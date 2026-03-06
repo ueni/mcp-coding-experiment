@@ -1,12 +1,14 @@
 services:
-  mcp-git:
+  mcp-git-server:
     build: .
-    container_name: mcp-git
+    image: mcp-git-server:latest
+    environment:
+      MCP_TRANSPORT: http
+      ALLOW_MUTATIONS: "true"
+      REPO_PATH: /repo
+      HOST: 0.0.0.0
+      PORT: "8000"
     ports:
       - "8000:8000"
-    environment:
-      REPO_PATH: /repo
-      ALLOW_MUTATIONS: "true"
-      ALLOW_ORIGINS: "*"
     volumes:
-      - ./repo:/repo
+      - ./:/repo

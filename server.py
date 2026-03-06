@@ -15,6 +15,7 @@ from starlette.routing import Mount, Route
 REPO_PATH = Path(os.getenv("REPO_PATH", "/repo")).resolve()
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
+MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "http").strip().lower()
 ALLOW_MUTATIONS = os.getenv("ALLOW_MUTATIONS", "false").strip().lower() in {
     "1",
     "true",
@@ -31,8 +32,6 @@ mcp = FastMCP(
         "Manage exactly one mounted Git repository and its files. "
         "All paths are relative to the repository root."
     ),
-    stateless_http=True,
-    json_response=True,
 )
 
 
@@ -123,6 +122,7 @@ def repo_info() -> dict[str, Any]:
         "repo_exists": REPO_PATH.exists(),
         "is_git_repo": _is_git_repo(),
         "allow_mutations": ALLOW_MUTATIONS,
+        "transport": MCP_TRANSPORT,
         "max_read_bytes": MAX_READ_BYTES,
         "max_output_chars": MAX_OUTPUT_CHARS,
     }
@@ -229,6 +229,8 @@ def write_file(
     if file_path.exists() and not overwrite:
         raise FileExistsError(path)
 
+    existed_before = file_path.exists()
+
     if create_dirs:
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -236,7 +238,7 @@ def write_file(
     return {
         "path": str(file_path.relative_to(REPO_PATH)),
         "bytes_written": len(content.encode(encoding)),
-        "existed_before": file_path.exists(),
+        "existed_before": existed_before,
     }
 
 
@@ -256,7 +258,6 @@ def delete_path(path: str, recursive: bool = False) -> dict[str, str]:
             target.rmdir()
     else:
         target.unlink()
-
     return {"deleted": rel}
 
 
@@ -483,6 +484,7 @@ async def healthz(_request):
             "repo_path": str(REPO_PATH),
             "is_git_repo": _is_git_repo(),
             "allow_mutations": ALLOW_MUTATIONS,
+            "transport": MCP_TRANSPORT,
         }
     )
 
@@ -515,7 +517,23 @@ app = CORSMiddleware(
 )
 
 
-if __name__ == "__main__":
-    import uvicorn
+def main() -> None:
+    transport = MCP_TRANSPORT
 
-    uvicorn.run(app, host=HOST, port=PORT)
+    if transport in {"stdio", "direct"}:
+        mcp.run()
+        return
+
+    if transport in {"http", "streamable-http", "streamable_http"}:
+        import uvicorn
+
+        uvicorn.run(app, host=HOST, port=PORT)
+        return
+
+    raise ValueError(
+        "Unsupported MCP_TRANSPORT. Expected one of: stdio, direct, http, streamable-http"
+    )
+
+
+if __name__ == "__main__":
+    main()
