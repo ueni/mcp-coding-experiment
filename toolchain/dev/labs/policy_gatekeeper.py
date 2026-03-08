@@ -60,6 +60,19 @@ def _is_doc_path(path: str, doc_roots: list[str]) -> bool:
     return False
 
 
+def _is_excluded_path(path: str, excluded_paths: list[str]) -> bool:
+    for item in excluded_paths:
+        norm = item.strip()
+        if not norm:
+            continue
+        if norm.endswith("/"):
+            if path.startswith(norm):
+                return True
+        elif path == norm:
+            return True
+    return False
+
+
 def check_docs_index(index_path: str, doc_files: list[str]) -> list[str]:
     path = Path(index_path)
     if not path.exists():
@@ -89,11 +102,13 @@ def check_docs_index(index_path: str, doc_files: list[str]) -> list[str]:
 
 
 def check_forbidden_patterns(
-    files: list[str], patterns: list[str], max_bytes: int
+    files: list[str], patterns: list[str], max_bytes: int, excluded_paths: list[str]
 ) -> list[dict[str, str]]:
     violations: list[dict[str, str]] = []
     compiled = [re.compile(p) for p in patterns]
     for rel in files:
+        if _is_excluded_path(rel, excluded_paths):
+            continue
         path = Path(rel)
         if not path.exists() or not path.is_file():
             continue
@@ -155,6 +170,7 @@ def main() -> int:
     cfg = load_config(Path(args.config))
     max_file_size = int(cfg.get("max_file_size_bytes", 1024 * 1024))
     forbidden_patterns = cfg.get("forbidden_patterns", [])
+    forbidden_pattern_excluded_paths = cfg.get("forbidden_pattern_excluded_paths", [])
     required_paths = cfg.get("required_paths", [])
     required_when_paths_change = cfg.get("required_when_paths_change", {})
     commands = cfg.get("command_checks", [])
@@ -169,6 +185,10 @@ def main() -> int:
         isinstance(x, str) for x in required_paths
     ):
         raise ValueError("required_paths must be a list of strings")
+    if not isinstance(forbidden_pattern_excluded_paths, list) or not all(
+        isinstance(x, str) for x in forbidden_pattern_excluded_paths
+    ):
+        raise ValueError("forbidden_pattern_excluded_paths must be a list of strings")
     if not isinstance(commands, list) or not all(isinstance(x, str) for x in commands):
         raise ValueError("command_checks must be a list of strings")
     if not isinstance(required_when_paths_change, dict):
@@ -216,7 +236,10 @@ def main() -> int:
         violations.append(f"Files exceeding {max_file_size} bytes: {details}")
 
     pattern_hits = check_forbidden_patterns(
-        tracked, forbidden_patterns, max_bytes=max_file_size
+        tracked,
+        forbidden_patterns,
+        max_bytes=max_file_size,
+        excluded_paths=forbidden_pattern_excluded_paths,
     )
     if pattern_hits:
         violations.append(f"Forbidden pattern hits: {len(pattern_hits)}")

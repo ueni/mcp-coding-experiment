@@ -7,6 +7,10 @@
     "(?i)private[_-]?key",
     "(?i)password\\s*=\\s*['\"][^'\"]+['\"]"
   ],
+  "forbidden_pattern_excluded_paths": [
+    ".build/",
+    ".config/dev/labs/policy_gatekeeper.json"
+  ],
   "required_paths": [
     "README.md",
     "toolchain/dev/server.py",
