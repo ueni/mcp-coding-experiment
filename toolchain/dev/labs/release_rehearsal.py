@@ -192,7 +192,9 @@ def main() -> int:
                 )
 
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text("\n".join(report_lines).rstrip() + "\n", encoding="utf-8")
+        report_path.write_text(
+            "\n".join(report_lines).rstrip() + "\n", encoding="utf-8"
+        )
 
     finally:
         # Return the user to the original branch when possible.

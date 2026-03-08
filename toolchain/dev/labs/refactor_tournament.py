@@ -64,7 +64,9 @@ def changed_stats(base_ref: str) -> tuple[int, int, int]:
     return files, insertions, deletions
 
 
-def score_strategy(checks: list[dict[str, Any]], files: int, insertions: int, deletions: int) -> int:
+def score_strategy(
+    checks: list[dict[str, Any]], files: int, insertions: int, deletions: int
+) -> int:
     pass_count = sum(1 for c in checks if c["ok"])
     fail_count = len(checks) - pass_count
     churn = insertions + deletions
@@ -112,13 +114,19 @@ def main() -> int:
                 raise ValueError("each strategy must be an object")
 
             name = str(strategy.get("name", "unnamed"))
-            branch = str(strategy.get("branch", f"tournament/{name.lower().replace(' ', '-')}")).strip()
+            branch = str(
+                strategy.get("branch", f"tournament/{name.lower().replace(' ', '-')}")
+            ).strip()
             mutate = strategy.get("mutate", [])
             checks = strategy.get("checks", [])
 
-            if not isinstance(mutate, list) or not all(isinstance(c, str) for c in mutate):
+            if not isinstance(mutate, list) or not all(
+                isinstance(c, str) for c in mutate
+            ):
                 raise ValueError(f"strategy '{name}' has invalid mutate list")
-            if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
+            if not isinstance(checks, list) or not all(
+                isinstance(c, str) for c in checks
+            ):
                 raise ValueError(f"strategy '{name}' has invalid checks list")
 
             git("checkout", "-B", branch, base_ref)

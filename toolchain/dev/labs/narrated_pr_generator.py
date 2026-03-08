@@ -24,7 +24,9 @@ def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return run(["git", *args], check=check)
 
 
-def top_changed_files(base: str, head: str, limit: int = 15) -> list[tuple[str, int, int]]:
+def top_changed_files(
+    base: str, head: str, limit: int = 15
+) -> list[tuple[str, int, int]]:
     cp = git("diff", "--numstat", f"{base}..{head}")
     rows = []
     for line in cp.stdout.splitlines():
@@ -57,7 +59,10 @@ def main() -> int:
     if not commits:
         commits = "<no commits in range>"
 
-    stat = git("diff", "--shortstat", f"{base}..{head}").stdout.strip() or "No file changes"
+    stat = (
+        git("diff", "--shortstat", f"{base}..{head}").stdout.strip()
+        or "No file changes"
+    )
     files = top_changed_files(base, head)
 
     changed_list = git("diff", "--name-only", f"{base}..{head}").stdout.splitlines()
@@ -100,7 +105,11 @@ def main() -> int:
             "",
             "## Risk Hotspots",
             "",
-            "- Core server/runtime files changed" if risky else "- No core runtime hotspot files detected",
+            (
+                "- Core server/runtime files changed"
+                if risky
+                else "- No core runtime hotspot files detected"
+            ),
             "- Verify backward compatibility for MCP tool arguments and defaults",
             "- Verify transport behavior (`http` vs `stdio`) remains stable",
             "",

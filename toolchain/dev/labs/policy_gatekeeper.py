@@ -43,7 +43,9 @@ def changed_files(ref: str) -> list[str]:
     return [line.strip() for line in cp.stdout.splitlines() if line.strip()]
 
 
-def check_forbidden_patterns(files: list[str], patterns: list[str], max_bytes: int) -> list[dict[str, str]]:
+def check_forbidden_patterns(
+    files: list[str], patterns: list[str], max_bytes: int
+) -> list[dict[str, str]]:
     violations: list[dict[str, str]] = []
     compiled = [re.compile(p) for p in patterns]
     for rel in files:
@@ -112,9 +114,13 @@ def main() -> int:
     required_when_paths_change = cfg.get("required_when_paths_change", {})
     commands = cfg.get("command_checks", [])
 
-    if not isinstance(forbidden_patterns, list) or not all(isinstance(x, str) for x in forbidden_patterns):
+    if not isinstance(forbidden_patterns, list) or not all(
+        isinstance(x, str) for x in forbidden_patterns
+    ):
         raise ValueError("forbidden_patterns must be a list of strings")
-    if not isinstance(required_paths, list) or not all(isinstance(x, str) for x in required_paths):
+    if not isinstance(required_paths, list) or not all(
+        isinstance(x, str) for x in required_paths
+    ):
         raise ValueError("required_paths must be a list of strings")
     if not isinstance(commands, list) or not all(isinstance(x, str) for x in commands):
         raise ValueError("command_checks must be a list of strings")
@@ -127,9 +133,13 @@ def main() -> int:
 
     violations: list[str] = []
 
-    missing_required = [p for p in required_paths if p not in tracked_set and not Path(p).exists()]
+    missing_required = [
+        p for p in required_paths if p not in tracked_set and not Path(p).exists()
+    ]
     if missing_required:
-        violations.append("Missing required paths: " + ", ".join(sorted(missing_required)))
+        violations.append(
+            "Missing required paths: " + ", ".join(sorted(missing_required))
+        )
 
     for rel, must_exist in required_when_paths_change.items():
         if not isinstance(rel, str) or not isinstance(must_exist, list):
@@ -137,11 +147,11 @@ def main() -> int:
         triggered = any(path.startswith(rel) for path in changed)
         if not triggered:
             continue
-        missing = [p for p in must_exist if p not in tracked_set and not Path(p).exists()]
+        missing = [
+            p for p in must_exist if p not in tracked_set and not Path(p).exists()
+        ]
         if missing:
-            violations.append(
-                f"Changes under '{rel}' require: {', '.join(missing)}"
-            )
+            violations.append(f"Changes under '{rel}' require: {', '.join(missing)}")
 
     oversize = []
     for rel in tracked:
@@ -152,7 +162,9 @@ def main() -> int:
         details = ", ".join(f"{p} ({s} bytes)" for p, s in oversize[:20])
         violations.append(f"Files exceeding {max_file_size} bytes: {details}")
 
-    pattern_hits = check_forbidden_patterns(tracked, forbidden_patterns, max_bytes=max_file_size)
+    pattern_hits = check_forbidden_patterns(
+        tracked, forbidden_patterns, max_bytes=max_file_size
+    )
     if pattern_hits:
         violations.append(f"Forbidden pattern hits: {len(pattern_hits)}")
 

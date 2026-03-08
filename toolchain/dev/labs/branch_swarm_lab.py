@@ -30,7 +30,12 @@ def sh(cmd: str) -> tuple[int, str, str, float]:
     start = dt.datetime.now(dt.timezone.utc)
     proc = subprocess.run(cmd, shell=True, text=True, capture_output=True)
     end = dt.datetime.now(dt.timezone.utc)
-    return proc.returncode, proc.stdout.strip(), proc.stderr.strip(), (end - start).total_seconds()
+    return (
+        proc.returncode,
+        proc.stdout.strip(),
+        proc.stderr.strip(),
+        (end - start).total_seconds(),
+    )
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -72,7 +77,9 @@ def main() -> int:
 
     cfg = load_config(Path(args.config))
     base_ref = str(cfg.get("base_ref", "HEAD"))
-    report_path = Path(str(cfg.get("report_path", ".build/reports/BRANCH_SWARM_REPORT.md")))
+    report_path = Path(
+        str(cfg.get("report_path", ".build/reports/BRANCH_SWARM_REPORT.md"))
+    )
     strategies = cfg.get("strategies", [])
 
     if not isinstance(strategies, list) or not strategies:
@@ -88,13 +95,21 @@ def main() -> int:
             if not isinstance(strategy, dict):
                 raise ValueError("strategy entries must be objects")
             name = str(strategy.get("name", "unnamed"))
-            branch = str(strategy.get("branch", f"swarm/{name.lower().replace(' ', '-')}")).strip()
+            branch = str(
+                strategy.get("branch", f"swarm/{name.lower().replace(' ', '-')}")
+            ).strip()
             setup = strategy.get("setup", [])
             benchmark = strategy.get("benchmark", [])
             quality = strategy.get("quality", [])
 
-            for key, val in [("setup", setup), ("benchmark", benchmark), ("quality", quality)]:
-                if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+            for key, val in [
+                ("setup", setup),
+                ("benchmark", benchmark),
+                ("quality", quality),
+            ]:
+                if not isinstance(val, list) or not all(
+                    isinstance(x, str) for x in val
+                ):
                     raise ValueError(f"{name}: {key} must be list[str]")
 
             git("checkout", "-B", branch, base_ref)
@@ -123,7 +138,9 @@ def main() -> int:
             metrics: list[float] = []
             for cmd in benchmark if setup_ok else []:
                 rc, out, err, secs = sh(cmd)
-                step_logs.append(f"benchmark | {cmd} | rc={rc} | {secs:.3f}s | out={out}")
+                step_logs.append(
+                    f"benchmark | {cmd} | rc={rc} | {secs:.3f}s | out={out}"
+                )
                 if rc == 0:
                     metrics.append(parse_metric(out))
                 else:
@@ -132,7 +149,9 @@ def main() -> int:
                         step_logs.append(f"stderr: {err}")
 
             primary_metric = min(metrics) if metrics else float("inf")
-            score = (quality_pass * 100) - int(primary_metric if primary_metric != float("inf") else 100000)
+            score = (quality_pass * 100) - int(
+                primary_metric if primary_metric != float("inf") else 100000
+            )
 
             rows.append(
                 {
@@ -168,7 +187,11 @@ def main() -> int:
     ]
 
     for idx, row in enumerate(ranking, start=1):
-        pm = "inf" if row["primary_metric"] == float("inf") else f"{row['primary_metric']:.3f}"
+        pm = (
+            "inf"
+            if row["primary_metric"] == float("inf")
+            else f"{row['primary_metric']:.3f}"
+        )
         lines.append(
             f"| {idx} | {row['name']} | {row['score']} | {row['quality_pass']}/{row['quality_total']} | {pm} |"
         )
@@ -178,7 +201,11 @@ def main() -> int:
         lines.append(f"- Branch: `{row['branch']}`")
         lines.append(f"- Setup OK: `{str(row['setup_ok']).lower()}`")
         lines.append(f"- Quality: `{row['quality_pass']}/{row['quality_total']}`")
-        pm = "inf" if row["primary_metric"] == float("inf") else f"{row['primary_metric']:.3f}"
+        pm = (
+            "inf"
+            if row["primary_metric"] == float("inf")
+            else f"{row['primary_metric']:.3f}"
+        )
         lines.append(f"- Primary metric: `{pm}`")
         lines.append("")
         lines.append("```text")

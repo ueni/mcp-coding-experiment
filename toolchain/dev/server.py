@@ -15,7 +15,6 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-
 REPO_PATH = Path(os.getenv("REPO_PATH", "/repo")).resolve()
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
@@ -28,7 +27,9 @@ ALLOW_MUTATIONS = os.getenv("ALLOW_MUTATIONS", "false").strip().lower() in {
 }
 MAX_READ_BYTES = int(os.getenv("MAX_READ_BYTES", "262144"))
 MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "200000"))
-ALLOW_ORIGINS = [x.strip() for x in os.getenv("ALLOW_ORIGINS", "*").split(",") if x.strip()]
+ALLOW_ORIGINS = [
+    x.strip() for x in os.getenv("ALLOW_ORIGINS", "*").split(",") if x.strip()
+]
 LABS_DIR = Path("toolchain/dev/labs")
 REPORTS_DIR = Path(".build/reports")
 
@@ -105,7 +106,11 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     if check and result.returncode != 0:
         stderr = result.stderr.strip()
         stdout = result.stdout.strip()
-        msg = stderr or stdout or f"git {' '.join(args)} failed with exit code {result.returncode}"
+        msg = (
+            stderr
+            or stdout
+            or f"git {' '.join(args)} failed with exit code {result.returncode}"
+        )
         raise RuntimeError(msg)
     return result
 
@@ -163,7 +168,9 @@ def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
     }
 
     if proc.returncode != 0:
-        msg = stderr or stdout or f"{script_name} failed with exit code {proc.returncode}"
+        msg = (
+            stderr or stdout or f"{script_name} failed with exit code {proc.returncode}"
+        )
         raise RuntimeError(msg)
 
     return result
@@ -252,7 +259,9 @@ def list_files(
 
 
 @mcp.tool()
-def read_file(path: str, encoding: str = "utf-8", max_bytes: int = MAX_READ_BYTES) -> str:
+def read_file(
+    path: str, encoding: str = "utf-8", max_bytes: int = MAX_READ_BYTES
+) -> str:
     """Read a UTF-8 text file from the repository."""
     if max_bytes < 1:
         raise ValueError("max_bytes must be >= 1")
@@ -501,7 +510,9 @@ def git_fetch(remote: str = "origin", prune: bool = False) -> str:
 
 
 @mcp.tool()
-def git_pull(remote: str = "origin", branch: str | None = None, rebase: bool = False) -> str:
+def git_pull(
+    remote: str = "origin", branch: str | None = None, rebase: bool = False
+) -> str:
     """Pull from a remote."""
     _require_mutations()
     _require_git_repo()

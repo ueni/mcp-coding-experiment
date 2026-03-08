@@ -50,7 +50,11 @@ def dependency_hints(files: list[str]) -> dict[str, list[str]]:
     hints: dict[str, list[str]] = {}
     groups = {
         "python": [f for f in files if f.endswith(".py")],
-        "docker": [f for f in files if "Dockerfile" in f or f.endswith(".yml") or f.endswith(".yaml")],
+        "docker": [
+            f
+            for f in files
+            if "Dockerfile" in f or f.endswith(".yml") or f.endswith(".yaml")
+        ],
         "docs": [f for f in files if f.lower().endswith(".md")],
     }
     for key, vals in groups.items():
