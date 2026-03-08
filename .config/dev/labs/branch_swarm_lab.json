@@ -1,0 +1,30 @@
+{
+  "base_ref": "HEAD",
+  "report_path": ".build/reports/BRANCH_SWARM_REPORT.md",
+  "strategies": [
+    {
+      "name": "Baseline",
+      "branch": "swarm/baseline",
+      "setup": [],
+      "quality": [
+        "python -m py_compile toolchain/dev/server.py"
+      ],
+      "benchmark": [
+        "python -c \"print(100.0)\""
+      ]
+    },
+    {
+      "name": "Compile Warmup",
+      "branch": "swarm/compile-warmup",
+      "setup": [
+        "python -m compileall -q toolchain/dev"
+      ],
+      "quality": [
+        "python -m py_compile toolchain/dev/server.py"
+      ],
+      "benchmark": [
+        "python -c \"print(95.0)\""
+      ]
+    }
+  ]
+}

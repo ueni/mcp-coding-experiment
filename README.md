@@ -114,6 +114,25 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - git_fetch
 - git_pull
 - git_push
+- lab_release_rehearsal
+- lab_refactor_tournament
+- lab_policy_gatekeeper
+- lab_branch_swarm
+- lab_narrated_pr
+- lab_repo_digital_twin
+
+## Fun Labs
+
+Prototype automations for advanced workflows live under `toolchain/dev/labs`:
+
+- `release_rehearsal.py`: dry-run a release, run checks, synthesize changelog, and emit `.build/reports/RELEASE_REHEARSAL.md`.
+- `refactor_tournament.py`: evaluate multiple refactor strategies on isolated branches and emit `.build/reports/REFACTOR_TOURNAMENT.md`.
+- `policy_gatekeeper.py`: enforce policy-as-code checks and emit `.build/reports/POLICY_GATEKEEPER.md`.
+- `branch_swarm_lab.py`: run strategy swarms with benchmark scoring and emit `.build/reports/BRANCH_SWARM_REPORT.md`.
+- `narrated_pr_generator.py`: generate a narrated PR packet and reviewer checklist in `.build/reports/PR_PACKET.md`.
+- `repo_digital_twin.py`: generate `.build/reports/REPO_DIGITAL_TWIN.json` and `.build/reports/REPO_DIGITAL_TWIN.md` snapshots.
+
+Start here: `toolchain/dev/labs/README.md`
 
 ## Notes
 

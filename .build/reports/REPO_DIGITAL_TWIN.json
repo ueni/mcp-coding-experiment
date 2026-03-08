@@ -1,0 +1,78 @@
+{
+  "generated_at": "2026-03-08T20:06:40.388201+00:00",
+  "repo": {
+    "branch": "feature/labs",
+    "head": "3de8eb8c49e6b75faa0fe60c79890228a940aa1d",
+    "dirty": true
+  },
+  "inventory": {
+    "tracked_file_count": 6,
+    "files": [
+      ".devcontainer/devcontainer.json",
+      "README.md",
+      "toolchain/dev/Dockerfile",
+      "toolchain/dev/docker-compose.yml",
+      "toolchain/dev/requirements.txt",
+      "toolchain/dev/server.py"
+    ]
+  },
+  "hotspots": [
+    {
+      "path": "README.md",
+      "touches": 3
+    },
+    {
+      "path": "Dockerfile",
+      "touches": 2
+    },
+    {
+      "path": "docker-compose.yml",
+      "touches": 2
+    },
+    {
+      "path": "server.py",
+      "touches": 2
+    },
+    {
+      "path": ".devcontainer/devcontainer.json",
+      "touches": 1
+    },
+    {
+      "path": "toolchain/dev/Dockerfile",
+      "touches": 1
+    },
+    {
+      "path": "toolchain/dev/docker-compose.yml",
+      "touches": 1
+    },
+    {
+      "path": "toolchain/dev/requirements.txt",
+      "touches": 1
+    },
+    {
+      "path": "toolchain/dev/server.py",
+      "touches": 1
+    },
+    {
+      "path": "requirements.txt",
+      "touches": 1
+    }
+  ],
+  "dependency_hints": {
+    "python": [
+      "toolchain/dev/server.py"
+    ],
+    "docker": [
+      "toolchain/dev/Dockerfile",
+      "toolchain/dev/docker-compose.yml"
+    ],
+    "docs": [
+      "README.md"
+    ]
+  },
+  "drift_markers": {
+    "has_xray": true,
+    "has_drift": true,
+    "has_gatekeeper_report": true
+  }
+}

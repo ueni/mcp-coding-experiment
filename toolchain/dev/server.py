@@ -1,7 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) Nico Ueberfeldt
+
 import contextlib
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +29,8 @@ ALLOW_MUTATIONS = os.getenv("ALLOW_MUTATIONS", "false").strip().lower() in {
 MAX_READ_BYTES = int(os.getenv("MAX_READ_BYTES", "262144"))
 MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "200000"))
 ALLOW_ORIGINS = [x.strip() for x in os.getenv("ALLOW_ORIGINS", "*").split(",") if x.strip()]
+LABS_DIR = Path("toolchain/dev/labs")
+REPORTS_DIR = Path(".build/reports")
 
 mcp = FastMCP(
     "git-repo-manager",
@@ -110,6 +116,57 @@ def _normalize_paths(paths: list[str]) -> list[str]:
         resolved = _resolve_repo_path(p)
         normalized.append(str(resolved.relative_to(REPO_PATH)))
     return normalized
+
+
+def _list_report_files(max_entries: int = 200) -> list[str]:
+    reports_dir = _resolve_repo_path(str(REPORTS_DIR))
+    if not reports_dir.exists():
+        return []
+
+    entries: list[str] = []
+    for item in reports_dir.rglob("*"):
+        if item.is_file():
+            entries.append(str(item.relative_to(REPO_PATH)))
+            if len(entries) >= max_entries:
+                break
+    entries.sort()
+    return entries
+
+
+def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
+    _require_mutations()
+    _require_git_repo()
+
+    script_rel = str(LABS_DIR / script_name)
+    script_path = _resolve_repo_path(script_rel)
+    if not script_path.is_file():
+        raise FileNotFoundError(script_rel)
+
+    proc = subprocess.run(
+        [sys.executable, str(script_path), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_PATH),
+    )
+
+    stdout = _trim_text(proc.stdout.strip())
+    stderr = _trim_text(proc.stderr.strip())
+    result: dict[str, Any] = {
+        "script": script_rel,
+        "args": args,
+        "exit_code": proc.returncode,
+        "ok": proc.returncode == 0,
+        "stdout": stdout,
+        "stderr": stderr,
+        "reports": _list_report_files(),
+    }
+
+    if proc.returncode != 0:
+        msg = stderr or stdout or f"{script_name} failed with exit code {proc.returncode}"
+        raise RuntimeError(msg)
+
+    return result
 
 
 @mcp.tool()
@@ -475,6 +532,113 @@ def git_push(
         args.append(branch)
     result = _git(*args)
     return _trim_text(result.stdout + result.stderr)
+
+
+@mcp.tool()
+def lab_release_rehearsal(
+    config_path: str = ".config/dev/labs/release_rehearsal.json",
+    allow_dirty: bool = False,
+    keep_branch: bool = False,
+) -> dict[str, Any]:
+    """Run release rehearsal lab and write report(s) under .build/reports."""
+    _resolve_repo_path(config_path)
+    args = ["--config", config_path]
+    if allow_dirty:
+        args.append("--allow-dirty")
+    if keep_branch:
+        args.append("--keep-branch")
+    return _run_lab_script("release_rehearsal.py", args)
+
+
+@mcp.tool()
+def lab_refactor_tournament(
+    config_path: str = ".config/dev/labs/refactor_tournament.json",
+    allow_dirty: bool = False,
+    keep_branches: bool = False,
+) -> dict[str, Any]:
+    """Run refactor tournament lab and write report(s) under .build/reports."""
+    _resolve_repo_path(config_path)
+    args = ["--config", config_path]
+    if allow_dirty:
+        args.append("--allow-dirty")
+    if keep_branches:
+        args.append("--keep-branches")
+    return _run_lab_script("refactor_tournament.py", args)
+
+
+@mcp.tool()
+def lab_policy_gatekeeper(
+    config_path: str = ".config/dev/labs/policy_gatekeeper.json",
+    changed_ref: str = "HEAD",
+    report_path: str = ".build/reports/POLICY_GATEKEEPER.md",
+) -> dict[str, Any]:
+    """Run policy-as-code gatekeeper checks."""
+    _resolve_repo_path(config_path)
+    _resolve_repo_path(report_path)
+    args = [
+        "--config",
+        config_path,
+        "--changed-ref",
+        changed_ref,
+        "--report-path",
+        report_path,
+    ]
+    return _run_lab_script("policy_gatekeeper.py", args)
+
+
+@mcp.tool()
+def lab_branch_swarm(
+    config_path: str = ".config/dev/labs/branch_swarm_lab.json",
+    allow_dirty: bool = False,
+    keep_branches: bool = False,
+) -> dict[str, Any]:
+    """Run branch swarm benchmark lab."""
+    _resolve_repo_path(config_path)
+    args = ["--config", config_path]
+    if allow_dirty:
+        args.append("--allow-dirty")
+    if keep_branches:
+        args.append("--keep-branches")
+    return _run_lab_script("branch_swarm_lab.py", args)
+
+
+@mcp.tool()
+def lab_narrated_pr(
+    base: str = "HEAD~1",
+    head: str = "HEAD",
+    output_path: str = ".build/reports/PR_PACKET.md",
+) -> dict[str, Any]:
+    """Generate a narrated PR packet for a commit range."""
+    _resolve_repo_path(output_path)
+    args = ["--base", base, "--head", head, "--output", output_path]
+    return _run_lab_script("narrated_pr_generator.py", args)
+
+
+@mcp.tool()
+def lab_repo_digital_twin(
+    json_path: str = ".build/reports/REPO_DIGITAL_TWIN.json",
+    markdown_path: str = ".build/reports/REPO_DIGITAL_TWIN.md",
+    max_files: int = 1000,
+    hotspot_limit: int = 20,
+) -> dict[str, Any]:
+    """Generate repo digital twin JSON + markdown snapshots."""
+    if max_files < 1:
+        raise ValueError("max_files must be >= 1")
+    if hotspot_limit < 1:
+        raise ValueError("hotspot_limit must be >= 1")
+    _resolve_repo_path(json_path)
+    _resolve_repo_path(markdown_path)
+    args = [
+        "--json",
+        json_path,
+        "--md",
+        markdown_path,
+        "--max-files",
+        str(max_files),
+        "--hotspot-limit",
+        str(hotspot_limit),
+    ]
+    return _run_lab_script("repo_digital_twin.py", args)
 
 
 async def healthz(_request):

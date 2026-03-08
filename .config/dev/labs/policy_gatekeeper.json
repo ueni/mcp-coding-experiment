@@ -1,0 +1,21 @@
+{
+  "max_file_size_bytes": 500000,
+  "forbidden_patterns": [
+    "AKIA[0-9A-Z]{16}",
+    "(?i)aws_secret_access_key",
+    "(?i)private[_-]?key",
+    "(?i)password\\s*=\\s*['\"][^'\"]+['\"]"
+  ],
+  "required_paths": [
+    "README.md",
+    "toolchain/dev/server.py"
+  ],
+  "required_when_paths_change": {
+    "toolchain/dev/": [
+      "README.md"
+    ]
+  },
+  "command_checks": [
+    "python -m py_compile toolchain/dev/server.py"
+  ]
+}

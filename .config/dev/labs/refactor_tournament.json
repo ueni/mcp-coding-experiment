@@ -1,0 +1,24 @@
+{
+  "base_ref": "HEAD",
+  "report_path": ".build/reports/REFACTOR_TOURNAMENT.md",
+  "strategies": [
+    {
+      "name": "Baseline",
+      "branch": "tournament/baseline",
+      "mutate": [],
+      "checks": [
+        "python -m py_compile toolchain/dev/server.py"
+      ]
+    },
+    {
+      "name": "Formatting Sweep",
+      "branch": "tournament/formatting-sweep",
+      "mutate": [
+        "python -m compileall -q toolchain/dev"
+      ],
+      "checks": [
+        "python -m py_compile toolchain/dev/server.py"
+      ]
+    }
+  ]
+}

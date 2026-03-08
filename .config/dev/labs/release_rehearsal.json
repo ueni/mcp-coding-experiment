@@ -1,0 +1,14 @@
+{
+  "target_branch": "master",
+  "changelog_from": "HEAD~5",
+  "report_path": ".build/reports/RELEASE_REHEARSAL.md",
+  "artifacts": [
+    "MCP_XRAY.md",
+    "MCP_DRIFT.md"
+  ],
+  "checks": [
+    "python -m py_compile toolchain/dev/server.py",
+    "python -m py_compile toolchain/dev/labs/release_rehearsal.py",
+    "python -m py_compile toolchain/dev/labs/refactor_tournament.py"
+  ]
+}
