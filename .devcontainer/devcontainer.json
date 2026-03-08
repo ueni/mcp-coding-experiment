@@ -1,0 +1,27 @@
+{
+  "name": "mcp-git-server",
+  "dockerComposeFile": [
+    "../toolchain/dev/docker-compose.yml"
+  ],
+  "service": "mcp-git-server",
+  "workspaceFolder": "/repo",
+  "shutdownAction": "stopCompose",
+  "forwardPorts": [
+    8000
+  ],
+  "portsAttributes": {
+    "8000": {
+      "label": "MCP Server",
+      "onAutoForward": "notify"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  }
+}

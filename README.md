@@ -2,10 +2,19 @@
 
 Minimal MCP server for one mounted Git repository.
 
+## Use With VS Code Dev Containers
+
+1. Open this repository in VS Code.
+2. Run `Dev Containers: Reopen in Container`.
+3. Wait for the `mcp-git-server` service to start.
+4. Use the MCP endpoint at `http://localhost:8000/mcp`.
+
+The VS Code entry point stays in [`.devcontainer/devcontainer.json`](/home/user/source/mcp-server-git-local-files/.devcontainer/devcontainer.json), while the underlying container implementation lives in [`toolchain/dev/docker-compose.yml`](/home/user/source/mcp-server-git-local-files/toolchain/dev/docker-compose.yml). The repository is mounted at `/repo` and port `8000` is forwarded automatically.
+
 ## Build
 
 ```bash
-docker build -t mcp-git-server .
+docker build -t mcp-git-server ./toolchain/dev
 ```
 
 ## Run over Streamable HTTP
