@@ -12,7 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ALLOW_ORIGINS=*
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

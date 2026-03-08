@@ -6,6 +6,9 @@
   "service": "mcp-git-server",
   "workspaceFolder": "/repo",
   "shutdownAction": "stopCompose",
+  "containerEnv": {
+    "DOCKER_HOST": "unix:///var/run/docker.sock"
+  },
   "forwardPorts": [
     8000
   ],
@@ -21,11 +24,14 @@
         "Continue.continue",
         "ms-python.python",
         "ms-python.vscode-pylance",
-        "ms-azuretools.vscode-docker"
+        "ms-azuretools.vscode-docker",
+        "mhutchie.git-graph"
       ]
     }
   },
   "mounts": [
-    "source=${localEnv:HOME}/.continue,target=/root/.continue,type=bind,consistency=cached"
+    "source=${localEnv:HOME}/.continue,target=/root/.continue,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.gitconfig,target=/root/.gitconfig,type=bind,consistency=cached",
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
   ]
 }
