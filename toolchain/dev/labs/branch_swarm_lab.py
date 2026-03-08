@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +62,10 @@ def parse_metric(stdout: str) -> float:
     except ValueError:
         tokens = text.replace(",", " ").split()
         for tok in reversed(tokens):
+            # Support key/value outputs like "metric_ms=12.345".
+            if "=" in tok:
+                tok = tok.split("=", 1)[1]
+            tok = re.sub(r"[^0-9eE+.-]", "", tok)
             try:
                 return float(tok)
             except ValueError:
