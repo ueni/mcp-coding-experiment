@@ -1,4 +1,5 @@
 {
+  "default_target_branch": "main",
   "max_file_size_bytes": 500000,
   "forbidden_patterns": [
     "AKIA[0-9A-Z]{16}",
@@ -8,7 +9,8 @@
   ],
   "required_paths": [
     "README.md",
-    "toolchain/dev/server.py"
+    "toolchain/dev/server.py",
+    "docs/index.md"
   ],
   "required_when_paths_change": {
     "toolchain/dev/": [
@@ -17,5 +19,18 @@
   },
   "command_checks": [
     "python -m py_compile toolchain/dev/server.py"
-  ]
+  ],
+  "docs_policy": {
+    "enabled": true,
+    "target_branch": "main",
+    "doc_roots": [
+      "docs/",
+      "README.md"
+    ],
+    "index_path": "docs/index.md",
+    "impl_path_prefixes": [
+      "toolchain/"
+    ],
+    "require_docs_for_impl_diff": true
+  }
 }

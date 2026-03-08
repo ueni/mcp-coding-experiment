@@ -20,6 +20,11 @@ python toolchain/dev/labs/policy_gatekeeper.py --changed-ref HEAD
 Config: `.config/dev/labs/policy_gatekeeper.json`
 Output: `.build/reports/POLICY_GATEKEEPER.md`
 
+Docs sync policy is config-driven via `docs_policy`:
+- docs roots (for this repo: `docs/` and `README.md`)
+- required docs index (`docs/index.md`)
+- implementation-vs-docs diff check against `target_branch` (default `main`)
+
 ## 6) Branch Swarm Benchmark Lab
 
 Runs strategy branches, executes quality + benchmark commands, and ranks strategies.

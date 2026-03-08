@@ -38,9 +38,54 @@ def list_files() -> list[str]:
     return [line.strip() for line in cp.stdout.splitlines() if line.strip()]
 
 
-def changed_files(ref: str) -> list[str]:
-    cp = git("diff", "--name-only", ref)
-    return [line.strip() for line in cp.stdout.splitlines() if line.strip()]
+def changed_files(ref: str) -> tuple[list[str], str | None]:
+    cp = git("diff", "--name-only", f"{ref}...HEAD", check=False)
+    if cp.returncode != 0:
+        cp = git("diff", "--name-only", ref, check=False)
+    if cp.returncode != 0:
+        return [], f"Unable to diff against reference '{ref}'"
+    return [line.strip() for line in cp.stdout.splitlines() if line.strip()], None
+
+
+def _is_doc_path(path: str, doc_roots: list[str]) -> bool:
+    for root in doc_roots:
+        norm = root.strip()
+        if not norm:
+            continue
+        if norm.endswith("/"):
+            if path.startswith(norm):
+                return True
+        elif path == norm:
+            return True
+    return False
+
+
+def check_docs_index(index_path: str, doc_files: list[str]) -> list[str]:
+    path = Path(index_path)
+    if not path.exists():
+        return [f"Missing docs index: {index_path}"]
+
+    try:
+        index_text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return [f"Unable to read docs index '{index_path}': {exc}"]
+
+    missing: list[str] = []
+    for doc in sorted(doc_files):
+        if doc == index_path:
+            continue
+        if doc not in index_text:
+            missing.append(doc)
+
+    if not missing:
+        return []
+    return [
+        (
+            f"Docs index '{index_path}' is missing entries for: "
+            + ", ".join(missing[:20])
+            + (" ..." if len(missing) > 20 else "")
+        )
+    ]
 
 
 def check_forbidden_patterns(
@@ -97,7 +142,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--changed-ref",
-        default="HEAD",
+        default=None,
         help="Diff reference for changed-files rules",
     )
     parser.add_argument(
@@ -113,6 +158,8 @@ def main() -> int:
     required_paths = cfg.get("required_paths", [])
     required_when_paths_change = cfg.get("required_when_paths_change", {})
     commands = cfg.get("command_checks", [])
+    docs_policy = cfg.get("docs_policy", {})
+    default_target_branch = str(cfg.get("default_target_branch", "main"))
 
     if not isinstance(forbidden_patterns, list) or not all(
         isinstance(x, str) for x in forbidden_patterns
@@ -126,12 +173,18 @@ def main() -> int:
         raise ValueError("command_checks must be a list of strings")
     if not isinstance(required_when_paths_change, dict):
         raise ValueError("required_when_paths_change must be an object")
+    if not isinstance(docs_policy, dict):
+        raise ValueError("docs_policy must be an object")
+
+    changed_ref = args.changed_ref if args.changed_ref is not None else default_target_branch
 
     tracked = list_files()
     tracked_set = set(tracked)
-    changed = changed_files(args.changed_ref)
+    changed, changed_error = changed_files(changed_ref)
 
     violations: list[str] = []
+    if changed_error:
+        violations.append(changed_error)
 
     missing_required = [
         p for p in required_paths if p not in tracked_set and not Path(p).exists()
@@ -173,13 +226,66 @@ def main() -> int:
     if failed_cmds:
         violations.append(f"Command checks failed: {len(failed_cmds)}")
 
+    docs_violations: list[str] = []
+    docs_enabled = bool(docs_policy.get("enabled", False))
+    if docs_enabled:
+        raw_roots = docs_policy.get("doc_roots", ["docs/", "README.md"])
+        index_path = str(docs_policy.get("index_path", "docs/index.md"))
+        require_docs_for_impl = bool(
+            docs_policy.get("require_docs_for_impl_diff", True)
+        )
+        impl_path_prefixes = docs_policy.get("impl_path_prefixes", ["toolchain/"])
+        docs_target_branch = str(
+            docs_policy.get("target_branch", default_target_branch)
+        ).strip()
+
+        if not isinstance(raw_roots, list) or not all(
+            isinstance(x, str) for x in raw_roots
+        ):
+            raise ValueError("docs_policy.doc_roots must be a list of strings")
+        if not isinstance(impl_path_prefixes, list) or not all(
+            isinstance(x, str) for x in impl_path_prefixes
+        ):
+            raise ValueError(
+                "docs_policy.impl_path_prefixes must be a list of strings"
+            )
+
+        effective_target = docs_target_branch or default_target_branch
+        if args.changed_ref is None and effective_target != changed_ref:
+            changed_ref = effective_target
+            changed, changed_error = changed_files(changed_ref)
+            if changed_error:
+                docs_violations.append(changed_error)
+
+        doc_roots = [x.strip() for x in raw_roots if x.strip()]
+        doc_files = [p for p in tracked if _is_doc_path(p, doc_roots)]
+        docs_changed = [p for p in changed if _is_doc_path(p, doc_roots)]
+        impl_changed = [
+            p
+            for p in changed
+            if not _is_doc_path(p, doc_roots)
+            and any(p.startswith(prefix) for prefix in impl_path_prefixes)
+        ]
+
+        docs_violations.extend(check_docs_index(index_path, doc_files))
+        if require_docs_for_impl and impl_changed and not docs_changed:
+            docs_violations.append(
+                (
+                    f"Implementation changes vs '{changed_ref}' require docs updates "
+                    f"under {', '.join(doc_roots)}; none were changed."
+                )
+            )
+
+    if docs_violations:
+        violations.extend(docs_violations)
+
     passed = not violations
 
     lines = [
         "# Policy Gatekeeper Report",
         "",
         f"Result: `{'PASS' if passed else 'FAIL'}`",
-        f"Changed reference: `{args.changed_ref}`",
+        f"Changed reference: `{changed_ref}`",
         "",
         "## Summary",
         "",
@@ -187,6 +293,7 @@ def main() -> int:
         f"- Changed files detected: `{len(changed)}`",
         f"- Pattern hits: `{len(pattern_hits)}`",
         f"- Failed command checks: `{len(failed_cmds)}`",
+        f"- Docs policy violations: `{len(docs_violations)}`",
         "",
     ]
 
