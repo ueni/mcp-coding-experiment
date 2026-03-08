@@ -18,10 +18,14 @@
   "customizations": {
     "vscode": {
       "extensions": [
+        "Continue.continue",
         "ms-python.python",
         "ms-python.vscode-pylance",
         "ms-azuretools.vscode-docker"
       ]
     }
-  }
+  },
+  "mounts": [
+    "source=${localEnv:HOME}/.continue,target=/root/.continue,type=bind,consistency=cached"
+  ]
 }
