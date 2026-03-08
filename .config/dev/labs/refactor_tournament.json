@@ -3,21 +3,57 @@
   "report_path": ".build/reports/REFACTOR_TOURNAMENT.md",
   "strategies": [
     {
-      "name": "Baseline",
-      "branch": "tournament/baseline",
+      "name": "Python Baseline",
+      "branch": "tournament/python-baseline",
       "mutate": [],
       "checks": [
-        "python -m py_compile toolchain/dev/server.py"
+        "python -m compileall -q toolchain/dev",
+        "for f in toolchain/dev/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
       ]
     },
     {
-      "name": "Formatting Sweep",
-      "branch": "tournament/formatting-sweep",
+      "name": "Ruff Autofix + Format",
+      "branch": "tournament/ruff-autofix-format",
       "mutate": [
-        "python -m compileall -q toolchain/dev"
+        "python -m ruff check --fix toolchain/dev",
+        "python -m ruff format toolchain/dev"
       ],
       "checks": [
-        "python -m py_compile toolchain/dev/server.py"
+        "python -m compileall -q toolchain/dev",
+        "python -m ruff check toolchain/dev",
+        "python -m ruff format --check toolchain/dev"
+      ]
+    },
+    {
+      "name": "Black + Isort",
+      "branch": "tournament/black-isort",
+      "mutate": [
+        "python -m isort toolchain/dev",
+        "python -m black toolchain/dev"
+      ],
+      "checks": [
+        "python -m compileall -q toolchain/dev",
+        "python -m isort --check-only toolchain/dev",
+        "python -m black --check toolchain/dev"
+      ]
+    },
+    {
+      "name": "Type Safety Pass",
+      "branch": "tournament/type-safety-pass",
+      "mutate": [],
+      "checks": [
+        "python -m compileall -q toolchain/dev",
+        "python -m mypy toolchain/dev --ignore-missing-imports"
+      ]
+    },
+    {
+      "name": "Pyupgrade Modernization",
+      "branch": "tournament/pyupgrade-modernization",
+      "mutate": [
+        "find toolchain/dev -type f -name '*.py' -print0 | xargs -0 python -m pyupgrade --py312-plus"
+      ],
+      "checks": [
+        "python -m compileall -q toolchain/dev"
       ]
     }
   ]
