@@ -60,6 +60,7 @@ TOKEN_BUDGET_FILE = Path(".build/memory/token_budget.json")
 EDIT_TXN_DIR = Path(".build/transactions")
 API_SNAPSHOT_FILE = Path(".build/reports/API_SURFACE.json")
 REPO_INDEX_FILE = Path(".build/index/repo_index.json")
+TOOL_CACHE_FILE = Path(".build/cache/tool_cache.json")
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -360,17 +361,17 @@ def _token_budget_load() -> dict[str, Any]:
         TOKEN_BUDGET_FILE,
         {
             "max_output_chars": MAX_OUTPUT_CHARS,
-            "default_output_profile": "normal",
+            "default_output_profile": "compact",
         },
     )
     if not isinstance(payload, dict):
-        return {"max_output_chars": MAX_OUTPUT_CHARS, "default_output_profile": "normal"}
+        return {"max_output_chars": MAX_OUTPUT_CHARS, "default_output_profile": "compact"}
     max_chars = payload.get("max_output_chars", MAX_OUTPUT_CHARS)
-    profile = payload.get("default_output_profile", "normal")
+    profile = payload.get("default_output_profile", "compact")
     if not isinstance(max_chars, int) or max_chars < 1:
         max_chars = MAX_OUTPUT_CHARS
     if profile not in OUTPUT_PROFILES:
-        profile = "normal"
+        profile = "compact"
     return {"max_output_chars": max_chars, "default_output_profile": profile}
 
 
@@ -384,6 +385,90 @@ def _default_output_profile(output_profile: str | None) -> str:
     if output_profile and output_profile.strip():
         return _validate_output_profile(output_profile)
     return _validate_output_profile(_token_budget_load()["default_output_profile"])
+
+
+def _paginate(items: list[Any], offset: int = 0, limit: int | None = None) -> list[Any]:
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be >= 1 when provided")
+    if limit is None:
+        return items[offset:]
+    return items[offset : offset + limit]
+
+
+def _select_fields(records: list[dict[str, Any]], fields: list[str] | None) -> list[dict[str, Any]]:
+    if not fields:
+        return records
+    selected: list[dict[str, Any]] = []
+    for row in records:
+        selected.append({k: row.get(k) for k in fields if k in row})
+    return selected
+
+
+def _cache_load() -> dict[str, Any]:
+    payload = _json_file_load(TOOL_CACHE_FILE, {"entries": {}})
+    if not isinstance(payload, dict):
+        return {"entries": {}}
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+    return {"entries": entries}
+
+
+def _cache_save(payload: dict[str, Any]) -> None:
+    _json_file_save(TOOL_CACHE_FILE, payload)
+
+
+def _cache_get(tool: str, key: str) -> Any | None:
+    payload = _cache_load()
+    tool_entries = payload["entries"].get(tool, {})
+    if not isinstance(tool_entries, dict):
+        return None
+    row = tool_entries.get(key)
+    if not isinstance(row, dict):
+        return None
+    return row.get("value")
+
+
+def _cache_set(tool: str, key: str, value: Any, max_entries: int = 50) -> None:
+    payload = _cache_load()
+    entries = payload["entries"]
+    tool_entries = entries.get(tool, {})
+    if not isinstance(tool_entries, dict):
+        tool_entries = {}
+    tool_entries[key] = {"updated_at": _now_iso(), "value": value}
+    if len(tool_entries) > max_entries:
+        ordered = sorted(
+            tool_entries.items(), key=lambda kv: str(kv[1].get("updated_at", "")), reverse=True
+        )
+        tool_entries = dict(ordered[:max_entries])
+    entries[tool] = tool_entries
+    payload["entries"] = entries
+    _cache_save(payload)
+
+
+def _fingerprint_path(
+    root: Path,
+    recursive: bool = True,
+    suffixes: set[str] | None = None,
+    max_files: int = 2000,
+) -> str:
+    hasher = hashlib.sha256()
+    count = 0
+    for p in _iter_candidate_files(root, recursive=recursive):
+        if suffixes and p.suffix.lower() not in suffixes:
+            continue
+        rel = str(p.relative_to(REPO_PATH)).replace("\\", "/")
+        hasher.update(rel.encode("utf-8"))
+        try:
+            hasher.update(_file_sha256(p).encode("utf-8"))
+        except OSError:
+            continue
+        count += 1
+        if count >= max_files:
+            break
+    return hasher.hexdigest()
 
 
 def _failure_memory_load() -> dict[str, Any]:
@@ -1194,7 +1279,9 @@ def find_paths(
     file_type: str = "any",
     max_depth: int | None = None,
     max_entries: int = 1000,
-    output_profile: str = "normal",
+    output_profile: str = "compact",
+    offset: int = 0,
+    limit: int | None = None,
 ) -> list[str]:
     """Find files and/or directories under a repository-relative path."""
     if max_entries < 1:
@@ -1203,7 +1290,7 @@ def find_paths(
         raise ValueError("max_depth must be >= 0")
     if file_type not in {"any", "file", "dir"}:
         raise ValueError("file_type must be one of: any, file, dir")
-    profile = _validate_output_profile(output_profile)
+    profile = _default_output_profile(output_profile)
 
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -1252,6 +1339,7 @@ def find_paths(
         maybe_add(item)
 
     results.sort()
+    results = _paginate(results, offset=offset, limit=limit)
     if profile == "compact":
         return [item[:-1] if item.endswith("/") else item for item in results]
     return results
@@ -1269,7 +1357,10 @@ def grep(
     max_matches: int = 500,
     max_file_bytes: int = 1048576,
     encoding: str = "utf-8",
-    output_profile: str = "normal",
+    output_profile: str = "compact",
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Search repository files for a regex pattern and return matches.
 
@@ -1280,7 +1371,7 @@ def grep(
         raise ValueError("max_matches must be >= 1")
     if max_file_bytes < 1:
         raise ValueError("max_file_bytes must be >= 1")
-    profile = _validate_output_profile(output_profile)
+    profile = _default_output_profile(output_profile)
     if profile == "compact":
         max_matches = min(max_matches, 250)
 
@@ -1341,6 +1432,8 @@ def grep(
                 continue
             search_file(p)
 
+    results = _paginate(results, offset=offset, limit=limit)
+    results = _select_fields(results, fields)
     return results
 
 
@@ -1475,7 +1568,7 @@ def read_snippet(
     context_before: int = 0,
     context_after: int = 0,
     encoding: str = "utf-8",
-    output_profile: str = "normal",
+    output_profile: str = "compact",
 ) -> dict[str, Any]:
     """Read a focused line range with optional surrounding context."""
     profile = _validate_output_profile(output_profile)
@@ -1503,7 +1596,7 @@ def read_batch(
     requests: list[dict[str, Any]],
     encoding: str = "utf-8",
     max_items: int = 50,
-    output_profile: str = "normal",
+    output_profile: str = "compact",
 ) -> dict[str, Any]:
     """Read multiple focused snippets in one call."""
     if max_items < 1:
@@ -1561,6 +1654,9 @@ def semantic_find(
     max_results: int = 30,
     output_profile: str | None = None,
     include_private_symbols: bool = False,
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Ranked search over file paths, symbols, and text matches."""
     if not query.strip():
@@ -1645,9 +1741,9 @@ def semantic_find(
                 "reasons": ["text_match"],
             }
 
-    ranked = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)[
-        :max_results
-    ]
+    ranked = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)[:max_results]
+    ranked = _paginate(ranked, offset=offset, limit=limit)
+    ranked = _select_fields(ranked, fields)
     if profile == "compact":
         ranked = [
             {
@@ -1672,12 +1768,15 @@ def symbol_index(
     recursive: bool = True,
     max_symbols: int = 5000,
     encoding: str = "utf-8",
-    output_profile: str = "normal",
+    output_profile: str = "compact",
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Index Python symbols (classes/functions) for focused navigation."""
     if max_symbols < 1:
         raise ValueError("max_symbols must be >= 1")
-    profile = _validate_output_profile(output_profile)
+    profile = _default_output_profile(output_profile)
     if profile == "compact":
         max_symbols = min(max_symbols, 2000)
 
@@ -1685,26 +1784,46 @@ def symbol_index(
     if not root.exists():
         raise FileNotFoundError(path)
 
-    symbols: list[dict[str, Any]] = []
-    for candidate in _iter_candidate_files(root, recursive=recursive):
-        if candidate.suffix != ".py":
-            continue
-        rel_path = candidate.relative_to(REPO_PATH)
-        rel_str = str(rel_path).replace("\\", "/")
-        if _is_likely_binary(candidate):
-            continue
-        try:
-            source = candidate.read_text(encoding=encoding, errors="replace")
-        except OSError:
-            continue
-        extracted = _collect_python_symbols(
-            source, rel_str, include_private=include_private
-        )
-        for symbol in extracted:
-            if len(symbols) >= max_symbols:
-                return symbols
-            symbols.append(_symbol_to_profile(symbol, profile))
-    return symbols
+    fingerprint = _fingerprint_path(
+        root, recursive=recursive, suffixes={".py"}, max_files=3000
+    )
+    cache_key = json.dumps(
+        {
+            "path": str(root.relative_to(REPO_PATH)),
+            "include_private": include_private,
+            "recursive": recursive,
+            "encoding": encoding,
+            "fingerprint": fingerprint,
+        },
+        sort_keys=True,
+    )
+    cached = _cache_get("symbol_index", cache_key)
+    if isinstance(cached, list):
+        symbols = [dict(row) for row in cached]
+    else:
+        symbols = []
+        for candidate in _iter_candidate_files(root, recursive=recursive):
+            if candidate.suffix != ".py":
+                continue
+            rel_path = candidate.relative_to(REPO_PATH)
+            rel_str = str(rel_path).replace("\\", "/")
+            if _is_likely_binary(candidate):
+                continue
+            try:
+                source = candidate.read_text(encoding=encoding, errors="replace")
+            except OSError:
+                continue
+            extracted = _collect_python_symbols(
+                source, rel_str, include_private=include_private
+            )
+            symbols.extend(extracted)
+        _cache_set("symbol_index", cache_key, symbols)
+
+    profiled = [_symbol_to_profile(symbol, profile) for symbol in symbols]
+    profiled = profiled[:max_symbols]
+    profiled = _paginate(profiled, offset=offset, limit=limit)
+    profiled = _select_fields(profiled, fields)
+    return profiled
 
 
 @mcp.tool()
@@ -1713,80 +1832,113 @@ def dependency_map(
     recursive: bool = True,
     include_stdlib: bool = False,
     max_files: int = 3000,
-    output_profile: str = "normal",
+    output_profile: str = "compact",
     encoding: str = "utf-8",
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Build a Python import dependency map for repo-local modules."""
     if max_files < 1:
         raise ValueError("max_files must be >= 1")
-    profile = _validate_output_profile(output_profile)
+    profile = _default_output_profile(output_profile)
     root = _resolve_repo_path(path)
     if not root.exists():
         raise FileNotFoundError(path)
 
-    module_to_path: dict[str, str] = {}
-    python_files: list[Path] = []
-    for candidate in _iter_candidate_files(root, recursive=recursive):
-        if candidate.suffix != ".py":
-            continue
-        rel = candidate.relative_to(REPO_PATH)
-        module = _module_name_from_relpath(rel)
-        rel_str = str(rel).replace("\\", "/")
-        module_to_path[module] = rel_str
-        python_files.append(candidate)
-        if len(python_files) >= max_files:
-            break
-
-    edges: list[dict[str, Any]] = []
-    unresolved: list[dict[str, Any]] = []
-
-    for file_path in python_files:
-        rel = str(file_path.relative_to(REPO_PATH)).replace("\\", "/")
-        try:
-            tree = ast.parse(file_path.read_text(encoding=encoding, errors="replace"))
-        except (OSError, SyntaxError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imports = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    imports = [node.module]
-                else:
-                    imports = []
-            else:
+    fingerprint = _fingerprint_path(
+        root, recursive=recursive, suffixes={".py"}, max_files=max_files
+    )
+    cache_key = json.dumps(
+        {
+            "path": str(root.relative_to(REPO_PATH)),
+            "recursive": recursive,
+            "include_stdlib": include_stdlib,
+            "encoding": encoding,
+            "fingerprint": fingerprint,
+            "max_files": max_files,
+        },
+        sort_keys=True,
+    )
+    cached = _cache_get("dependency_map", cache_key)
+    if isinstance(cached, dict):
+        python_file_count = int(cached.get("python_file_count", 0))
+        edges = list(cached.get("edges", []))
+        unresolved = list(cached.get("unresolved_imports", []))
+    else:
+        module_to_path: dict[str, str] = {}
+        python_files: list[Path] = []
+        for candidate in _iter_candidate_files(root, recursive=recursive):
+            if candidate.suffix != ".py":
                 continue
+            rel = candidate.relative_to(REPO_PATH)
+            module = _module_name_from_relpath(rel)
+            rel_str = str(rel).replace("\\", "/")
+            module_to_path[module] = rel_str
+            python_files.append(candidate)
+            if len(python_files) >= max_files:
+                break
 
-            for imp in imports:
-                resolved_path = None
-                for candidate_module in _import_candidates(imp):
-                    resolved = module_to_path.get(candidate_module)
-                    if resolved:
-                        resolved_path = resolved
-                        break
-                if resolved_path:
-                    edges.append(
-                        {
-                            "from": rel,
-                            "to": resolved_path,
-                            "import": imp,
-                            "line": int(getattr(node, "lineno", 1)),
-                        }
-                    )
-                elif include_stdlib:
-                    unresolved.append(
-                        {
-                            "from": rel,
-                            "import": imp,
-                            "line": int(getattr(node, "lineno", 1)),
-                        }
-                    )
+        edges: list[dict[str, Any]] = []
+        unresolved: list[dict[str, Any]] = []
+
+        for file_path in python_files:
+            rel = str(file_path.relative_to(REPO_PATH)).replace("\\", "/")
+            try:
+                tree = ast.parse(file_path.read_text(encoding=encoding, errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        imports = [node.module]
+                    else:
+                        imports = []
+                else:
+                    continue
+
+                for imp in imports:
+                    resolved_path = None
+                    for candidate_module in _import_candidates(imp):
+                        resolved = module_to_path.get(candidate_module)
+                        if resolved:
+                            resolved_path = resolved
+                            break
+                    if resolved_path:
+                        edges.append(
+                            {
+                                "from": rel,
+                                "to": resolved_path,
+                                "import": imp,
+                                "line": int(getattr(node, "lineno", 1)),
+                            }
+                        )
+                    elif include_stdlib:
+                        unresolved.append(
+                            {
+                                "from": rel,
+                                "import": imp,
+                                "line": int(getattr(node, "lineno", 1)),
+                            }
+                        )
+        python_file_count = len(python_files)
+        _cache_set(
+            "dependency_map",
+            cache_key,
+            {
+                "python_file_count": python_file_count,
+                "edges": edges,
+                "unresolved_imports": unresolved,
+            },
+        )
 
     result: dict[str, Any] = {
         "root": str(root.relative_to(REPO_PATH)),
-        "python_file_count": len(python_files),
+        "python_file_count": python_file_count,
         "edge_count": len(edges),
-        "edges": edges,
+        "edges": _select_fields(_paginate(edges, offset=offset, limit=limit), fields),
     }
     if profile == "compact":
         return {
@@ -1823,6 +1975,9 @@ def call_graph(
     max_edges: int = 5000,
     output_profile: str | None = None,
     encoding: str = "utf-8",
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Build a simple Python function-level call graph."""
     if max_edges < 1:
@@ -1832,45 +1987,65 @@ def call_graph(
     if not root.exists():
         raise FileNotFoundError(path)
 
-    edges: list[dict[str, Any]] = []
-    for candidate in _iter_candidate_files(root, recursive=recursive):
-        if candidate.suffix != ".py":
-            continue
-        rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
-        try:
-            tree = ast.parse(candidate.read_text(encoding=encoding, errors="replace"))
-        except (SyntaxError, OSError):
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    fingerprint = _fingerprint_path(
+        root, recursive=recursive, suffixes={".py"}, max_files=3000
+    )
+    cache_key = json.dumps(
+        {
+            "path": str(root.relative_to(REPO_PATH)),
+            "recursive": recursive,
+            "encoding": encoding,
+            "fingerprint": fingerprint,
+            "max_edges": max_edges,
+        },
+        sort_keys=True,
+    )
+    cached = _cache_get("call_graph", cache_key)
+    if isinstance(cached, list):
+        edges = list(cached)
+    else:
+        edges: list[dict[str, Any]] = []
+        for candidate in _iter_candidate_files(root, recursive=recursive):
+            if candidate.suffix != ".py":
                 continue
-            caller = node.name
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call):
-                    callee = _ast_expr_name(child.func)
-                    if not callee:
-                        continue
-                    edges.append(
-                        {
-                            "path": rel,
-                            "caller": caller,
-                            "callee": callee,
-                            "line": int(getattr(child, "lineno", getattr(node, "lineno", 1))),
-                        }
-                    )
-                    if len(edges) >= max_edges:
-                        break
+            rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+            try:
+                tree = ast.parse(candidate.read_text(encoding=encoding, errors="replace"))
+            except (SyntaxError, OSError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                caller = node.name
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        callee = _ast_expr_name(child.func)
+                        if not callee:
+                            continue
+                        edges.append(
+                            {
+                                "path": rel,
+                                "caller": caller,
+                                "callee": callee,
+                                "line": int(getattr(child, "lineno", getattr(node, "lineno", 1))),
+                            }
+                        )
+                        if len(edges) >= max_edges:
+                            break
+                if len(edges) >= max_edges:
+                    break
             if len(edges) >= max_edges:
                 break
-        if len(edges) >= max_edges:
-            break
+        _cache_set("call_graph", cache_key, edges)
+
+    paged_edges = _select_fields(_paginate(edges, offset=offset, limit=limit), fields)
 
     if profile == "compact":
-        return {"edge_count": len(edges), "edges": edges[:500]}
+        return {"edge_count": len(edges), "edges": paged_edges[:500]}
     inbound: dict[str, int] = {}
     for edge in edges:
         inbound[edge["callee"]] = inbound.get(edge["callee"], 0) + 1
-    result: dict[str, Any] = {"edge_count": len(edges), "edges": edges}
+    result: dict[str, Any] = {"edge_count": len(edges), "edges": paged_edges}
     if profile == "verbose":
         result["most_called"] = sorted(
             [{"symbol": k, "count": v} for k, v in inbound.items()],
@@ -2067,7 +2242,7 @@ def summarize_diff(
     ref: str | None = None,
     staged: bool = False,
     pathspec: str | None = None,
-    output_profile: str = "normal",
+    output_profile: str = "compact",
     include_patch: bool = False,
     patch_unified: int = 0,
 ) -> dict[str, Any]:
@@ -2152,7 +2327,7 @@ def json_query(
     path: str,
     query: str = "",
     file_type: str | None = None,
-    output_profile: str = "normal",
+    output_profile: str = "compact",
 ) -> dict[str, Any]:
     """Query JSON/TOML/YAML content with a dot/index path."""
     profile = _validate_output_profile(output_profile)
@@ -2207,7 +2382,7 @@ def token_budget_guard(
     if reset:
         payload = {
             "max_output_chars": MAX_OUTPUT_CHARS,
-            "default_output_profile": "normal",
+            "default_output_profile": "compact",
             "updated_at": _now_iso(),
         }
         _json_file_save(TOKEN_BUDGET_FILE, payload)
@@ -2668,6 +2843,9 @@ def tree_sitter_core(
     max_files: int = 200,
     max_nodes: int = 5000,
     output_profile: str | None = None,
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Parse/search syntax trees via Tree-sitter when available."""
     if mode not in {"status", "parse", "search"}:
@@ -2683,72 +2861,104 @@ def tree_sitter_core(
     if mode == "status":
         return {"available": available, "engine": "tree_sitter_languages"}
 
-    matched_files = 0
-    total_nodes = 0
-    files: list[dict[str, Any]] = []
-    regex = re.compile(text_pattern, re.IGNORECASE) if text_pattern else None
+    fingerprint = _fingerprint_path(root, recursive=recursive, max_files=3000)
+    cache_key = json.dumps(
+        {
+            "path": str(root.relative_to(REPO_PATH)),
+            "mode": mode,
+            "language": language,
+            "node_types": node_types or [],
+            "text_pattern": text_pattern or "",
+            "recursive": recursive,
+            "max_files": max_files,
+            "max_nodes": max_nodes,
+            "fingerprint": fingerprint,
+            "available": available,
+        },
+        sort_keys=True,
+    )
+    cached = _cache_get("tree_sitter_core", cache_key)
+    if isinstance(cached, dict):
+        matched_files = int(cached.get("file_count", 0))
+        total_nodes = int(cached.get("node_count", 0))
+        files = list(cached.get("files", []))
+    else:
+        matched_files = 0
+        total_nodes = 0
+        files: list[dict[str, Any]] = []
+        regex = re.compile(text_pattern, re.IGNORECASE) if text_pattern else None
 
-    for candidate in _iter_candidate_files(root, recursive=recursive):
-        ext = candidate.suffix.lower()
-        detected = _tree_sitter_language_for_ext(ext)
-        if not detected:
-            continue
-        lang = detected if language == "auto" else language
-        if language != "auto" and lang != detected:
-            continue
-        source = candidate.read_text(encoding="utf-8", errors="replace")
-        rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
-        nodes: list[dict[str, Any]] = []
+        for candidate in _iter_candidate_files(root, recursive=recursive):
+            ext = candidate.suffix.lower()
+            detected = _tree_sitter_language_for_ext(ext)
+            if not detected:
+                continue
+            lang = detected if language == "auto" else language
+            if language != "auto" and lang != detected:
+                continue
+            source = candidate.read_text(encoding="utf-8", errors="replace")
+            rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+            nodes: list[dict[str, Any]] = []
 
-        if available:
-            try:
-                nodes = _tree_sitter_parse_nodes(
-                    source=source,
-                    language=lang,
-                    node_types=node_types,
-                    max_nodes=max_nodes - total_nodes,
+            if available:
+                try:
+                    nodes = _tree_sitter_parse_nodes(
+                        source=source,
+                        language=lang,
+                        node_types=node_types,
+                        max_nodes=max_nodes - total_nodes,
+                    )
+                except Exception:
+                    nodes = []
+            if not nodes and lang == "python":
+                ast_hits = ast_search(
+                    path=rel,
+                    node_type=(node_types[0] if node_types else "FunctionDef"),
+                    max_results=max(1, max_nodes - total_nodes),
                 )
-            except Exception:
-                nodes = []
-        if not nodes and lang == "python":
-            # Fallback to Python AST if tree-sitter runtime is unavailable.
-            ast_hits = ast_search(
-                path=rel,
-                node_type=(node_types[0] if node_types else "FunctionDef"),
-                max_results=max(1, max_nodes - total_nodes),
-            )
-            nodes = [
-                {
-                    "type": hit["node_type"],
-                    "start_line": hit["line"],
-                    "start_column": hit["column"],
-                    "end_line": hit["end_line"],
-                    "end_column": hit["column"],
-                }
-                for hit in ast_hits
-            ]
+                nodes = [
+                    {
+                        "type": hit["node_type"],
+                        "start_line": hit["line"],
+                        "start_column": hit["column"],
+                        "end_line": hit["end_line"],
+                        "end_column": hit["column"],
+                    }
+                    for hit in ast_hits
+                ]
 
-        if regex:
-            lines = source.splitlines()
-            filtered: list[dict[str, Any]] = []
-            for n in nodes:
-                s = max(1, int(n["start_line"]))
-                e = min(len(lines), int(n["end_line"]))
-                snippet = "\n".join(lines[s - 1 : e])
-                if regex.search(snippet):
-                    filtered.append(n)
-            nodes = filtered
+            if regex:
+                lines = source.splitlines()
+                filtered: list[dict[str, Any]] = []
+                for n in nodes:
+                    s = max(1, int(n["start_line"]))
+                    e = min(len(lines), int(n["end_line"]))
+                    snippet = "\n".join(lines[s - 1 : e])
+                    if regex.search(snippet):
+                        filtered.append(n)
+                nodes = filtered
 
-        if not nodes:
-            continue
-        matched_files += 1
-        total_nodes += len(nodes)
-        file_result: dict[str, Any] = {"path": rel, "language": lang, "node_count": len(nodes)}
-        if profile != "compact":
-            file_result["nodes"] = nodes
-        files.append(file_result)
-        if matched_files >= max_files or total_nodes >= max_nodes:
-            break
+            if not nodes:
+                continue
+            matched_files += 1
+            total_nodes += len(nodes)
+            files.append({"path": rel, "language": lang, "node_count": len(nodes), "nodes": nodes})
+            if matched_files >= max_files or total_nodes >= max_nodes:
+                break
+        _cache_set(
+            "tree_sitter_core",
+            cache_key,
+            {"file_count": matched_files, "node_count": total_nodes, "files": files},
+        )
+
+    files = _paginate(files, offset=offset, limit=limit)
+    if profile == "compact" and not fields:
+        files = [
+            {"path": f.get("path"), "language": f.get("language"), "node_count": f.get("node_count")}
+            for f in files
+        ]
+    else:
+        files = _select_fields(files, fields)
 
     return {
         "available": available,
@@ -2769,6 +2979,9 @@ def repo_index_daemon(
     include_hashes: bool = False,
     max_files: int = 5000,
     output_profile: str | None = None,
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Build/read/query a persistent repository index keyed by file metadata."""
     if mode not in {"refresh", "read", "query"}:
@@ -2784,12 +2997,21 @@ def repo_index_daemon(
         index_payload = json.loads(index_path.read_text(encoding="utf-8"))
         if mode == "query":
             value = _query_value(index_payload, query) if query.strip() else index_payload
+            if isinstance(value, list):
+                value = _paginate(value, offset=offset, limit=limit)
+                if value and isinstance(value[0], dict):
+                    value = _select_fields(value, fields)
             return {
                 "mode": mode,
                 "query": query,
                 "value_json": _trim_text(json.dumps(value, indent=2, ensure_ascii=True)),
                 "value": value if profile != "compact" else None,
             }
+        if isinstance(index_payload.get("files"), list):
+            files = _paginate(index_payload["files"], offset=offset, limit=limit)
+            if files and isinstance(files[0], dict):
+                files = _select_fields(files, fields)
+            index_payload["files"] = files
         if profile == "compact":
             return {
                 "mode": mode,

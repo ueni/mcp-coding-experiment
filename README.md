@@ -167,5 +167,6 @@ Start here: `toolchain/dev/labs/README.md`
 - All paths are repository-relative.
 - Path traversal outside the mounted repo is blocked.
 - Mutating operations require `ALLOW_MUTATIONS=true`.
+- Tool outputs default to compact responses; adjust with `token_budget_guard` and per-tool `output_profile`.
 - `git commit` still needs Git user identity to be configured in the repo or via environment.
 - In stdio mode, do not write logs to stdout.
