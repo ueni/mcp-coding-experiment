@@ -204,6 +204,12 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `memory_validate`
 - `license_monitor`
 - `install_git_hooks`
+- `commit_lint_tag`
+- `golden_output_guard`
+- `flaky_test_detector`
+- `change_impact_gate`
+- `smart_fix_batch`
+- `release_readiness`
 
 ### Math, Data, and Content
 

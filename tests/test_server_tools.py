@@ -673,6 +673,105 @@ class ServerToolsTest(unittest.TestCase):
         self.assertIn("policy_gatekeeper.py", pre_commit.read_text(encoding="utf-8"))
         self.assertIn("repo_digital_twin.py", pre_push.read_text(encoding="utf-8"))
 
+    def test_commit_lint_tag(self):
+        out = self.server.commit_lint_tag(message="feat(api): add release gate")
+        self.assertEqual(out["schema"], "commit_lint_tag.v1")
+        self.assertTrue(out["lint_ok"])
+        self.assertIn("feat(api): add release gate", out["message"])
+
+    def test_golden_output_guard_write_and_check(self):
+        write = self.server.golden_output_guard(
+            mode="write",
+            tools=["token_budget_guard"],
+        )
+        self.assertEqual(write["schema"], "golden_output_guard.v1")
+        self.assertTrue(write["ok"])
+
+        check = self.server.golden_output_guard(
+            mode="check",
+            tools=["token_budget_guard"],
+        )
+        self.assertEqual(check["schema"], "golden_output_guard.v1")
+        self.assertTrue(check["ok"])
+
+    def test_flaky_test_detector_unittest(self):
+        out = self.server.flaky_test_detector(
+            runner="unittest",
+            target="tests/test_smoke.py",
+            runs=3,
+            update_history=True,
+        )
+        self.assertEqual(out["schema"], "flaky_test_detector.v1")
+        self.assertEqual(out["runs"], 3)
+        self.assertEqual(out["runner"], "unittest")
+        self.assertEqual(len(out["run_results"]), 3)
+
+    def test_change_impact_gate_blocks_on_missing_docs(self):
+        sample = self.repo_path / "src" / "sample.py"
+        sample.write_text(sample.read_text(encoding="utf-8") + "\n# change\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo_path), "add", "src/sample.py"], check=True)
+        subprocess.run(["git", "-C", str(self.repo_path), "commit", "-m", "feat: change sample"], check=True)
+
+        out = self.server.change_impact_gate(
+            base_ref="HEAD~1",
+            head_ref="HEAD",
+            require_docs_for_impl_diff=True,
+            require_tests_for_critical=False,
+            block_on_risk_level="none",
+        )
+        self.assertEqual(out["schema"], "change_impact_gate.v1")
+        self.assertTrue(out["should_block"])
+        self.assertGreaterEqual(len(out["blocked_reasons"]), 1)
+
+    def test_smart_fix_batch_plan_and_execute(self):
+        plan = self.server.smart_fix_batch(
+            findings=[
+                {
+                    "path": "src/sample.py",
+                    "search": "return x + 1",
+                    "replacement": "return x + 2",
+                    "description": "adjust increment",
+                }
+            ],
+            mode="plan",
+        )
+        self.assertEqual(plan["schema"], "smart_fix_batch.v1")
+        self.assertEqual(plan["mode"], "plan")
+
+        execute = self.server.smart_fix_batch(
+            findings=[
+                {
+                    "path": "src/sample.py",
+                    "search": "return x + 1",
+                    "replacement": "return x + 2",
+                }
+            ],
+            mode="execute",
+            run_validation=True,
+        )
+        self.assertEqual(execute["schema"], "smart_fix_batch.v1")
+        self.assertEqual(execute["mode"], "execute")
+        self.assertGreaterEqual(execute["applied_count"], 1)
+        self.assertIn("return x + 2", (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"))
+
+    def test_release_readiness_quick(self):
+        out = self.server.release_readiness(
+            base_ref="HEAD",
+            head_ref="HEAD",
+            run_tests=True,
+            test_runner="unittest",
+            test_target="tests/test_smoke.py",
+            run_docs_check=True,
+            run_security_check=False,
+            run_license_check=False,
+            run_risk_check=True,
+            run_impact_check=True,
+            summary_mode="quick",
+        )
+        self.assertEqual(out["schema"], "release_readiness.quick.v1")
+        self.assertIn("checks", out)
+        self.assertIn("tests", out["checks"])
+
 
 if __name__ == "__main__":
     unittest.main()

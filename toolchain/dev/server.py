@@ -114,6 +114,8 @@ RESULT_STORE_FILE = Path(".build/cache/result_store.json")
 OUTPUT_BASELINE_FILE = Path(".build/reports/TOOL_OUTPUT_BASELINE.json")
 REUSE_SPDX_REPORT = Path(".build/reports/REUSE.spdx")
 REUSE_LINT_REPORT = Path(".build/reports/REUSE_LINT.txt")
+GOLDEN_BASELINE_FILE = Path(".build/reports/TOOL_GOLDEN_BASELINE.json")
+FLAKY_HISTORY_FILE = Path(".build/reports/FLAKY_TEST_HISTORY.json")
 LOCAL_MODELS_DIR = Path(os.getenv("LOCAL_MODELS_DIR", "/models"))
 LOCAL_EMBED_BACKEND = os.getenv("LOCAL_EMBED_BACKEND", "hash").strip().lower()
 LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "").strip()
@@ -1575,6 +1577,59 @@ def _collect_missing_spdx_headers(
             if len(missing) >= max_files:
                 break
     return missing
+
+
+_VOLATILE_GOLDEN_KEYS = {
+    "generated_at",
+    "started_at",
+    "finished_at",
+    "updated_at",
+    "created_at",
+    "result_id",
+    "git_head",
+    "git_branch",
+}
+
+
+def _stable_for_golden(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key in sorted(value.keys()):
+            if key in _VOLATILE_GOLDEN_KEYS:
+                continue
+            out[key] = _stable_for_golden(value[key])
+        return out
+    if isinstance(value, list):
+        return [_stable_for_golden(v) for v in value]
+    return value
+
+
+def _hash_json_payload(value: Any) -> str:
+    payload = json.dumps(_stable_for_golden(value), sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _extract_failed_tests_pytest(output: str) -> list[str]:
+    failed = set(re.findall(r"^FAILED\\s+([^\\s]+)", output, flags=re.MULTILINE))
+    for match in re.findall(r"^\\s*([^\\s]+)::([^\\s]+)\\s+FAILED\\s*$", output, flags=re.MULTILINE):
+        failed.add(f"{match[0]}::{match[1]}")
+    return sorted(failed)
+
+
+def _extract_failed_tests_unittest(output: str) -> list[str]:
+    failed: set[str] = set()
+    for name, module in re.findall(
+        r"^(?:FAIL|ERROR):\\s+([^\\s]+)\\s+\\(([^\\)]+)\\)",
+        output,
+        flags=re.MULTILINE,
+    ):
+        failed.add(f"{module}.{name}")
+    return sorted(failed)
+
+
+def _risk_level_value(level: str) -> int:
+    order = {"low": 1, "medium": 2, "high": 3}
+    return order.get(level, 0)
 
 
 @mcp.tool()
@@ -5069,6 +5124,587 @@ def output_size_guard(
         "regressions": regressions,
         "current_sizes": current,
     }
+
+
+@mcp.tool()
+def commit_lint_tag(
+    message: str = "",
+    ref: str = "HEAD",
+    include_diff_hints: bool = True,
+) -> dict[str, Any]:
+    """Lint commit messages and infer semantic tags from changes."""
+    _require_git_repo()
+    subject = message.strip()
+    if not subject:
+        subject = _git("show", "-s", "--format=%s", ref).stdout.strip()
+    if not subject:
+        raise ValueError("commit message is empty")
+
+    pattern = re.compile(
+        r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?(!)?: .+"
+    )
+    lint_ok = bool(pattern.match(subject))
+    tags: set[str] = set()
+    subject_lower = subject.lower()
+
+    if any(tok in subject_lower for tok in ("license", "spdx", "reuse", "foss")):
+        tags.add("compliance")
+    if any(tok in subject_lower for tok in ("perf", "optimiz", "latency", "cache")):
+        tags.add("perf")
+    if any(tok in subject_lower for tok in ("security", "secret", "token", "auth", "vuln")):
+        tags.add("security")
+    if "!" in subject.split(":")[0] or "breaking change" in subject_lower:
+        tags.add("breaking")
+
+    changed_paths: list[str] = []
+    if include_diff_hints:
+        try:
+            changed_out = _git("diff-tree", "--no-commit-id", "--name-only", "-r", ref).stdout
+            changed_paths = [line.strip() for line in changed_out.splitlines() if line.strip()]
+        except RuntimeError:
+            changed_paths = []
+
+    for rel in changed_paths:
+        if rel.startswith("docs/") or rel.endswith(".md") or rel == "README.md":
+            tags.add("docs")
+        if rel.startswith("tests/") or "/test" in rel or rel.endswith("_test.py"):
+            tags.add("test")
+        if rel.startswith(".devcontainer/") or rel.startswith("toolchain/dev/") or "Dockerfile" in rel:
+            tags.add("infra")
+
+    suggestions: list[str] = []
+    if not lint_ok:
+        suggestions.append(
+            "Use Conventional Commits format, e.g. 'feat(parser): add x'."
+        )
+    if not tags:
+        suggestions.append("No semantic tags inferred; consider explicit scope or keywords.")
+
+    return {
+        "schema": "commit_lint_tag.v1",
+        "ref": ref,
+        "message": subject,
+        "lint_ok": lint_ok,
+        "tags": sorted(tags),
+        "changed_paths": changed_paths,
+        "suggestions": suggestions,
+    }
+
+
+@mcp.tool()
+def golden_output_guard(
+    mode: str = "check",
+    tools: list[str] | None = None,
+    baseline_path: str = str(GOLDEN_BASELINE_FILE),
+) -> dict[str, Any]:
+    """Write/check golden output hashes to detect behavior regressions."""
+    if mode not in {"write", "check"}:
+        raise ValueError("mode must be one of: write, check")
+    selected = tools or [
+        "repo_info",
+        "workspace_facts",
+        "token_budget_guard",
+        "math_parser",
+        "sql_expert",
+    ]
+    catalog: dict[str, Any] = {
+        "repo_info": lambda: repo_info(),
+        "workspace_facts": lambda: workspace_facts(),
+        "token_budget_guard": lambda: token_budget_guard(reset=False),
+        "math_parser": lambda: math_parser("x**2 + 2*x + 1"),
+        "sql_expert": lambda: sql_expert(
+            mode="format",
+            query="select id, name from users where active=1 order by created_at desc",
+        ),
+    }
+    unknown = [t for t in selected if t not in catalog]
+    if unknown:
+        raise ValueError(f"unknown tools for golden_output_guard: {', '.join(unknown)}")
+
+    current: dict[str, dict[str, Any]] = {}
+    for tool in selected:
+        out = catalog[tool]()
+        current[tool] = {
+            "hash": _hash_json_payload(out),
+            "payload_bytes": _payload_size_bytes(out),
+        }
+
+    baseline_file = _resolve_repo_path(baseline_path)
+    if mode == "write":
+        _require_mutations()
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": "golden_output_guard.baseline.v1",
+            "generated_at": _now_iso(),
+            "tools": current,
+        }
+        baseline_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return {
+            "schema": "golden_output_guard.v1",
+            "mode": mode,
+            "ok": True,
+            "baseline_path": baseline_path,
+            "tools": current,
+        }
+
+    if not baseline_file.is_file():
+        raise FileNotFoundError(baseline_path)
+    baseline = json.loads(baseline_file.read_text(encoding="utf-8"))
+    previous = baseline.get("tools", {})
+    regressions: list[dict[str, Any]] = []
+    for tool, cur in current.items():
+        prev = previous.get(tool, {})
+        if prev.get("hash") and prev.get("hash") != cur["hash"]:
+            regressions.append(
+                {
+                    "tool": tool,
+                    "baseline_hash": prev.get("hash"),
+                    "current_hash": cur["hash"],
+                }
+            )
+    return {
+        "schema": "golden_output_guard.v1",
+        "mode": mode,
+        "ok": not regressions,
+        "baseline_path": baseline_path,
+        "regressions": regressions,
+        "tools": current,
+    }
+
+
+@mcp.tool()
+def flaky_test_detector(
+    runner: str = "pytest",
+    target: str = "tests",
+    runs: int = 5,
+    fail_fast: bool = False,
+    timeout_seconds: int = 300,
+    history_path: str = str(FLAKY_HISTORY_FILE),
+    update_history: bool = True,
+) -> dict[str, Any]:
+    """Run tests repeatedly and detect flaky tests by intermittent failures."""
+    if runner not in {"pytest", "unittest"}:
+        raise ValueError("runner must be one of: pytest, unittest")
+    if runs < 2:
+        raise ValueError("runs must be >= 2")
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    _resolve_repo_path(target)
+    history_file = _resolve_repo_path(history_path)
+
+    run_results: list[dict[str, Any]] = []
+    failed_counter: dict[str, int] = {}
+    for i in range(runs):
+        if runner == "pytest":
+            cmd = ["pytest", "-q"]
+            if fail_fast:
+                cmd.append("-x")
+            cmd.append(target)
+        else:
+            cmd = [sys.executable, "-m", "unittest"]
+            if fail_fast:
+                cmd.append("-f")
+            cmd.extend(["-v", target])
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(REPO_PATH),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except FileNotFoundError as exc:
+            return {
+                "schema": "flaky_test_detector.v1",
+                "ok": False,
+                "runner": runner,
+                "error": str(exc),
+                "runs": runs,
+            }
+        except subprocess.TimeoutExpired as exc:
+            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            run_results.append(
+                {
+                    "run": i + 1,
+                    "ok": False,
+                    "exit_code": None,
+                    "timeout": True,
+                    "failed_tests": ["<timeout>"],
+                    "stdout": _trim_text(stdout),
+                    "stderr": _trim_text(stderr),
+                }
+            )
+            failed_counter["<timeout>"] = failed_counter.get("<timeout>", 0) + 1
+            continue
+
+        merged = f"{proc.stdout}\n{proc.stderr}"
+        failed_tests = (
+            _extract_failed_tests_pytest(merged)
+            if runner == "pytest"
+            else _extract_failed_tests_unittest(merged)
+        )
+        if proc.returncode != 0 and not failed_tests:
+            failed_tests = ["<unknown>"]
+        for t in failed_tests:
+            failed_counter[t] = failed_counter.get(t, 0) + 1
+        run_results.append(
+            {
+                "run": i + 1,
+                "ok": proc.returncode == 0,
+                "exit_code": proc.returncode,
+                "timeout": False,
+                "failed_tests": failed_tests,
+            }
+        )
+
+    flaky = [
+        {
+            "test": test_id,
+            "failed_runs": failures,
+            "pass_runs": runs - failures,
+            "failure_rate": round(failures / runs, 4),
+        }
+        for test_id, failures in sorted(failed_counter.items())
+        if 0 < failures < runs
+    ]
+    consistently_failing = [
+        test_id for test_id, failures in sorted(failed_counter.items()) if failures == runs
+    ]
+
+    if update_history:
+        _require_mutations()
+        payload = {"schema": "flaky_test_history.v1", "updated_at": _now_iso(), "tests": {}}
+        if history_file.is_file():
+            try:
+                payload = json.loads(history_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                payload = {"schema": "flaky_test_history.v1", "updated_at": _now_iso(), "tests": {}}
+        tests_map = payload.get("tests", {})
+        if not isinstance(tests_map, dict):
+            tests_map = {}
+        for test_id, failures in failed_counter.items():
+            rec = tests_map.get(test_id, {})
+            total_runs = int(rec.get("total_runs", 0)) + runs
+            total_failures = int(rec.get("total_failures", 0)) + failures
+            rec = {
+                "total_runs": total_runs,
+                "total_failures": total_failures,
+                "failure_rate": round(total_failures / max(1, total_runs), 4),
+                "last_seen": _now_iso(),
+            }
+            tests_map[test_id] = rec
+        payload["tests"] = tests_map
+        payload["updated_at"] = _now_iso()
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        history_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    return {
+        "schema": "flaky_test_detector.v1",
+        "ok": True,
+        "runner": runner,
+        "target": target,
+        "runs": runs,
+        "run_results": run_results,
+        "flaky_tests": flaky,
+        "consistently_failing_tests": consistently_failing,
+        "history_path": history_path if update_history else None,
+    }
+
+
+@mcp.tool()
+def change_impact_gate(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    critical_globs: list[str] | None = None,
+    require_tests_for_critical: bool = True,
+    require_docs_for_impl_diff: bool = True,
+    block_on_risk_level: str = "high",
+) -> dict[str, Any]:
+    """Block risky changes when impact, docs, or tests requirements are not met."""
+    _require_git_repo()
+    if block_on_risk_level not in {"none", "medium", "high"}:
+        raise ValueError("block_on_risk_level must be one of: none, medium, high")
+
+    changed_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout
+    changed = [line.strip() for line in changed_out.splitlines() if line.strip()]
+    critical_patterns = critical_globs or [
+        "toolchain/dev/server.py",
+        "toolchain/dev/Dockerfile",
+        ".devcontainer/**",
+        "**/auth*",
+        "**/security*",
+    ]
+    critical_changed = [
+        rel for rel in changed if any(fnmatch.fnmatch(rel, pat) for pat in critical_patterns)
+    ]
+
+    impacts = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
+    selected_tests = impacts.get("tests", []) if isinstance(impacts, dict) else []
+    docs = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+    risk = risk_scoring(ref=head_ref)
+
+    blocked_reasons: list[str] = []
+    if require_tests_for_critical and critical_changed and not selected_tests:
+        blocked_reasons.append("critical changes detected but no impacted tests selected")
+    if require_docs_for_impl_diff and bool(docs.get("needs_docs_update")):
+        blocked_reasons.append("implementation changed without documentation updates")
+    if block_on_risk_level != "none":
+        risk_level = str(risk.get("risk_level", "low"))
+        if _risk_level_value(risk_level) >= _risk_level_value(block_on_risk_level):
+            blocked_reasons.append(
+                f"risk level '{risk_level}' meets/exceeds gate threshold '{block_on_risk_level}'"
+            )
+
+    return {
+        "schema": "change_impact_gate.v1",
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "changed_count": len(changed),
+        "critical_changed": critical_changed,
+        "selected_tests": selected_tests,
+        "docs": docs,
+        "risk": {"risk_score": risk.get("risk_score"), "risk_level": risk.get("risk_level")},
+        "should_block": bool(blocked_reasons),
+        "blocked_reasons": blocked_reasons,
+    }
+
+
+@mcp.tool()
+def smart_fix_batch(
+    findings: list[dict[str, Any]],
+    mode: str = "plan",
+    regex: bool = False,
+    replace_all: bool = False,
+    run_validation: bool = True,
+) -> dict[str, Any]:
+    """Plan or apply a batch of targeted code fixes from structured findings."""
+    if mode not in {"plan", "execute"}:
+        raise ValueError("mode must be one of: plan, execute")
+    if not findings:
+        raise ValueError("findings must not be empty")
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for idx, item in enumerate(findings):
+        path = item.get("path")
+        search = item.get("search")
+        replacement = item.get("replacement")
+        if not isinstance(path, str) or not isinstance(search, str) or not isinstance(replacement, str):
+            raise ValueError("each finding requires string path/search/replacement")
+        _resolve_repo_path(path)
+        payload = {
+            "index": idx,
+            "path": path,
+            "search": search,
+            "replacement": replacement,
+            "description": str(item.get("description", "")),
+            "severity": str(item.get("severity", "medium")),
+        }
+        grouped.setdefault(path, []).append(payload)
+
+    if mode == "plan":
+        return {
+            "schema": "smart_fix_batch.v1",
+            "mode": mode,
+            "file_count": len(grouped),
+            "fix_count": len(findings),
+            "plan": [
+                {"path": path, "fixes": rows}
+                for path, rows in sorted(grouped.items(), key=lambda x: x[0])
+            ],
+        }
+
+    _require_mutations()
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    changed_paths: set[str] = set()
+    for path, rows in grouped.items():
+        file_path = _resolve_repo_path(path)
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        original = text
+        for row in rows:
+            search = row["search"]
+            repl = row["replacement"]
+            if regex:
+                count = 0 if replace_all else 1
+                updated, n = re.subn(search, repl, text, count=count)
+            else:
+                if search not in text:
+                    skipped.append(
+                        {
+                            "path": path,
+                            "index": row["index"],
+                            "reason": "search text not found",
+                        }
+                    )
+                    continue
+                if replace_all:
+                    n = text.count(search)
+                    updated = text.replace(search, repl)
+                else:
+                    updated = text.replace(search, repl, 1)
+                    n = 1
+            if n == 0:
+                skipped.append(
+                    {"path": path, "index": row["index"], "reason": "no replacements made"}
+                )
+                continue
+            text = updated
+            applied.append({"path": path, "index": row["index"], "replacements": n})
+        if text != original:
+            file_path.write_text(text, encoding="utf-8")
+            changed_paths.add(path)
+
+    compile_errors: list[dict[str, Any]] = []
+    if run_validation:
+        for rel in sorted(changed_paths):
+            if not rel.endswith(".py"):
+                continue
+            proc = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(_resolve_repo_path(rel))],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                compile_errors.append({"path": rel, "stderr": _trim_text(proc.stderr)})
+
+    return {
+        "schema": "smart_fix_batch.v1",
+        "mode": mode,
+        "ok": len(compile_errors) == 0,
+        "applied_count": len(applied),
+        "skipped_count": len(skipped),
+        "changed_paths": sorted(changed_paths),
+        "applied": applied,
+        "skipped": skipped,
+        "compile_error_count": len(compile_errors),
+        "compile_errors": compile_errors,
+    }
+
+
+@mcp.tool()
+def release_readiness(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    run_tests: bool = True,
+    test_runner: str = "unittest",
+    test_target: str = "tests",
+    run_docs_check: bool = True,
+    run_security_check: bool = True,
+    run_license_check: bool = True,
+    run_risk_check: bool = True,
+    run_impact_check: bool = True,
+    summary_mode: str = "quick",
+) -> dict[str, Any]:
+    """Run release readiness checks and return go/no-go status."""
+    _require_git_repo()
+    if summary_mode not in {"quick", "full"}:
+        raise ValueError("summary_mode must be one of: quick, full")
+
+    result: dict[str, Any] = {
+        "schema": "release_readiness.v1",
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "started_at": _now_iso(),
+        "checks": {},
+        "ok": True,
+    }
+
+    if run_tests:
+        test_out = self_test(
+            runner=test_runner,
+            target=test_target,
+            verbose=False,
+            fail_fast=False,
+            timeout_seconds=600,
+        )
+        result["checks"]["tests"] = {
+            "ok": test_out.get("ok", False),
+            "runner": test_runner,
+            "target": test_target,
+            "exit_code": test_out.get("exit_code"),
+        }
+        if not test_out.get("ok", False):
+            result["ok"] = False
+
+    if run_docs_check:
+        docs = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+        result["checks"]["docs"] = {
+            "ok": not docs.get("needs_docs_update", False),
+            "needs_docs_update": docs.get("needs_docs_update", False),
+        }
+        if docs.get("needs_docs_update", False):
+            result["ok"] = False
+
+    if run_security_check:
+        patch = _git("diff", f"{base_ref}...{head_ref}", "--", ".").stdout
+        security = security_triage(diff_text=patch)
+        finding_count = int(security.get("finding_count", 0))
+        result["checks"]["security"] = {
+            "ok": finding_count == 0,
+            "finding_count": finding_count,
+        }
+        if finding_count > 0:
+            result["ok"] = False
+
+    if run_license_check:
+        try:
+            license_out = license_monitor(
+                run_reuse_lint=True,
+                generate_spdx=False,
+                auto_fix_headers=False,
+                download_missing_licenses=False,
+            )
+            result["checks"]["license"] = {
+                "ok": license_out.get("ok", False),
+                "missing_spdx_header_count": license_out.get("missing_spdx_header_count", 0),
+                "missing_license_text_count": license_out.get("missing_license_text_count", 0),
+            }
+            if not license_out.get("ok", False):
+                result["ok"] = False
+        except Exception as exc:
+            result["checks"]["license"] = {"ok": False, "error": str(exc)}
+            result["ok"] = False
+
+    if run_risk_check:
+        risk = risk_scoring(ref=head_ref)
+        result["checks"]["risk"] = {
+            "ok": risk.get("risk_level") != "high",
+            "risk_score": risk.get("risk_score"),
+            "risk_level": risk.get("risk_level"),
+        }
+        if risk.get("risk_level") == "high":
+            result["ok"] = False
+
+    if run_impact_check:
+        impacts = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
+        selected = impacts.get("tests", []) if isinstance(impacts, dict) else []
+        result["checks"]["impact_tests"] = {
+            "ok": True,
+            "selected_count": len(selected),
+            "tests": selected[:200],
+        }
+
+    result["finished_at"] = _now_iso()
+    if summary_mode == "quick":
+        return {
+            "schema": "release_readiness.quick.v1",
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "ok": result["ok"],
+            "checks": {
+                name: {
+                    k: v
+                    for k, v in data.items()
+                    if k in {"ok", "exit_code", "runner", "target", "finding_count", "risk_score", "risk_level", "missing_spdx_header_count", "missing_license_text_count", "selected_count", "needs_docs_update"}
+                }
+                for name, data in result["checks"].items()
+                if isinstance(data, dict)
+            },
+        }
+    return result
 
 
 @mcp.tool()
