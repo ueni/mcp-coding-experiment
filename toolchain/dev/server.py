@@ -17,6 +17,7 @@ import math
 import urllib.error
 import urllib.request
 import html
+import zipfile
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,6 +52,26 @@ try:
     import pytesseract
 except ModuleNotFoundError:  # pragma: no cover
     pytesseract = None
+
+try:
+    from pypdf import PdfReader
+except ModuleNotFoundError:  # pragma: no cover
+    PdfReader = None
+
+try:
+    import docx
+except ModuleNotFoundError:  # pragma: no cover
+    docx = None
+
+try:
+    import openpyxl
+except ModuleNotFoundError:  # pragma: no cover
+    openpyxl = None
+
+try:
+    import xlrd
+except ModuleNotFoundError:  # pragma: no cover
+    xlrd = None
 
 try:
     from tree_sitter_languages import get_parser as _ts_get_parser
@@ -263,6 +284,173 @@ def _iter_candidate_files(root: Path, recursive: bool) -> Any:
 
 def _read_lines(path: Path, encoding: str = "utf-8") -> list[str]:
     return path.read_text(encoding=encoding, errors="replace").splitlines()
+
+
+def _truncate_with_flag(text: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars < 1:
+        raise ValueError("max_chars must be >= 1")
+    if len(text) <= max_chars:
+        return text, False
+    marker = f"\n\n[truncated: exceeded {max_chars} chars]"
+    keep = max(1, max_chars - len(marker))
+    return text[:keep] + marker, True
+
+
+def _read_pdf_text(path: Path, max_pages: int) -> tuple[str, dict[str, Any]]:
+    if PdfReader is None:
+        raise RuntimeError("pypdf is not installed")
+    if max_pages < 1:
+        raise ValueError("max_pages must be >= 1")
+    reader = PdfReader(str(path))
+    lines: list[str] = []
+    page_count = len(reader.pages)
+    for page in reader.pages[:max_pages]:
+        extracted = page.extract_text() or ""
+        if extracted:
+            lines.append(extracted.strip())
+    meta = {"page_count": page_count, "pages_read": min(page_count, max_pages)}
+    return "\n\n".join(x for x in lines if x), meta
+
+
+def _read_docx_text(path: Path) -> tuple[str, dict[str, Any]]:
+    if docx is None:
+        raise RuntimeError("python-docx is not installed")
+    document = docx.Document(str(path))
+    chunks: list[str] = []
+    para_count = 0
+    for p in document.paragraphs:
+        t = p.text.strip()
+        if t:
+            chunks.append(t)
+        para_count += 1
+    table_cells = 0
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                text = cell.text.strip()
+                if text:
+                    chunks.append(text)
+                table_cells += 1
+    return "\n".join(chunks), {"paragraph_count": para_count, "table_cells": table_cells}
+
+
+def _read_doc_text(path: Path) -> tuple[str, dict[str, Any]]:
+    antiword = shutil.which("antiword")
+    if antiword:
+        proc = subprocess.run(
+            [antiword, str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = (proc.stdout or "").strip()
+        if output:
+            return output, {"backend": "antiword", "exit_code": proc.returncode}
+        return "", {"backend": "antiword", "exit_code": proc.returncode}
+
+    # Fallback keeps behavior functional even without antiword.
+    raw = path.read_bytes()
+    text = raw.decode("latin-1", errors="replace")
+    return text, {"backend": "latin1-fallback", "bytes_read": len(raw)}
+
+
+def _read_xlsx_text(path: Path, max_rows_per_sheet: int) -> tuple[str, dict[str, Any]]:
+    if openpyxl is None:
+        raise RuntimeError("openpyxl is not installed")
+    if max_rows_per_sheet < 1:
+        raise ValueError("max_rows_per_sheet must be >= 1")
+    wb = openpyxl.load_workbook(filename=str(path), read_only=True, data_only=True)
+    chunks: list[str] = []
+    total_rows = 0
+    sheets_meta: list[dict[str, Any]] = []
+    for ws in wb.worksheets:
+        rows_read = 0
+        for row in ws.iter_rows(values_only=True):
+            if rows_read >= max_rows_per_sheet:
+                break
+            values = [str(v).strip() for v in row if v is not None and str(v).strip()]
+            if values:
+                chunks.append(" | ".join(values))
+            rows_read += 1
+        total_rows += rows_read
+        sheets_meta.append({"name": ws.title, "rows_read": rows_read})
+    return "\n".join(chunks), {"sheet_count": len(wb.worksheets), "rows_read": total_rows, "sheets": sheets_meta}
+
+
+def _read_xls_text(path: Path, max_rows_per_sheet: int) -> tuple[str, dict[str, Any]]:
+    if xlrd is None:
+        raise RuntimeError("xlrd is not installed")
+    if max_rows_per_sheet < 1:
+        raise ValueError("max_rows_per_sheet must be >= 1")
+    wb = xlrd.open_workbook(str(path))
+    chunks: list[str] = []
+    total_rows = 0
+    sheets_meta: list[dict[str, Any]] = []
+    for i in range(wb.nsheets):
+        sheet = wb.sheet_by_index(i)
+        rows_read = min(sheet.nrows, max_rows_per_sheet)
+        for r in range(rows_read):
+            row = sheet.row_values(r)
+            values = [str(v).strip() for v in row if str(v).strip()]
+            if values:
+                chunks.append(" | ".join(values))
+        total_rows += rows_read
+        sheets_meta.append({"name": sheet.name, "rows_read": rows_read})
+    return "\n".join(chunks), {"sheet_count": wb.nsheets, "rows_read": total_rows, "sheets": sheets_meta}
+
+
+def _read_opendoc_text(path: Path, ext: str, max_rows_per_sheet: int) -> tuple[str, dict[str, Any]]:
+    if max_rows_per_sheet < 1:
+        raise ValueError("max_rows_per_sheet must be >= 1")
+    try:
+        with zipfile.ZipFile(path) as zf:
+            raw = zf.read("content.xml")
+    except KeyError as exc:
+        raise RuntimeError("content.xml not found in OpenDocument file") from exc
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("invalid OpenDocument zip container") from exc
+
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"invalid OpenDocument content.xml: {exc}") from exc
+
+    ns = {
+        "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+        "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
+    }
+    chunks: list[str] = []
+    meta: dict[str, Any] = {"format": ext}
+
+    if ext == ".ods":
+        sheet_rows: list[dict[str, Any]] = []
+        for table in root.findall(".//table:table", ns):
+            table_name = table.attrib.get(f"{{{ns['table']}}}name", "")
+            rows_read = 0
+            for row in table.findall("table:table-row", ns):
+                if rows_read >= max_rows_per_sheet:
+                    break
+                cells: list[str] = []
+                for cell in row.findall("table:table-cell", ns):
+                    ps = [p.text.strip() for p in cell.findall(".//text:p", ns) if p.text and p.text.strip()]
+                    if ps:
+                        cells.append(" ".join(ps))
+                if cells:
+                    chunks.append(" | ".join(cells))
+                rows_read += 1
+            sheet_rows.append({"name": table_name, "rows_read": rows_read})
+        meta["sheet_count"] = len(sheet_rows)
+        meta["sheets"] = sheet_rows
+        meta["rows_read"] = sum(s["rows_read"] for s in sheet_rows)
+        return "\n".join(chunks), meta
+
+    # .odt / .odp text extraction
+    paragraphs = [p.text.strip() for p in root.findall(".//text:p", ns) if p.text and p.text.strip()]
+    chunks.extend(paragraphs)
+    meta["paragraph_count"] = len(paragraphs)
+    return "\n".join(chunks), meta
 
 
 def _node_display_name(node: ast.AST) -> str:
@@ -1228,6 +1416,78 @@ def read_file(
 
     data = file_path.read_text(encoding=encoding)
     return _trim_text(data)
+
+
+@mcp.tool()
+def read_document(
+    path: str,
+    max_chars: int = 20000,
+    max_pages: int = 20,
+    max_rows_per_sheet: int = 200,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Read document formats: .pdf, .doc, .docx, .xls, .xlsx, .odt, .ods, .odp."""
+    profile = _default_output_profile(output_profile)
+    file_path = _resolve_repo_path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(path)
+    ext = file_path.suffix.lower()
+    if ext not in {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".odt", ".ods", ".odp"}:
+        raise ValueError(
+            "unsupported extension; expected .pdf, .doc, .docx, .xls, .xlsx, .odt, .ods, or .odp"
+        )
+
+    warnings: list[str] = []
+    metadata: dict[str, Any] = {"extension": ext}
+    text = ""
+
+    try:
+        if ext == ".pdf":
+            text, extra = _read_pdf_text(file_path, max_pages=max_pages)
+        elif ext == ".docx":
+            text, extra = _read_docx_text(file_path)
+        elif ext == ".doc":
+            text, extra = _read_doc_text(file_path)
+            if extra.get("backend") != "antiword":
+                warnings.append("antiword not available; used lossy latin-1 fallback for .doc")
+        elif ext == ".xlsx":
+            text, extra = _read_xlsx_text(file_path, max_rows_per_sheet=max_rows_per_sheet)
+        elif ext in {".odt", ".ods", ".odp"}:
+            text, extra = _read_opendoc_text(
+                file_path,
+                ext=ext,
+                max_rows_per_sheet=max_rows_per_sheet,
+            )
+        else:
+            text, extra = _read_xls_text(file_path, max_rows_per_sheet=max_rows_per_sheet)
+    except Exception as exc:
+        raise RuntimeError(f"failed to parse {ext} document: {exc}") from exc
+
+    metadata.update(extra)
+    text = text.strip()
+    text, truncated = _truncate_with_flag(text, max_chars=max_chars)
+
+    result = {
+        "schema": "read_document.v1",
+        "path": str(file_path.relative_to(REPO_PATH)),
+        "extension": ext,
+        "chars": len(text),
+        "truncated": truncated,
+        "warnings": warnings,
+        "metadata": metadata if profile != "compact" else {},
+        "text": text,
+    }
+    if profile == "compact":
+        return {
+            "schema": "read_document.compact.v1",
+            "path": result["path"],
+            "extension": ext,
+            "chars": result["chars"],
+            "truncated": truncated,
+            "warnings": warnings,
+            "text": text,
+        }
+    return result
 
 
 @mcp.tool()

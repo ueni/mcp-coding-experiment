@@ -3,7 +3,9 @@ import json
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _load_server_module():
@@ -371,6 +373,98 @@ class ServerToolsTest(unittest.TestCase):
             mode="check",
         )
         self.assertTrue(rechecked["in_sync"])
+
+    def test_read_document_formats(self):
+        # Real .xlsx fixture when openpyxl is installed.
+        if self.server.openpyxl is not None:
+            wb = self.server.openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Data"
+            ws.append(["name", "value"])
+            ws.append(["alpha", 1])
+            xlsx_path = self.repo_path / "docs" / "table.xlsx"
+            wb.save(str(xlsx_path))
+            xlsx_out = self.server.read_document(path="docs/table.xlsx", max_rows_per_sheet=10)
+            self.assertEqual(xlsx_out["schema"], "read_document.v1")
+            self.assertEqual(xlsx_out["extension"], ".xlsx")
+            self.assertIn("alpha", xlsx_out["text"])
+
+        # Real .docx fixture when python-docx is installed.
+        if self.server.docx is not None:
+            doc = self.server.docx.Document()
+            doc.add_paragraph("hello docx")
+            docx_path = self.repo_path / "docs" / "sample.docx"
+            doc.save(str(docx_path))
+            docx_out = self.server.read_document(path="docs/sample.docx")
+            self.assertEqual(docx_out["schema"], "read_document.v1")
+            self.assertEqual(docx_out["extension"], ".docx")
+            self.assertIn("hello docx", docx_out["text"])
+
+        # Dispatch coverage for .pdf and .xls using parser patching.
+        pdf_path = self.repo_path / "docs" / "sample.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        with patch.object(self.server, "_read_pdf_text", return_value=("hello pdf", {"page_count": 1, "pages_read": 1})):
+            pdf_out = self.server.read_document(path="docs/sample.pdf", max_pages=5, output_profile="compact")
+        self.assertEqual(pdf_out["schema"], "read_document.compact.v1")
+        self.assertEqual(pdf_out["extension"], ".pdf")
+        self.assertIn("hello pdf", pdf_out["text"])
+
+        xls_path = self.repo_path / "docs" / "legacy.xls"
+        xls_path.write_bytes(b"fake-xls")
+        with patch.object(self.server, "_read_xls_text", return_value=("a | b", {"sheet_count": 1, "rows_read": 1, "sheets": [{"name": "S1", "rows_read": 1}]})):
+            xls_out = self.server.read_document(path="docs/legacy.xls")
+        self.assertIn(xls_out["schema"], {"read_document.v1", "read_document.compact.v1"})
+        self.assertEqual(xls_out["extension"], ".xls")
+        self.assertIn("a | b", xls_out["text"])
+
+    def test_read_document_opendoc_formats(self):
+        odt_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:text><text:p>Hello ODT</text:p></office:text></office:body>
+</office:document-content>"""
+        odt_path = self.repo_path / "docs" / "sample.odt"
+        with zipfile.ZipFile(odt_path, "w") as zf:
+            zf.writestr("content.xml", odt_xml)
+        odt_out = self.server.read_document(path="docs/sample.odt")
+        self.assertEqual(odt_out["extension"], ".odt")
+        self.assertIn("Hello ODT", odt_out["text"])
+
+        ods_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:spreadsheet>
+    <table:table table:name="Sheet1">
+      <table:table-row>
+        <table:table-cell><text:p>a</text:p></table:table-cell>
+        <table:table-cell><text:p>1</text:p></table:table-cell>
+      </table:table-row>
+    </table:table>
+  </office:spreadsheet></office:body>
+</office:document-content>"""
+        ods_path = self.repo_path / "docs" / "sample.ods"
+        with zipfile.ZipFile(ods_path, "w") as zf:
+            zf.writestr("content.xml", ods_xml)
+        ods_out = self.server.read_document(path="docs/sample.ods")
+        self.assertEqual(ods_out["extension"], ".ods")
+        self.assertIn("a | 1", ods_out["text"])
+
+        odp_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:presentation><text:p>Hello ODP</text:p></office:presentation></office:body>
+</office:document-content>"""
+        odp_path = self.repo_path / "docs" / "sample.odp"
+        with zipfile.ZipFile(odp_path, "w") as zf:
+            zf.writestr("content.xml", odp_xml)
+        odp_out = self.server.read_document(path="docs/sample.odp", output_profile="compact")
+        self.assertEqual(odp_out["schema"], "read_document.compact.v1")
+        self.assertEqual(odp_out["extension"], ".odp")
+        self.assertIn("Hello ODP", odp_out["text"])
 
 
 if __name__ == "__main__":

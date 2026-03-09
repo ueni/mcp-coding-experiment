@@ -99,6 +99,7 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - git_init
 - list_files
 - read_file
+- read_document
 - write_file
 - delete_path
 - move_path
