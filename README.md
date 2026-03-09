@@ -128,7 +128,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - Path traversal outside the mounted repository is blocked.
 - Read-only usage is the safest default: keep `ALLOW_MUTATIONS=false` unless changes are required.
 - Mutating operations (for example `write_file`, `delete_path`, `move_path`, Git writes) require `ALLOW_MUTATIONS=true`.
-- `git commit` still requires Git user identity in repo config or environment.
+- Git commits still require Git user identity in repo config or environment.
 - In stdio mode, avoid writing logs to stdout to preserve protocol framing.
 
 ## Tool Catalog by Category
