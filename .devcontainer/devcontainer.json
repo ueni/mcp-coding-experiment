@@ -1,9 +1,11 @@
 {
-  "name": "mcp-git-server",
+  "name": "codebase-tooling-mcp",
   "dockerComposeFile": [
     "../toolchain/dev/docker-compose.yml"
   ],
-  "service": "mcp-git-server",
+  "service": "codebase-tooling-mcp",
+  "remoteUser": "app",
+  "containerUser": "app",
   "workspaceFolder": "/repo",
   "shutdownAction": "stopCompose",
   "containerEnv": {
@@ -30,8 +32,8 @@
     }
   },
   "mounts": [
-    "source=${localEnv:HOME}/.continue,target=/root/.continue,type=bind,consistency=cached",
-    "source=${localEnv:HOME}/.gitconfig,target=/root/.gitconfig,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.continue,target=/home/app/.continue,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
   ]
 }
