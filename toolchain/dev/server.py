@@ -10,6 +10,7 @@ import subprocess
 import sys
 import re
 import fnmatch
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,10 @@ ALLOW_ORIGINS = [
 LABS_DIR = Path("toolchain/dev/labs")
 REPORTS_DIR = Path(".build/reports")
 MEMORY_FILE = Path(".build/memory/context_memory.json")
+FAILURE_MEMORY_FILE = Path(".build/memory/failure_memory.json")
+TOKEN_BUDGET_FILE = Path(".build/memory/token_budget.json")
+EDIT_TXN_DIR = Path(".build/transactions")
+API_SNAPSHOT_FILE = Path(".build/reports/API_SURFACE.json")
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -324,6 +329,178 @@ def _memory_save(payload: dict[str, Any]) -> None:
     memory_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
     )
+
+
+def _json_file_load(path: Path, default: Any) -> Any:
+    file_path = _resolve_repo_path(str(path))
+    if not file_path.exists():
+        return default
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return default
+    return payload
+
+
+def _json_file_save(path: Path, payload: Any) -> None:
+    file_path = _resolve_repo_path(str(path))
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _token_budget_load() -> dict[str, Any]:
+    payload = _json_file_load(
+        TOKEN_BUDGET_FILE,
+        {
+            "max_output_chars": MAX_OUTPUT_CHARS,
+            "default_output_profile": "normal",
+        },
+    )
+    if not isinstance(payload, dict):
+        return {"max_output_chars": MAX_OUTPUT_CHARS, "default_output_profile": "normal"}
+    max_chars = payload.get("max_output_chars", MAX_OUTPUT_CHARS)
+    profile = payload.get("default_output_profile", "normal")
+    if not isinstance(max_chars, int) or max_chars < 1:
+        max_chars = MAX_OUTPUT_CHARS
+    if profile not in OUTPUT_PROFILES:
+        profile = "normal"
+    return {"max_output_chars": max_chars, "default_output_profile": profile}
+
+
+def _token_budget_apply_max(max_chars: int | None) -> int:
+    if isinstance(max_chars, int) and max_chars > 0:
+        return max_chars
+    return int(_token_budget_load()["max_output_chars"])
+
+
+def _default_output_profile(output_profile: str | None) -> str:
+    if output_profile and output_profile.strip():
+        return _validate_output_profile(output_profile)
+    return _validate_output_profile(_token_budget_load()["default_output_profile"])
+
+
+def _failure_memory_load() -> dict[str, Any]:
+    payload = _json_file_load(FAILURE_MEMORY_FILE, {"entries": []})
+    if not isinstance(payload, dict):
+        return {"entries": []}
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    return {"entries": entries}
+
+
+def _failure_memory_save(payload: dict[str, Any]) -> None:
+    _json_file_save(FAILURE_MEMORY_FILE, payload)
+
+
+def _failure_record(
+    command: list[str],
+    stderr: str,
+    stdout: str = "",
+    category: str = "command",
+    suggestion: str | None = None,
+) -> None:
+    payload = _failure_memory_load()
+    entries = payload["entries"]
+    entries.append(
+        {
+            "timestamp": _now_iso(),
+            "command": command,
+            "category": category,
+            "stderr": _trim_text(stderr),
+            "stdout": _trim_text(stdout),
+            "suggestion": suggestion or "",
+        }
+    )
+    payload["entries"] = entries[-500:]
+    _failure_memory_save(payload)
+
+
+def _tx_path(txn_id: str) -> Path:
+    return _resolve_repo_path(str(EDIT_TXN_DIR / f"{txn_id}.json"))
+
+
+def _tx_load(txn_id: str) -> dict[str, Any]:
+    tx_path = _tx_path(txn_id)
+    if not tx_path.is_file():
+        raise FileNotFoundError(f"transaction not found: {txn_id}")
+    try:
+        payload = json.loads(tx_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("transaction metadata is corrupted") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("transaction metadata is invalid")
+    return payload
+
+
+def _tx_save(txn_id: str, payload: dict[str, Any]) -> None:
+    tx_path = _tx_path(txn_id)
+    tx_path.parent.mkdir(parents=True, exist_ok=True)
+    tx_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _collect_python_symbols_top_level(
+    source: str, rel_path: str, include_private: bool = False
+) -> list[dict[str, Any]]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    symbols: list[dict[str, Any]] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        name = node.name
+        if not include_private and name.startswith("_"):
+            continue
+        kind = "class"
+        if isinstance(node, ast.FunctionDef):
+            kind = "function"
+        if isinstance(node, ast.AsyncFunctionDef):
+            kind = "async_function"
+        symbols.append(
+            {
+                "path": rel_path,
+                "name": name,
+                "kind": kind,
+                "line_start": int(getattr(node, "lineno", 1)),
+                "line_end": int(getattr(node, "end_lineno", getattr(node, "lineno", 1))),
+            }
+        )
+    return symbols
+
+
+def _language_parse_file(path: Path, language: str) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    symbols: list[dict[str, Any]] = []
+    imports: list[str] = []
+    lines = text.splitlines()
+    for idx, line in enumerate(lines, start=1):
+        if language in {"javascript", "typescript"}:
+            m = re.search(r"\b(function|class)\s+([A-Za-z_]\w*)", line)
+            if m:
+                symbols.append({"name": m.group(2), "kind": m.group(1), "line": idx})
+            m2 = re.search(r"\b(const|let|var)\s+([A-Za-z_]\w*)\s*=\s*\(", line)
+            if m2:
+                symbols.append({"name": m2.group(2), "kind": "callable_var", "line": idx})
+            imp = re.search(r"^\s*import\s+.*?from\s+[\"']([^\"']+)[\"']", line)
+            if imp:
+                imports.append(imp.group(1))
+        elif language == "go":
+            m = re.search(r"^\s*func\s+([A-Za-z_]\w*)", line)
+            if m:
+                symbols.append({"name": m.group(1), "kind": "func", "line": idx})
+            imp = re.search(r'^\s*import\s+"([^"]+)"', line)
+            if imp:
+                imports.append(imp.group(1))
+        elif language == "rust":
+            m = re.search(r"^\s*(pub\s+)?(fn|struct|enum|trait)\s+([A-Za-z_]\w*)", line)
+            if m:
+                symbols.append({"name": m.group(3), "kind": m.group(2), "line": idx})
+            imp = re.search(r"^\s*use\s+([^;]+);", line)
+            if imp:
+                imports.append(imp.group(1).strip())
+    return {"symbols": symbols, "imports": imports}
 
 
 def _now_iso() -> str:
@@ -1349,6 +1526,117 @@ def read_batch(
 
 
 @mcp.tool()
+def semantic_find(
+    query: str,
+    path: str = ".",
+    max_results: int = 30,
+    output_profile: str | None = None,
+    include_private_symbols: bool = False,
+) -> dict[str, Any]:
+    """Ranked search over file paths, symbols, and text matches."""
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    if max_results < 1:
+        raise ValueError("max_results must be >= 1")
+    profile = _default_output_profile(output_profile)
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    terms = [t.lower() for t in re.split(r"\s+", query.strip()) if t]
+    candidates: dict[str, dict[str, Any]] = {}
+
+    for rel in find_paths(
+        path=path,
+        recursive=True,
+        include_hidden=False,
+        max_entries=5000,
+        output_profile="compact",
+        file_type="file",
+    ):
+        score = 0.0
+        rel_low = rel.lower()
+        for term in terms:
+            if term in rel_low:
+                score += 3.0
+        if score > 0:
+            candidates.setdefault(
+                f"path:{rel}",
+                {"kind": "path", "path": rel, "score": 0.0, "reasons": []},
+            )
+            candidates[f"path:{rel}"]["score"] += score
+            candidates[f"path:{rel}"]["reasons"].append("path_term_match")
+
+    symbol_term = "|".join(re.escape(t) for t in terms if t)
+    if symbol_term:
+        for sym in symbol_index(
+            path=path,
+            include_private=include_private_symbols,
+            recursive=True,
+            max_symbols=5000,
+            output_profile="normal",
+        ):
+            name = str(sym.get("name", ""))
+            score = 0.0
+            for term in terms:
+                if term in name.lower():
+                    score += 5.0
+            if score <= 0:
+                continue
+            key = f"symbol:{sym['path']}:{name}:{sym['line_start']}"
+            candidates[key] = {
+                "kind": "symbol",
+                "path": sym["path"],
+                "name": name,
+                "line_start": sym["line_start"],
+                "line_end": sym.get("line_end"),
+                "score": score,
+                "reasons": ["symbol_name_match"],
+            }
+
+    pattern = "|".join(re.escape(t) for t in terms)
+    if pattern:
+        matches = grep(
+            pattern=pattern,
+            path=path,
+            recursive=True,
+            case_insensitive=True,
+            max_matches=200,
+            output_profile="compact",
+        )
+        for m in matches:
+            key = f"grep:{m['path']}:{m['line']}:{m['column']}"
+            candidates[key] = {
+                "kind": "text_match",
+                "path": m["path"],
+                "line": m["line"],
+                "column": m["column"],
+                "match": m["match"],
+                "score": 2.0,
+                "reasons": ["text_match"],
+            }
+
+    ranked = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)[
+        :max_results
+    ]
+    if profile == "compact":
+        ranked = [
+            {
+                "kind": r["kind"],
+                "path": r["path"],
+                "score": r["score"],
+            }
+            for r in ranked
+        ]
+    return {
+        "query": query,
+        "path": str(root.relative_to(REPO_PATH)),
+        "count": len(ranked),
+        "results": ranked,
+    }
+
+
+@mcp.tool()
 def symbol_index(
     path: str = ".",
     include_private: bool = False,
@@ -1561,6 +1849,70 @@ def dependency_map(
 
 
 @mcp.tool()
+def call_graph(
+    path: str = ".",
+    recursive: bool = True,
+    max_edges: int = 5000,
+    output_profile: str | None = None,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Build a simple Python function-level call graph."""
+    if max_edges < 1:
+        raise ValueError("max_edges must be >= 1")
+    profile = _default_output_profile(output_profile)
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    edges: list[dict[str, Any]] = []
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        if candidate.suffix != ".py":
+            continue
+        rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+        try:
+            tree = ast.parse(candidate.read_text(encoding=encoding, errors="replace"))
+        except (SyntaxError, OSError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            caller = node.name
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    callee = _ast_expr_name(child.func)
+                    if not callee:
+                        continue
+                    edges.append(
+                        {
+                            "path": rel,
+                            "caller": caller,
+                            "callee": callee,
+                            "line": int(getattr(child, "lineno", getattr(node, "lineno", 1))),
+                        }
+                    )
+                    if len(edges) >= max_edges:
+                        break
+            if len(edges) >= max_edges:
+                break
+        if len(edges) >= max_edges:
+            break
+
+    if profile == "compact":
+        return {"edge_count": len(edges), "edges": edges[:500]}
+    inbound: dict[str, int] = {}
+    for edge in edges:
+        inbound[edge["callee"]] = inbound.get(edge["callee"], 0) + 1
+    result: dict[str, Any] = {"edge_count": len(edges), "edges": edges}
+    if profile == "verbose":
+        result["most_called"] = sorted(
+            [{"symbol": k, "count": v} for k, v in inbound.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )[:25]
+    return result
+
+
+@mcp.tool()
 def ast_search(
     path: str = ".",
     node_type: str = "Call",
@@ -1654,15 +2006,14 @@ def command_runner(
     command: list[str],
     cwd: str = ".",
     timeout_seconds: int = 30,
-    max_output_chars: int = MAX_OUTPUT_CHARS,
+    max_output_chars: int | None = None,
 ) -> dict[str, Any]:
     """Run a whitelisted command without shell interpolation."""
     if not command:
         raise ValueError("command must not be empty")
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
-    if max_output_chars < 1:
-        raise ValueError("max_output_chars must be >= 1")
+    out_cap = _token_budget_apply_max(max_output_chars)
 
     binary = command[0]
     if binary not in SAFE_COMMANDS:
@@ -1693,16 +2044,29 @@ def command_runner(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
+        _failure_record(
+            command=command,
+            stderr="command timed out",
+            stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
+            category="command_runner",
+            suggestion="Increase timeout_seconds or narrow command scope.",
+        )
         return {
             "ok": False,
             "exit_code": None,
             "command": command,
             "cwd": str(workdir.relative_to(REPO_PATH)),
-            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else ""),
-            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else ""),
+            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
+            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
             "timeout": True,
         }
     except FileNotFoundError as exc:
+        _failure_record(
+            command=command,
+            stderr=str(exc),
+            category="command_runner",
+            suggestion="Verify the executable is installed in the runtime.",
+        )
         return {
             "ok": False,
             "exit_code": None,
@@ -1712,13 +2076,21 @@ def command_runner(
             "stderr": str(exc),
             "timeout": False,
         }
+    if proc.returncode != 0:
+        _failure_record(
+            command=command,
+            stderr=proc.stderr,
+            stdout=proc.stdout,
+            category="command_runner",
+            suggestion="Inspect stderr and retry with narrower scope or valid flags.",
+        )
     return {
         "ok": proc.returncode == 0,
         "exit_code": proc.returncode,
         "command": command,
         "cwd": str(workdir.relative_to(REPO_PATH)),
-        "stdout": _trim_text(proc.stdout, max_chars=max_output_chars),
-        "stderr": _trim_text(proc.stderr, max_chars=max_output_chars),
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
     }
 
 
@@ -1736,6 +2108,7 @@ def test_targeted(
         raise ValueError("max_tests must be >= 1")
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
+    out_cap = _token_budget_apply_max(None)
 
     diff_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout.strip()
     changed = [line.strip() for line in diff_out.splitlines() if line.strip()]
@@ -1784,6 +2157,13 @@ def test_targeted(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
+        _failure_record(
+            command=full_cmd,
+            stderr="test run timed out",
+            stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
+            category="test_targeted",
+            suggestion="Increase timeout_seconds or reduce selected tests.",
+        )
         return {
             "base_ref": base_ref,
             "head_ref": head_ref,
@@ -1793,10 +2173,16 @@ def test_targeted(
             "ok": False,
             "exit_code": None,
             "timeout": True,
-            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else ""),
-            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else ""),
+            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
+            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
         }
     except FileNotFoundError as exc:
+        _failure_record(
+            command=full_cmd,
+            stderr=str(exc),
+            category="test_targeted",
+            suggestion="Install the configured test runner or pass a valid runner list.",
+        )
         return {
             "base_ref": base_ref,
             "head_ref": head_ref,
@@ -1809,6 +2195,14 @@ def test_targeted(
             "stdout": "",
             "stderr": str(exc),
         }
+    if proc.returncode != 0:
+        _failure_record(
+            command=full_cmd,
+            stderr=proc.stderr,
+            stdout=proc.stdout,
+            category="test_targeted",
+            suggestion="Review failing tests and rerun with targeted scope.",
+        )
 
     return {
         "base_ref": base_ref,
@@ -1818,8 +2212,8 @@ def test_targeted(
         "command": full_cmd,
         "ok": proc.returncode == 0,
         "exit_code": proc.returncode,
-        "stdout": _trim_text(proc.stdout),
-        "stderr": _trim_text(proc.stderr),
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
     }
 
 
@@ -1949,6 +2343,545 @@ def json_query(
     if profile == "verbose":
         result["value_type"] = type(value).__name__
     return result
+
+
+@mcp.tool()
+def token_budget_guard(
+    max_output_chars: int | None = None,
+    default_output_profile: str | None = None,
+    reset: bool = False,
+) -> dict[str, Any]:
+    """Set or read global output budget/profile defaults."""
+    if reset:
+        payload = {
+            "max_output_chars": MAX_OUTPUT_CHARS,
+            "default_output_profile": "normal",
+            "updated_at": _now_iso(),
+        }
+        _json_file_save(TOKEN_BUDGET_FILE, payload)
+        return payload
+
+    current = _token_budget_load()
+    changed = False
+    if max_output_chars is not None:
+        if max_output_chars < 1:
+            raise ValueError("max_output_chars must be >= 1")
+        current["max_output_chars"] = max_output_chars
+        changed = True
+    if default_output_profile is not None:
+        current["default_output_profile"] = _validate_output_profile(default_output_profile)
+        changed = True
+    if changed:
+        current["updated_at"] = _now_iso()
+        _json_file_save(TOKEN_BUDGET_FILE, current)
+    return current
+
+
+@mcp.tool()
+def failure_memory_get(
+    category: str | None = None,
+    contains: str | None = None,
+    max_entries: int = 100,
+) -> dict[str, Any]:
+    """Read recent failure records captured from tool runs."""
+    if max_entries < 1:
+        raise ValueError("max_entries must be >= 1")
+    payload = _failure_memory_load()
+    entries_out: list[dict[str, Any]] = []
+    needle = (contains or "").lower().strip()
+    for entry in reversed(payload["entries"]):
+        if category and entry.get("category") != category:
+            continue
+        if needle:
+            hay = f"{entry.get('stderr', '')}\n{entry.get('stdout', '')}".lower()
+            if needle not in hay:
+                continue
+        entries_out.append(entry)
+        if len(entries_out) >= max_entries:
+            break
+    return {"count": len(entries_out), "entries": entries_out}
+
+
+@mcp.tool()
+def failure_memory_suggest(
+    error_text: str,
+    max_suggestions: int = 5,
+) -> dict[str, Any]:
+    """Suggest remediation hints from similar historical failures."""
+    if max_suggestions < 1:
+        raise ValueError("max_suggestions must be >= 1")
+    needle_terms = [t for t in re.split(r"\W+", error_text.lower()) if len(t) > 2]
+    payload = _failure_memory_load()
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for entry in payload["entries"]:
+        hay = f"{entry.get('stderr', '')}\n{entry.get('stdout', '')}".lower()
+        score = sum(1 for t in needle_terms if t in hay)
+        if score <= 0:
+            continue
+        scored.append((score, entry))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    suggestions: list[dict[str, Any]] = []
+    for score, entry in scored[:max_suggestions]:
+        suggestions.append(
+            {
+                "score": score,
+                "category": entry.get("category"),
+                "command": entry.get("command"),
+                "suggestion": entry.get("suggestion"),
+                "stderr": entry.get("stderr"),
+            }
+        )
+    return {"count": len(suggestions), "suggestions": suggestions}
+
+
+@mcp.tool()
+def edit_transaction_begin(label: str = "") -> dict[str, Any]:
+    """Start a multi-step edit transaction."""
+    _require_mutations()
+    txn_id = uuid.uuid4().hex[:12]
+    payload = {
+        "id": txn_id,
+        "label": label,
+        "status": "open",
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+        "changes": [],
+        "backups": {},
+    }
+    _tx_save(txn_id, payload)
+    return {"transaction_id": txn_id, "status": "open"}
+
+
+@mcp.tool()
+def edit_transaction_apply(
+    transaction_id: str,
+    changes: list[dict[str, Any]],
+    create_dirs: bool = True,
+) -> dict[str, Any]:
+    """Apply one or more file-content changes into an open transaction."""
+    _require_mutations()
+    if not changes:
+        raise ValueError("changes must not be empty")
+    tx = _tx_load(transaction_id)
+    if tx.get("status") != "open":
+        raise ValueError("transaction is not open")
+
+    applied: list[str] = []
+    for change in changes:
+        path = change.get("path")
+        content = change.get("content")
+        if not isinstance(path, str) or not isinstance(content, str):
+            raise ValueError("each change requires string path and content")
+        file_path = _resolve_repo_path(path)
+        rel = str(file_path.relative_to(REPO_PATH))
+
+        if rel not in tx["backups"]:
+            if file_path.exists() and file_path.is_file():
+                tx["backups"][rel] = {"existed": True, "content": file_path.read_text(encoding="utf-8", errors="replace")}
+            else:
+                tx["backups"][rel] = {"existed": False, "content": ""}
+
+        if create_dirs:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+        tx["changes"].append({"path": rel, "bytes": len(content.encode("utf-8"))})
+        applied.append(rel)
+
+    tx["updated_at"] = _now_iso()
+    _tx_save(transaction_id, tx)
+    return {"transaction_id": transaction_id, "applied": applied, "change_count": len(applied)}
+
+
+@mcp.tool()
+def edit_transaction_validate(transaction_id: str) -> dict[str, Any]:
+    """Validate open transaction with lightweight checks."""
+    tx = _tx_load(transaction_id)
+    changed_paths = sorted({c["path"] for c in tx.get("changes", [])})
+    py_files = [p for p in changed_paths if p.endswith(".py")]
+    compile_errors: list[dict[str, Any]] = []
+    for rel in py_files[:200]:
+        file_path = _resolve_repo_path(rel)
+        proc = subprocess.run(
+            [sys.executable, "-m", "py_compile", str(file_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            compile_errors.append({"path": rel, "stderr": _trim_text(proc.stderr)})
+    return {
+        "transaction_id": transaction_id,
+        "status": tx.get("status"),
+        "changed_paths": changed_paths,
+        "python_files_checked": len(py_files[:200]),
+        "compile_error_count": len(compile_errors),
+        "compile_errors": compile_errors,
+    }
+
+
+@mcp.tool()
+def edit_transaction_rollback(transaction_id: str) -> dict[str, Any]:
+    """Rollback all files touched by a transaction."""
+    _require_mutations()
+    tx = _tx_load(transaction_id)
+    backups = tx.get("backups", {})
+    restored: list[str] = []
+    for rel, backup in backups.items():
+        file_path = _resolve_repo_path(rel)
+        existed = bool(backup.get("existed"))
+        if existed:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(str(backup.get("content", "")), encoding="utf-8")
+        else:
+            if file_path.exists():
+                file_path.unlink()
+        restored.append(rel)
+    tx["status"] = "rolled_back"
+    tx["updated_at"] = _now_iso()
+    _tx_save(transaction_id, tx)
+    return {"transaction_id": transaction_id, "status": "rolled_back", "restored": restored}
+
+
+@mcp.tool()
+def edit_transaction_commit(transaction_id: str, delete_metadata: bool = False) -> dict[str, Any]:
+    """Commit transaction metadata (does not create a git commit)."""
+    tx = _tx_load(transaction_id)
+    tx["status"] = "committed"
+    tx["updated_at"] = _now_iso()
+    _tx_save(transaction_id, tx)
+    if delete_metadata:
+        _tx_path(transaction_id).unlink(missing_ok=True)
+    return {"transaction_id": transaction_id, "status": "committed", "metadata_deleted": delete_metadata}
+
+
+@mcp.tool()
+def patch_minimize(
+    ref: str | None = None,
+    staged: bool = False,
+    pathspec: str | None = None,
+) -> dict[str, Any]:
+    """Generate a minimal-context patch (`-U0`) for current repo diff."""
+    _require_git_repo()
+    args = ["diff", "--unified=0"]
+    if staged:
+        args.append("--staged")
+    if ref:
+        args.append(ref)
+    if pathspec:
+        _resolve_repo_path(pathspec)
+        args.extend(["--", pathspec])
+    patch = _git(*args).stdout
+    return {
+        "bytes": len(patch.encode("utf-8")),
+        "line_count": len(patch.splitlines()),
+        "patch": _trim_text(patch),
+    }
+
+
+@mcp.tool()
+def impact_tests(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    max_tests: int = 300,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Select impacted tests using changed files and dependency edges."""
+    _require_git_repo()
+    if max_tests < 1:
+        raise ValueError("max_tests must be >= 1")
+    profile = _default_output_profile(output_profile)
+    diff_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout.strip()
+    changed = [line.strip() for line in diff_out.splitlines() if line.strip()]
+
+    dep = dependency_map(path=".", recursive=True, include_stdlib=False, output_profile="normal")
+    reverse_edges: dict[str, set[str]] = {}
+    for edge in dep.get("edges", []):
+        reverse_edges.setdefault(edge["to"], set()).add(edge["from"])
+
+    impacted: set[str] = set(changed)
+    queue: list[str] = list(changed)
+    while queue:
+        cur = queue.pop(0)
+        for src in reverse_edges.get(cur, set()):
+            if src not in impacted:
+                impacted.add(src)
+                queue.append(src)
+
+    tests: list[str] = []
+    for rel in sorted(impacted):
+        p = Path(rel)
+        if "test" in p.name.lower() and p.suffix == ".py":
+            tests.append(rel)
+            continue
+        if p.suffix == ".py":
+            for cand in (f"tests/test_{p.stem}.py", f"tests/{p.stem}_test.py"):
+                resolved = _resolve_repo_path(cand)
+                if resolved.is_file():
+                    tests.append(cand)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for t in tests:
+        if t in seen:
+            continue
+        seen.add(t)
+        deduped.append(t)
+        if len(deduped) >= max_tests:
+            break
+
+    result = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "changed_files": changed,
+        "impacted_files": sorted(impacted),
+        "tests": deduped,
+    }
+    if profile == "compact":
+        return {"test_count": len(deduped), "tests": deduped}
+    return result
+
+
+@mcp.tool()
+def api_surface_snapshot(
+    path: str = ".",
+    snapshot_path: str = str(API_SNAPSHOT_FILE),
+    mode: str = "write",
+    include_private: bool = False,
+) -> dict[str, Any]:
+    """Write or check public Python API surface snapshots."""
+    _require_git_repo()
+    if mode not in {"write", "check"}:
+        raise ValueError("mode must be one of: write, check")
+
+    symbols = symbol_index(
+        path=path,
+        include_private=include_private,
+        recursive=True,
+        max_symbols=20000,
+        output_profile="normal",
+    )
+    public_symbols = [
+        {
+            "path": s["path"],
+            "name": s["name"],
+            "kind": s["kind"],
+        }
+        for s in symbols
+        if include_private or not str(s["name"]).startswith("_")
+    ]
+    public_symbols.sort(key=lambda x: (x["path"], x["name"], x["kind"]))
+    snap_file = _resolve_repo_path(snapshot_path)
+
+    if mode == "write":
+        _require_mutations()
+        snap_file.parent.mkdir(parents=True, exist_ok=True)
+        snap_file.write_text(
+            json.dumps({"generated_at": _now_iso(), "symbols": public_symbols}, indent=2),
+            encoding="utf-8",
+        )
+        return {"mode": "write", "snapshot_path": snapshot_path, "symbol_count": len(public_symbols)}
+
+    if not snap_file.is_file():
+        raise FileNotFoundError(snapshot_path)
+    baseline = json.loads(snap_file.read_text(encoding="utf-8"))
+    baseline_symbols = baseline.get("symbols", [])
+    base_set = {(x["path"], x["name"], x["kind"]) for x in baseline_symbols if isinstance(x, dict)}
+    cur_set = {(x["path"], x["name"], x["kind"]) for x in public_symbols}
+    removed = sorted(base_set - cur_set)
+    added = sorted(cur_set - base_set)
+    return {
+        "mode": "check",
+        "snapshot_path": snapshot_path,
+        "removed_count": len(removed),
+        "added_count": len(added),
+        "removed": [{"path": p, "name": n, "kind": k} for (p, n, k) in removed],
+        "added": [{"path": p, "name": n, "kind": k} for (p, n, k) in added],
+    }
+
+
+@mcp.tool()
+def workspace_facts(refresh: bool = True) -> dict[str, Any]:
+    """Get or refresh lightweight workspace facts."""
+    facts_path = Path(".build/memory/workspace_facts.json")
+    if not refresh:
+        payload = _json_file_load(facts_path, {})
+        if payload:
+            return payload
+
+    files = find_paths(path=".", recursive=True, file_type="file", max_entries=10000, output_profile="compact")
+    ext_counts: dict[str, int] = {}
+    for rel in files:
+        ext = Path(rel).suffix.lower() or "<none>"
+        ext_counts[ext] = ext_counts.get(ext, 0) + 1
+    top_ext = sorted(
+        [{"extension": k, "count": v} for k, v in ext_counts.items()],
+        key=lambda x: x["count"],
+        reverse=True,
+    )[:20]
+    payload = {
+        "generated_at": _now_iso(),
+        "is_git_repo": _is_git_repo(),
+        "file_count": len(files),
+        "top_extensions": top_ext,
+        "has_tests_dir": _resolve_repo_path("tests").exists(),
+        "has_readme": _resolve_repo_path("README.md").exists(),
+        "default_output_profile": _token_budget_load()["default_output_profile"],
+    }
+    _json_file_save(facts_path, payload)
+    return payload
+
+
+@mcp.tool()
+def risk_scoring(
+    ref: str | None = None,
+    staged: bool = False,
+    pathspec: str | None = None,
+) -> dict[str, Any]:
+    """Score change risk using path and churn heuristics."""
+    summary = summarize_diff(ref=ref, staged=staged, pathspec=pathspec, output_profile="normal")
+    score = 0
+    reasons: list[str] = []
+    file_count = int(summary["file_count"])
+    add = int(summary["total_added"])
+    delete = int(summary["total_deleted"])
+    churn = add + delete
+
+    if file_count > 20:
+        score += 2
+        reasons.append("large file count")
+    if churn > 500:
+        score += 2
+        reasons.append("high churn")
+    if churn > 1500:
+        score += 2
+        reasons.append("very high churn")
+
+    risky_files = summary.get("risk_flags", {}).get("risky_files", [])
+    if risky_files:
+        score += min(4, len(risky_files))
+        reasons.append("sensitive file changes")
+
+    todo_adds = int(summary.get("risk_flags", {}).get("todo_like_additions", 0))
+    if todo_adds > 0:
+        score += 1
+        reasons.append("todo/fixme additions")
+
+    level = "low"
+    if score >= 6:
+        level = "high"
+    elif score >= 3:
+        level = "medium"
+    return {
+        "risk_score": score,
+        "risk_level": level,
+        "reasons": reasons,
+        "summary": summary,
+    }
+
+
+@mcp.tool()
+def doc_sync_check(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    doc_globs: list[str] | None = None,
+) -> dict[str, Any]:
+    """Check whether docs changed when code/API-like files changed."""
+    _require_git_repo()
+    docs = doc_globs or ["README.md", "docs/**", "**/*.md"]
+    diff_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout.strip()
+    changed = [line.strip() for line in diff_out.splitlines() if line.strip()]
+    doc_changed: list[str] = []
+    code_changed: list[str] = []
+    for rel in changed:
+        if any(fnmatch.fnmatch(rel, g) for g in docs):
+            doc_changed.append(rel)
+            continue
+        if rel.endswith((".py", ".ts", ".tsx", ".js", ".go", ".rs")):
+            code_changed.append(rel)
+    needs_docs = bool(code_changed) and not bool(doc_changed)
+    suggestions: list[str] = []
+    if needs_docs:
+        suggestions.append("Update README.md with behavioral/API changes.")
+        if _resolve_repo_path("docs").exists():
+            suggestions.append("Add or update docs under docs/.")
+    return {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "changed_count": len(changed),
+        "code_changed": code_changed,
+        "doc_changed": doc_changed,
+        "needs_docs_update": needs_docs,
+        "suggestions": suggestions,
+    }
+
+
+@mcp.tool()
+def language_parsers(
+    path: str = ".",
+    language: str = "auto",
+    recursive: bool = True,
+    max_files: int = 1000,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Extract lightweight symbols/imports for JS/TS/Go/Rust files."""
+    if max_files < 1:
+        raise ValueError("max_files must be >= 1")
+    profile = _default_output_profile(output_profile)
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    lang_map = {
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".go": "go",
+        ".rs": "rust",
+    }
+    allowed = {"auto", "javascript", "typescript", "go", "rust"}
+    if language not in allowed:
+        raise ValueError("language must be one of: auto, javascript, typescript, go, rust")
+
+    files: list[dict[str, Any]] = []
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        suffix = candidate.suffix.lower()
+        detected = lang_map.get(suffix)
+        if not detected:
+            continue
+        if language != "auto" and detected != language:
+            continue
+        rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+        try:
+            parsed = _language_parse_file(candidate, detected)
+        except OSError:
+            continue
+        files.append(
+            {
+                "path": rel,
+                "language": detected,
+                "symbol_count": len(parsed["symbols"]),
+                "import_count": len(parsed["imports"]),
+                "symbols": parsed["symbols"],
+                "imports": parsed["imports"],
+            }
+        )
+        if len(files) >= max_files:
+            break
+
+    if profile == "compact":
+        return {
+            "file_count": len(files),
+            "files": [
+                {
+                    "path": f["path"],
+                    "language": f["language"],
+                    "symbol_count": f["symbol_count"],
+                    "import_count": f["import_count"],
+                }
+                for f in files
+            ],
+        }
+    return {"file_count": len(files), "files": files}
 
 
 @mcp.tool()
