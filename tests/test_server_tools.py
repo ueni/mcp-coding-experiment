@@ -497,6 +497,71 @@ class ServerToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.server.browse_web(url="file:///etc/passwd")
 
+    def test_interpret_presentation_pptx_and_odp(self):
+        pptx_slide = """<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp><p:txBody><a:p><a:r><a:t>Roadmap</a:t></a:r></a:p></p:txBody></p:sp>
+    <p:sp><p:txBody><a:p><a:r><a:t>Q1 deliverables</a:t></a:r></a:p></p:txBody></p:sp>
+  </p:spTree></p:cSld>
+</p:sld>"""
+        pptx_path = self.repo_path / "docs" / "deck.pptx"
+        with zipfile.ZipFile(pptx_path, "w") as zf:
+            zf.writestr("ppt/slides/slide1.xml", pptx_slide)
+        out_pptx = self.server.interpret_presentation(
+            path="docs/deck.pptx", use_local_model=False, output_profile="compact"
+        )
+        self.assertEqual(out_pptx["schema"], "interpret_presentation.compact.v1")
+        self.assertEqual(out_pptx["extension"], ".pptx")
+        self.assertEqual(out_pptx["slide_count"], 1)
+        self.assertIn("Roadmap", out_pptx["summary"])
+
+        odp_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:presentation>
+    <draw:page draw:name="Intro"><text:p>Welcome</text:p></draw:page>
+  </office:presentation></office:body>
+</office:document-content>"""
+        odp_path = self.repo_path / "docs" / "deck.odp"
+        with zipfile.ZipFile(odp_path, "w") as zf:
+            zf.writestr("content.xml", odp_xml)
+        out_odp = self.server.interpret_presentation(
+            path="docs/deck.odp",
+            use_local_model=False,
+            output_profile="normal",
+        )
+        self.assertEqual(out_odp["schema"], "interpret_presentation.v1")
+        self.assertEqual(out_odp["extension"], ".odp")
+        self.assertEqual(out_odp["slide_count"], 1)
+        self.assertIn("Intro", out_odp["summary"])
+
+    def test_interpret_presentation_with_local_model(self):
+        pptx_slide = """<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Budget</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+</p:sld>"""
+        pptx_path = self.repo_path / "docs" / "model.pptx"
+        with zipfile.ZipFile(pptx_path, "w") as zf:
+            zf.writestr("ppt/slides/slide1.xml", pptx_slide)
+        with patch.object(
+            self.server,
+            "local_infer",
+            return_value={"output": "Summary by local model", "backend": "fallback"},
+        ):
+            out = self.server.interpret_presentation(
+                path="docs/model.pptx",
+                use_local_model=True,
+                output_profile="normal",
+            )
+        self.assertTrue(out["used_local_model"])
+        self.assertEqual(out["model_backend"], "fallback")
+        self.assertIn("Summary by local model", out["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

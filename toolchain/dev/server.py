@@ -485,6 +485,112 @@ def _read_opendoc_text(path: Path, ext: str, max_rows_per_sheet: int) -> tuple[s
     return "\n".join(chunks), meta
 
 
+def _read_pptx_presentation(
+    path: Path,
+    max_slides: int,
+    max_chars_per_slide: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if max_slides < 1:
+        raise ValueError("max_slides must be >= 1")
+    if max_chars_per_slide < 1:
+        raise ValueError("max_chars_per_slide must be >= 1")
+    try:
+        with zipfile.ZipFile(path) as zf:
+            slide_files = sorted(
+                [n for n in zf.namelist() if re.match(r"^ppt/slides/slide\d+\.xml$", n)],
+                key=lambda n: int(re.search(r"slide(\d+)\.xml$", n).group(1)),  # type: ignore[union-attr]
+            )
+            slides: list[dict[str, Any]] = []
+            for idx, slide_name in enumerate(slide_files[:max_slides], start=1):
+                raw = zf.read(slide_name)
+                root = ET.fromstring(raw)
+                text_nodes = [t.text.strip() for t in root.findall(".//{*}t") if t.text and t.text.strip()]
+                text = "\n".join(text_nodes)
+                text, _ = _truncate_with_flag(text, max_chars=max_chars_per_slide)
+                title = text_nodes[0] if text_nodes else f"Slide {idx}"
+                slides.append(
+                    {
+                        "index": idx,
+                        "title": title[:160],
+                        "text": text,
+                        "text_blocks": len(text_nodes),
+                    }
+                )
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("invalid .pptx container") from exc
+    except ET.ParseError as exc:
+        raise RuntimeError(f"invalid .pptx slide xml: {exc}") from exc
+    return slides, {"slide_count": len(slide_files), "slides_read": len(slides)}
+
+
+def _read_odp_presentation(
+    path: Path,
+    max_slides: int,
+    max_chars_per_slide: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if max_slides < 1:
+        raise ValueError("max_slides must be >= 1")
+    if max_chars_per_slide < 1:
+        raise ValueError("max_chars_per_slide must be >= 1")
+    try:
+        with zipfile.ZipFile(path) as zf:
+            raw = zf.read("content.xml")
+    except KeyError as exc:
+        raise RuntimeError("content.xml not found in .odp") from exc
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("invalid .odp container") from exc
+
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"invalid .odp content xml: {exc}") from exc
+
+    ns = {
+        "draw": "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0",
+        "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+    }
+    pages = root.findall(".//draw:page", ns)
+    slides: list[dict[str, Any]] = []
+    for idx, page in enumerate(pages[:max_slides], start=1):
+        title = page.attrib.get(f"{{{ns['draw']}}}name", "") or f"Slide {idx}"
+        lines = [p.text.strip() for p in page.findall(".//text:p", ns) if p.text and p.text.strip()]
+        text = "\n".join(lines)
+        text, _ = _truncate_with_flag(text, max_chars=max_chars_per_slide)
+        slides.append(
+            {
+                "index": idx,
+                "title": title[:160],
+                "text": text,
+                "text_blocks": len(lines),
+            }
+        )
+    return slides, {"slide_count": len(pages), "slides_read": len(slides)}
+
+
+def _read_ppt_legacy_text(path: Path, max_slides: int, max_chars_per_slide: int) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    warnings: list[str] = []
+    ppttxt = shutil.which("catppt") or shutil.which("ppttotext")
+    text = ""
+    if ppttxt:
+        proc = subprocess.run(
+            [ppttxt, str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        text = (proc.stdout or "").strip()
+    if not text:
+        raw = path.read_bytes()
+        ascii_chunks = re.findall(rb"[ -~]{4,}", raw)
+        text = "\n".join(chunk.decode("latin-1", errors="replace") for chunk in ascii_chunks)
+        warnings.append("Used lossy fallback extractor for .ppt (install catppt/ppttotext for better quality).")
+    text, _ = _truncate_with_flag(text.strip(), max_chars=max(1, max_slides * max_chars_per_slide))
+    slides = [{"index": 1, "title": "Slide 1", "text": text, "text_blocks": len(text.splitlines())}] if text else []
+    return slides, {"slide_count": 1 if text else 0, "slides_read": len(slides)}, warnings
+
+
 def _node_display_name(node: ast.AST) -> str:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return node.name
@@ -1591,6 +1697,98 @@ def browse_web(
             "content_type": result["content_type"],
             "truncated": bool(truncated_bytes or truncated_chars),
             "text": result["text"],
+        }
+    return result
+
+
+@mcp.tool()
+def interpret_presentation(
+    path: str,
+    max_slides: int = 50,
+    max_chars_per_slide: int = 1200,
+    use_local_model: bool = True,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Interpret presentation files (.pptx, .ppt, .odp) and optionally summarize with a local model."""
+    profile = _default_output_profile(output_profile)
+    file_path = _resolve_repo_path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(path)
+    ext = file_path.suffix.lower()
+    if ext not in {".pptx", ".ppt", ".odp"}:
+        raise ValueError("unsupported extension; expected .pptx, .ppt, or .odp")
+
+    warnings: list[str] = []
+    if ext == ".pptx":
+        slides, meta = _read_pptx_presentation(
+            file_path, max_slides=max_slides, max_chars_per_slide=max_chars_per_slide
+        )
+    elif ext == ".odp":
+        slides, meta = _read_odp_presentation(
+            file_path, max_slides=max_slides, max_chars_per_slide=max_chars_per_slide
+        )
+    else:
+        slides, meta, legacy_warnings = _read_ppt_legacy_text(
+            file_path, max_slides=max_slides, max_chars_per_slide=max_chars_per_slide
+        )
+        warnings.extend(legacy_warnings)
+
+    interpreted_summary = ""
+    model_used = ""
+    if use_local_model and slides:
+        joined = "\n\n".join(
+            f"Slide {s['index']} - {s['title']}\n{s['text']}" for s in slides[:12]
+        )
+        prompt = (
+            "Summarize this presentation in <=8 bullets. "
+            "Include objective, key points, risks, and action items.\n\n"
+            f"{joined}"
+        )
+        try:
+            inferred = local_infer(
+                prompt=prompt,
+                task="presentation_summary",
+                backend="auto",
+                output_profile="compact",
+                max_tokens=400,
+            )
+            interpreted_summary = str(inferred.get("output", "")).strip()
+            model_used = str(inferred.get("backend", ""))
+        except Exception as exc:
+            warnings.append(f"local model summary failed: {exc}")
+
+    if not interpreted_summary:
+        titles = [str(s.get("title", "")).strip() for s in slides if str(s.get("title", "")).strip()]
+        if titles:
+            interpreted_summary = "Slides cover: " + ", ".join(titles[:8])
+            if len(titles) > 8:
+                interpreted_summary += ", ..."
+        else:
+            interpreted_summary = "No textual content extracted from presentation."
+
+    result = {
+        "schema": "interpret_presentation.v1",
+        "path": str(file_path.relative_to(REPO_PATH)),
+        "extension": ext,
+        "slide_count": int(meta.get("slide_count", len(slides))),
+        "slides_read": int(meta.get("slides_read", len(slides))),
+        "used_local_model": bool(model_used),
+        "model_backend": model_used,
+        "warnings": warnings,
+        "summary": interpreted_summary,
+        "slides": slides,
+    }
+    if profile == "compact":
+        return {
+            "schema": "interpret_presentation.compact.v1",
+            "path": result["path"],
+            "extension": ext,
+            "slide_count": result["slide_count"],
+            "slides_read": result["slides_read"],
+            "used_local_model": result["used_local_model"],
+            "warnings": warnings,
+            "summary": interpreted_summary,
+            "slides": [{"index": s["index"], "title": s["title"]} for s in slides[:50]],
         }
     return result
 

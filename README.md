@@ -104,6 +104,7 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - list_files
 - read_file
 - read_document
+- interpret_presentation
 - browse_web
 - write_file
 - delete_path
