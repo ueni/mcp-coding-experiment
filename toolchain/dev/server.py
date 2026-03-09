@@ -477,39 +477,6 @@ def _collect_python_symbols_top_level(
     return symbols
 
 
-def _language_parse_file(path: Path, language: str) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    symbols: list[dict[str, Any]] = []
-    imports: list[str] = []
-    lines = text.splitlines()
-    for idx, line in enumerate(lines, start=1):
-        if language in {"javascript", "typescript"}:
-            m = re.search(r"\b(function|class)\s+([A-Za-z_]\w*)", line)
-            if m:
-                symbols.append({"name": m.group(2), "kind": m.group(1), "line": idx})
-            m2 = re.search(r"\b(const|let|var)\s+([A-Za-z_]\w*)\s*=\s*\(", line)
-            if m2:
-                symbols.append({"name": m2.group(2), "kind": "callable_var", "line": idx})
-            imp = re.search(r"^\s*import\s+.*?from\s+[\"']([^\"']+)[\"']", line)
-            if imp:
-                imports.append(imp.group(1))
-        elif language == "go":
-            m = re.search(r"^\s*func\s+([A-Za-z_]\w*)", line)
-            if m:
-                symbols.append({"name": m.group(1), "kind": "func", "line": idx})
-            imp = re.search(r'^\s*import\s+"([^"]+)"', line)
-            if imp:
-                imports.append(imp.group(1))
-        elif language == "rust":
-            m = re.search(r"^\s*(pub\s+)?(fn|struct|enum|trait)\s+([A-Za-z_]\w*)", line)
-            if m:
-                symbols.append({"name": m.group(3), "kind": m.group(2), "line": idx})
-            imp = re.search(r"^\s*use\s+([^;]+);", line)
-            if imp:
-                imports.append(imp.group(1).strip())
-    return {"symbols": symbols, "imports": imports}
-
-
 def _file_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -1741,67 +1708,6 @@ def symbol_index(
 
 
 @mcp.tool()
-def read_symbol(
-    name: str,
-    path: str = ".",
-    occurrence: int = 1,
-    include_private: bool = True,
-    recursive: bool = True,
-    encoding: str = "utf-8",
-    output_profile: str = "normal",
-) -> dict[str, Any]:
-    """Read source for a named Python symbol."""
-    profile = _validate_output_profile(output_profile)
-    if occurrence < 1:
-        raise ValueError("occurrence must be >= 1")
-
-    matches: list[dict[str, Any]] = []
-    for symbol in symbol_index(
-        path=path,
-        include_private=include_private,
-        recursive=recursive,
-        max_symbols=20000,
-        encoding=encoding,
-        output_profile="normal",
-    ):
-        if symbol["name"] == name:
-            matches.append(symbol)
-
-    if not matches:
-        raise FileNotFoundError(f"symbol not found: {name}")
-    if occurrence > len(matches):
-        raise ValueError(
-            f"occurrence out of range: requested {occurrence}, found {len(matches)}"
-        )
-
-    target = matches[occurrence - 1]
-    file_path = _resolve_repo_path(target["path"])
-    lines = _read_lines(file_path, encoding=encoding)
-    start = max(1, int(target["line_start"]))
-    end = min(len(lines), int(target["line_end"]))
-    content = "\n".join(lines[start - 1 : end])
-
-    result = {
-        "path": target["path"],
-        "name": target["name"],
-        "kind": target["kind"],
-        "occurrence": occurrence,
-        "line_start": start,
-        "line_end": end,
-        "content": content,
-    }
-    if profile == "compact":
-        return {
-            "path": result["path"],
-            "name": result["name"],
-            "line_start": result["line_start"],
-            "line_end": result["line_end"],
-            "content": result["content"],
-        }
-    return result
-
-
-@mcp.tool()
 def dependency_map(
     path: str = ".",
     recursive: bool = True,
@@ -2157,138 +2063,19 @@ def command_runner(
 
 
 @mcp.tool()
-def test_targeted(
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-    runner: list[str] | None = None,
-    max_tests: int = 200,
-    timeout_seconds: int = 300,
-) -> dict[str, Any]:
-    """Run targeted tests inferred from changed paths in a git range."""
-    _require_git_repo()
-    if max_tests < 1:
-        raise ValueError("max_tests must be >= 1")
-    if timeout_seconds < 1:
-        raise ValueError("timeout_seconds must be >= 1")
-    out_cap = _token_budget_apply_max(None)
-
-    diff_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout.strip()
-    changed = [line.strip() for line in diff_out.splitlines() if line.strip()]
-
-    candidates: list[str] = []
-    for path in changed:
-        p = Path(path)
-        name = p.name
-        stem = p.stem
-        if "test" in name.lower() and p.suffix == ".py":
-            candidates.append(path)
-            continue
-        if p.suffix == ".py":
-            candidates.extend(
-                [
-                    f"tests/test_{stem}.py",
-                    f"tests/{stem}_test.py",
-                ]
-            )
-
-    seen: set[str] = set()
-    tests: list[str] = []
-    for item in candidates:
-        if item in seen:
-            continue
-        seen.add(item)
-        resolved = _resolve_repo_path(item)
-        if resolved.is_file():
-            tests.append(item)
-        if len(tests) >= max_tests:
-            break
-
-    run_cmd = runner or ["pytest", "-q"]
-    if tests:
-        full_cmd = [*run_cmd, *tests]
-    else:
-        full_cmd = run_cmd
-
-    try:
-        proc = subprocess.run(
-            full_cmd,
-            cwd=str(REPO_PATH),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _failure_record(
-            command=full_cmd,
-            stderr="test run timed out",
-            stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
-            category="test_targeted",
-            suggestion="Increase timeout_seconds or reduce selected tests.",
-        )
-        return {
-            "base_ref": base_ref,
-            "head_ref": head_ref,
-            "changed_files": changed,
-            "targeted_tests": tests,
-            "command": full_cmd,
-            "ok": False,
-            "exit_code": None,
-            "timeout": True,
-            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
-            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
-        }
-    except FileNotFoundError as exc:
-        _failure_record(
-            command=full_cmd,
-            stderr=str(exc),
-            category="test_targeted",
-            suggestion="Install the configured test runner or pass a valid runner list.",
-        )
-        return {
-            "base_ref": base_ref,
-            "head_ref": head_ref,
-            "changed_files": changed,
-            "targeted_tests": tests,
-            "command": full_cmd,
-            "ok": False,
-            "exit_code": None,
-            "timeout": False,
-            "stdout": "",
-            "stderr": str(exc),
-        }
-    if proc.returncode != 0:
-        _failure_record(
-            command=full_cmd,
-            stderr=proc.stderr,
-            stdout=proc.stdout,
-            category="test_targeted",
-            suggestion="Review failing tests and rerun with targeted scope.",
-        )
-
-    return {
-        "base_ref": base_ref,
-        "head_ref": head_ref,
-        "changed_files": changed,
-        "targeted_tests": tests,
-        "command": full_cmd,
-        "ok": proc.returncode == 0,
-        "exit_code": proc.returncode,
-        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
-        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
-    }
-
-
-@mcp.tool()
 def summarize_diff(
     ref: str | None = None,
     staged: bool = False,
     pathspec: str | None = None,
     output_profile: str = "normal",
+    include_patch: bool = False,
+    patch_unified: int = 0,
 ) -> dict[str, Any]:
     """Return compact structured diff summary with risk hints."""
     _require_git_repo()
     profile = _validate_output_profile(output_profile)
+    if patch_unified < 0:
+        raise ValueError("patch_unified must be >= 0")
     args = ["diff"]
     if staged:
         args.append("--staged")
@@ -2299,7 +2086,7 @@ def summarize_diff(
         args.extend(["--", pathspec])
 
     numstat = _git(*args, "--numstat").stdout
-    patch = _git(*args, "--unified=0").stdout
+    patch = _git(*args, f"--unified={patch_unified}").stdout
 
     files: list[dict[str, Any]] = []
     total_added = 0
@@ -2354,6 +2141,9 @@ def summarize_diff(
         result["files_sorted_by_churn"] = sorted(
             files, key=lambda x: x["added"] + x["deleted"], reverse=True
         )
+    if include_patch:
+        result["patch"] = _trim_text(patch)
+        result["patch_unified"] = patch_unified
     return result
 
 
@@ -2440,36 +2230,35 @@ def token_budget_guard(
 
 
 @mcp.tool()
-def failure_memory_get(
+def failure_memory(
+    mode: str = "get",
     category: str | None = None,
     contains: str | None = None,
     max_entries: int = 100,
-) -> dict[str, Any]:
-    """Read recent failure records captured from tool runs."""
-    if max_entries < 1:
-        raise ValueError("max_entries must be >= 1")
-    payload = _failure_memory_load()
-    entries_out: list[dict[str, Any]] = []
-    needle = (contains or "").lower().strip()
-    for entry in reversed(payload["entries"]):
-        if category and entry.get("category") != category:
-            continue
-        if needle:
-            hay = f"{entry.get('stderr', '')}\n{entry.get('stdout', '')}".lower()
-            if needle not in hay:
-                continue
-        entries_out.append(entry)
-        if len(entries_out) >= max_entries:
-            break
-    return {"count": len(entries_out), "entries": entries_out}
-
-
-@mcp.tool()
-def failure_memory_suggest(
-    error_text: str,
+    error_text: str = "",
     max_suggestions: int = 5,
 ) -> dict[str, Any]:
-    """Suggest remediation hints from similar historical failures."""
+    """Unified failure memory access (`get` or `suggest`)."""
+    if mode not in {"get", "suggest"}:
+        raise ValueError("mode must be one of: get, suggest")
+    if mode == "get":
+        if max_entries < 1:
+            raise ValueError("max_entries must be >= 1")
+        payload = _failure_memory_load()
+        entries_out: list[dict[str, Any]] = []
+        needle = (contains or "").lower().strip()
+        for entry in reversed(payload["entries"]):
+            if category and entry.get("category") != category:
+                continue
+            if needle:
+                hay = f"{entry.get('stderr', '')}\n{entry.get('stdout', '')}".lower()
+                if needle not in hay:
+                    continue
+            entries_out.append(entry)
+            if len(entries_out) >= max_entries:
+                break
+        return {"mode": mode, "count": len(entries_out), "entries": entries_out}
+
     if max_suggestions < 1:
         raise ValueError("max_suggestions must be >= 1")
     needle_terms = [t for t in re.split(r"\W+", error_text.lower()) if len(t) > 2]
@@ -2493,150 +2282,142 @@ def failure_memory_suggest(
                 "stderr": entry.get("stderr"),
             }
         )
-    return {"count": len(suggestions), "suggestions": suggestions}
+    return {"mode": mode, "count": len(suggestions), "suggestions": suggestions}
 
 
 @mcp.tool()
-def edit_transaction_begin(label: str = "") -> dict[str, Any]:
-    """Start a multi-step edit transaction."""
-    _require_mutations()
-    txn_id = uuid.uuid4().hex[:12]
-    payload = {
-        "id": txn_id,
-        "label": label,
-        "status": "open",
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
-        "changes": [],
-        "backups": {},
-    }
-    _tx_save(txn_id, payload)
-    return {"transaction_id": txn_id, "status": "open"}
-
-
-@mcp.tool()
-def edit_transaction_apply(
-    transaction_id: str,
-    changes: list[dict[str, Any]],
+def edit_transaction(
+    mode: str = "begin",
+    transaction_id: str = "",
+    label: str = "",
+    changes: list[dict[str, Any]] | None = None,
     create_dirs: bool = True,
+    delete_metadata: bool = False,
 ) -> dict[str, Any]:
-    """Apply one or more file-content changes into an open transaction."""
-    _require_mutations()
-    if not changes:
-        raise ValueError("changes must not be empty")
-    tx = _tx_load(transaction_id)
-    if tx.get("status") != "open":
-        raise ValueError("transaction is not open")
+    """Unified transaction tool (`begin|apply|validate|rollback|commit`)."""
+    if mode not in {"begin", "apply", "validate", "rollback", "commit"}:
+        raise ValueError("mode must be one of: begin, apply, validate, rollback, commit")
 
-    applied: list[str] = []
-    for change in changes:
-        path = change.get("path")
-        content = change.get("content")
-        if not isinstance(path, str) or not isinstance(content, str):
-            raise ValueError("each change requires string path and content")
-        file_path = _resolve_repo_path(path)
-        rel = str(file_path.relative_to(REPO_PATH))
+    if mode == "begin":
+        _require_mutations()
+        txn_id = uuid.uuid4().hex[:12]
+        payload = {
+            "id": txn_id,
+            "label": label,
+            "status": "open",
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+            "changes": [],
+            "backups": {},
+        }
+        _tx_save(txn_id, payload)
+        return {"mode": mode, "transaction_id": txn_id, "status": "open"}
 
-        if rel not in tx["backups"]:
-            if file_path.exists() and file_path.is_file():
-                tx["backups"][rel] = {"existed": True, "content": file_path.read_text(encoding="utf-8", errors="replace")}
+    if not transaction_id.strip():
+        raise ValueError("transaction_id is required for this mode")
+
+    if mode == "apply":
+        _require_mutations()
+        batch = changes or []
+        if not batch:
+            raise ValueError("changes must not be empty")
+        tx = _tx_load(transaction_id)
+        if tx.get("status") != "open":
+            raise ValueError("transaction is not open")
+        applied: list[str] = []
+        for change in batch:
+            path = change.get("path")
+            content = change.get("content")
+            if not isinstance(path, str) or not isinstance(content, str):
+                raise ValueError("each change requires string path and content")
+            file_path = _resolve_repo_path(path)
+            rel = str(file_path.relative_to(REPO_PATH))
+
+            if rel not in tx["backups"]:
+                if file_path.exists() and file_path.is_file():
+                    tx["backups"][rel] = {
+                        "existed": True,
+                        "content": file_path.read_text(encoding="utf-8", errors="replace"),
+                    }
+                else:
+                    tx["backups"][rel] = {"existed": False, "content": ""}
+
+            if create_dirs:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding="utf-8")
+            tx["changes"].append({"path": rel, "bytes": len(content.encode("utf-8"))})
+            applied.append(rel)
+
+        tx["updated_at"] = _now_iso()
+        _tx_save(transaction_id, tx)
+        return {
+            "mode": mode,
+            "transaction_id": transaction_id,
+            "applied": applied,
+            "change_count": len(applied),
+        }
+
+    if mode == "validate":
+        tx = _tx_load(transaction_id)
+        changed_paths = sorted({c["path"] for c in tx.get("changes", [])})
+        py_files = [p for p in changed_paths if p.endswith(".py")]
+        compile_errors: list[dict[str, Any]] = []
+        for rel in py_files[:200]:
+            file_path = _resolve_repo_path(rel)
+            proc = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(file_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                compile_errors.append({"path": rel, "stderr": _trim_text(proc.stderr)})
+        return {
+            "mode": mode,
+            "transaction_id": transaction_id,
+            "status": tx.get("status"),
+            "changed_paths": changed_paths,
+            "python_files_checked": len(py_files[:200]),
+            "compile_error_count": len(compile_errors),
+            "compile_errors": compile_errors,
+        }
+
+    if mode == "rollback":
+        _require_mutations()
+        tx = _tx_load(transaction_id)
+        backups = tx.get("backups", {})
+        restored: list[str] = []
+        for rel, backup in backups.items():
+            file_path = _resolve_repo_path(rel)
+            existed = bool(backup.get("existed"))
+            if existed:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(str(backup.get("content", "")), encoding="utf-8")
             else:
-                tx["backups"][rel] = {"existed": False, "content": ""}
+                if file_path.exists():
+                    file_path.unlink()
+            restored.append(rel)
+        tx["status"] = "rolled_back"
+        tx["updated_at"] = _now_iso()
+        _tx_save(transaction_id, tx)
+        return {
+            "mode": mode,
+            "transaction_id": transaction_id,
+            "status": "rolled_back",
+            "restored": restored,
+        }
 
-        if create_dirs:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content, encoding="utf-8")
-        tx["changes"].append({"path": rel, "bytes": len(content.encode("utf-8"))})
-        applied.append(rel)
-
-    tx["updated_at"] = _now_iso()
-    _tx_save(transaction_id, tx)
-    return {"transaction_id": transaction_id, "applied": applied, "change_count": len(applied)}
-
-
-@mcp.tool()
-def edit_transaction_validate(transaction_id: str) -> dict[str, Any]:
-    """Validate open transaction with lightweight checks."""
-    tx = _tx_load(transaction_id)
-    changed_paths = sorted({c["path"] for c in tx.get("changes", [])})
-    py_files = [p for p in changed_paths if p.endswith(".py")]
-    compile_errors: list[dict[str, Any]] = []
-    for rel in py_files[:200]:
-        file_path = _resolve_repo_path(rel)
-        proc = subprocess.run(
-            [sys.executable, "-m", "py_compile", str(file_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            compile_errors.append({"path": rel, "stderr": _trim_text(proc.stderr)})
-    return {
-        "transaction_id": transaction_id,
-        "status": tx.get("status"),
-        "changed_paths": changed_paths,
-        "python_files_checked": len(py_files[:200]),
-        "compile_error_count": len(compile_errors),
-        "compile_errors": compile_errors,
-    }
-
-
-@mcp.tool()
-def edit_transaction_rollback(transaction_id: str) -> dict[str, Any]:
-    """Rollback all files touched by a transaction."""
-    _require_mutations()
-    tx = _tx_load(transaction_id)
-    backups = tx.get("backups", {})
-    restored: list[str] = []
-    for rel, backup in backups.items():
-        file_path = _resolve_repo_path(rel)
-        existed = bool(backup.get("existed"))
-        if existed:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(str(backup.get("content", "")), encoding="utf-8")
-        else:
-            if file_path.exists():
-                file_path.unlink()
-        restored.append(rel)
-    tx["status"] = "rolled_back"
-    tx["updated_at"] = _now_iso()
-    _tx_save(transaction_id, tx)
-    return {"transaction_id": transaction_id, "status": "rolled_back", "restored": restored}
-
-
-@mcp.tool()
-def edit_transaction_commit(transaction_id: str, delete_metadata: bool = False) -> dict[str, Any]:
-    """Commit transaction metadata (does not create a git commit)."""
     tx = _tx_load(transaction_id)
     tx["status"] = "committed"
     tx["updated_at"] = _now_iso()
     _tx_save(transaction_id, tx)
     if delete_metadata:
         _tx_path(transaction_id).unlink(missing_ok=True)
-    return {"transaction_id": transaction_id, "status": "committed", "metadata_deleted": delete_metadata}
-
-
-@mcp.tool()
-def patch_minimize(
-    ref: str | None = None,
-    staged: bool = False,
-    pathspec: str | None = None,
-) -> dict[str, Any]:
-    """Generate a minimal-context patch (`-U0`) for current repo diff."""
-    _require_git_repo()
-    args = ["diff", "--unified=0"]
-    if staged:
-        args.append("--staged")
-    if ref:
-        args.append(ref)
-    if pathspec:
-        _resolve_repo_path(pathspec)
-        args.extend(["--", pathspec])
-    patch = _git(*args).stdout
     return {
-        "bytes": len(patch.encode("utf-8")),
-        "line_count": len(patch.splitlines()),
-        "patch": _trim_text(patch),
+        "mode": mode,
+        "transaction_id": transaction_id,
+        "status": "committed",
+        "metadata_deleted": delete_metadata,
     }
 
 
@@ -2877,76 +2658,6 @@ def doc_sync_check(
 
 
 @mcp.tool()
-def language_parsers(
-    path: str = ".",
-    language: str = "auto",
-    recursive: bool = True,
-    max_files: int = 1000,
-    output_profile: str | None = None,
-) -> dict[str, Any]:
-    """Extract lightweight symbols/imports for JS/TS/Go/Rust files."""
-    if max_files < 1:
-        raise ValueError("max_files must be >= 1")
-    profile = _default_output_profile(output_profile)
-    root = _resolve_repo_path(path)
-    if not root.exists():
-        raise FileNotFoundError(path)
-
-    lang_map = {
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".go": "go",
-        ".rs": "rust",
-    }
-    allowed = {"auto", "javascript", "typescript", "go", "rust"}
-    if language not in allowed:
-        raise ValueError("language must be one of: auto, javascript, typescript, go, rust")
-
-    files: list[dict[str, Any]] = []
-    for candidate in _iter_candidate_files(root, recursive=recursive):
-        suffix = candidate.suffix.lower()
-        detected = lang_map.get(suffix)
-        if not detected:
-            continue
-        if language != "auto" and detected != language:
-            continue
-        rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
-        try:
-            parsed = _language_parse_file(candidate, detected)
-        except OSError:
-            continue
-        files.append(
-            {
-                "path": rel,
-                "language": detected,
-                "symbol_count": len(parsed["symbols"]),
-                "import_count": len(parsed["imports"]),
-                "symbols": parsed["symbols"],
-                "imports": parsed["imports"],
-            }
-        )
-        if len(files) >= max_files:
-            break
-
-    if profile == "compact":
-        return {
-            "file_count": len(files),
-            "files": [
-                {
-                    "path": f["path"],
-                    "language": f["language"],
-                    "symbol_count": f["symbol_count"],
-                    "import_count": f["import_count"],
-                }
-                for f in files
-            ],
-        }
-    return {"file_count": len(files), "files": files}
-
-
-@mcp.tool()
 def tree_sitter_core(
     path: str = ".",
     mode: str = "status",
@@ -3165,7 +2876,7 @@ def repo_index_daemon(
 def self_check_pipeline(
     base_ref: str = "HEAD~1",
     head_ref: str = "HEAD",
-    run_targeted_tests: bool = True,
+    run_test_execution: bool = True,
     run_impact_tests: bool = True,
     run_doc_check: bool = True,
     run_api_check: bool = True,
@@ -3243,16 +2954,27 @@ def self_check_pipeline(
         impacts = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
         result["checks"]["impact_tests"] = impacts
 
-    if run_targeted_tests:
-        tests = test_targeted(base_ref=base_ref, head_ref=head_ref)
-        result["checks"]["targeted_tests"] = {
-            "ok": tests.get("ok", False),
-            "exit_code": tests.get("exit_code"),
-            "targeted_tests": tests.get("targeted_tests", []),
-            "timeout": tests.get("timeout", False),
-            "stderr": tests.get("stderr", ""),
+    if run_test_execution:
+        selected = impact_tests(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            output_profile="compact",
+        ).get("tests", [])
+        test_cmd = ["pytest", "-q", *selected] if selected else ["pytest", "-q"]
+        exec_result = command_runner(
+            command=test_cmd,
+            cwd=".",
+            timeout_seconds=300,
+        )
+        result["checks"]["test_execution"] = {
+            "ok": exec_result.get("ok", False),
+            "exit_code": exec_result.get("exit_code"),
+            "command": exec_result.get("command"),
+            "selected_tests": selected,
+            "stderr": exec_result.get("stderr", ""),
+            "timeout": exec_result.get("timeout", False),
         }
-        if not tests.get("ok", False):
+        if not exec_result.get("ok", False):
             result["ok"] = False
 
     result["finished_at"] = _now_iso()
