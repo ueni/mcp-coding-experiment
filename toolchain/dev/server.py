@@ -1632,6 +1632,242 @@ def _risk_level_value(level: str) -> int:
     return order.get(level, 0)
 
 
+def _lossless_blob_store_load(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"schema": "lossless_blob_store.v1", "blobs": {}}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"schema": "lossless_blob_store.v1", "blobs": {}}
+    blobs = payload.get("blobs", {})
+    if not isinstance(blobs, dict):
+        blobs = {}
+    return {"schema": "lossless_blob_store.v1", "blobs": blobs}
+
+
+def _lossless_blob_store_save(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _lossless_collect_string_counts(value: Any, counts: dict[str, int]) -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            counts[str(k)] = counts.get(str(k), 0) + 1
+            _lossless_collect_string_counts(v, counts)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _lossless_collect_string_counts(item, counts)
+        return
+    if isinstance(value, str):
+        counts[value] = counts.get(value, 0) + 1
+
+
+def _lossless_build_symbol_table(
+    value: Any,
+    min_symbol_length: int,
+    min_symbol_reuse: int,
+) -> dict[str, str]:
+    counts: dict[str, int] = {}
+    _lossless_collect_string_counts(value, counts)
+    candidates = [
+        s for s, c in counts.items() if len(s) >= min_symbol_length and c >= min_symbol_reuse
+    ]
+    candidates.sort(key=lambda s: (-counts[s], -len(s), s))
+    table: dict[str, str] = {}
+    for i, s in enumerate(candidates, start=1):
+        table[f"s{i}"] = s
+    return table
+
+
+def _lossless_symbol_inverse(table: dict[str, str]) -> dict[str, str]:
+    inv: dict[str, str] = {}
+    for token, text in table.items():
+        if text not in inv:
+            inv[text] = token
+    return inv
+
+
+def _lossless_encode_node(
+    value: Any,
+    symbol_inverse: dict[str, str],
+    blobs: dict[str, str],
+    use_blob_refs: bool,
+    min_blob_chars: int,
+) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            key = str(k)
+            token = symbol_inverse.get(key)
+            enc_key = {"$sym": token} if token else key
+            out_key = json.dumps(enc_key, sort_keys=True) if isinstance(enc_key, dict) else enc_key
+            out[out_key] = _lossless_encode_node(
+                v,
+                symbol_inverse=symbol_inverse,
+                blobs=blobs,
+                use_blob_refs=use_blob_refs,
+                min_blob_chars=min_blob_chars,
+            )
+        return out
+    if isinstance(value, list):
+        return [
+            _lossless_encode_node(
+                item,
+                symbol_inverse=symbol_inverse,
+                blobs=blobs,
+                use_blob_refs=use_blob_refs,
+                min_blob_chars=min_blob_chars,
+            )
+            for item in value
+        ]
+    if isinstance(value, str):
+        token = symbol_inverse.get(value)
+        if token:
+            return {"$sym": token}
+        if use_blob_refs and len(value) >= min_blob_chars:
+            digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+            blob_id = f"sha256:{digest}"
+            blobs.setdefault(blob_id, value)
+            return {"$blob": blob_id}
+    return value
+
+
+def _lossless_decode_key(raw_key: str, symbol_table: dict[str, str]) -> str:
+    if raw_key.startswith("{") and raw_key.endswith("}"):
+        try:
+            parsed = json.loads(raw_key)
+            if isinstance(parsed, dict) and isinstance(parsed.get("$sym"), str):
+                token = parsed["$sym"]
+                return symbol_table.get(token, token)
+        except json.JSONDecodeError:
+            pass
+    return raw_key
+
+
+def _lossless_decode_node(
+    value: Any,
+    symbol_table: dict[str, str],
+    blobs: dict[str, str],
+) -> Any:
+    if isinstance(value, dict):
+        if "$sym" in value and len(value) == 1 and isinstance(value["$sym"], str):
+            token = value["$sym"]
+            return symbol_table.get(token, token)
+        if "$blob" in value and len(value) == 1 and isinstance(value["$blob"], str):
+            blob_id = value["$blob"]
+            if blob_id not in blobs:
+                raise KeyError(f"missing blob id: {blob_id}")
+            return blobs[blob_id]
+        out: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = _lossless_decode_key(str(raw_key), symbol_table=symbol_table)
+            out[key] = _lossless_decode_node(raw_value, symbol_table=symbol_table, blobs=blobs)
+        return out
+    if isinstance(value, list):
+        return [_lossless_decode_node(item, symbol_table=symbol_table, blobs=blobs) for item in value]
+    return value
+
+
+def _delta_join_path(base: str, segment: str) -> str:
+    escaped = segment.replace("~", "~0").replace("/", "~1")
+    if base == "":
+        return f"/{escaped}"
+    return f"{base}/{escaped}"
+
+
+def _delta_build_ops(base: Any, target: Any, path: str, ops: list[dict[str, Any]]) -> None:
+    if type(base) is not type(target):
+        ops.append({"op": "set", "path": path or "/", "value": target})
+        return
+    if isinstance(base, dict):
+        base_keys = set(base.keys())
+        target_keys = set(target.keys())
+        for key in sorted(base_keys - target_keys):
+            ops.append({"op": "remove", "path": _delta_join_path(path, str(key))})
+        for key in sorted(target_keys):
+            child_path = _delta_join_path(path, str(key))
+            if key not in base:
+                ops.append({"op": "set", "path": child_path, "value": target[key]})
+            else:
+                _delta_build_ops(base[key], target[key], child_path, ops)
+        return
+    if isinstance(base, list):
+        if base != target:
+            ops.append({"op": "set", "path": path or "/", "value": target})
+        return
+    if base != target:
+        ops.append({"op": "set", "path": path or "/", "value": target})
+
+
+def _delta_parse_path(path: str) -> list[str]:
+    if path in {"", "/"}:
+        return []
+    if not path.startswith("/"):
+        raise ValueError("delta path must start with '/'")
+    parts = path.split("/")[1:]
+    return [p.replace("~1", "/").replace("~0", "~") for p in parts]
+
+
+def _delta_set_value(root: Any, parts: list[str], value: Any) -> Any:
+    if not parts:
+        return value
+    cursor = root
+    for i, part in enumerate(parts[:-1]):
+        nxt = parts[i + 1]
+        if isinstance(cursor, dict):
+            if part not in cursor or not isinstance(cursor[part], (dict, list)):
+                cursor[part] = [] if nxt.isdigit() else {}
+            cursor = cursor[part]
+        elif isinstance(cursor, list):
+            idx = int(part)
+            while len(cursor) <= idx:
+                cursor.append({})
+            if not isinstance(cursor[idx], (dict, list)):
+                cursor[idx] = [] if nxt.isdigit() else {}
+            cursor = cursor[idx]
+        else:
+            raise ValueError("cannot navigate delta path")
+    last = parts[-1]
+    if isinstance(cursor, dict):
+        cursor[last] = value
+        return root
+    if isinstance(cursor, list):
+        idx = int(last)
+        while len(cursor) <= idx:
+            cursor.append(None)
+        cursor[idx] = value
+        return root
+    raise ValueError("cannot set delta value on non-container")
+
+
+def _delta_remove_value(root: Any, parts: list[str]) -> Any:
+    if not parts:
+        return None
+    cursor = root
+    for part in parts[:-1]:
+        if isinstance(cursor, dict):
+            if part not in cursor:
+                return root
+            cursor = cursor[part]
+        elif isinstance(cursor, list):
+            idx = int(part)
+            if idx >= len(cursor):
+                return root
+            cursor = cursor[idx]
+        else:
+            return root
+    last = parts[-1]
+    if isinstance(cursor, dict):
+        cursor.pop(last, None)
+    elif isinstance(cursor, list):
+        idx = int(last)
+        if 0 <= idx < len(cursor):
+            cursor.pop(idx)
+    return root
+
+
 @mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Return repository state and server settings."""
@@ -5705,6 +5941,186 @@ def release_readiness(
             },
         }
     return result
+
+
+@mcp.tool()
+def encode_lossless(
+    value: Any,
+    use_symbols: bool = True,
+    min_symbol_length: int = 12,
+    min_symbol_reuse: int = 2,
+    use_blob_refs: bool = True,
+    min_blob_chars: int = 400,
+    blob_store_path: str = ".build/cache/lossless_blobs.json",
+    store_blobs: bool = True,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Encode payload with reversible lossless codec (symbols + optional blob refs)."""
+    if min_symbol_length < 1:
+        raise ValueError("min_symbol_length must be >= 1")
+    if min_symbol_reuse < 1:
+        raise ValueError("min_symbol_reuse must be >= 1")
+    if min_blob_chars < 1:
+        raise ValueError("min_blob_chars must be >= 1")
+    blob_file = _resolve_repo_path(blob_store_path)
+    symbol_table = (
+        _lossless_build_symbol_table(
+            value=value,
+            min_symbol_length=min_symbol_length,
+            min_symbol_reuse=min_symbol_reuse,
+        )
+        if use_symbols
+        else {}
+    )
+    symbol_inverse = _lossless_symbol_inverse(symbol_table)
+
+    blob_payload = _lossless_blob_store_load(blob_file)
+    blobs = blob_payload["blobs"]
+    original_blob_count = len(blobs)
+    encoded = _lossless_encode_node(
+        value,
+        symbol_inverse=symbol_inverse,
+        blobs=blobs,
+        use_blob_refs=use_blob_refs,
+        min_blob_chars=min_blob_chars,
+    )
+    if use_blob_refs and store_blobs:
+        _require_mutations()
+        blob_payload["updated_at"] = _now_iso()
+        _lossless_blob_store_save(blob_file, blob_payload)
+
+    original_json = json.dumps(value, ensure_ascii=True, sort_keys=True)
+    encoded_json = json.dumps(encoded, ensure_ascii=True, sort_keys=True)
+    added_blob_count = len(blobs) - original_blob_count
+    out: dict[str, Any] = {
+        "schema": "lossless_codec.v1",
+        "mode": "encode",
+        "codec": "lossless_v1",
+        "encoded": encoded,
+        "symbol_table": symbol_table,
+        "blob_store_path": blob_store_path if use_blob_refs else None,
+        "added_blob_count": added_blob_count if use_blob_refs else 0,
+        "original_json_chars": len(original_json),
+        "encoded_json_chars": len(encoded_json),
+        "char_saving": len(original_json) - len(encoded_json),
+        "char_saving_ratio": (
+            round((len(original_json) - len(encoded_json)) / max(1, len(original_json)), 6)
+        ),
+    }
+    if store_result:
+        out["result_id"] = _result_store_put("encode_lossless", out)
+    return out
+
+
+@mcp.tool()
+def decode_lossless(
+    encoded: Any,
+    symbol_table: dict[str, str] | None = None,
+    blob_store_path: str = ".build/cache/lossless_blobs.json",
+    blobs_inline: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Decode payload produced by encode_lossless."""
+    symbols = symbol_table or {}
+    blobs: dict[str, str] = {}
+    if blobs_inline:
+        blobs.update(blobs_inline)
+    blob_file = _resolve_repo_path(blob_store_path)
+    store_payload = _lossless_blob_store_load(blob_file)
+    raw_blobs = store_payload.get("blobs", {})
+    if isinstance(raw_blobs, dict):
+        for k, v in raw_blobs.items():
+            if isinstance(k, str) and isinstance(v, str):
+                blobs.setdefault(k, v)
+    decoded = _lossless_decode_node(encoded, symbol_table=symbols, blobs=blobs)
+    return {
+        "schema": "lossless_codec.v1",
+        "mode": "decode",
+        "codec": "lossless_v1",
+        "decoded": decoded,
+    }
+
+
+@mcp.tool()
+def roundtrip_verify(
+    value: Any,
+    use_symbols: bool = True,
+    min_symbol_length: int = 12,
+    min_symbol_reuse: int = 2,
+    use_blob_refs: bool = False,
+    min_blob_chars: int = 400,
+) -> dict[str, Any]:
+    """Verify decode(encode(x)) round-trip equivalence for lossless codec."""
+    encoded = encode_lossless(
+        value=value,
+        use_symbols=use_symbols,
+        min_symbol_length=min_symbol_length,
+        min_symbol_reuse=min_symbol_reuse,
+        use_blob_refs=use_blob_refs,
+        min_blob_chars=min_blob_chars,
+        store_blobs=False,
+    )
+    decoded = decode_lossless(
+        encoded=encoded["encoded"],
+        symbol_table=encoded.get("symbol_table", {}),
+        blobs_inline={},
+    )
+    ok = decoded.get("decoded") == value
+    return {
+        "schema": "lossless_codec.v1",
+        "mode": "roundtrip_verify",
+        "codec": "lossless_v1",
+        "ok": ok,
+        "original_json_chars": encoded.get("original_json_chars"),
+        "encoded_json_chars": encoded.get("encoded_json_chars"),
+        "char_saving": encoded.get("char_saving"),
+        "char_saving_ratio": encoded.get("char_saving_ratio"),
+    }
+
+
+@mcp.tool()
+def delta_encode(
+    base: Any,
+    target: Any,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Build deterministic lossless delta operations from base -> target."""
+    ops: list[dict[str, Any]] = []
+    _delta_build_ops(base=base, target=target, path="", ops=ops)
+    out = {
+        "schema": "delta_codec.v1",
+        "mode": "encode",
+        "op_count": len(ops),
+        "ops": ops,
+    }
+    if store_result:
+        out["result_id"] = _result_store_put("delta_encode", out)
+    return out
+
+
+@mcp.tool()
+def delta_apply(
+    base: Any,
+    ops: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply deterministic delta operations and return reconstructed payload."""
+    current = json.loads(json.dumps(base))
+    for op in ops:
+        op_name = str(op.get("op", ""))
+        path = str(op.get("path", ""))
+        parts = _delta_parse_path(path)
+        if op_name == "set":
+            current = _delta_set_value(current, parts, op.get("value"))
+            continue
+        if op_name == "remove":
+            current = _delta_remove_value(current, parts)
+            continue
+        raise ValueError(f"unsupported delta op: {op_name}")
+    return {
+        "schema": "delta_codec.v1",
+        "mode": "apply",
+        "op_count": len(ops),
+        "value": current,
+    }
 
 
 @mcp.tool()

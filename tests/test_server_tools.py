@@ -772,6 +772,51 @@ class ServerToolsTest(unittest.TestCase):
         self.assertIn("checks", out)
         self.assertIn("tests", out["checks"])
 
+    def test_lossless_codec_roundtrip_and_delta(self):
+        payload = {
+            "title": "release checklist",
+            "repeat": "toolchain/dev/server.py",
+            "nested": {
+                "repeat": "toolchain/dev/server.py",
+                "items": ["toolchain/dev/server.py", "docs/index.md"],
+            },
+        }
+        enc = self.server.encode_lossless(
+            value=payload,
+            use_symbols=True,
+            use_blob_refs=False,
+            store_blobs=False,
+        )
+        self.assertEqual(enc["schema"], "lossless_codec.v1")
+        self.assertEqual(enc["mode"], "encode")
+        self.assertIn("encoded", enc)
+
+        dec = self.server.decode_lossless(
+            encoded=enc["encoded"],
+            symbol_table=enc["symbol_table"],
+            blobs_inline={},
+        )
+        self.assertEqual(dec["schema"], "lossless_codec.v1")
+        self.assertEqual(dec["mode"], "decode")
+        self.assertEqual(dec["decoded"], payload)
+
+        rt = self.server.roundtrip_verify(value=payload, use_blob_refs=False)
+        self.assertEqual(rt["schema"], "lossless_codec.v1")
+        self.assertTrue(rt["ok"])
+
+        target = {
+            "title": "release checklist",
+            "repeat": "toolchain/dev/server.py",
+            "nested": {"repeat": "changed", "items": ["toolchain/dev/server.py"]},
+            "new_key": 7,
+        }
+        delta = self.server.delta_encode(base=payload, target=target)
+        self.assertEqual(delta["schema"], "delta_codec.v1")
+        self.assertGreaterEqual(delta["op_count"], 1)
+        applied = self.server.delta_apply(base=payload, ops=delta["ops"])
+        self.assertEqual(applied["schema"], "delta_codec.v1")
+        self.assertEqual(applied["value"], target)
+
 
 if __name__ == "__main__":
     unittest.main()
