@@ -114,6 +114,9 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - git_fetch
 - git_pull
 - git_push
+- grep
+- find_paths
+- replace_in_files
 - lab_release_rehearsal
 - lab_refactor_tournament
 - lab_policy_gatekeeper

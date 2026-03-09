@@ -140,6 +140,36 @@ def _list_report_files(max_entries: int = 200) -> list[str]:
     return entries
 
 
+def _is_hidden_rel_path(rel: Path) -> bool:
+    return any(part.startswith(".") for part in rel.parts)
+
+
+def _is_likely_binary(path: Path, max_file_bytes: int = 1048576) -> bool:
+    try:
+        size = path.stat().st_size
+        if size > max_file_bytes:
+            return True
+        with path.open("rb") as f:
+            chunk = f.read(8192)
+        if b"\x00" in chunk:
+            return True
+    except OSError:
+        return True
+    return False
+
+
+def _allowed_by_globs(
+    rel_str: str,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+) -> bool:
+    if include_globs and not any(fnmatch.fnmatch(rel_str, g) for g in include_globs):
+        return False
+    if exclude_globs and any(fnmatch.fnmatch(rel_str, g) for g in exclude_globs):
+        return False
+    return True
+
+
 def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
     _require_mutations()
     _require_git_repo()
@@ -655,6 +685,75 @@ def lab_repo_digital_twin(
 
 
 @mcp.tool()
+def find_paths(
+    path: str = ".",
+    recursive: bool = True,
+    include_hidden: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    file_type: str = "any",
+    max_depth: int | None = None,
+    max_entries: int = 1000,
+) -> list[str]:
+    """Find files and/or directories under a repository-relative path."""
+    if max_entries < 1:
+        raise ValueError("max_entries must be >= 1")
+    if max_depth is not None and max_depth < 0:
+        raise ValueError("max_depth must be >= 0")
+    if file_type not in {"any", "file", "dir"}:
+        raise ValueError("file_type must be one of: any, file, dir")
+
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    results: list[str] = []
+
+    def maybe_add(candidate: Path) -> None:
+        if len(results) >= max_entries:
+            return
+        rel_path = candidate.relative_to(REPO_PATH)
+        rel_str = str(rel_path).replace("\\", "/")
+
+        if not include_hidden and _is_hidden_rel_path(rel_path):
+            return
+        if not _allowed_by_globs(rel_str, include_globs, exclude_globs):
+            return
+
+        if file_type == "file" and not candidate.is_file():
+            return
+        if file_type == "dir" and not candidate.is_dir():
+            return
+
+        if candidate.is_dir():
+            rel_str += "/"
+        results.append(rel_str)
+
+    if root.is_file():
+        maybe_add(root)
+        return results
+
+    root_parts = len(root.relative_to(REPO_PATH).parts)
+
+    if recursive:
+        iterator = root.rglob("*")
+    else:
+        iterator = root.glob("*")
+
+    for item in iterator:
+        if len(results) >= max_entries:
+            break
+        if max_depth is not None:
+            item_parts = len(item.relative_to(REPO_PATH).parts)
+            if item_parts - root_parts > max_depth:
+                continue
+        maybe_add(item)
+
+    results.sort()
+    return results
+
+
+@mcp.tool()
 def grep(
     pattern: str,
     path: str = ".",
@@ -689,46 +788,19 @@ def grep(
     except re.error as exc:
         raise ValueError(f"invalid regex pattern: {exc}") from exc
 
-    def is_hidden_path(p: Path) -> bool:
-        try:
-            rel = p.relative_to(REPO_PATH)
-        except ValueError:
-            rel = p
-        return any(part.startswith(".") for part in rel.parts)
-
-    def allowed_by_globs(rel_str: str) -> bool:
-        if include_globs:
-            if not any(fnmatch.fnmatch(rel_str, g) for g in include_globs):
-                return False
-        if exclude_globs and any(fnmatch.fnmatch(rel_str, g) for g in exclude_globs):
-            return False
-        return True
-
-    def is_likely_binary(p: Path) -> bool:
-        try:
-            size = p.stat().st_size
-            if size > max_file_bytes:
-                return True
-            with p.open("rb") as f:
-                chunk = f.read(8192)
-            if b"\x00" in chunk:
-                return True
-        except OSError:
-            return True
-        return False
-
     results: list[dict[str, Any]] = []
 
     def search_file(p: Path) -> None:
         nonlocal results
         if not p.is_file():
             return
-        rel_str = str(p.relative_to(REPO_PATH)).replace("\\", "/")
-        if not include_hidden and is_hidden_path(p):
+        rel_path = p.relative_to(REPO_PATH)
+        rel_str = str(rel_path).replace("\\", "/")
+        if not include_hidden and _is_hidden_rel_path(rel_path):
             return
-        if not allowed_by_globs(rel_str):
+        if not _allowed_by_globs(rel_str, include_globs, exclude_globs):
             return
-        if is_likely_binary(p):
+        if _is_likely_binary(p, max_file_bytes=max_file_bytes):
             return
 
         try:
@@ -762,6 +834,129 @@ def grep(
             search_file(p)
 
     return results
+
+
+@mcp.tool()
+def replace_in_files(
+    pattern: str,
+    replacement: str,
+    path: str = ".",
+    recursive: bool = True,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    regex: bool = True,
+    case_insensitive: bool = False,
+    dry_run: bool = True,
+    max_files: int = 200,
+    max_replacements: int = 5000,
+    max_file_bytes: int = 1048576,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Replace text in files under a path, optionally as a dry-run preview."""
+    if max_files < 1:
+        raise ValueError("max_files must be >= 1")
+    if max_replacements < 1:
+        raise ValueError("max_replacements must be >= 1")
+    if max_file_bytes < 1:
+        raise ValueError("max_file_bytes must be >= 1")
+
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    if not dry_run:
+        _require_mutations()
+
+    flags = re.MULTILINE
+    if case_insensitive:
+        flags |= re.IGNORECASE
+
+    if regex:
+        try:
+            compiled = re.compile(pattern, flags)
+        except re.error as exc:
+            raise ValueError(f"invalid regex pattern: {exc}") from exc
+    else:
+        compiled = re.compile(re.escape(pattern), flags)
+
+    files_changed: list[dict[str, Any]] = []
+    scanned_files = 0
+    total_replacements = 0
+    files_limit_reached = False
+    replacements_limit_reached = False
+
+    def iter_candidates():
+        if root.is_file():
+            yield root
+            return
+        if recursive:
+            for p in root.rglob("*"):
+                if p.is_file():
+                    yield p
+            return
+        for p in root.glob("*"):
+            if p.is_file():
+                yield p
+
+    for candidate in iter_candidates():
+        if len(files_changed) >= max_files:
+            files_limit_reached = True
+            break
+
+        scanned_files += 1
+        rel_path = candidate.relative_to(REPO_PATH)
+        rel_str = str(rel_path).replace("\\", "/")
+
+        if not include_hidden and _is_hidden_rel_path(rel_path):
+            continue
+        if not _allowed_by_globs(rel_str, include_globs, exclude_globs):
+            continue
+        if _is_likely_binary(candidate, max_file_bytes=max_file_bytes):
+            continue
+
+        try:
+            original = candidate.read_text(encoding=encoding, errors="replace")
+        except OSError:
+            continue
+
+        remaining = max_replacements - total_replacements
+        if remaining <= 0:
+            replacements_limit_reached = True
+            break
+
+        updated, replacements = compiled.subn(replacement, original, count=remaining)
+        if replacements <= 0:
+            continue
+
+        total_replacements += replacements
+        files_changed.append(
+            {
+                "path": rel_str,
+                "replacements": replacements,
+                "changed": True,
+            }
+        )
+
+        if not dry_run:
+            candidate.write_text(updated, encoding=encoding)
+
+        if total_replacements >= max_replacements:
+            replacements_limit_reached = True
+            break
+
+    return {
+        "path": str(root.relative_to(REPO_PATH)),
+        "dry_run": dry_run,
+        "regex": regex,
+        "case_insensitive": case_insensitive,
+        "scanned_files": scanned_files,
+        "files_changed_count": len(files_changed),
+        "total_replacements": total_replacements,
+        "files_limit_reached": files_limit_reached,
+        "replacements_limit_reached": replacements_limit_reached,
+        "files_changed": files_changed,
+    }
 
 
 async def healthz(_request):
