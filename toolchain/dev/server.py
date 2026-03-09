@@ -2,14 +2,27 @@
 # Copyright (c) Nico Ueberfeldt
 
 import contextlib
+import ast
+import json
 import os
 import shutil
 import subprocess
 import sys
 import re
 import fnmatch
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None
+
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover
+    yaml = None
 
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
@@ -34,6 +47,18 @@ ALLOW_ORIGINS = [
 ]
 LABS_DIR = Path("toolchain/dev/labs")
 REPORTS_DIR = Path(".build/reports")
+MEMORY_FILE = Path(".build/memory/context_memory.json")
+SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git"}
+SAFE_GIT_SUBCOMMANDS = {
+    "status",
+    "diff",
+    "log",
+    "show",
+    "grep",
+    "rev-parse",
+    "branch",
+    "ls-files",
+}
 
 mcp = FastMCP(
     "git-repo-manager",
@@ -168,6 +193,192 @@ def _allowed_by_globs(
     if exclude_globs and any(fnmatch.fnmatch(rel_str, g) for g in exclude_globs):
         return False
     return True
+
+
+def _iter_candidate_files(root: Path, recursive: bool) -> Any:
+    if root.is_file():
+        yield root
+        return
+    if recursive:
+        for p in root.rglob("*"):
+            if p.is_file():
+                yield p
+        return
+    for p in root.glob("*"):
+        if p.is_file():
+            yield p
+
+
+def _read_lines(path: Path, encoding: str = "utf-8") -> list[str]:
+    return path.read_text(encoding=encoding, errors="replace").splitlines()
+
+
+def _node_display_name(node: ast.AST) -> str:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name
+    if isinstance(node, ast.Call):
+        return _ast_expr_name(node.func)
+    if isinstance(node, ast.Import):
+        return ", ".join(alias.name for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        return f"{module}:{', '.join(alias.name for alias in node.names)}"
+    return ""
+
+
+def _ast_expr_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        left = _ast_expr_name(node.value)
+        return f"{left}.{node.attr}" if left else node.attr
+    if isinstance(node, ast.Call):
+        return _ast_expr_name(node.func)
+    return ""
+
+
+def _guess_file_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return "json"
+    if suffix in {".toml"}:
+        return "toml"
+    if suffix in {".yaml", ".yml"}:
+        return "yaml"
+    raise ValueError("unsupported file type; expected .json, .toml, .yaml, or .yml")
+
+
+def _parse_query_path(query: str) -> list[str | int]:
+    query = query.strip()
+    if not query:
+        return []
+    tokens: list[str | int] = []
+    current = ""
+    i = 0
+    while i < len(query):
+        ch = query[i]
+        if ch == ".":
+            if current:
+                tokens.append(current)
+                current = ""
+            i += 1
+            continue
+        if ch == "[":
+            if current:
+                tokens.append(current)
+                current = ""
+            j = query.find("]", i)
+            if j == -1:
+                raise ValueError("invalid query path: missing closing ']'")
+            raw_index = query[i + 1 : j].strip()
+            if not raw_index.isdigit():
+                raise ValueError("invalid query path: index must be a non-negative int")
+            tokens.append(int(raw_index))
+            i = j + 1
+            continue
+        current += ch
+        i += 1
+    if current:
+        tokens.append(current)
+    return tokens
+
+
+def _query_value(data: Any, query: str) -> Any:
+    value = data
+    for token in _parse_query_path(query):
+        if isinstance(token, int):
+            if not isinstance(value, list):
+                raise ValueError("query expected list while resolving index")
+            if token < 0 or token >= len(value):
+                raise ValueError("query index out of range")
+            value = value[token]
+            continue
+        if not isinstance(value, dict):
+            raise ValueError("query expected object while resolving key")
+        if token not in value:
+            raise ValueError(f"query key not found: {token}")
+        value = value[token]
+    return value
+
+
+def _memory_load() -> dict[str, Any]:
+    memory_path = _resolve_repo_path(str(MEMORY_FILE))
+    if not memory_path.exists():
+        return {"entries": []}
+    try:
+        payload = json.loads(memory_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"entries": []}
+    if not isinstance(payload, dict):
+        return {"entries": []}
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    return {"entries": entries}
+
+
+def _memory_save(payload: dict[str, Any]) -> None:
+    memory_path = _resolve_repo_path(str(MEMORY_FILE))
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _to_iso_expiry(ttl_days: int | None) -> str | None:
+    if ttl_days is None:
+        return None
+    if ttl_days < 1:
+        raise ValueError("ttl_days must be >= 1")
+    return (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
+
+
+def _is_expired(expires_at: str | None, now: datetime) -> bool:
+    if not expires_at:
+        return False
+    try:
+        ts = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts < now
+
+
+def _collect_python_symbols(
+    source: str, rel_path: str, include_private: bool
+) -> list[dict[str, Any]]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    symbols: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        name = node.name
+        if not include_private and name.startswith("_"):
+            continue
+        kind = "class"
+        if isinstance(node, ast.FunctionDef):
+            kind = "function"
+        if isinstance(node, ast.AsyncFunctionDef):
+            kind = "async_function"
+        symbols.append(
+            {
+                "path": rel_path,
+                "name": name,
+                "kind": kind,
+                "line_start": int(getattr(node, "lineno", 1)),
+                "line_end": int(getattr(node, "end_lineno", getattr(node, "lineno", 1))),
+            }
+        )
+    return symbols
 
 
 def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
@@ -956,6 +1167,646 @@ def replace_in_files(
         "files_limit_reached": files_limit_reached,
         "replacements_limit_reached": replacements_limit_reached,
         "files_changed": files_changed,
+    }
+
+
+@mcp.tool()
+def read_snippet(
+    path: str,
+    start_line: int,
+    end_line: int,
+    context_before: int = 0,
+    context_after: int = 0,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Read a focused line range with optional surrounding context."""
+    if start_line < 1 or end_line < 1:
+        raise ValueError("start_line and end_line must be >= 1")
+    if end_line < start_line:
+        raise ValueError("end_line must be >= start_line")
+    if context_before < 0 or context_after < 0:
+        raise ValueError("context_before/context_after must be >= 0")
+
+    file_path = _resolve_repo_path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(path)
+
+    lines = _read_lines(file_path, encoding=encoding)
+    total_lines = len(lines)
+    from_line = max(1, start_line - context_before)
+    to_line = min(total_lines, end_line + context_after)
+    snippet_lines = lines[from_line - 1 : to_line]
+
+    return {
+        "path": str(file_path.relative_to(REPO_PATH)),
+        "requested_start_line": start_line,
+        "requested_end_line": end_line,
+        "start_line": from_line,
+        "end_line": to_line,
+        "total_lines": total_lines,
+        "content": "\n".join(snippet_lines),
+    }
+
+
+@mcp.tool()
+def symbol_index(
+    path: str = ".",
+    include_private: bool = False,
+    recursive: bool = True,
+    max_symbols: int = 5000,
+    encoding: str = "utf-8",
+) -> list[dict[str, Any]]:
+    """Index Python symbols (classes/functions) for focused navigation."""
+    if max_symbols < 1:
+        raise ValueError("max_symbols must be >= 1")
+
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    symbols: list[dict[str, Any]] = []
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        if candidate.suffix != ".py":
+            continue
+        rel_path = candidate.relative_to(REPO_PATH)
+        rel_str = str(rel_path).replace("\\", "/")
+        if _is_likely_binary(candidate):
+            continue
+        try:
+            source = candidate.read_text(encoding=encoding, errors="replace")
+        except OSError:
+            continue
+        extracted = _collect_python_symbols(
+            source, rel_str, include_private=include_private
+        )
+        for symbol in extracted:
+            if len(symbols) >= max_symbols:
+                return symbols
+            symbols.append(symbol)
+    return symbols
+
+
+@mcp.tool()
+def read_symbol(
+    name: str,
+    path: str = ".",
+    occurrence: int = 1,
+    include_private: bool = True,
+    recursive: bool = True,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Read source for a named Python symbol."""
+    if occurrence < 1:
+        raise ValueError("occurrence must be >= 1")
+
+    matches: list[dict[str, Any]] = []
+    for symbol in symbol_index(
+        path=path,
+        include_private=include_private,
+        recursive=recursive,
+        max_symbols=20000,
+        encoding=encoding,
+    ):
+        if symbol["name"] == name:
+            matches.append(symbol)
+
+    if not matches:
+        raise FileNotFoundError(f"symbol not found: {name}")
+    if occurrence > len(matches):
+        raise ValueError(
+            f"occurrence out of range: requested {occurrence}, found {len(matches)}"
+        )
+
+    target = matches[occurrence - 1]
+    file_path = _resolve_repo_path(target["path"])
+    lines = _read_lines(file_path, encoding=encoding)
+    start = max(1, int(target["line_start"]))
+    end = min(len(lines), int(target["line_end"]))
+    content = "\n".join(lines[start - 1 : end])
+
+    return {
+        "path": target["path"],
+        "name": target["name"],
+        "kind": target["kind"],
+        "occurrence": occurrence,
+        "line_start": start,
+        "line_end": end,
+        "content": content,
+    }
+
+
+@mcp.tool()
+def ast_search(
+    path: str = ".",
+    node_type: str = "Call",
+    name_pattern: str | None = None,
+    recursive: bool = True,
+    max_results: int = 500,
+    encoding: str = "utf-8",
+) -> list[dict[str, Any]]:
+    """Search Python AST nodes to find structural code matches."""
+    if max_results < 1:
+        raise ValueError("max_results must be >= 1")
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    try:
+        node_cls = getattr(ast, node_type)
+    except AttributeError as exc:
+        raise ValueError(f"unsupported node_type: {node_type}") from exc
+
+    name_regex = re.compile(name_pattern) if name_pattern else None
+    results: list[dict[str, Any]] = []
+
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        if candidate.suffix != ".py":
+            continue
+        rel_str = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+        try:
+            source = candidate.read_text(encoding=encoding, errors="replace")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, node_cls):
+                continue
+            node_name = _node_display_name(node)
+            if name_regex and not name_regex.search(node_name):
+                continue
+            results.append(
+                {
+                    "path": rel_str,
+                    "node_type": node_type,
+                    "name": node_name,
+                    "line": int(getattr(node, "lineno", 1)),
+                    "column": int(getattr(node, "col_offset", 0)) + 1,
+                    "end_line": int(getattr(node, "end_lineno", getattr(node, "lineno", 1))),
+                }
+            )
+            if len(results) >= max_results:
+                return results
+    return results
+
+
+@mcp.tool()
+def apply_unified_diff(
+    diff_text: str,
+    check_only: bool = True,
+    cached: bool = False,
+) -> dict[str, Any]:
+    """Apply a unified diff through git-apply with optional dry-run checks."""
+    _require_git_repo()
+    if not check_only:
+        _require_mutations()
+
+    args = ["git", "-C", str(REPO_PATH), "apply"]
+    if check_only:
+        args.append("--check")
+    if cached:
+        args.append("--cached")
+
+    proc = subprocess.run(
+        args,
+        input=diff_text,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "ok": proc.returncode == 0,
+        "check_only": check_only,
+        "cached": cached,
+        "exit_code": proc.returncode,
+        "stdout": _trim_text(proc.stdout.strip()),
+        "stderr": _trim_text(proc.stderr.strip()),
+    }
+
+
+@mcp.tool()
+def command_runner(
+    command: list[str],
+    cwd: str = ".",
+    timeout_seconds: int = 30,
+    max_output_chars: int = MAX_OUTPUT_CHARS,
+) -> dict[str, Any]:
+    """Run a whitelisted command without shell interpolation."""
+    if not command:
+        raise ValueError("command must not be empty")
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    if max_output_chars < 1:
+        raise ValueError("max_output_chars must be >= 1")
+
+    binary = command[0]
+    if binary not in SAFE_COMMANDS:
+        raise ValueError(f"command not allowed: {binary}")
+
+    if binary == "git":
+        if len(command) < 2:
+            raise ValueError("git command must include a subcommand")
+        if command[1] not in SAFE_GIT_SUBCOMMANDS:
+            raise ValueError(f"git subcommand not allowed: {command[1]}")
+    if binary == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in command[1:]):
+        raise ValueError("sed in-place edits are not allowed")
+    if binary == "find" and any(arg in {"-delete", "-exec", "-ok"} for arg in command[1:]):
+        raise ValueError("find destructive/exec flags are not allowed")
+    if binary == "awk":
+        script = command[1] if len(command) > 1 else ""
+        if "system(" in script:
+            raise ValueError("awk system() is not allowed")
+
+    workdir = _resolve_repo_path(cwd)
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(workdir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "exit_code": None,
+            "command": command,
+            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else ""),
+            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else ""),
+            "timeout": True,
+        }
+    except FileNotFoundError as exc:
+        return {
+            "ok": False,
+            "exit_code": None,
+            "command": command,
+            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "stdout": "",
+            "stderr": str(exc),
+            "timeout": False,
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "command": command,
+        "cwd": str(workdir.relative_to(REPO_PATH)),
+        "stdout": _trim_text(proc.stdout, max_chars=max_output_chars),
+        "stderr": _trim_text(proc.stderr, max_chars=max_output_chars),
+    }
+
+
+@mcp.tool()
+def test_targeted(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    runner: list[str] | None = None,
+    max_tests: int = 200,
+    timeout_seconds: int = 300,
+) -> dict[str, Any]:
+    """Run targeted tests inferred from changed paths in a git range."""
+    _require_git_repo()
+    if max_tests < 1:
+        raise ValueError("max_tests must be >= 1")
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+
+    diff_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout.strip()
+    changed = [line.strip() for line in diff_out.splitlines() if line.strip()]
+
+    candidates: list[str] = []
+    for path in changed:
+        p = Path(path)
+        name = p.name
+        stem = p.stem
+        if "test" in name.lower() and p.suffix == ".py":
+            candidates.append(path)
+            continue
+        if p.suffix == ".py":
+            candidates.extend(
+                [
+                    f"tests/test_{stem}.py",
+                    f"tests/{stem}_test.py",
+                ]
+            )
+
+    seen: set[str] = set()
+    tests: list[str] = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        resolved = _resolve_repo_path(item)
+        if resolved.is_file():
+            tests.append(item)
+        if len(tests) >= max_tests:
+            break
+
+    run_cmd = runner or ["pytest", "-q"]
+    if tests:
+        full_cmd = [*run_cmd, *tests]
+    else:
+        full_cmd = run_cmd
+
+    try:
+        proc = subprocess.run(
+            full_cmd,
+            cwd=str(REPO_PATH),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "changed_files": changed,
+            "targeted_tests": tests,
+            "command": full_cmd,
+            "ok": False,
+            "exit_code": None,
+            "timeout": True,
+            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else ""),
+            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else ""),
+        }
+    except FileNotFoundError as exc:
+        return {
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "changed_files": changed,
+            "targeted_tests": tests,
+            "command": full_cmd,
+            "ok": False,
+            "exit_code": None,
+            "timeout": False,
+            "stdout": "",
+            "stderr": str(exc),
+        }
+
+    return {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "changed_files": changed,
+        "targeted_tests": tests,
+        "command": full_cmd,
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "stdout": _trim_text(proc.stdout),
+        "stderr": _trim_text(proc.stderr),
+    }
+
+
+@mcp.tool()
+def summarize_diff(
+    ref: str | None = None,
+    staged: bool = False,
+    pathspec: str | None = None,
+) -> dict[str, Any]:
+    """Return compact structured diff summary with risk hints."""
+    _require_git_repo()
+    args = ["diff"]
+    if staged:
+        args.append("--staged")
+    if ref:
+        args.append(ref)
+    if pathspec:
+        _resolve_repo_path(pathspec)
+        args.extend(["--", pathspec])
+
+    numstat = _git(*args, "--numstat").stdout
+    patch = _git(*args, "--unified=0").stdout
+
+    files: list[dict[str, Any]] = []
+    total_added = 0
+    total_deleted = 0
+    risky_files: list[str] = []
+
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        add_raw, del_raw, file_path = parts
+        added = int(add_raw) if add_raw.isdigit() else 0
+        deleted = int(del_raw) if del_raw.isdigit() else 0
+        total_added += added
+        total_deleted += deleted
+        files.append({"path": file_path, "added": added, "deleted": deleted})
+        low = file_path.lower()
+        if (
+            "dockerfile" in low
+            or "requirements" in low
+            or low.endswith(".lock")
+            or low.endswith("package.json")
+            or "/.github/workflows/" in low
+        ):
+            risky_files.append(file_path)
+
+    todo_hits = 0
+    for line in patch.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        if "TODO" in line or "FIXME" in line or "XXX" in line:
+            todo_hits += 1
+
+    return {
+        "file_count": len(files),
+        "total_added": total_added,
+        "total_deleted": total_deleted,
+        "files": files,
+        "risk_flags": {
+            "risky_files": risky_files,
+            "todo_like_additions": todo_hits,
+        },
+    }
+
+
+@mcp.tool()
+def json_query(
+    path: str,
+    query: str = "",
+    file_type: str | None = None,
+) -> dict[str, Any]:
+    """Query JSON/TOML/YAML content with a dot/index path."""
+    file_path = _resolve_repo_path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(path)
+
+    fmt = (file_type or _guess_file_type(file_path)).lower()
+    raw = file_path.read_text(encoding="utf-8", errors="replace")
+
+    if fmt == "json":
+        data = json.loads(raw)
+    elif fmt == "toml":
+        if tomllib is None:
+            raise RuntimeError("tomllib is not available in this Python runtime")
+        data = tomllib.loads(raw)
+    elif fmt == "yaml":
+        if yaml is None:
+            raise RuntimeError("PyYAML is not installed in this runtime")
+        data = yaml.safe_load(raw)
+    else:
+        raise ValueError("file_type must be one of: json, toml, yaml")
+
+    value = _query_value(data, query) if query.strip() else data
+    encoded = json.dumps(value, indent=2, ensure_ascii=True)
+    return {
+        "path": str(file_path.relative_to(REPO_PATH)),
+        "query": query,
+        "file_type": fmt,
+        "value": value,
+        "value_json": _trim_text(encoded),
+    }
+
+
+@mcp.tool()
+def memory_upsert(
+    namespace: str,
+    key: str,
+    value: Any,
+    ttl_days: int | None = None,
+    confidence: float = 1.0,
+    source: str = "agent",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create or update a structured context memory record."""
+    _require_mutations()
+    if not namespace.strip() or not key.strip():
+        raise ValueError("namespace and key must not be empty")
+    if confidence < 0 or confidence > 1:
+        raise ValueError("confidence must be in range [0, 1]")
+
+    payload = _memory_load()
+    entries = payload["entries"]
+    now_iso = _now_iso()
+    expires_at = _to_iso_expiry(ttl_days)
+    updated = False
+    for entry in entries:
+        if entry.get("namespace") == namespace and entry.get("key") == key:
+            entry["value"] = value
+            entry["confidence"] = confidence
+            entry["source"] = source
+            entry["tags"] = tags or []
+            entry["updated_at"] = now_iso
+            entry["expires_at"] = expires_at
+            updated = True
+            break
+
+    if not updated:
+        entries.append(
+            {
+                "namespace": namespace,
+                "key": key,
+                "value": value,
+                "confidence": confidence,
+                "source": source,
+                "tags": tags or [],
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "expires_at": expires_at,
+            }
+        )
+
+    _memory_save(payload)
+    return {
+        "path": str(MEMORY_FILE),
+        "namespace": namespace,
+        "key": key,
+        "updated": True,
+        "expires_at": expires_at,
+    }
+
+
+@mcp.tool()
+def memory_get(
+    namespace: str | None = None,
+    key: str | None = None,
+    include_expired: bool = False,
+    max_entries: int = 200,
+) -> dict[str, Any]:
+    """Read context memory entries with namespace/key filters."""
+    if max_entries < 1:
+        raise ValueError("max_entries must be >= 1")
+    payload = _memory_load()
+    now = datetime.now(timezone.utc)
+    entries_out: list[dict[str, Any]] = []
+
+    for entry in payload["entries"]:
+        if namespace is not None and entry.get("namespace") != namespace:
+            continue
+        if key is not None and entry.get("key") != key:
+            continue
+        expired = _is_expired(entry.get("expires_at"), now)
+        if expired and not include_expired:
+            continue
+        copied = dict(entry)
+        copied["expired"] = expired
+        entries_out.append(copied)
+        if len(entries_out) >= max_entries:
+            break
+
+    return {
+        "path": str(MEMORY_FILE),
+        "count": len(entries_out),
+        "entries": entries_out,
+    }
+
+
+@mcp.tool()
+def memory_validate(
+    validate_paths: bool = True,
+    drop_expired: bool = False,
+    max_entries: int = 5000,
+) -> dict[str, Any]:
+    """Validate memory freshness and optionally prune expired records."""
+    if max_entries < 1:
+        raise ValueError("max_entries must be >= 1")
+    payload = _memory_load()
+    entries = payload["entries"][:max_entries]
+    now = datetime.now(timezone.utc)
+
+    stale: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+
+    for entry in entries:
+        expired = _is_expired(entry.get("expires_at"), now)
+        if expired and drop_expired:
+            dropped += 1
+            continue
+
+        record = dict(entry)
+        record["expired"] = expired
+        record["stale_paths"] = []
+        if validate_paths:
+            value = entry.get("value")
+            refs = value.get("file_paths", []) if isinstance(value, dict) else []
+            if isinstance(refs, list):
+                for rel in refs:
+                    if isinstance(rel, str):
+                        try:
+                            resolved = _resolve_repo_path(rel)
+                        except ValueError:
+                            record["stale_paths"].append(rel)
+                            continue
+                        if not resolved.exists():
+                            record["stale_paths"].append(rel)
+        if expired or record["stale_paths"]:
+            stale.append(record)
+        kept.append(entry)
+
+    if drop_expired:
+        _require_mutations()
+        payload["entries"] = kept
+        _memory_save(payload)
+
+    return {
+        "path": str(MEMORY_FILE),
+        "total_checked": len(entries),
+        "stale_count": len(stale),
+        "dropped_expired": dropped,
+        "stale_entries": stale,
     }
 
 
