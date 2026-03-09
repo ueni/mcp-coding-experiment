@@ -309,6 +309,69 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(translated["schema"], "translation_small.v1")
         self.assertNotEqual(translated["translated"], "")
 
+    def test_diagram_from_code_and_mermaid_lint_fix(self):
+        diagram = self.server.diagram_from_code(
+            path="src",
+            diagram_type="flowchart",
+            max_nodes=20,
+            include_call_edges=False,
+            output_profile="compact",
+        )
+        self.assertEqual(diagram["schema"], "diagram_from_code.compact.v1")
+        self.assertIn("flowchart", diagram["mermaid"])
+
+        linted = self.server.mermaid_lint_fix("A -> B", auto_fix=True)
+        self.assertEqual(linted["schema"], "mermaid_lint_fix.v1")
+        self.assertGreaterEqual(linted["issue_count"], 1)
+        self.assertIn("flowchart", linted["fixed_mermaid"])
+        self.assertIn("-->", linted["fixed_mermaid"])
+
+    def test_drawio_generator_generate_and_parse(self):
+        generated = self.server.drawio_generator(
+            mode="generate",
+            nodes=[
+                {"id": "n1", "label": "Service"},
+                {"id": "n2", "label": "DB"},
+            ],
+            edges=[{"source": "n1", "target": "n2"}],
+        )
+        self.assertEqual(generated["schema"], "drawio_generator.v1")
+        self.assertEqual(generated["mode"], "generate")
+        self.assertIn("<mxfile", generated["drawio_xml"])
+
+        parsed = self.server.drawio_generator(mode="parse", drawio_xml=generated["drawio_xml"])
+        self.assertEqual(parsed["schema"], "drawio_generator.v1")
+        self.assertEqual(parsed["mode"], "parse")
+        self.assertEqual(parsed["node_count"], 2)
+        self.assertEqual(parsed["edge_count"], 1)
+
+    def test_diagram_sync_check_update_and_check(self):
+        diagram_doc = self.repo_path / "docs" / "architecture.md"
+        diagram_doc.write_text("# Architecture\n\nflowchart LR\nA-->B\n", encoding="utf-8")
+
+        checked = self.server.diagram_sync_check(
+            source_paths=["src/sample.py"],
+            diagram_path="docs/architecture.md",
+            mode="check",
+        )
+        self.assertEqual(checked["schema"], "diagram_sync_check.v1")
+        self.assertFalse(checked["in_sync"])
+
+        updated = self.server.diagram_sync_check(
+            source_paths=["src/sample.py"],
+            diagram_path="docs/architecture.md",
+            mode="update",
+        )
+        self.assertTrue(updated["in_sync"])
+        self.assertFalse(updated["needs_update"])
+
+        rechecked = self.server.diagram_sync_check(
+            source_paths=["src/sample.py"],
+            diagram_path="docs/architecture.md",
+            mode="check",
+        )
+        self.assertTrue(rechecked["in_sync"])
+
 
 if __name__ == "__main__":
     unittest.main()

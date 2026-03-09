@@ -143,6 +143,10 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - test_gen_small
 - vision_ocr_parser
 - translation_small
+- diagram_from_code
+- mermaid_lint_fix
+- drawio_generator
+- diagram_sync_check
 - local_model_status
 - local_embed
 - local_infer

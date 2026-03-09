@@ -16,6 +16,8 @@ import time
 import math
 import urllib.error
 import urllib.request
+import html
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -744,6 +746,24 @@ def _simple_translate(text: str, source_lang: str, target_lang: str) -> str:
         else:
             out.append(t)
     return "".join(out)
+
+
+def _diagram_fingerprint(paths: list[str]) -> str:
+    h = hashlib.sha256()
+    normalized = sorted(set(paths))
+    for rel in normalized:
+        p = _resolve_repo_path(rel)
+        if not p.is_file():
+            continue
+        h.update(rel.encode("utf-8"))
+        h.update(_file_sha256(p).encode("utf-8"))
+    return h.hexdigest()
+
+
+def _mermaid_sanitize_id(text: str) -> str:
+    out = re.sub(r"[^A-Za-z0-9_]", "_", text)
+    out = re.sub(r"_+", "_", out).strip("_")
+    return out or "node"
 
 
 def _adaptive_limit(requested: int, soft_cap: int = 500) -> int:
@@ -3221,6 +3241,276 @@ def translation_small(
         "target_lang": target_lang,
         "translated": infer.get("output", ""),
         "backend": infer.get("backend"),
+    }
+
+
+@mcp.tool()
+def diagram_from_code(
+    path: str = ".",
+    diagram_type: str = "flowchart",
+    max_nodes: int = 60,
+    include_call_edges: bool = False,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Generate Mermaid diagrams from repository dependency/call metadata."""
+    if diagram_type not in {"flowchart", "class", "sequence"}:
+        raise ValueError("diagram_type must be one of: flowchart, class, sequence")
+    if max_nodes < 1:
+        raise ValueError("max_nodes must be >= 1")
+    profile = _default_output_profile(output_profile)
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    dep = dependency_map(
+        path=path,
+        recursive=True,
+        output_profile="normal",
+        fields=["from", "to"],
+        limit=max_nodes * 4,
+    )
+    edges = dep.get("edges", []) if isinstance(dep, dict) else []
+    nodes: set[str] = set()
+    lines: list[str] = []
+
+    if diagram_type == "flowchart":
+        lines.append("flowchart LR")
+        for e in edges:
+            src = str(e.get("from", ""))
+            dst = str(e.get("to", ""))
+            if not src or not dst:
+                continue
+            nodes.add(src)
+            nodes.add(dst)
+            if len(nodes) > max_nodes:
+                break
+            sid = _mermaid_sanitize_id(src)
+            did = _mermaid_sanitize_id(dst)
+            lines.append(f'    {sid}["{src}"] --> {did}["{dst}"]')
+    elif diagram_type == "class":
+        lines.append("classDiagram")
+        for e in edges:
+            src = Path(str(e.get("from", ""))).stem
+            dst = Path(str(e.get("to", ""))).stem
+            if not src or not dst:
+                continue
+            nodes.add(src)
+            nodes.add(dst)
+            if len(nodes) > max_nodes:
+                break
+            lines.append(f"    class {src}")
+            lines.append(f"    class {dst}")
+            lines.append(f"    {src} --> {dst}")
+    else:
+        lines.append("sequenceDiagram")
+        lines.append("    autonumber")
+        for e in edges[:max_nodes]:
+            src = Path(str(e.get("from", ""))).stem or "A"
+            dst = Path(str(e.get("to", ""))).stem or "B"
+            lines.append(f"    {src}->>{dst}: imports")
+
+    if include_call_edges:
+        cg = call_graph(
+            path=path,
+            output_profile="compact",
+            fields=["path", "caller", "callee"],
+            limit=max_nodes,
+        )
+        call_edges = cg.get("edges", []) if isinstance(cg, dict) else []
+    else:
+        call_edges = []
+
+    mermaid = "\n".join(lines)
+    result = {
+        "schema": "diagram_from_code.v1",
+        "diagram_type": diagram_type,
+        "path": str(root.relative_to(REPO_PATH)),
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "mermaid": mermaid,
+        "call_edges": call_edges if profile == "verbose" else [],
+    }
+    if profile == "compact":
+        return {
+            "schema": "diagram_from_code.compact.v1",
+            "diagram_type": diagram_type,
+            "node_count": result["node_count"],
+            "edge_count": result["edge_count"],
+            "mermaid": result["mermaid"],
+        }
+    return result
+
+
+@mcp.tool()
+def mermaid_lint_fix(
+    mermaid_text: str,
+    auto_fix: bool = True,
+) -> dict[str, Any]:
+    """Lint and optionally fix common Mermaid syntax issues."""
+    if not mermaid_text.strip():
+        raise ValueError("mermaid_text must not be empty")
+    text = mermaid_text.replace("\t", "    ")
+    issues: list[str] = []
+    fixed = text
+
+    header_re = re.compile(r"^\s*(flowchart|graph|classDiagram|sequenceDiagram)\b", re.MULTILINE)
+    if not header_re.search(fixed):
+        issues.append("Missing diagram header; prepended 'flowchart LR'.")
+        if auto_fix:
+            fixed = "flowchart LR\n" + fixed
+
+    if "->" in fixed and "-->" not in fixed:
+        issues.append("Potential invalid arrow syntax '->'; replacing with '-->'.")
+        if auto_fix:
+            fixed = fixed.replace("->", "-->")
+
+    if "```" in fixed:
+        issues.append("Remove markdown fences from raw mermaid input.")
+        if auto_fix:
+            fixed = fixed.replace("```mermaid", "").replace("```", "").strip()
+
+    valid = True
+    if "flowchart" in fixed and "-->" not in fixed and "---" not in fixed:
+        valid = False
+        issues.append("Flowchart has no edges.")
+
+    return {
+        "schema": "mermaid_lint_fix.v1",
+        "valid": bool(valid),
+        "issue_count": len(issues),
+        "issues": issues,
+        "fixed_mermaid": fixed if auto_fix else mermaid_text,
+    }
+
+
+@mcp.tool()
+def drawio_generator(
+    mode: str = "generate",
+    nodes: list[dict[str, Any]] | None = None,
+    edges: list[dict[str, Any]] | None = None,
+    drawio_xml: str = "",
+) -> dict[str, Any]:
+    """Generate simple draw.io XML from graph data or parse XML back to graph."""
+    if mode not in {"generate", "parse"}:
+        raise ValueError("mode must be one of: generate, parse")
+
+    if mode == "generate":
+        ns = "https://app.diagrams.net"
+        diagram_id = "diagram-1"
+        nlist = nodes or []
+        elist = edges or []
+        root = [
+            f'<mxfile host="{ns}">',
+            f'  <diagram id="{diagram_id}" name="Page-1">',
+            "    <mxGraphModel><root>",
+            '      <mxCell id="0"/>',
+            '      <mxCell id="1" parent="0"/>',
+        ]
+        for i, n in enumerate(nlist, start=2):
+            nid = str(n.get("id", f"n{i}"))
+            label = html.escape(str(n.get("label", nid)))
+            x = int(n.get("x", 40 + (i - 2) * 40))
+            y = int(n.get("y", 40 + (i - 2) * 20))
+            root.append(
+                f'      <mxCell id="{nid}" value="{label}" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">'
+                f'<mxGeometry x="{x}" y="{y}" width="140" height="60" as="geometry"/></mxCell>'
+            )
+        for i, e in enumerate(elist, start=1):
+            eid = f"e{i}"
+            src = html.escape(str(e.get("source", "")))
+            dst = html.escape(str(e.get("target", "")))
+            root.append(
+                f'      <mxCell id="{eid}" edge="1" parent="1" source="{src}" target="{dst}"><mxGeometry relative="1" as="geometry"/></mxCell>'
+            )
+        root.extend(["    </root></mxGraphModel>", "  </diagram>", "</mxfile>"])
+        xml = "\n".join(root)
+        return {
+            "schema": "drawio_generator.v1",
+            "mode": mode,
+            "node_count": len(nlist),
+            "edge_count": len(elist),
+            "drawio_xml": xml,
+        }
+
+    if not drawio_xml.strip():
+        raise ValueError("drawio_xml must not be empty for parse mode")
+    try:
+        tree = ET.fromstring(drawio_xml)
+    except ET.ParseError as exc:
+        raise ValueError(f"invalid drawio xml: {exc}") from exc
+
+    parsed_nodes: list[dict[str, Any]] = []
+    parsed_edges: list[dict[str, Any]] = []
+    for cell in tree.iter("mxCell"):
+        if cell.attrib.get("vertex") == "1":
+            parsed_nodes.append(
+                {"id": cell.attrib.get("id", ""), "label": cell.attrib.get("value", "")}
+            )
+        if cell.attrib.get("edge") == "1":
+            parsed_edges.append(
+                {
+                    "id": cell.attrib.get("id", ""),
+                    "source": cell.attrib.get("source", ""),
+                    "target": cell.attrib.get("target", ""),
+                }
+            )
+    return {
+        "schema": "drawio_generator.v1",
+        "mode": mode,
+        "node_count": len(parsed_nodes),
+        "edge_count": len(parsed_edges),
+        "nodes": parsed_nodes,
+        "edges": parsed_edges,
+    }
+
+
+@mcp.tool()
+def diagram_sync_check(
+    source_paths: list[str],
+    diagram_path: str,
+    mode: str = "check",
+    marker: str = "diagram-fingerprint",
+) -> dict[str, Any]:
+    """Check/update diagram freshness metadata against source file fingerprints."""
+    if not source_paths:
+        raise ValueError("source_paths must not be empty")
+    if mode not in {"check", "update"}:
+        raise ValueError("mode must be one of: check, update")
+    diagram = _resolve_repo_path(diagram_path)
+    if not diagram.is_file():
+        raise FileNotFoundError(diagram_path)
+    for p in source_paths:
+        rp = _resolve_repo_path(p)
+        if not rp.is_file():
+            raise FileNotFoundError(p)
+
+    fingerprint = _diagram_fingerprint(source_paths)
+    text = diagram.read_text(encoding="utf-8", errors="replace")
+    rx = re.compile(rf"{re.escape(marker)}:\s*([a-f0-9]{{64}})")
+    m = rx.search(text)
+    existing = m.group(1) if m else ""
+    in_sync = existing == fingerprint
+
+    if mode == "update":
+        _require_mutations()
+        new_line = f"{marker}: {fingerprint}"
+        if m:
+            text = rx.sub(new_line, text, count=1)
+        else:
+            text = text.rstrip() + "\n\n" + new_line + "\n"
+        diagram.write_text(text, encoding="utf-8")
+        in_sync = True
+
+    return {
+        "schema": "diagram_sync_check.v1",
+        "mode": mode,
+        "diagram_path": str(diagram.relative_to(REPO_PATH)),
+        "source_paths": sorted(source_paths),
+        "marker": marker,
+        "fingerprint": fingerprint,
+        "existing_fingerprint": existing,
+        "in_sync": in_sync,
+        "needs_update": not in_sync,
     }
 
 
