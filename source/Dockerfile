@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+# SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 #
 # SPDX-License-Identifier: MIT
 
@@ -31,7 +31,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_INFER_MODEL= \
     LOCAL_INFER_ENDPOINT=http://127.0.0.1:11434/api/generate \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-    HOST_CA_CERT_FILE=
+    HOST_CA_CERT_FILE= \
+    MCP_APPLY_REPO_DEFAULTS=false
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -82,12 +83,17 @@ RUN set -eux; \
 
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
-    && mkdir -p /models /repo/.build/cache /repo/.build/reports \
+    && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults \
     && chown -R app:app /app /models /home/app
 
 COPY --chown=app:app server.py ./
 COPY --chown=app:app entrypoint.sh ./
+COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
 RUN chmod 0755 /app/entrypoint.sh
+
+RUN mkdir -p /home/app/.vscode-server/extensions \
+    && ln -sfn /opt/codebase-tooling/defaults/extensions/local.mcp-inline-autocomplete-0.0.1 /home/app/.vscode-server/extensions/local.mcp-inline-autocomplete-0.0.1 \
+    && chown -R app:app /opt/codebase-tooling /home/app/.vscode-server
 
 EXPOSE 8000
 EXPOSE 11434

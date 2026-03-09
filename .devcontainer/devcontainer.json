@@ -9,7 +9,8 @@
   "workspaceFolder": "/repo",
   "shutdownAction": "stopCompose",
   "containerEnv": {
-    "DOCKER_HOST": "unix:///var/run/docker.sock"
+    "DOCKER_HOST": "unix:///var/run/docker.sock",
+    "MCP_APPLY_REPO_DEFAULTS": "true"
   },
   "forwardPorts": [
     8000
@@ -34,7 +35,6 @@
       }
     }
   },
-  "postCreateCommand": "mkdir -p /home/app/.vscode-server/extensions && ln -sfn /repo/vscode/mcp-inline-autocomplete /home/app/.vscode-server/extensions/local.mcp-inline-autocomplete-0.0.1",
   "mounts": [
     "source=${localEnv:HOME}/.continue,target=/home/app/.continue,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",

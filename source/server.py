@@ -2723,7 +2723,7 @@ def git_push(
 
 @mcp.tool()
 def lab_release_rehearsal(
-    config_path: str = ".config/dev/labs/release_rehearsal.json",
+    config_path: str = ".config/labs/release_rehearsal.json",
     allow_dirty: bool = False,
     keep_branch: bool = False,
 ) -> dict[str, Any]:
@@ -2739,7 +2739,7 @@ def lab_release_rehearsal(
 
 @mcp.tool()
 def lab_refactor_tournament(
-    config_path: str = ".config/dev/labs/refactor_tournament.json",
+    config_path: str = ".config/labs/refactor_tournament.json",
     allow_dirty: bool = False,
     keep_branches: bool = False,
 ) -> dict[str, Any]:
@@ -2755,7 +2755,7 @@ def lab_refactor_tournament(
 
 @mcp.tool()
 def lab_policy_gatekeeper(
-    config_path: str = ".config/dev/labs/policy_gatekeeper.json",
+    config_path: str = ".config/labs/policy_gatekeeper.json",
     changed_ref: str = "HEAD",
     report_path: str = ".build/reports/POLICY_GATEKEEPER.md",
 ) -> dict[str, Any]:
@@ -2775,7 +2775,7 @@ def lab_policy_gatekeeper(
 
 @mcp.tool()
 def lab_branch_swarm(
-    config_path: str = ".config/dev/labs/branch_swarm_lab.json",
+    config_path: str = ".config/labs/branch_swarm_lab.json",
     allow_dirty: bool = False,
     keep_branches: bool = False,
 ) -> dict[str, Any]:

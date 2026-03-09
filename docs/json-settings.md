@@ -1,14 +1,14 @@
 <!--
-SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 
 SPDX-License-Identifier: MIT
 -->
 
 # JSON Settings Files
 
-This page documents the JSON configuration files under `.config/dev/labs`.
+This page documents the JSON configuration files under `.config/labs`.
 
-## `.config/dev/labs/policy_gatekeeper.json`
+## `.config/labs/policy_gatekeeper.json`
 
 Controls policy checks executed by `policy_gatekeeper.py`.
 
@@ -28,7 +28,7 @@ Controls policy checks executed by `policy_gatekeeper.py`.
 - `impl_path_prefixes`: code paths considered implementation changes.
 - `require_docs_for_impl_diff`: require docs changes when implementation changes are detected.
 
-## `.config/dev/labs/branch_swarm_lab.json`
+## `.config/labs/branch_swarm_lab.json`
 
 Configuration for `branch_swarm_lab.py` strategy benchmarking.
 
@@ -43,7 +43,7 @@ Each strategy supports:
 - `quality`: commands that should pass (used in scoring).
 - `benchmark`: commands printing a numeric metric (lower is better).
 
-## `.config/dev/labs/refactor_tournament.json`
+## `.config/labs/refactor_tournament.json`
 
 Configuration for `refactor_tournament.py` refactor competitions.
 
@@ -57,7 +57,7 @@ Each strategy supports:
 - `mutate`: transformation commands to apply.
 - `checks`: verification commands run after mutations.
 
-## `.config/dev/labs/release_rehearsal.json`
+## `.config/labs/release_rehearsal.json`
 
 Configuration for `release_rehearsal.py` dry-run release checks.
 

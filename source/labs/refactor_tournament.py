@@ -93,7 +93,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a refactor tournament")
     parser.add_argument(
         "--config",
-        default=".config/dev/labs/refactor_tournament.json",
+        default=".config/labs/refactor_tournament.json",
         help="Path to tournament JSON config",
     )
     parser.add_argument(

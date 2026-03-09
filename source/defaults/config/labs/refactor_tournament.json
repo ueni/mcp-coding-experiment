@@ -1,0 +1,64 @@
+{
+  "base_ref": "HEAD",
+  "report_path": ".build/reports/REFACTOR_TOURNAMENT.md",
+  "strategies": [
+    {
+      "name": "Python Baseline",
+      "branch": "tournament/python-baseline",
+      "mutate": [],
+      "checks": [
+        "python -m compileall -q source",
+        "for f in source/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
+      ]
+    },
+    {
+      "name": "Ruff Autofix + Format",
+      "branch": "tournament/ruff-autofix-format",
+      "mutate": [
+        "python -m ruff check --fix source",
+        "python -m ruff format source"
+      ],
+      "checks": [
+        "python -m compileall -q source",
+        "python -m ruff check source",
+        "python -m ruff format --check source"
+      ]
+    },
+    {
+      "name": "Black + Isort",
+      "branch": "tournament/black-isort",
+      "mutate": [
+        "python -m isort source",
+        "python -m black source"
+      ],
+      "checks": [
+        "python -m compileall -q source",
+        "python -m isort --check-only source",
+        "python -m black --check source"
+      ]
+    },
+    {
+      "name": "Type Safety Pass",
+      "branch": "tournament/type-safety-pass",
+      "mutate": [],
+      "checks": [
+        "python -m compileall -q source",
+        "python -m mypy source --ignore-missing-imports"
+      ]
+    },
+    {
+      "name": "Pyupgrade Modernization",
+      "branch": "tournament/pyupgrade-modernization",
+      "allowed_mutate_exit_codes": [
+        0,
+        123
+      ],
+      "mutate": [
+        "find source -type f -name '*.py' -print0 | xargs -0 python -m pyupgrade --py312-plus"
+      ],
+      "checks": [
+        "python -m compileall -q source"
+      ]
+    }
+  ]
+}

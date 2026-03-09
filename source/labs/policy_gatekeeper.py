@@ -152,7 +152,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run policy gatekeeper checks")
     parser.add_argument(
         "--config",
-        default=".config/dev/labs/policy_gatekeeper.json",
+        default=".config/labs/policy_gatekeeper.json",
         help="Path to policy config JSON",
     )
     parser.add_argument(

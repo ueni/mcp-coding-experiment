@@ -1,7 +1,3 @@
-// SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
-//
-// SPDX-License-Identifier: MIT
-
 const vscode = require("vscode");
 
 function cfg() {

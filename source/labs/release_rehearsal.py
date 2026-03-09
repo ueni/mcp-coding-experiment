@@ -66,7 +66,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a release rehearsal")
     parser.add_argument(
         "--config",
-        default=".config/dev/labs/release_rehearsal.json",
+        default=".config/labs/release_rehearsal.json",
         help="Path to rehearsal JSON config",
     )
     parser.add_argument(

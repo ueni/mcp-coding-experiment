@@ -75,7 +75,7 @@ def parse_metric(stdout: str) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run branch swarm benchmark lab")
-    parser.add_argument("--config", default=".config/dev/labs/branch_swarm_lab.json")
+    parser.add_argument("--config", default=".config/labs/branch_swarm_lab.json")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--keep-branches", action="store_true")
     args = parser.parse_args()

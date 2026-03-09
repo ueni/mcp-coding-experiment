@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 
 SPDX-License-Identifier: MIT
 -->

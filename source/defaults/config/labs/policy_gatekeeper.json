@@ -1,0 +1,40 @@
+{
+  "default_target_branch": "main",
+  "max_file_size_bytes": 500000,
+  "forbidden_patterns": [
+    "AKIA[0-9A-Z]{16}",
+    "(?i)aws_secret_access_key",
+    "(?i)private[_-]?key",
+    "(?i)password\\s*=\\s*['\"][^'\"]+['\"]"
+  ],
+  "forbidden_pattern_excluded_paths": [
+    ".build/",
+    ".config/labs/policy_gatekeeper.json"
+  ],
+  "required_paths": [
+    "README.md",
+    "source/server.py",
+    "docs/index.md"
+  ],
+  "required_when_paths_change": {
+    "source/": [
+      "README.md"
+    ]
+  },
+  "command_checks": [
+    "python -m py_compile source/server.py"
+  ],
+  "docs_policy": {
+    "enabled": true,
+    "target_branch": "main",
+    "doc_roots": [
+      "docs/",
+      "README.md"
+    ],
+    "index_path": "docs/index.md",
+    "impl_path_prefixes": [
+      "toolchain/"
+    ],
+    "require_docs_for_impl_diff": true
+  }
+}

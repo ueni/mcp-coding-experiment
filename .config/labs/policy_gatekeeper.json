@@ -9,7 +9,7 @@
   ],
   "forbidden_pattern_excluded_paths": [
     ".build/",
-    ".config/dev/labs/policy_gatekeeper.json"
+    ".config/labs/policy_gatekeeper.json"
   ],
   "required_paths": [
     "README.md",

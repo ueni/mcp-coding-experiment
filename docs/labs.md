@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 
 SPDX-License-Identifier: MIT
 -->
@@ -30,7 +30,7 @@ Policy checks completed
 Report written: .build/reports/POLICY_GATEKEEPER.md
 ```
 
-Config: `.config/dev/labs/policy_gatekeeper.json`
+Config: `.config/labs/policy_gatekeeper.json`
 Output: `.build/reports/POLICY_GATEKEEPER.md`
 
 Docs sync policy is config-driven via `docs_policy`:
@@ -53,7 +53,7 @@ Benchmark complete
 Report written: .build/reports/BRANCH_SWARM_REPORT.md
 ```
 
-Config: `.config/dev/labs/branch_swarm_lab.json`
+Config: `.config/labs/branch_swarm_lab.json`
 Output: `.build/reports/BRANCH_SWARM_REPORT.md`
 
 ## 7) Narrated PR Generator
@@ -107,5 +107,5 @@ Report written under .build/reports/
 ```
 
 Configs:
-- `.config/dev/labs/release_rehearsal.json`
-- `.config/dev/labs/refactor_tournament.json`
+- `.config/labs/release_rehearsal.json`
+- `.config/labs/refactor_tournament.json`
