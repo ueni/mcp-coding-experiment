@@ -196,7 +196,9 @@ def main() -> int:
     if not isinstance(docs_policy, dict):
         raise ValueError("docs_policy must be an object")
 
-    changed_ref = args.changed_ref if args.changed_ref is not None else default_target_branch
+    changed_ref = (
+        args.changed_ref if args.changed_ref is not None else default_target_branch
+    )
 
     tracked = list_files()
     tracked_set = set(tracked)
@@ -269,9 +271,7 @@ def main() -> int:
         if not isinstance(impl_path_prefixes, list) or not all(
             isinstance(x, str) for x in impl_path_prefixes
         ):
-            raise ValueError(
-                "docs_policy.impl_path_prefixes must be a list of strings"
-            )
+            raise ValueError("docs_policy.impl_path_prefixes must be a list of strings")
 
         effective_target = docs_target_branch or default_target_branch
         if args.changed_ref is None and effective_target != changed_ref:
@@ -293,10 +293,8 @@ def main() -> int:
         docs_violations.extend(check_docs_index(index_path, doc_files))
         if require_docs_for_impl and impl_changed and not docs_changed:
             docs_violations.append(
-                (
-                    f"Implementation changes vs '{changed_ref}' require docs updates "
-                    f"under {', '.join(doc_roots)}; none were changed."
-                )
+                f"Implementation changes vs '{changed_ref}' require docs updates "
+                f"under {', '.join(doc_roots)}; none were changed."
             )
 
     if docs_violations:
