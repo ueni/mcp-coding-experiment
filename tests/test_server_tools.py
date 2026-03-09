@@ -641,6 +641,38 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(out["model_backend"], "fallback")
         self.assertIn("Summary by local model", out["summary"])
 
+    def test_license_monitor_detects_missing_headers(self):
+        out = self.server.license_monitor(
+            path="src",
+            run_reuse_lint=False,
+            generate_spdx=False,
+            auto_fix_headers=False,
+            download_missing_licenses=False,
+        )
+        self.assertEqual(out["schema"], "license_monitor.v1")
+        self.assertGreaterEqual(out["missing_spdx_header_count"], 1)
+        self.assertIn("src/sample.py", out["missing_spdx_headers"])
+
+    def test_install_git_hooks_creates_pre_commit_and_pre_push(self):
+        out = self.server.install_git_hooks(
+            install_pre_commit=True,
+            install_pre_push=True,
+            include_foss_reports=True,
+            include_lab_reports=True,
+            overwrite=True,
+        )
+        self.assertEqual(out["schema"], "install_git_hooks.v1")
+        self.assertIn(".git/hooks/pre-commit", out["installed"])
+        self.assertIn(".git/hooks/pre-push", out["installed"])
+
+        pre_commit = self.repo_path / ".git" / "hooks" / "pre-commit"
+        pre_push = self.repo_path / ".git" / "hooks" / "pre-push"
+        self.assertTrue(pre_commit.is_file())
+        self.assertTrue(pre_push.is_file())
+        self.assertIn("reuse lint", pre_commit.read_text(encoding="utf-8"))
+        self.assertIn("policy_gatekeeper.py", pre_commit.read_text(encoding="utf-8"))
+        self.assertIn("repo_digital_twin.py", pre_push.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

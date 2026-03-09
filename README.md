@@ -202,6 +202,8 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `memory_upsert`
 - `memory_get`
 - `memory_validate`
+- `license_monitor`
+- `install_git_hooks`
 
 ### Math, Data, and Content
 

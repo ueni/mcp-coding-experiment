@@ -112,6 +112,8 @@ REPO_INDEX_FILE = Path(".build/index/repo_index.json")
 TOOL_CACHE_FILE = Path(".build/cache/tool_cache.json")
 RESULT_STORE_FILE = Path(".build/cache/result_store.json")
 OUTPUT_BASELINE_FILE = Path(".build/reports/TOOL_OUTPUT_BASELINE.json")
+REUSE_SPDX_REPORT = Path(".build/reports/REUSE.spdx")
+REUSE_LINT_REPORT = Path(".build/reports/REUSE_LINT.txt")
 LOCAL_MODELS_DIR = Path(os.getenv("LOCAL_MODELS_DIR", "/models"))
 LOCAL_EMBED_BACKEND = os.getenv("LOCAL_EMBED_BACKEND", "hash").strip().lower()
 LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "").strip()
@@ -122,7 +124,7 @@ LOCAL_INFER_ENDPOINT = os.getenv(
     "LOCAL_INFER_ENDPOINT", "http://127.0.0.1:11434/api/generate"
 ).strip()
 HOST_CA_CERT_FILE = os.getenv("HOST_CA_CERT_FILE", "").strip()
-SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest"}
+SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
     "diff",
@@ -1481,6 +1483,100 @@ def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
     return result
 
 
+def _chunk_strings(values: list[str], chunk_size: int) -> list[list[str]]:
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be >= 1")
+    return [values[i : i + chunk_size] for i in range(0, len(values), chunk_size)]
+
+
+def _require_reuse_cli() -> None:
+    if shutil.which("reuse") is None:
+        raise RuntimeError("reuse CLI not found; install python package 'reuse'")
+
+
+def _run_reuse(args: list[str], timeout_seconds: int = 120) -> dict[str, Any]:
+    _require_reuse_cli()
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    proc = subprocess.run(
+        ["reuse", *args],
+        cwd=str(REPO_PATH),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "command": ["reuse", *args],
+        "stdout": _trim_text(proc.stdout.strip()),
+        "stderr": _trim_text(proc.stderr.strip()),
+    }
+
+
+def _collect_spdx_license_ids(path: str = ".", recursive: bool = True) -> list[str]:
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+    found: set[str] = set()
+    matcher = re.compile(r"SPDX-License-Identifier:\s*(.+)")
+    token_re = re.compile(r"[A-Za-z0-9.\-+]+")
+    keywords = {"AND", "OR", "WITH"}
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        rel = candidate.relative_to(REPO_PATH)
+        rel_str = str(rel).replace("\\", "/")
+        if rel_str.startswith(".git/") or rel_str.startswith(".build/"):
+            continue
+        if _is_likely_binary(candidate):
+            continue
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines()[:120]:
+            match = matcher.search(line)
+            if not match:
+                continue
+            expr = match.group(1)
+            for token in token_re.findall(expr):
+                if token in keywords or token.startswith("LicenseRef-"):
+                    continue
+                found.add(token)
+    return sorted(found)
+
+
+def _collect_missing_spdx_headers(
+    path: str = ".",
+    recursive: bool = True,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    max_files: int = 5000,
+) -> list[str]:
+    if max_files < 1:
+        raise ValueError("max_files must be >= 1")
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+    missing: list[str] = []
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        rel = candidate.relative_to(REPO_PATH)
+        rel_str = str(rel).replace("\\", "/")
+        if rel_str.startswith(".git/") or rel_str.startswith(".build/") or rel_str.startswith("LICENSES/"):
+            continue
+        if not _allowed_by_globs(rel_str, include_globs=include_globs, exclude_globs=exclude_globs):
+            continue
+        if _is_likely_binary(candidate):
+            continue
+        try:
+            lines = _read_lines(candidate, encoding="utf-8")
+        except OSError:
+            continue
+        window = "\n".join(lines[:40])
+        if "SPDX-License-Identifier:" not in window:
+            missing.append(rel_str)
+            if len(missing) >= max_files:
+                break
+    return missing
+
+
 @mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Return repository state and server settings."""
@@ -2192,6 +2288,245 @@ def lab_repo_digital_twin(
         str(hotspot_limit),
     ]
     return _run_lab_script("repo_digital_twin.py", args)
+
+
+@mcp.tool()
+def license_monitor(
+    path: str = ".",
+    recursive: bool = True,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    run_reuse_lint: bool = True,
+    generate_spdx: bool = True,
+    spdx_output_path: str = str(REUSE_SPDX_REPORT),
+    lint_report_path: str = str(REUSE_LINT_REPORT),
+    auto_fix_headers: bool = False,
+    default_license: str = "MIT",
+    copyright_owner: str = "Project Contributors",
+    download_missing_licenses: bool = False,
+    max_missing_files: int = 5000,
+) -> dict[str, Any]:
+    """Check REUSE/FOSS license compliance and optionally auto-fix missing metadata."""
+    if max_missing_files < 1:
+        raise ValueError("max_missing_files must be >= 1")
+    _ensure_repo_path_exists()
+    _resolve_repo_path(path)
+    _resolve_repo_path(spdx_output_path)
+    _resolve_repo_path(lint_report_path)
+
+    missing_before = _collect_missing_spdx_headers(
+        path=path,
+        recursive=recursive,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        max_files=max_missing_files,
+    )
+    actions: list[str] = []
+
+    if auto_fix_headers and missing_before:
+        _require_mutations()
+        _require_reuse_cli()
+        year = str(datetime.now(timezone.utc).year)
+        copyright_line = f"{year} {copyright_owner.strip() or 'Project Contributors'}"
+        for chunk in _chunk_strings(missing_before, chunk_size=100):
+            cmd = [
+                "annotate",
+                "--merge-copyrights",
+                "--fallback-dot-license",
+                "--license",
+                default_license,
+                "--copyright",
+                copyright_line,
+                *chunk,
+            ]
+            proc = _run_reuse(cmd)
+            if not proc["ok"]:
+                raise RuntimeError(proc["stderr"] or proc["stdout"] or "reuse annotate failed")
+        actions.append(f"annotated_missing_headers:{len(missing_before)}")
+
+    missing_after = _collect_missing_spdx_headers(
+        path=path,
+        recursive=recursive,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        max_files=max_missing_files,
+    )
+
+    observed_ids = _collect_spdx_license_ids(path=path, recursive=recursive)
+    missing_license_texts = [
+        lid
+        for lid in observed_ids
+        if not (REPO_PATH / "LICENSES" / f"{lid}.txt").is_file()
+    ]
+
+    if download_missing_licenses and missing_license_texts:
+        _require_mutations()
+        _require_reuse_cli()
+        for lid in missing_license_texts:
+            proc = _run_reuse(["download", lid])
+            if not proc["ok"]:
+                raise RuntimeError(
+                    proc["stderr"] or proc["stdout"] or f"reuse download failed for {lid}"
+                )
+        actions.append(f"downloaded_license_texts:{len(missing_license_texts)}")
+        missing_license_texts = [
+            lid
+            for lid in observed_ids
+            if not (REPO_PATH / "LICENSES" / f"{lid}.txt").is_file()
+        ]
+
+    lint_result: dict[str, Any] | None = None
+    if run_reuse_lint:
+        lint_result = _run_reuse(["lint"])
+        lint_abs = _resolve_repo_path(lint_report_path)
+        lint_abs.parent.mkdir(parents=True, exist_ok=True)
+        lint_abs.write_text(
+            (
+                f"reuse lint exit_code={lint_result['exit_code']}\n\n"
+                f"{lint_result.get('stdout', '')}\n\n{lint_result.get('stderr', '')}\n"
+            ),
+            encoding="utf-8",
+        )
+
+    spdx_result: dict[str, Any] | None = None
+    if generate_spdx:
+        _require_reuse_cli()
+        spdx_result = _run_reuse(["spdx", "-o", spdx_output_path])
+        if not spdx_result["ok"]:
+            raise RuntimeError(spdx_result["stderr"] or spdx_result["stdout"] or "reuse spdx failed")
+
+    ok = (
+        len(missing_after) == 0
+        and len(missing_license_texts) == 0
+        and (lint_result is None or bool(lint_result.get("ok", False)))
+    )
+    return {
+        "schema": "license_monitor.v1",
+        "ok": ok,
+        "path": path,
+        "recursive": recursive,
+        "actions": actions,
+        "missing_spdx_header_count": len(missing_after),
+        "missing_spdx_headers": missing_after[:200],
+        "observed_spdx_license_ids": observed_ids,
+        "missing_license_text_count": len(missing_license_texts),
+        "missing_license_texts": missing_license_texts[:200],
+        "lint": lint_result,
+        "spdx": spdx_result,
+        "lint_report_path": lint_report_path if run_reuse_lint else None,
+        "spdx_output_path": spdx_output_path if generate_spdx else None,
+    }
+
+
+@mcp.tool()
+def install_git_hooks(
+    install_pre_commit: bool = True,
+    install_pre_push: bool = True,
+    include_foss_reports: bool = True,
+    include_lab_reports: bool = True,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Install git hooks that generate FOSS and lab reports."""
+    _require_mutations()
+    _require_git_repo()
+    hooks_rel = _git("rev-parse", "--git-path", "hooks").stdout.strip()
+    hooks_path_raw = Path(hooks_rel)
+    if hooks_path_raw.is_absolute():
+        hooks_dir = hooks_path_raw.resolve()
+        try:
+            hooks_dir.relative_to(REPO_PATH)
+        except ValueError as exc:
+            raise ValueError("git hooks path escapes repository root") from exc
+    else:
+        hooks_dir = _resolve_repo_path(hooks_rel)
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    if not install_pre_commit and not install_pre_push:
+        raise ValueError("at least one hook must be selected")
+
+    script_lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        'repo_root="$(git rev-parse --show-toplevel)"',
+        'cd "$repo_root"',
+        "mkdir -p .build/reports",
+        "",
+    ]
+    if include_foss_reports:
+        script_lines.extend(
+            [
+                "if ! command -v reuse >/dev/null 2>&1; then",
+                '  echo "reuse CLI not found. Install \\"reuse\\" before committing/pushing." >&2',
+                "  exit 1",
+                "fi",
+                "reuse lint > .build/reports/REUSE_LINT.txt",
+                "reuse spdx -o .build/reports/REUSE.spdx",
+                "",
+            ]
+        )
+    script_lines.extend(
+        [
+            "if command -v python >/dev/null 2>&1; then",
+            '  PYTHON_BIN="python"',
+            "elif command -v python3 >/dev/null 2>&1; then",
+            '  PYTHON_BIN="python3"',
+            "else",
+            '  echo "python or python3 is required for lab report hooks." >&2',
+            "  exit 1",
+            "fi",
+            "",
+        ]
+    )
+
+    pre_commit_lines = list(script_lines)
+    if include_lab_reports:
+        pre_commit_lines.append(
+            '"$PYTHON_BIN" toolchain/dev/labs/policy_gatekeeper.py --changed-ref HEAD '
+            '--report-path .build/reports/POLICY_GATEKEEPER.md'
+        )
+
+    pre_push_lines = list(script_lines)
+    if include_lab_reports:
+        pre_push_lines.append(
+            '"$PYTHON_BIN" toolchain/dev/labs/policy_gatekeeper.py --changed-ref HEAD '
+            '--report-path .build/reports/POLICY_GATEKEEPER.md'
+        )
+        pre_push_lines.append(
+            '"$PYTHON_BIN" toolchain/dev/labs/repo_digital_twin.py '
+            '--json .build/reports/REPO_DIGITAL_TWIN.json '
+            '--md .build/reports/REPO_DIGITAL_TWIN.md'
+        )
+
+    installed: list[str] = []
+    skipped: list[str] = []
+    if install_pre_commit:
+        pre_commit_path = hooks_dir / "pre-commit"
+        if pre_commit_path.exists() and not overwrite:
+            skipped.append(str(pre_commit_path))
+        else:
+            pre_commit_path.write_text("\n".join(pre_commit_lines).strip() + "\n", encoding="utf-8")
+            pre_commit_path.chmod(0o755)
+            installed.append(str(pre_commit_path.relative_to(REPO_PATH)))
+
+    if install_pre_push:
+        pre_push_path = hooks_dir / "pre-push"
+        if pre_push_path.exists() and not overwrite:
+            skipped.append(str(pre_push_path))
+        else:
+            pre_push_path.write_text("\n".join(pre_push_lines).strip() + "\n", encoding="utf-8")
+            pre_push_path.chmod(0o755)
+            installed.append(str(pre_push_path.relative_to(REPO_PATH)))
+
+    return {
+        "schema": "install_git_hooks.v1",
+        "hooks_dir": str(hooks_dir.relative_to(REPO_PATH)),
+        "installed": installed,
+        "skipped": skipped,
+        "overwrite": overwrite,
+        "include_foss_reports": include_foss_reports,
+        "include_lab_reports": include_lab_reports,
+    }
 
 
 @mcp.tool()
