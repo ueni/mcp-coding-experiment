@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+
+SPDX-License-Identifier: MIT
+-->
+
 # JSON Settings Files
 
 This page documents the JSON configuration files under `.config/dev/labs`.

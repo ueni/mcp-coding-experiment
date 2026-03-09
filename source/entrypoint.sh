@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 
 umask 027

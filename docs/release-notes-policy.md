@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+
+SPDX-License-Identifier: MIT
+-->
+
 # Release Notes and Documentation Policy
 
 ## Purpose

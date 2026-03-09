@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
 FROM python:3.12.8-slim-bookworm
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

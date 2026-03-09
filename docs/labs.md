@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+
+SPDX-License-Identifier: MIT
+-->
+
 # MCP Fun Labs
 
 Workflows implemented in this folder:

@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+
+SPDX-License-Identifier: MIT
+-->
+
 # codebase-tooling-mcp
 
 MCP server for repository engineering workflows on a single mounted Git repository.

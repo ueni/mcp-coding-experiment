@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 2026 Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
 [tool.black]
 line-length = 88
 target-version = ["py312"]
