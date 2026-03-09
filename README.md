@@ -277,6 +277,7 @@ See [MCP Fun Labs](/repo/docs/labs.md) for command examples and expected outputs
 ## Documentation
 
 - [Documentation Index](/repo/docs/index.md)
+- [Tooling White Paper](/repo/docs/tooling-whitepaper.md)
 - [JSON Settings Files](/repo/docs/json-settings.md)
 - [MCP Fun Labs](/repo/docs/labs.md)
 - [Troubleshooting](/repo/docs/troubleshooting.md)
