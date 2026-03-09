@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
     REPO_PATH=/repo \
     HOST=0.0.0.0 \
     PORT=8000 \
@@ -21,7 +22,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST_CA_CERT_FILE=
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates docker.io curl tesseract-ocr antiword \
+    && apt-get install -y --no-install-recommends git ca-certificates curl tesseract-ocr antiword \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && printf "Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: %s\nComponents: stable\nSigned-By: /etc/apt/keyrings/docker.asc\n" "$(. /etc/os-release && echo "$VERSION_CODENAME")" > /etc/apt/sources.list.d/docker.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
