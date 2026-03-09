@@ -837,6 +837,19 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(out["missing_artifacts"], [])
         self.assertEqual(out["missing_result_ids"], [])
 
+    def test_fast_path_dev_minimal(self):
+        out = self.server.fast_path_dev(
+            task="quick-check",
+            refresh_index=False,
+            run_readiness=False,
+            enforce_tool_chain=False,
+            store_result=False,
+        )
+        self.assertEqual(out["schema"], "fast_path_dev.v1")
+        self.assertEqual(out["task"], "quick-check")
+        self.assertTrue(out["ok"])
+        self.assertIn("token_budget", out["steps"])
+
 
 if __name__ == "__main__":
     unittest.main()

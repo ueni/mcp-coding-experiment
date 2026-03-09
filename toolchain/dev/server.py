@@ -6044,6 +6044,90 @@ def required_tool_chain(
 
 
 @mcp.tool()
+def fast_path_dev(
+    task: str = "review",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    refresh_index: bool = True,
+    index_path: str = ".",
+    run_readiness: bool = True,
+    readiness_test_runner: str = "unittest",
+    readiness_test_target: str = "tests",
+    enforce_tool_chain: bool = False,
+    required_tools: list[str] | None = None,
+    store_result: bool = True,
+) -> dict[str, Any]:
+    """Run a low-token developer fast path workflow in one call."""
+    if not task.strip():
+        raise ValueError("task must not be empty")
+    _ensure_repo_path_exists()
+
+    token_profile = token_budget_guard(default_output_profile="compact")
+    steps: dict[str, Any] = {
+        "token_budget": {
+            "max_output_chars": token_profile.get("max_output_chars"),
+            "default_output_profile": token_profile.get("default_output_profile"),
+        }
+    }
+    required_chain: list[str] = []
+
+    if refresh_index:
+        idx = repo_index_daemon(
+            mode="refresh",
+            path=index_path,
+            output_profile="compact",
+            summary_mode="quick",
+            incremental=True,
+        )
+        steps["repo_index"] = idx
+        required_chain.append("repo_index_daemon")
+
+    if run_readiness:
+        readiness = release_readiness(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            run_tests=True,
+            test_runner=readiness_test_runner,
+            test_target=readiness_test_target,
+            run_docs_check=True,
+            run_security_check=True,
+            run_license_check=True,
+            run_risk_check=True,
+            run_impact_check=True,
+            summary_mode="quick",
+        )
+        steps["release_readiness"] = readiness
+        required_chain.append("release_readiness")
+
+    chain_result = None
+    if enforce_tool_chain:
+        chain_result = required_tool_chain(
+            required_tools=required_tools or required_chain or ["release_readiness"],
+            require_order=False,
+            max_age_minutes=60,
+        )
+        steps["required_tool_chain"] = chain_result
+
+    ok = True
+    if isinstance(steps.get("release_readiness"), dict):
+        ok = ok and bool(steps["release_readiness"].get("ok", False))
+    if isinstance(chain_result, dict):
+        ok = ok and bool(chain_result.get("ok", False))
+
+    out: dict[str, Any] = {
+        "schema": "fast_path_dev.v1",
+        "task": task,
+        "ok": ok,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "steps": steps,
+    }
+    if store_result:
+        out["result_id"] = _result_store_put("fast_path_dev", out)
+    return out
+
+
+@mcp.tool()
 def encode_lossless(
     value: Any,
     use_symbols: bool = True,
