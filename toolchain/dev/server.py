@@ -5944,6 +5944,106 @@ def release_readiness(
 
 
 @mcp.tool()
+def required_tool_chain(
+    required_tools: list[str],
+    required_artifacts: list[str] | None = None,
+    required_result_ids: list[str] | None = None,
+    require_order: bool = True,
+    max_age_minutes: int | None = None,
+) -> dict[str, Any]:
+    """Validate required tool chain execution from result telemetry and artifacts."""
+    if not required_tools:
+        raise ValueError("required_tools must not be empty")
+    if max_age_minutes is not None and max_age_minutes < 1:
+        raise ValueError("max_age_minutes must be >= 1 when provided")
+
+    payload = _result_store_load()
+    rows: list[dict[str, Any]] = []
+    for rid, row in payload.get("results", {}).items():
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                "result_id": rid,
+                "tool": str(row.get("tool", "")),
+                "created_at": str(row.get("created_at", "")),
+            }
+        )
+    rows.sort(key=lambda x: x["created_at"])
+
+    if max_age_minutes is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            created_raw = row.get("created_at", "")
+            try:
+                created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            if created_dt >= cutoff:
+                filtered.append(row)
+        rows = filtered
+
+    missing_tools: list[str] = []
+    matched: list[dict[str, Any]] = []
+    if require_order:
+        idx = 0
+        for need in required_tools:
+            found = None
+            for j in range(idx, len(rows)):
+                if rows[j]["tool"] == need:
+                    found = rows[j]
+                    idx = j + 1
+                    break
+            if found is None:
+                missing_tools.append(need)
+            else:
+                matched.append(found)
+    else:
+        by_tool: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            by_tool.setdefault(row["tool"], []).append(row)
+        for need in required_tools:
+            entries = by_tool.get(need, [])
+            if not entries:
+                missing_tools.append(need)
+            else:
+                matched.append(entries[-1])
+
+    missing_result_ids: list[str] = []
+    if required_result_ids:
+        existing_ids = {row["result_id"] for row in rows}
+        for rid in required_result_ids:
+            if rid not in existing_ids:
+                missing_result_ids.append(rid)
+
+    required_artifacts = required_artifacts or []
+    missing_artifacts: list[str] = []
+    for rel in required_artifacts:
+        p = _resolve_repo_path(rel)
+        if not p.exists():
+            missing_artifacts.append(rel)
+
+    ok = not missing_tools and not missing_artifacts and not missing_result_ids
+    return {
+        "schema": "required_tool_chain.v1",
+        "ok": ok,
+        "require_order": require_order,
+        "max_age_minutes": max_age_minutes,
+        "required_tools": required_tools,
+        "matched_tools": matched,
+        "missing_tools": missing_tools,
+        "required_artifacts": required_artifacts,
+        "missing_artifacts": missing_artifacts,
+        "required_result_ids": required_result_ids or [],
+        "missing_result_ids": missing_result_ids,
+        "observed_result_count": len(rows),
+    }
+
+
+@mcp.tool()
 def encode_lossless(
     value: Any,
     use_symbols: bool = True,

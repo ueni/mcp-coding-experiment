@@ -210,6 +210,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `change_impact_gate`
 - `smart_fix_batch`
 - `release_readiness`
+- `required_tool_chain`
 - `encode_lossless`
 - `decode_lossless`
 - `roundtrip_verify`

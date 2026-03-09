@@ -817,6 +817,26 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(applied["schema"], "delta_codec.v1")
         self.assertEqual(applied["value"], target)
 
+    def test_required_tool_chain(self):
+        a = self.server.result_handle(mode="store", tool="tool_a", value={"ok": 1})
+        b = self.server.result_handle(mode="store", tool="tool_b", value={"ok": 1})
+        report = self.repo_path / ".build" / "reports" / "SAMPLE.txt"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("ok\n", encoding="utf-8")
+
+        out = self.server.required_tool_chain(
+            required_tools=["tool_a", "tool_b"],
+            required_artifacts=[".build/reports/SAMPLE.txt"],
+            required_result_ids=[a["result_id"], b["result_id"]],
+            require_order=True,
+            max_age_minutes=60,
+        )
+        self.assertEqual(out["schema"], "required_tool_chain.v1")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["missing_tools"], [])
+        self.assertEqual(out["missing_artifacts"], [])
+        self.assertEqual(out["missing_result_ids"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
