@@ -132,7 +132,12 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - summarize_diff
 - risk_scoring
 - json_query
+- prompt_optimize
 - token_budget_guard
+- cache_control
+- result_handle
+- tool_benchmark
+- output_size_guard
 - memory_upsert
 - memory_get
 - memory_validate
@@ -168,5 +173,6 @@ Start here: `toolchain/dev/labs/README.md`
 - Path traversal outside the mounted repo is blocked.
 - Mutating operations require `ALLOW_MUTATIONS=true`.
 - Tool outputs default to compact responses; adjust with `token_budget_guard` and per-tool `output_profile`.
+- Prefer prompt/tool usage with `fields`, `offset`, `limit`, `summary_mode="quick"`, and `store_result=true` for large outputs.
 - `git commit` still needs Git user identity to be configured in the repo or via environment.
 - In stdio mode, do not write logs to stdout.

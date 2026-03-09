@@ -12,6 +12,7 @@ import re
 import fnmatch
 import uuid
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -61,7 +62,9 @@ EDIT_TXN_DIR = Path(".build/transactions")
 API_SNAPSHOT_FILE = Path(".build/reports/API_SURFACE.json")
 REPO_INDEX_FILE = Path(".build/index/repo_index.json")
 TOOL_CACHE_FILE = Path(".build/cache/tool_cache.json")
-SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git"}
+RESULT_STORE_FILE = Path(".build/cache/result_store.json")
+OUTPUT_BASELINE_FILE = Path(".build/reports/TOOL_OUTPUT_BASELINE.json")
+SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
     "diff",
@@ -77,7 +80,8 @@ OUTPUT_PROFILES = {"compact", "normal", "verbose"}
 mcp = FastMCP(
     "git-repo-manager",
     instructions=(
-        "Manage exactly one mounted Git repository and its files. "
+        "Manage exactly one mounted Git repository and its files with minimal output. "
+        "Prefer compact schemas, selective fields, pagination, and cached/indexed workflows. "
         "All paths are relative to the repository root."
     ),
 )
@@ -446,6 +450,109 @@ def _cache_set(tool: str, key: str, value: Any, max_entries: int = 50) -> None:
     entries[tool] = tool_entries
     payload["entries"] = entries
     _cache_save(payload)
+
+
+def _cache_clear(tool: str | None = None) -> dict[str, Any]:
+    payload = _cache_load()
+    entries = payload.get("entries", {})
+    if not isinstance(entries, dict):
+        entries = {}
+    removed = 0
+    if tool:
+        tool_entries = entries.pop(tool, {})
+        if isinstance(tool_entries, dict):
+            removed = len(tool_entries)
+    else:
+        for v in entries.values():
+            if isinstance(v, dict):
+                removed += len(v)
+        entries = {}
+    payload["entries"] = entries
+    _cache_save(payload)
+    return {"removed_entries": removed, "tool": tool or "*"}
+
+
+def _cache_stats() -> dict[str, Any]:
+    payload = _cache_load()
+    entries = payload.get("entries", {})
+    if not isinstance(entries, dict):
+        entries = {}
+    per_tool: dict[str, int] = {}
+    total = 0
+    for tool, rows in entries.items():
+        if isinstance(rows, dict):
+            per_tool[tool] = len(rows)
+            total += len(rows)
+    return {"total_entries": total, "tools": per_tool}
+
+
+def _result_store_load() -> dict[str, Any]:
+    payload = _json_file_load(RESULT_STORE_FILE, {"results": {}})
+    if not isinstance(payload, dict):
+        return {"results": {}}
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        results = {}
+    return {"results": results}
+
+
+def _result_store_save(payload: dict[str, Any]) -> None:
+    _json_file_save(RESULT_STORE_FILE, payload)
+
+
+def _result_store_put(tool: str, value: Any, max_entries: int = 200) -> str:
+    payload = _result_store_load()
+    results = payload["results"]
+    rid = uuid.uuid4().hex[:16]
+    results[rid] = {"tool": tool, "created_at": _now_iso(), "value": value}
+    if len(results) > max_entries:
+        ordered = sorted(
+            results.items(), key=lambda kv: str(kv[1].get("created_at", "")), reverse=True
+        )
+        results = dict(ordered[:max_entries])
+    payload["results"] = results
+    _result_store_save(payload)
+    return rid
+
+
+def _result_store_get(result_id: str) -> dict[str, Any]:
+    payload = _result_store_load()
+    row = payload["results"].get(result_id)
+    if not isinstance(row, dict):
+        raise FileNotFoundError(f"result handle not found: {result_id}")
+    return row
+
+
+def _compress_table(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        return {"columns": [], "rows": []}
+    cols = sorted({k for r in records for k in r.keys()})
+    rows = [[r.get(c) for c in cols] for r in records]
+    return {"columns": cols, "rows": rows}
+
+
+def _payload_size_bytes(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=True).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8"))
+
+
+def _adaptive_limit(requested: int, soft_cap: int = 500) -> int:
+    if requested < 1:
+        raise ValueError("requested limit must be >= 1")
+    budget = _token_budget_load().get("max_output_chars", MAX_OUTPUT_CHARS)
+    if not isinstance(budget, int):
+        budget = MAX_OUTPUT_CHARS
+    factor = 1.0
+    if budget <= 100000:
+        factor = 0.75
+    if budget <= 50000:
+        factor = 0.5
+    if budget <= 25000:
+        factor = 0.35
+    cap = max(10, int(soft_cap * factor))
+    return min(requested, cap)
 
 
 def _fingerprint_path(
@@ -1282,10 +1389,13 @@ def find_paths(
     output_profile: str = "compact",
     offset: int = 0,
     limit: int | None = None,
+    adaptive_limits: bool = True,
 ) -> list[str]:
     """Find files and/or directories under a repository-relative path."""
     if max_entries < 1:
         raise ValueError("max_entries must be >= 1")
+    if adaptive_limits:
+        max_entries = _adaptive_limit(max_entries, soft_cap=2000)
     if max_depth is not None and max_depth < 0:
         raise ValueError("max_depth must be >= 0")
     if file_type not in {"any", "file", "dir"}:
@@ -1361,6 +1471,11 @@ def grep(
     fields: list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    dedupe: bool = True,
+    compress: bool = False,
+    adaptive_limits: bool = True,
+    summary_mode: str = "full",
+    store_result: bool = False,
 ) -> list[dict[str, Any]]:
     """Search repository files for a regex pattern and return matches.
 
@@ -1372,7 +1487,11 @@ def grep(
     if max_file_bytes < 1:
         raise ValueError("max_file_bytes must be >= 1")
     profile = _default_output_profile(output_profile)
-    if profile == "compact":
+    if summary_mode not in {"full", "quick"}:
+        raise ValueError("summary_mode must be one of: full, quick")
+    if adaptive_limits:
+        max_matches = _adaptive_limit(max_matches, soft_cap=250)
+    elif profile == "compact":
         max_matches = min(max_matches, 250)
 
     root = _resolve_repo_path(path)
@@ -1432,8 +1551,36 @@ def grep(
                 continue
             search_file(p)
 
+    if dedupe:
+        uniq: dict[str, dict[str, Any]] = {}
+        for row in results:
+            key = f"{row.get('path')}:{row.get('line')}:{row.get('match')}"
+            if key not in uniq:
+                uniq[key] = row
+        results = list(uniq.values())
+    total = len(results)
     results = _paginate(results, offset=offset, limit=limit)
     results = _select_fields(results, fields)
+    if summary_mode == "quick":
+        summary = {
+            "schema": "grep.quick.v1",
+            "total_matches": total,
+            "returned": len(results),
+            "paths": sorted({str(r.get("path")) for r in results if r.get("path")})[:100],
+        }
+        if store_result:
+            rid = _result_store_put("grep", summary)
+            summary["result_id"] = rid
+        return [summary]
+    if compress:
+        compressed = _compress_table(results)
+        if store_result:
+            rid = _result_store_put("grep", compressed)
+            compressed["result_id"] = rid
+        return [compressed]
+    if store_result:
+        rid = _result_store_put("grep", results)
+        return [{"schema": "grep.result_handle.v1", "result_id": rid, "count": len(results)}]
     return results
 
 
@@ -1657,12 +1804,21 @@ def semantic_find(
     fields: list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    dedupe: bool = True,
+    compress: bool = False,
+    adaptive_limits: bool = True,
+    summary_mode: str = "full",
+    store_result: bool = False,
 ) -> dict[str, Any]:
     """Ranked search over file paths, symbols, and text matches."""
     if not query.strip():
         raise ValueError("query must not be empty")
     if max_results < 1:
         raise ValueError("max_results must be >= 1")
+    if summary_mode not in {"full", "quick"}:
+        raise ValueError("summary_mode must be one of: full, quick")
+    if adaptive_limits:
+        max_results = _adaptive_limit(max_results, soft_cap=100)
     profile = _default_output_profile(output_profile)
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -1741,24 +1897,47 @@ def semantic_find(
                 "reasons": ["text_match"],
             }
 
-    ranked = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)[:max_results]
+    ranked = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)
+    if dedupe:
+        uniq: dict[str, dict[str, Any]] = {}
+        for row in ranked:
+            key = f"{row.get('kind')}:{row.get('path')}:{row.get('line', '')}:{row.get('name', '')}"
+            if key not in uniq:
+                uniq[key] = row
+        ranked = list(uniq.values())
+    ranked = ranked[:max_results]
     ranked = _paginate(ranked, offset=offset, limit=limit)
-    ranked = _select_fields(ranked, fields)
     if profile == "compact":
         ranked = [
             {
-                "kind": r["kind"],
-                "path": r["path"],
-                "score": r["score"],
+                "kind": r.get("kind"),
+                "path": r.get("path"),
+                "score": r.get("score"),
             }
             for r in ranked
         ]
-    return {
+    ranked = _select_fields(ranked, fields)
+    result = {
+        "schema": "semantic_find.v1",
         "query": query,
         "path": str(root.relative_to(REPO_PATH)),
         "count": len(ranked),
         "results": ranked,
     }
+    if summary_mode == "quick":
+        result = {
+            "schema": "semantic_find.quick.v1",
+            "query": query,
+            "count": len(ranked),
+            "top_paths": [r.get("path") for r in ranked[:20] if isinstance(r, dict)],
+        }
+    if compress and isinstance(result.get("results"), list):
+        result["results_compressed"] = _compress_table(result["results"])
+        result.pop("results", None)
+    if store_result:
+        rid = _result_store_put("semantic_find", result)
+        result["result_id"] = rid
+    return result
 
 
 @mcp.tool()
@@ -1772,10 +1951,13 @@ def symbol_index(
     fields: list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    adaptive_limits: bool = True,
 ) -> list[dict[str, Any]]:
     """Index Python symbols (classes/functions) for focused navigation."""
     if max_symbols < 1:
         raise ValueError("max_symbols must be >= 1")
+    if adaptive_limits:
+        max_symbols = _adaptive_limit(max_symbols, soft_cap=2000)
     profile = _default_output_profile(output_profile)
     if profile == "compact":
         max_symbols = min(max_symbols, 2000)
@@ -1837,10 +2019,18 @@ def dependency_map(
     fields: list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    adaptive_limits: bool = True,
+    summary_mode: str = "full",
+    compress: bool = False,
+    store_result: bool = False,
 ) -> dict[str, Any]:
     """Build a Python import dependency map for repo-local modules."""
     if max_files < 1:
         raise ValueError("max_files must be >= 1")
+    if summary_mode not in {"full", "quick"}:
+        raise ValueError("summary_mode must be one of: full, quick")
+    if adaptive_limits:
+        max_files = _adaptive_limit(max_files, soft_cap=1500)
     profile = _default_output_profile(output_profile)
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -1935,17 +2125,25 @@ def dependency_map(
         )
 
     result: dict[str, Any] = {
+        "schema": "dependency_map.v1",
         "root": str(root.relative_to(REPO_PATH)),
         "python_file_count": python_file_count,
         "edge_count": len(edges),
         "edges": _select_fields(_paginate(edges, offset=offset, limit=limit), fields),
     }
     if profile == "compact":
-        return {
+        compact = {
+            "schema": "dependency_map.compact.v1",
             "python_file_count": result["python_file_count"],
             "edge_count": result["edge_count"],
-            "edges": edges[:500],
+            "edges": result["edges"][:500] if isinstance(result["edges"], list) else [],
         }
+        if compress:
+            compact["edges_compressed"] = _compress_table(compact["edges"])
+            compact.pop("edges", None)
+        if store_result:
+            compact["result_id"] = _result_store_put("dependency_map", compact)
+        return compact
     if profile == "verbose":
         result["unresolved_imports"] = unresolved
         inbound: dict[str, int] = {}
@@ -1965,6 +2163,18 @@ def dependency_map(
                 reverse=True,
             )[:20],
         }
+    if summary_mode == "quick":
+        result = {
+            "schema": "dependency_map.quick.v1",
+            "root": result["root"],
+            "python_file_count": result["python_file_count"],
+            "edge_count": result["edge_count"],
+        }
+    if compress and isinstance(result.get("edges"), list):
+        result["edges_compressed"] = _compress_table(result["edges"])
+        result.pop("edges", None)
+    if store_result:
+        result["result_id"] = _result_store_put("dependency_map", result)
     return result
 
 
@@ -1978,10 +2188,18 @@ def call_graph(
     fields: list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    adaptive_limits: bool = True,
+    summary_mode: str = "full",
+    compress: bool = False,
+    store_result: bool = False,
 ) -> dict[str, Any]:
     """Build a simple Python function-level call graph."""
     if max_edges < 1:
         raise ValueError("max_edges must be >= 1")
+    if summary_mode not in {"full", "quick"}:
+        raise ValueError("summary_mode must be one of: full, quick")
+    if adaptive_limits:
+        max_edges = _adaptive_limit(max_edges, soft_cap=2000)
     profile = _default_output_profile(output_profile)
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -2041,17 +2259,34 @@ def call_graph(
     paged_edges = _select_fields(_paginate(edges, offset=offset, limit=limit), fields)
 
     if profile == "compact":
-        return {"edge_count": len(edges), "edges": paged_edges[:500]}
+        compact = {"schema": "call_graph.compact.v1", "edge_count": len(edges), "edges": paged_edges[:500]}
+        if compress:
+            compact["edges_compressed"] = _compress_table(compact["edges"])
+            compact.pop("edges", None)
+        if store_result:
+            compact["result_id"] = _result_store_put("call_graph", compact)
+        return compact
     inbound: dict[str, int] = {}
     for edge in edges:
         inbound[edge["callee"]] = inbound.get(edge["callee"], 0) + 1
-    result: dict[str, Any] = {"edge_count": len(edges), "edges": paged_edges}
+    result: dict[str, Any] = {"schema": "call_graph.v1", "edge_count": len(edges), "edges": paged_edges}
     if profile == "verbose":
         result["most_called"] = sorted(
             [{"symbol": k, "count": v} for k, v in inbound.items()],
             key=lambda x: x["count"],
             reverse=True,
         )[:25]
+    if summary_mode == "quick":
+        result = {
+            "schema": "call_graph.quick.v1",
+            "edge_count": result["edge_count"],
+            "top_called": result.get("most_called", [])[:10] if profile == "verbose" else [],
+        }
+    if compress and isinstance(result.get("edges"), list):
+        result["edges_compressed"] = _compress_table(result["edges"])
+        result.pop("edges", None)
+    if store_result:
+        result["result_id"] = _result_store_put("call_graph", result)
     return result
 
 
@@ -2373,6 +2608,42 @@ def json_query(
 
 
 @mcp.tool()
+def prompt_optimize(
+    prompt: str,
+    mode: str = "coding",
+    max_chars: int = 2000,
+) -> dict[str, Any]:
+    """Produce a compact prompt variant tuned for low-token tool workflows."""
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty")
+    if max_chars < 100:
+        raise ValueError("max_chars must be >= 100")
+    if mode not in {"coding", "review", "search"}:
+        raise ValueError("mode must be one of: coding, review, search")
+
+    header = {
+        "coding": "Goal: implement minimal safe change. Use compact outputs and bounded queries.",
+        "review": "Goal: find high-severity issues first. Return concise findings with file/line.",
+        "search": "Goal: locate exact targets quickly. Use fields, pagination, and result handles.",
+    }[mode]
+    suffix = (
+        "Constraints: prefer output_profile=compact; set fields; use offset/limit; "
+        "use summary_mode=quick first; store_result=true for large outputs."
+    )
+    body = re.sub(r"\s+", " ", prompt.strip())
+    optimized = f"{header} Request: {body} {suffix}".strip()
+    if len(optimized) > max_chars:
+        optimized = optimized[:max_chars]
+    return {
+        "schema": "prompt_optimize.v1",
+        "mode": mode,
+        "original_chars": len(prompt),
+        "optimized_chars": len(optimized),
+        "optimized_prompt": optimized,
+    }
+
+
+@mcp.tool()
 def token_budget_guard(
     max_output_chars: int | None = None,
     default_output_profile: str | None = None,
@@ -2402,6 +2673,172 @@ def token_budget_guard(
         current["updated_at"] = _now_iso()
         _json_file_save(TOKEN_BUDGET_FILE, current)
     return current
+
+
+@mcp.tool()
+def cache_control(
+    mode: str = "stats",
+    tool: str | None = None,
+) -> dict[str, Any]:
+    """Inspect or clear server-side tool cache entries."""
+    if mode not in {"stats", "clear", "clear_tool"}:
+        raise ValueError("mode must be one of: stats, clear, clear_tool")
+    if mode == "stats":
+        return {"mode": mode, **_cache_stats()}
+    if mode == "clear":
+        return {"mode": mode, **_cache_clear(None)}
+    if not tool:
+        raise ValueError("tool is required for clear_tool mode")
+    return {"mode": mode, **_cache_clear(tool)}
+
+
+@mcp.tool()
+def result_handle(
+    mode: str = "fetch",
+    result_id: str = "",
+    tool: str = "",
+    value: Any = None,
+    offset: int = 0,
+    limit: int | None = None,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
+    """Store/fetch/list/clear result handles for large payload workflows."""
+    if mode not in {"store", "fetch", "list", "clear"}:
+        raise ValueError("mode must be one of: store, fetch, list, clear")
+    if mode == "store":
+        rid = _result_store_put(tool=tool or "manual", value=value)
+        return {"mode": mode, "result_id": rid}
+    if mode == "list":
+        payload = _result_store_load()
+        items = []
+        for rid, row in payload["results"].items():
+            items.append(
+                {
+                    "result_id": rid,
+                    "tool": row.get("tool"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+        items = sorted(items, key=lambda x: str(x.get("created_at", "")), reverse=True)
+        items = _paginate(items, offset=offset, limit=limit)
+        items = _select_fields(items, fields)
+        return {"mode": mode, "count": len(items), "results": items}
+    if mode == "clear":
+        _result_store_save({"results": {}})
+        return {"mode": mode, "cleared": True}
+
+    if not result_id:
+        raise ValueError("result_id is required for fetch mode")
+    row = _result_store_get(result_id)
+    value_out = row.get("value")
+    if isinstance(value_out, list):
+        value_out = _paginate(value_out, offset=offset, limit=limit)
+        if value_out and isinstance(value_out[0], dict):
+            value_out = _select_fields(value_out, fields)
+    return {
+        "mode": mode,
+        "result_id": result_id,
+        "tool": row.get("tool"),
+        "created_at": row.get("created_at"),
+        "value": value_out,
+    }
+
+
+@mcp.tool()
+def tool_benchmark(
+    tools: list[str] | None = None,
+    iterations: int = 3,
+    warmup: int = 1,
+) -> dict[str, Any]:
+    """Benchmark representative tool invocations for latency and payload size."""
+    if iterations < 1:
+        raise ValueError("iterations must be >= 1")
+    if warmup < 0:
+        raise ValueError("warmup must be >= 0")
+
+    catalog = {
+        "find_paths": lambda: find_paths(path=".", recursive=True, max_entries=500, output_profile="compact"),
+        "grep": lambda: grep(pattern="def ", path="toolchain/dev", recursive=True, max_matches=100, output_profile="compact"),
+        "symbol_index": lambda: symbol_index(path="toolchain/dev", recursive=True, max_symbols=1000, output_profile="compact"),
+        "dependency_map": lambda: dependency_map(path="toolchain/dev", recursive=True, max_files=1000, output_profile="compact", summary_mode="quick"),
+        "call_graph": lambda: call_graph(path="toolchain/dev", recursive=True, max_edges=1000, output_profile="compact", summary_mode="quick"),
+        "semantic_find": lambda: semantic_find(query="tool cache", path="toolchain/dev", max_results=20, output_profile="compact"),
+        "tree_sitter_core": lambda: tree_sitter_core(path="toolchain/dev", mode="parse", max_files=20, max_nodes=500, output_profile="compact", summary_mode="quick"),
+    }
+    selected = tools or list(catalog.keys())
+    unknown = [t for t in selected if t not in catalog]
+    if unknown:
+        raise ValueError(f"unknown benchmark tools: {', '.join(unknown)}")
+
+    results: list[dict[str, Any]] = []
+    for tool in selected:
+        fn = catalog[tool]
+        for _ in range(warmup):
+            fn()
+        latencies_ms: list[float] = []
+        size_bytes: list[int] = []
+        for _ in range(iterations):
+            t0 = time.perf_counter()
+            out = fn()
+            t1 = time.perf_counter()
+            latencies_ms.append((t1 - t0) * 1000.0)
+            size_bytes.append(_payload_size_bytes(out))
+        results.append(
+            {
+                "tool": tool,
+                "iterations": iterations,
+                "latency_ms_avg": round(sum(latencies_ms) / len(latencies_ms), 2),
+                "latency_ms_p95": round(sorted(latencies_ms)[int(max(0, len(latencies_ms) * 0.95 - 1))], 2),
+                "payload_bytes_avg": int(sum(size_bytes) / len(size_bytes)),
+                "payload_bytes_max": int(max(size_bytes)),
+            }
+        )
+
+    return {"schema": "tool_benchmark.v1", "results": results}
+
+
+@mcp.tool()
+def output_size_guard(
+    mode: str = "check",
+    tools: list[str] | None = None,
+    tolerance_ratio: float = 1.2,
+    baseline_path: str = str(OUTPUT_BASELINE_FILE),
+) -> dict[str, Any]:
+    """Write/check baseline payload sizes to catch output-size regressions."""
+    if mode not in {"write", "check"}:
+        raise ValueError("mode must be one of: write, check")
+    if tolerance_ratio < 1.0:
+        raise ValueError("tolerance_ratio must be >= 1.0")
+
+    bench = tool_benchmark(tools=tools, iterations=1, warmup=0)
+    current = {r["tool"]: int(r["payload_bytes_max"]) for r in bench["results"]}
+    baseline_file = _resolve_repo_path(baseline_path)
+
+    if mode == "write":
+        _require_mutations()
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_text(
+            json.dumps({"generated_at": _now_iso(), "sizes": current}, indent=2),
+            encoding="utf-8",
+        )
+        return {"mode": mode, "baseline_path": baseline_path, "sizes": current}
+
+    if not baseline_file.is_file():
+        raise FileNotFoundError(baseline_path)
+    baseline = json.loads(baseline_file.read_text(encoding="utf-8"))
+    prev = baseline.get("sizes", {})
+    regressions: list[dict[str, Any]] = []
+    for tool, cur in current.items():
+        old = int(prev.get(tool, cur))
+        if cur > int(old * tolerance_ratio):
+            regressions.append({"tool": tool, "baseline": old, "current": cur})
+    return {
+        "mode": mode,
+        "baseline_path": baseline_path,
+        "ok": not regressions,
+        "regressions": regressions,
+        "current_sizes": current,
+    }
 
 
 @mcp.tool()
@@ -2846,12 +3283,21 @@ def tree_sitter_core(
     fields: list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    adaptive_limits: bool = True,
+    summary_mode: str = "full",
+    compress: bool = False,
+    store_result: bool = False,
 ) -> dict[str, Any]:
     """Parse/search syntax trees via Tree-sitter when available."""
     if mode not in {"status", "parse", "search"}:
         raise ValueError("mode must be one of: status, parse, search")
     if max_files < 1 or max_nodes < 1:
         raise ValueError("max_files and max_nodes must be >= 1")
+    if summary_mode not in {"full", "quick"}:
+        raise ValueError("summary_mode must be one of: full, quick")
+    if adaptive_limits:
+        max_files = _adaptive_limit(max_files, soft_cap=120)
+        max_nodes = _adaptive_limit(max_nodes, soft_cap=1500)
     profile = _default_output_profile(output_profile)
     available = _tree_sitter_available()
     root = _resolve_repo_path(path)
@@ -2960,7 +3406,8 @@ def tree_sitter_core(
     else:
         files = _select_fields(files, fields)
 
-    return {
+    result = {
+        "schema": "tree_sitter_core.v1",
         "available": available,
         "mode": mode,
         "path": str(root.relative_to(REPO_PATH)),
@@ -2968,6 +3415,21 @@ def tree_sitter_core(
         "node_count": total_nodes,
         "files": files,
     }
+    if summary_mode == "quick":
+        result = {
+            "schema": "tree_sitter_core.quick.v1",
+            "available": available,
+            "mode": mode,
+            "path": str(root.relative_to(REPO_PATH)),
+            "file_count": matched_files,
+            "node_count": total_nodes,
+        }
+    if compress and isinstance(result.get("files"), list):
+        result["files_compressed"] = _compress_table(result["files"])
+        result.pop("files", None)
+    if store_result:
+        result["result_id"] = _result_store_put("tree_sitter_core", result)
+    return result
 
 
 @mcp.tool()
@@ -2982,12 +3444,21 @@ def repo_index_daemon(
     fields: list[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    adaptive_limits: bool = True,
+    summary_mode: str = "full",
+    compress: bool = False,
+    store_result: bool = False,
+    incremental: bool = True,
 ) -> dict[str, Any]:
     """Build/read/query a persistent repository index keyed by file metadata."""
     if mode not in {"refresh", "read", "query"}:
         raise ValueError("mode must be one of: refresh, read, query")
     if max_files < 1:
         raise ValueError("max_files must be >= 1")
+    if summary_mode not in {"full", "quick"}:
+        raise ValueError("summary_mode must be one of: full, quick")
+    if adaptive_limits:
+        max_files = _adaptive_limit(max_files, soft_cap=2500)
     profile = _default_output_profile(output_profile)
     index_path = _resolve_repo_path(str(REPO_INDEX_FILE))
 
@@ -3013,18 +3484,45 @@ def repo_index_daemon(
                 files = _select_fields(files, fields)
             index_payload["files"] = files
         if profile == "compact":
-            return {
+            compact = {
+                "schema": "repo_index_daemon.compact.v1",
                 "mode": mode,
                 "generated_at": index_payload.get("generated_at"),
                 "file_count": index_payload.get("file_count", 0),
                 "symbol_count": index_payload.get("symbol_count", 0),
                 "dependency_edge_count": index_payload.get("dependency_edge_count", 0),
             }
+            if store_result:
+                compact["result_id"] = _result_store_put("repo_index_daemon", compact)
+            return compact
+        if summary_mode == "quick":
+            quick = {
+                "schema": "repo_index_daemon.quick.v1",
+                "mode": mode,
+                "generated_at": index_payload.get("generated_at"),
+                "file_count": index_payload.get("file_count", 0),
+                "symbol_count": index_payload.get("symbol_count", 0),
+            }
+            if store_result:
+                quick["result_id"] = _result_store_put("repo_index_daemon", quick)
+            return quick
+        if compress and isinstance(index_payload.get("files"), list):
+            index_payload["files_compressed"] = _compress_table(index_payload["files"])
+            index_payload.pop("files", None)
+        if store_result:
+            index_payload["result_id"] = _result_store_put("repo_index_daemon", index_payload)
         return index_payload
 
     root = _resolve_repo_path(path)
     if not root.exists():
         raise FileNotFoundError(path)
+
+    existing_payload = None
+    if incremental and index_path.is_file():
+        try:
+            existing_payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing_payload = None
 
     files_meta: list[dict[str, Any]] = []
     for candidate in _iter_candidate_files(root, recursive=recursive):
@@ -3044,38 +3542,66 @@ def repo_index_daemon(
         if len(files_meta) >= max_files:
             break
 
-    symbols = symbol_index(
-        path=path,
-        include_private=False,
-        recursive=recursive,
-        max_symbols=20000,
-        output_profile="compact",
-    )
-    dep = dependency_map(
-        path=path,
-        recursive=recursive,
-        include_stdlib=False,
-        max_files=max_files,
-        output_profile="compact",
-    )
-    call = call_graph(
-        path=path,
-        recursive=recursive,
-        max_edges=20000,
-        output_profile="compact",
-    )
+    changed_paths: list[str] = []
+    if existing_payload and isinstance(existing_payload.get("files"), list):
+        prev = {
+            f.get("path"): (f.get("size"), f.get("mtime_ns"))
+            for f in existing_payload["files"]
+            if isinstance(f, dict) and isinstance(f.get("path"), str)
+        }
+        for row in files_meta:
+            p = row["path"]
+            sig = (row.get("size"), row.get("mtime_ns"))
+            if prev.get(p) != sig:
+                changed_paths.append(p)
+
+    reuse_prev_graphs = bool(existing_payload) and len([p for p in changed_paths if p.endswith(".py")]) == 0
+    if reuse_prev_graphs:
+        symbols = existing_payload.get("symbols", []) if isinstance(existing_payload.get("symbols"), list) else []
+        dep_edges = existing_payload.get("dependencies", []) if isinstance(existing_payload.get("dependencies"), list) else []
+        call_edges = existing_payload.get("call_edges", []) if isinstance(existing_payload.get("call_edges"), list) else []
+        dep = {"edge_count": len(dep_edges), "edges": dep_edges}
+        call = {"edge_count": len(call_edges), "edges": call_edges}
+    else:
+        symbols = symbol_index(
+            path=path,
+            include_private=False,
+            recursive=recursive,
+            max_symbols=20000,
+            output_profile="compact",
+        )
+        dep = dependency_map(
+            path=path,
+            recursive=recursive,
+            include_stdlib=False,
+            max_files=max_files,
+            output_profile="compact",
+        )
+        call = call_graph(
+            path=path,
+            recursive=recursive,
+            max_edges=20000,
+            output_profile="compact",
+        )
 
     payload: dict[str, Any] = {
+        "schema": "repo_index_daemon.v1",
         "generated_at": _now_iso(),
         "path": str(root.relative_to(REPO_PATH)),
         "file_count": len(files_meta),
-        "symbol_count": len(symbols),
+        "symbol_count": (
+            int(existing_payload.get("symbol_count", 0))
+            if reuse_prev_graphs and existing_payload
+            else len(symbols)
+        ),
         "dependency_edge_count": int(dep.get("edge_count", 0)),
         "call_edge_count": int(call.get("edge_count", 0)),
         "files": files_meta if profile != "compact" else files_meta[:300],
         "symbols": symbols if profile == "verbose" else [],
         "dependencies": dep.get("edges", []) if profile == "verbose" else [],
         "call_edges": call.get("edges", []) if profile == "verbose" else [],
+        "incremental": incremental,
+        "changed_paths_count": len(changed_paths),
     }
     if _is_git_repo():
         payload["git_head"] = _git("rev-parse", "HEAD").stdout.strip()
@@ -3083,7 +3609,8 @@ def repo_index_daemon(
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return {
+    result = {
+        "schema": "repo_index_daemon.refresh.v1",
         "mode": mode,
         "index_path": str(REPO_INDEX_FILE),
         "generated_at": payload["generated_at"],
@@ -3091,7 +3618,24 @@ def repo_index_daemon(
         "symbol_count": payload["symbol_count"],
         "dependency_edge_count": payload["dependency_edge_count"],
         "call_edge_count": payload["call_edge_count"],
+        "incremental": incremental,
+        "changed_paths_count": len(changed_paths),
     }
+    if summary_mode == "quick":
+        result = {
+            "schema": "repo_index_daemon.quick.v1",
+            "mode": mode,
+            "generated_at": payload["generated_at"],
+            "file_count": payload["file_count"],
+            "symbol_count": payload["symbol_count"],
+            "incremental": incremental,
+            "changed_paths_count": len(changed_paths),
+        }
+    if compress:
+        result["files_compressed"] = _compress_table(files_meta[:500])
+    if store_result:
+        result["result_id"] = _result_store_put("repo_index_daemon", result)
+    return result
 
 
 @mcp.tool()
@@ -3106,11 +3650,14 @@ def self_check_pipeline(
     run_compile_check: bool = True,
     snapshot_path: str = str(API_SNAPSHOT_FILE),
     max_compile_files: int = 300,
+    summary_mode: str = "quick",
 ) -> dict[str, Any]:
     """Run a single-call quality gate pipeline and return structured results."""
     _require_git_repo()
     if max_compile_files < 1:
         raise ValueError("max_compile_files must be >= 1")
+    if summary_mode not in {"quick", "full"}:
+        raise ValueError("summary_mode must be one of: quick, full")
 
     result: dict[str, Any] = {
         "base_ref": base_ref,
@@ -3139,7 +3686,7 @@ def self_check_pipeline(
         result["checks"]["compile"] = {
             "checked_files": len(py_files),
             "error_count": len(compile_errors),
-            "errors": compile_errors,
+            "errors": compile_errors if summary_mode == "full" else compile_errors[:10],
         }
         if compile_errors:
             result["ok"] = False
@@ -3173,7 +3720,11 @@ def self_check_pipeline(
             }
 
     if run_impact_tests:
-        impacts = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
+        impacts = impact_tests(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            output_profile="compact",
+        )
         result["checks"]["impact_tests"] = impacts
 
     if run_test_execution:
@@ -3200,6 +3751,23 @@ def self_check_pipeline(
             result["ok"] = False
 
     result["finished_at"] = _now_iso()
+    if summary_mode == "quick":
+        return {
+            "schema": "self_check_pipeline.quick.v1",
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "ok": result["ok"],
+            "changed_file_count": len(changed),
+            "checks": {
+                name: {
+                    k: v
+                    for k, v in data.items()
+                    if k in {"ok", "exit_code", "error_count", "needs_docs_update", "risk_level", "removed_count", "added_count", "timeout", "checked_files"}
+                }
+                for name, data in result["checks"].items()
+                if isinstance(data, dict)
+            },
+        }
     return result
 
 
