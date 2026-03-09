@@ -591,6 +591,33 @@ def _read_ppt_legacy_text(path: Path, max_slides: int, max_chars_per_slide: int)
     return slides, {"slide_count": 1 if text else 0, "slides_read": len(slides)}, warnings
 
 
+def _image_basic_features(path: Path) -> dict[str, Any]:
+    features: dict[str, Any] = {
+        "width": 0,
+        "height": 0,
+        "mode": "",
+        "format": path.suffix.lower().lstrip("."),
+        "aspect_ratio": 0.0,
+        "mean_luma": None,
+    }
+    if Image is None:
+        return features
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            features["width"] = int(width)
+            features["height"] = int(height)
+            features["mode"] = str(img.mode)
+            features["format"] = str((img.format or features["format"])).lower()
+            features["aspect_ratio"] = round(width / height, 4) if height else 0.0
+            gray = img.convert("L")
+            stat = gray.resize((1, 1)).getpixel((0, 0))
+            features["mean_luma"] = float(stat)
+    except Exception:
+        return features
+    return features
+
+
 def _node_display_name(node: ast.AST) -> str:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return node.name
@@ -3769,6 +3796,134 @@ def vision_ocr_parser(
         "line_count": len(lines),
         "text": _trim_text(text, max_chars=max_chars),
     }
+
+
+@mcp.tool()
+def image_interpret(
+    image_path: str,
+    mode: str = "caption",
+    language: str = "eng",
+    use_local_model: bool = False,
+    max_chars: int = 2000,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Interpret an image with constrained offline modes: ocr, caption, classify, ui_parse."""
+    if mode not in {"ocr", "caption", "classify", "ui_parse"}:
+        raise ValueError("mode must be one of: ocr, caption, classify, ui_parse")
+    path = _resolve_repo_path(image_path)
+    if not path.is_file():
+        raise FileNotFoundError(image_path)
+    profile = _default_output_profile(output_profile)
+
+    warnings: list[str] = []
+    features = _image_basic_features(path)
+    ocr_text = ""
+    if Image is not None and pytesseract is not None:
+        try:
+            with Image.open(path) as img:
+                ocr_text = pytesseract.image_to_string(img, lang=language)
+        except Exception as exc:
+            warnings.append(f"OCR failed: {exc}")
+    elif mode == "ocr":
+        raise RuntimeError("vision OCR dependencies missing (Pillow/pytesseract)")
+
+    lines = [ln.strip() for ln in ocr_text.splitlines() if ln.strip()]
+    word_count = len(re.findall(r"\b\w+\b", ocr_text))
+    aspect = float(features.get("aspect_ratio") or 0.0)
+    mean_luma = features.get("mean_luma")
+
+    label = "photo_like"
+    confidence = 0.55
+    if word_count > 40:
+        label = "document_scan"
+        confidence = 0.82
+    elif word_count > 12 and 1.5 <= aspect <= 2.2:
+        label = "ui_screenshot"
+        confidence = 0.78
+    elif word_count > 8:
+        label = "diagram_or_slide"
+        confidence = 0.68
+    elif mean_luma is not None and float(mean_luma) > 210:
+        label = "minimal_graphic"
+        confidence = 0.62
+
+    text_preview = " ".join(lines[:3]).strip()
+    caption = (
+        f"{label.replace('_', ' ')} image"
+        f" ({int(features.get('width', 0))}x{int(features.get('height', 0))})."
+    )
+    if text_preview:
+        caption += f" Visible text starts with: {text_preview[:180]}"
+
+    ui_elements = []
+    for idx, ln in enumerate(lines[:40], start=1):
+        token_count = len(re.findall(r"\b\w+\b", ln))
+        elem_type = "headline" if token_count <= 6 and len(ln) <= 60 else "text"
+        ui_elements.append({"row": idx, "type": elem_type, "text": ln[:160]})
+
+    summary = ""
+    model_backend = ""
+    if use_local_model and (caption or text_preview):
+        prompt = (
+            "Interpret this image using concise structured bullets:\n"
+            f"- mode: {mode}\n"
+            f"- heuristic_label: {label}\n"
+            f"- caption: {caption}\n"
+            f"- ocr_preview: {text_preview}\n"
+            "- Return objective, key info, and uncertainty."
+        )
+        try:
+            inferred = local_infer(
+                prompt=prompt,
+                task="image_interpret",
+                backend="auto",
+                output_profile="compact",
+                max_tokens=220,
+            )
+            summary = str(inferred.get("output", "")).strip()
+            model_backend = str(inferred.get("backend", ""))
+        except Exception as exc:
+            warnings.append(f"local model interpret failed: {exc}")
+    if not summary:
+        summary = caption
+
+    payload = {
+        "schema": "image_interpret.v1",
+        "image_path": image_path,
+        "mode": mode,
+        "label": label,
+        "confidence": round(confidence, 3),
+        "features": features,
+        "line_count": len(lines),
+        "word_count": word_count,
+        "warnings": warnings,
+        "used_local_model": bool(model_backend),
+        "model_backend": model_backend,
+        "summary": _trim_text(summary, max_chars=max_chars),
+        "ocr_text": _trim_text(ocr_text, max_chars=max_chars),
+        "ui_elements": ui_elements,
+    }
+    if mode == "ocr":
+        payload["summary"] = _trim_text(ocr_text, max_chars=max_chars)
+    if mode == "classify":
+        payload["summary"] = f"{label} ({round(confidence, 3)})"
+    if mode == "ui_parse" and not ui_elements and ocr_text:
+        payload["ui_elements"] = [{"row": 1, "type": "text", "text": _trim_text(ocr_text, max_chars=160)}]
+
+    if profile == "compact":
+        return {
+            "schema": "image_interpret.compact.v1",
+            "image_path": image_path,
+            "mode": mode,
+            "label": payload["label"],
+            "confidence": payload["confidence"],
+            "line_count": payload["line_count"],
+            "warnings": warnings,
+            "used_local_model": payload["used_local_model"],
+            "summary": payload["summary"],
+            "ui_elements": payload["ui_elements"][:12],
+        }
+    return payload
 
 
 @mcp.tool()

@@ -497,6 +497,85 @@ class ServerToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.server.browse_web(url="file:///etc/passwd")
 
+    def test_image_interpret_classify_and_ui_parse(self):
+        img_path = self.repo_path / "docs" / "image.png"
+        img_path.write_bytes(b"not-a-real-png-but-path-exists")
+        with patch.object(
+            self.server,
+            "_image_basic_features",
+            return_value={"width": 1280, "height": 720, "aspect_ratio": 1.7778, "mean_luma": 200.0, "mode": "RGB", "format": "png"},
+        ), patch.object(
+            self.server,
+            "Image",
+            None,
+        ), patch.object(
+            self.server,
+            "pytesseract",
+            None,
+        ):
+            out = self.server.image_interpret(
+                image_path="docs/image.png",
+                mode="classify",
+                output_profile="compact",
+            )
+        self.assertEqual(out["schema"], "image_interpret.compact.v1")
+        self.assertIn(out["label"], {"photo_like", "minimal_graphic", "ui_screenshot", "diagram_or_slide", "document_scan"})
+
+        with patch.object(
+            self.server,
+            "_image_basic_features",
+            return_value={"width": 1200, "height": 700, "aspect_ratio": 1.714, "mean_luma": 170.0, "mode": "RGB", "format": "png"},
+        ), patch.object(
+            self.server,
+            "Image",
+            None,
+        ), patch.object(
+            self.server,
+            "pytesseract",
+            None,
+        ):
+            ui_out = self.server.image_interpret(
+                image_path="docs/image.png",
+                mode="ui_parse",
+                output_profile="normal",
+            )
+        self.assertEqual(ui_out["schema"], "image_interpret.v1")
+        self.assertIn("summary", ui_out)
+
+    def test_image_interpret_with_local_model_and_ocr_mode_validation(self):
+        img_path = self.repo_path / "docs" / "image2.png"
+        img_path.write_bytes(b"png")
+        with patch.object(
+            self.server,
+            "_image_basic_features",
+            return_value={"width": 800, "height": 600, "aspect_ratio": 1.3333, "mean_luma": 150.0, "mode": "RGB", "format": "png"},
+        ), patch.object(
+            self.server,
+            "Image",
+            None,
+        ), patch.object(
+            self.server,
+            "pytesseract",
+            None,
+        ), patch.object(
+            self.server,
+            "local_infer",
+            return_value={"output": "Interpreted by local model", "backend": "fallback"},
+        ):
+            out = self.server.image_interpret(
+                image_path="docs/image2.png",
+                mode="caption",
+                use_local_model=True,
+                output_profile="normal",
+            )
+        self.assertTrue(out["used_local_model"])
+        self.assertEqual(out["model_backend"], "fallback")
+        self.assertIn("Interpreted by local model", out["summary"])
+
+        with patch.object(self.server, "Image", None), patch.object(self.server, "pytesseract", None):
+            with self.assertRaises(RuntimeError):
+                self.server.image_interpret(image_path="docs/image2.png", mode="ocr")
+
     def test_interpret_presentation_pptx_and_odp(self):
         pptx_slide = """<?xml version="1.0" encoding="UTF-8"?>
 <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"

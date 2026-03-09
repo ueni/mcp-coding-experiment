@@ -149,6 +149,7 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - code_review_classifier
 - test_gen_small
 - vision_ocr_parser
+- image_interpret
 - translation_small
 - diagram_from_code
 - mermaid_lint_fix
