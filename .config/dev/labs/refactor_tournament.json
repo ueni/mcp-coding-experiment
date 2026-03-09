@@ -49,6 +49,7 @@
     {
       "name": "Pyupgrade Modernization",
       "branch": "tournament/pyupgrade-modernization",
+      "allowed_mutate_exit_codes": [0, 123],
       "mutate": [
         "find toolchain/dev -type f -name '*.py' -print0 | xargs -0 python -m pyupgrade --py312-plus"
       ],

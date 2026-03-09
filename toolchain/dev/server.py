@@ -4636,9 +4636,9 @@ def math_verify(
     _require_sympy()
     if trials < 1:
         raise ValueError("trials must be >= 1")
-    l = _math_expr(left)
-    r = _math_expr(right)
-    diff = sp.simplify(l - r)
+    lhs = _math_expr(left)
+    rhs = _math_expr(right)
+    diff = sp.simplify(lhs - rhs)
     proven = diff == 0
     checks: list[dict[str, Any]] = []
     syms = sorted(diff.free_symbols, key=lambda s: str(s))
@@ -4647,7 +4647,7 @@ def math_verify(
     if not proven and syms:
         for i in range(trials):
             vals = {s: (i + 2) for s in syms}
-            ok = sp.simplify((l - r).subs(vals)) == 0
+            ok = sp.simplify((lhs - rhs).subs(vals)) == 0
             checks.append({"substitution": {str(k): str(v) for k, v in vals.items()}, "ok": bool(ok)})
     return {
         "schema": "math_verify.v1",

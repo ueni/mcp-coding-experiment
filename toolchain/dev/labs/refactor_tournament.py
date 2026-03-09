@@ -64,6 +64,21 @@ def changed_stats(base_ref: str) -> tuple[int, int, int]:
     return files, insertions, deletions
 
 
+def delta_stats(
+    before: tuple[int, int, int], after: tuple[int, int, int]
+) -> tuple[int, int, int]:
+    before_files, before_insertions, before_deletions = before
+    after_files, after_insertions, after_deletions = after
+    file_delta = after_files - before_files
+    if file_delta < 0:
+        file_delta = after_files
+    return (
+        file_delta,
+        max(0, after_insertions - before_insertions),
+        max(0, after_deletions - before_deletions),
+    )
+
+
 def score_strategy(
     checks: list[dict[str, Any]], files: int, insertions: int, deletions: int
 ) -> int:
@@ -119,6 +134,7 @@ def main() -> int:
             ).strip()
             mutate = strategy.get("mutate", [])
             checks = strategy.get("checks", [])
+            allowed_mutate_exit_codes = strategy.get("allowed_mutate_exit_codes", [0])
 
             if not isinstance(mutate, list) or not all(
                 isinstance(c, str) for c in mutate
@@ -128,23 +144,31 @@ def main() -> int:
                 isinstance(c, str) for c in checks
             ):
                 raise ValueError(f"strategy '{name}' has invalid checks list")
+            if not isinstance(allowed_mutate_exit_codes, list) or not all(
+                isinstance(code, int) for code in allowed_mutate_exit_codes
+            ):
+                raise ValueError(
+                    f"strategy '{name}' has invalid allowed_mutate_exit_codes"
+                )
 
             git("checkout", "-B", branch, base_ref)
+            baseline_stats = changed_stats(base_ref)
 
             mutate_results: list[dict[str, Any]] = []
             for cmd in mutate:
                 rc, out, err, seconds = run_shell(cmd)
+                ok = rc in allowed_mutate_exit_codes
                 mutate_results.append(
                     {
                         "command": cmd,
-                        "ok": rc == 0,
+                        "ok": ok,
                         "exit_code": rc,
                         "seconds": round(seconds, 3),
                         "stdout": out.strip(),
                         "stderr": err.strip(),
                     }
                 )
-                if rc != 0:
+                if not ok:
                     break
 
             check_results: list[dict[str, Any]] = []
@@ -162,7 +186,9 @@ def main() -> int:
                         }
                     )
 
-            files, insertions, deletions = changed_stats(base_ref)
+            files, insertions, deletions = delta_stats(
+                baseline_stats, changed_stats(base_ref)
+            )
             score = score_strategy(check_results, files, insertions, deletions)
             summary.append(
                 {

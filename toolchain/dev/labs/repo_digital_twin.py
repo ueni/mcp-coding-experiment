@@ -77,7 +77,7 @@ def main() -> int:
     files = collect_tree(args.max_files)
     hs = hotspots(args.hotspot_limit)
 
-    twin = {
+    twin: dict[str, Any] = {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "repo": {
             "branch": branch,
