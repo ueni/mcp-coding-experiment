@@ -4592,10 +4592,6 @@ def self_test(
 
     if runner == "unittest":
         cmd = [sys.executable, "-m", "unittest"]
-        if verbose:
-            cmd.append("-v")
-        if fail_fast:
-            cmd.append("-f")
         target_path = _resolve_repo_path(target)
         if target_path.is_file() and target_path.suffix == ".py":
             rel_parent = str(target_path.parent.relative_to(REPO_PATH))
@@ -4608,7 +4604,15 @@ def self_test(
                     target_path.name,
                 ]
             )
+            if verbose:
+                cmd.append("-v")
+            if fail_fast:
+                cmd.append("-f")
         else:
+            if verbose:
+                cmd.append("-v")
+            if fail_fast:
+                cmd.append("-f")
             cmd.append(target)
     else:
         cmd = ["pytest"]

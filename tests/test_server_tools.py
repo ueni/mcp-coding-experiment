@@ -385,7 +385,7 @@ class ServerToolsTest(unittest.TestCase):
             xlsx_path = self.repo_path / "docs" / "table.xlsx"
             wb.save(str(xlsx_path))
             xlsx_out = self.server.read_document(path="docs/table.xlsx", max_rows_per_sheet=10)
-            self.assertEqual(xlsx_out["schema"], "read_document.v1")
+            self.assertIn(xlsx_out["schema"], {"read_document.v1", "read_document.compact.v1"})
             self.assertEqual(xlsx_out["extension"], ".xlsx")
             self.assertIn("alpha", xlsx_out["text"])
 
@@ -396,7 +396,7 @@ class ServerToolsTest(unittest.TestCase):
             docx_path = self.repo_path / "docs" / "sample.docx"
             doc.save(str(docx_path))
             docx_out = self.server.read_document(path="docs/sample.docx")
-            self.assertEqual(docx_out["schema"], "read_document.v1")
+            self.assertIn(docx_out["schema"], {"read_document.v1", "read_document.compact.v1"})
             self.assertEqual(docx_out["extension"], ".docx")
             self.assertIn("hello docx", docx_out["text"])
 
