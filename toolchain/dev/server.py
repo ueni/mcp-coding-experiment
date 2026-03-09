@@ -1166,13 +1166,17 @@ def _local_infer_via_endpoint(
     max_tokens: int,
     temperature: float,
     system: str = "",
+    stop: list[str] | None = None,
 ) -> str:
+    options: dict[str, Any] = {"num_predict": max_tokens, "temperature": temperature}
+    if stop:
+        options["stop"] = stop
     payload = {
         "model": model,
         "prompt": prompt,
         "system": system,
         "stream": False,
-        "options": {"num_predict": max_tokens, "temperature": temperature},
+        "options": options,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -1192,6 +1196,55 @@ def _local_infer_via_endpoint(
             if isinstance(parsed.get(key), str):
                 return parsed[key]
     return body
+
+
+def _autocomplete_prompt(prefix: str, suffix: str, language: str) -> str:
+    lang = language.strip() or "plaintext"
+    return (
+        "You complete source code.\n"
+        f"Language: {lang}\n"
+        "Return only the continuation for the cursor position.\n"
+        "Do not repeat the prefix or explain anything.\n\n"
+        "<PREFIX>\n"
+        f"{prefix}\n"
+        "</PREFIX>\n"
+        "<SUFFIX>\n"
+        f"{suffix}\n"
+        "</SUFFIX>\n"
+        "<CONTINUATION>\n"
+    )
+
+
+def _autocomplete_strip_wrappers(text: str) -> str:
+    out = text
+    if out.lstrip().startswith("```"):
+        out = out.replace("```python", "").replace("```", "")
+    return out
+
+
+def _autocomplete_apply_stops(text: str, stop: list[str] | None = None) -> str:
+    if not stop:
+        return text
+    cut = len(text)
+    for tok in stop:
+        if not tok:
+            continue
+        idx = text.find(tok)
+        if idx >= 0:
+            cut = min(cut, idx)
+    return text[:cut]
+
+
+def _autocomplete_fallback(prefix: str, suffix: str) -> str:
+    del suffix
+    tail = prefix.rstrip()
+    if tail.endswith(":"):
+        return "\n    "
+    if tail.endswith(("(", "[", "{")):
+        return { "(": ")", "[": "]", "{": "}" }[tail[-1]]
+    if tail.endswith("return"):
+        return " None"
+    return ""
 
 
 def _require_sympy() -> None:
@@ -5379,6 +5432,85 @@ def local_infer(
         }
     if store_result:
         result["result_id"] = _result_store_put("local_infer", result)
+    return result
+
+
+@mcp.tool()
+def autocomplete(
+    prefix: str,
+    suffix: str = "",
+    language: str = "",
+    backend: str = "auto",
+    model: str = "",
+    max_tokens: int = 64,
+    temperature: float = 0.1,
+    stop: list[str] | None = None,
+    output_profile: str | None = None,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Generate code autocomplete text using a local model endpoint or fallback."""
+    if not prefix:
+        raise ValueError("prefix must not be empty")
+    if max_tokens < 1:
+        raise ValueError("max_tokens must be >= 1")
+    if temperature < 0:
+        raise ValueError("temperature must be >= 0")
+    profile = _default_output_profile(output_profile)
+    selected = backend.strip().lower()
+    if selected == "auto":
+        selected = LOCAL_INFER_BACKEND or "endpoint"
+    model_name = model or LOCAL_INFER_MODEL or "local-default"
+
+    completion = ""
+    if selected == "endpoint":
+        try:
+            completion = _local_infer_via_endpoint(
+                prompt=_autocomplete_prompt(prefix=prefix, suffix=suffix, language=language),
+                model=model_name,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=(
+                    "You are a code completion engine. "
+                    "Return only code continuation text for the cursor."
+                ),
+                stop=stop,
+            )
+        except Exception as exc:
+            _failure_record(
+                command=["autocomplete", "endpoint"],
+                stderr=str(exc),
+                category="autocomplete",
+                suggestion="Ensure local inference endpoint is running and reachable.",
+            )
+            selected = "fallback"
+    if selected in {"fallback", "rule", "hash"}:
+        completion = _autocomplete_fallback(prefix=prefix, suffix=suffix)
+
+    completion = _autocomplete_strip_wrappers(completion)
+    completion = _autocomplete_apply_stops(completion, stop=stop)
+    completion = _trim_text(completion, max_chars=max(200, max_tokens * 12))
+
+    result: dict[str, Any] = {
+        "schema": "autocomplete.v1",
+        "backend": selected,
+        "model": model_name,
+        "language": language.strip(),
+        "prefix_chars": len(prefix),
+        "suffix_chars": len(suffix),
+        "max_tokens": max_tokens,
+        "completion": completion,
+        "ok": bool(completion),
+    }
+    if profile == "compact":
+        result = {
+            "schema": "autocomplete.compact.v1",
+            "backend": selected,
+            "model": model_name,
+            "ok": bool(completion),
+            "completion": completion,
+        }
+    if store_result:
+        result["result_id"] = _result_store_put("autocomplete", result)
     return result
 
 

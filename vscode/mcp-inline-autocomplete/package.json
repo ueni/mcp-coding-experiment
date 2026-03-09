@@ -1,0 +1,98 @@
+{
+  "name": "mcp-inline-autocomplete",
+  "displayName": "MCP Inline Autocomplete",
+  "description": "Inline autocomplete provider backed by an MCP tool endpoint.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:mcpInlineAutocomplete.status"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mcpInlineAutocomplete.status",
+        "title": "MCP Inline Autocomplete: Show Status"
+      }
+    ],
+    "configuration": {
+      "title": "MCP Inline Autocomplete",
+      "properties": {
+        "mcpInlineAutocomplete.endpoint": {
+          "type": "string",
+          "default": "http://localhost:8000/mcp",
+          "description": "HTTP MCP endpoint URL."
+        },
+        "mcpInlineAutocomplete.timeoutMs": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 200,
+          "description": "Timeout for MCP requests in milliseconds."
+        },
+        "mcpInlineAutocomplete.maxTokens": {
+          "type": "number",
+          "default": 64,
+          "minimum": 1,
+          "description": "Maximum tokens to request from the autocomplete tool."
+        },
+        "mcpInlineAutocomplete.temperature": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for autocomplete."
+        },
+        "mcpInlineAutocomplete.maxPrefixChars": {
+          "type": "number",
+          "default": 4000,
+          "minimum": 64,
+          "description": "Number of characters before cursor to send."
+        },
+        "mcpInlineAutocomplete.maxSuffixChars": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 0,
+          "description": "Number of characters after cursor to send."
+        },
+        "mcpInlineAutocomplete.minPrefixChars": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "description": "Do not request completions if prefix is shorter than this."
+        },
+        "mcpInlineAutocomplete.enabledLanguages": {
+          "type": "array",
+          "default": [
+            "*"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "List of VS Code language IDs to enable for, or ['*'] for all."
+        },
+        "mcpInlineAutocomplete.backend": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "endpoint",
+            "fallback"
+          ],
+          "default": "auto",
+          "description": "Autocomplete backend forwarded to the MCP tool."
+        },
+        "mcpInlineAutocomplete.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model override."
+        }
+      }
+    }
+  }
+}

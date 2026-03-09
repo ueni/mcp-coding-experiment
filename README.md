@@ -71,6 +71,24 @@ ok
 
 The VS Code entry point is [`.devcontainer/devcontainer.json`](/repo/.devcontainer/devcontainer.json), while the underlying container implementation is [`toolchain/dev/docker-compose.yml`](/repo/toolchain/dev/docker-compose.yml). The repository is mounted at `/repo` and port `8000` is forwarded automatically.
 
+### VS Code Inline Autocomplete Extension (MCP-backed)
+
+A minimal extension is included at [`vscode/mcp-inline-autocomplete`](/repo/vscode/mcp-inline-autocomplete).
+
+Run it in VS Code:
+
+1. Open [`vscode/mcp-inline-autocomplete/package.json`](/repo/vscode/mcp-inline-autocomplete/package.json).
+2. Press `F5` (Run Extension) to start an Extension Development Host.
+3. In the dev host, open Command Palette and run `MCP Inline Autocomplete: Show Status`.
+4. Start typing in a file; inline suggestions come from MCP tool `autocomplete` at `http://localhost:8000/mcp`.
+
+Key settings (in VS Code Settings):
+
+- `mcpInlineAutocomplete.endpoint` (default `http://localhost:8000/mcp`)
+- `mcpInlineAutocomplete.maxTokens`
+- `mcpInlineAutocomplete.temperature`
+- `mcpInlineAutocomplete.enabledLanguages`
+
 ## Endpoints (HTTP mode)
 
 - MCP endpoint: `http://localhost:8000/mcp`
@@ -259,6 +277,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `local_model_status`
 - `local_embed`
 - `local_infer`
+- `autocomplete`
 - `local_rerank`
 
 ### Labs

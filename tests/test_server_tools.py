@@ -270,6 +270,18 @@ class ServerToolsTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertIn("output", out)
 
+    def test_autocomplete_fallback(self):
+        out = self.server.autocomplete(
+            prefix="def handler():",
+            backend="fallback",
+            output_profile="compact",
+            max_tokens=16,
+        )
+        self.assertEqual(out["schema"], "autocomplete.compact.v1")
+        self.assertEqual(out["backend"], "fallback")
+        self.assertTrue(out["ok"])
+        self.assertIn("completion", out)
+
     def test_semantic_find_with_local_rerank(self):
         out = self.server.semantic_find(
             query="alpha sample",
