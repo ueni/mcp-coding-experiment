@@ -77,6 +77,30 @@ class ServerToolsTest(unittest.TestCase):
         self.assertIn("optimized_prompt", out)
         self.assertGreater(out["optimized_chars"], 0)
 
+    def test_terminal_support_session(self):
+        started = self.server.terminal_support_session(
+            mode="start",
+            command=["cat"],
+            cwd=".",
+            read_timeout_ms=10,
+        )
+        self.assertEqual(started["schema"], "terminal_support_session.v1")
+        sid = started["session_id"]
+        listed = self.server.terminal_support_session(mode="list")
+        self.assertIn(sid, {row["session_id"] for row in listed["sessions"]})
+        sent = self.server.terminal_support_session(
+            mode="send",
+            session_id=sid,
+            input_text="hello-support\n",
+            read_timeout_ms=20,
+        )
+        self.assertEqual(sent["schema"], "terminal_support_session.v1")
+        self.assertIn("hello-support", sent["output"])
+        stopped = self.server.terminal_support_session(mode="stop", session_id=sid, read_timeout_ms=20)
+        self.assertEqual(stopped["schema"], "terminal_support_session.v1")
+        self.assertFalse(stopped["running"])
+        self.assertTrue((self.repo_path / stopped["log_path"]).is_file())
+
     def test_cache_control_and_symbol_cache(self):
         _ = self.server.symbol_index(path="src", output_profile="compact")
         stats = self.server.cache_control(mode="stats")

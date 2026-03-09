@@ -21,6 +21,8 @@ import urllib.parse
 import html
 import zipfile
 import xml.etree.ElementTree as ET
+import pty
+import select
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -124,6 +126,7 @@ COST_BUDGET_FILE = Path(".build/memory/cost_budget.json")
 APPROVAL_POINTS_FILE = Path(".build/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".build/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
+TERMINAL_CAPTURE_DIR = Path(".build/reports/terminal")
 LOCAL_MODELS_DIR = Path(os.getenv("LOCAL_MODELS_DIR", "/models"))
 LOCAL_EMBED_BACKEND = os.getenv("LOCAL_EMBED_BACKEND", "hash").strip().lower()
 LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "").strip()
@@ -134,7 +137,7 @@ LOCAL_INFER_ENDPOINT = os.getenv(
     "LOCAL_INFER_ENDPOINT", "http://127.0.0.1:11434/api/generate"
 ).strip()
 HOST_CA_CERT_FILE = os.getenv("HOST_CA_CERT_FILE", "").strip()
-SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse"}
+SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse", "cat"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
     "diff",
@@ -155,6 +158,8 @@ mcp = FastMCP(
         "All paths are relative to the repository root."
     ),
 )
+
+_TERMINAL_SESSIONS: dict[str, dict[str, Any]] = {}
 
 
 def _trim_text(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
@@ -977,6 +982,60 @@ def _cache_prune(max_age_minutes: int, tool: str | None = None) -> dict[str, Any
     payload["entries"] = entries
     _cache_save(payload)
     return {"removed_entries": removed, "scanned_entries": scanned, "tool": tool or "*", "max_age_minutes": max_age_minutes}
+
+
+def _validate_safe_command(command: list[str]) -> None:
+    if not command:
+        raise ValueError("command must not be empty")
+    binary = command[0]
+    if binary not in SAFE_COMMANDS:
+        raise ValueError(f"command not allowed: {binary}")
+    if binary == "git":
+        if len(command) < 2:
+            raise ValueError("git command must include a subcommand")
+        if command[1] not in SAFE_GIT_SUBCOMMANDS:
+            raise ValueError(f"git subcommand not allowed: {command[1]}")
+    if binary == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in command[1:]):
+        raise ValueError("sed in-place edits are not allowed")
+    if binary == "find" and any(arg in {"-delete", "-exec", "-ok"} for arg in command[1:]):
+        raise ValueError("find destructive/exec flags are not allowed")
+    if binary == "awk":
+        script = command[1] if len(command) > 1 else ""
+        if "system(" in script:
+            raise ValueError("awk system() is not allowed")
+
+
+def _terminal_read_available(
+    session: dict[str, Any], max_output_chars: int, wait_timeout_ms: int = 0
+) -> str:
+    fd = int(session["read_fd"])
+    chunks: list[str] = []
+    total = 0
+    first = True
+    while total < max_output_chars:
+        timeout = (wait_timeout_ms / 1000.0) if first and wait_timeout_ms > 0 else 0
+        first = False
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            break
+        try:
+            data = os.read(fd, min(4096, max_output_chars - total))
+        except BlockingIOError:
+            break
+        except OSError:
+            break
+        if not data:
+            break
+        text = data.decode("utf-8", errors="replace")
+        chunks.append(text)
+        total += len(text)
+    out = "".join(chunks)
+    if out:
+        log_path = Path(session["log_path"])
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(out)
+        session["output_chars"] = int(session.get("output_chars", 0)) + len(out)
+    return out
 
 
 def _result_store_load() -> dict[str, Any]:
@@ -3978,29 +4037,10 @@ def command_runner(
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
     """Run a whitelisted command without shell interpolation."""
-    if not command:
-        raise ValueError("command must not be empty")
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
     out_cap = _token_budget_apply_max(max_output_chars)
-
-    binary = command[0]
-    if binary not in SAFE_COMMANDS:
-        raise ValueError(f"command not allowed: {binary}")
-
-    if binary == "git":
-        if len(command) < 2:
-            raise ValueError("git command must include a subcommand")
-        if command[1] not in SAFE_GIT_SUBCOMMANDS:
-            raise ValueError(f"git subcommand not allowed: {command[1]}")
-    if binary == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in command[1:]):
-        raise ValueError("sed in-place edits are not allowed")
-    if binary == "find" and any(arg in {"-delete", "-exec", "-ok"} for arg in command[1:]):
-        raise ValueError("find destructive/exec flags are not allowed")
-    if binary == "awk":
-        script = command[1] if len(command) > 1 else ""
-        if "system(" in script:
-            raise ValueError("awk system() is not allowed")
+    _validate_safe_command(command)
 
     workdir = _resolve_repo_path(cwd)
     try:
@@ -4060,6 +4100,214 @@ def command_runner(
         "cwd": str(workdir.relative_to(REPO_PATH)),
         "stdout": _trim_text(proc.stdout, max_chars=out_cap),
         "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+    }
+
+
+@mcp.tool()
+def terminal_support_session(
+    mode: str = "start",
+    session_id: str = "",
+    command: list[str] | None = None,
+    cwd: str = ".",
+    input_text: str = "",
+    read_timeout_ms: int = 100,
+    max_output_chars: int | None = None,
+    include_output: bool = True,
+) -> dict[str, Any]:
+    """Manage PTY terminal sessions for support workflows with captured I/O logs."""
+    if mode not in {"start", "send", "poll", "stop", "list"}:
+        raise ValueError("mode must be one of: start, send, poll, stop, list")
+    if read_timeout_ms < 0:
+        raise ValueError("read_timeout_ms must be >= 0")
+    out_cap = _token_budget_apply_max(max_output_chars)
+
+    if mode == "list":
+        rows = []
+        for sid, row in _TERMINAL_SESSIONS.items():
+            proc = row.get("proc")
+            code = proc.poll() if proc else None
+            rows.append(
+                {
+                    "session_id": sid,
+                    "command": row.get("command", []),
+                    "cwd": row.get("cwd", "."),
+                    "running": code is None,
+                    "exit_code": code,
+                }
+            )
+        return {"schema": "terminal_support_session.v1", "mode": mode, "sessions": rows}
+
+    if mode == "start":
+        cmd = command or []
+        _validate_safe_command(cmd)
+        workdir = _resolve_repo_path(cwd)
+        capture_dir = _resolve_repo_path(str(TERMINAL_CAPTURE_DIR))
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        sid = uuid.uuid4().hex[:12]
+        log_path = capture_dir / f"{sid}.log"
+        master_fd = -1
+        backend = "pty"
+        proc: subprocess.Popen[bytes]
+        try:
+            master_fd, slave_fd = pty.openpty()
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(workdir),
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    text=False,
+                    close_fds=True,
+                )
+            finally:
+                os.close(slave_fd)
+            os.set_blocking(master_fd, False)
+            read_fd = master_fd
+        except OSError:
+            backend = "pipe"
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(workdir),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=False,
+                close_fds=True,
+            )
+            if proc.stdout is None:
+                raise RuntimeError("failed to create stdout pipe for terminal session")
+            read_fd = proc.stdout.fileno()
+            os.set_blocking(read_fd, False)
+        log_path.write_text(
+            f"# terminal session {sid}\n# started_at={_now_iso()}\n# cwd={workdir.relative_to(REPO_PATH)}\n# command={json.dumps(cmd)}\n\n",
+            encoding="utf-8",
+        )
+        session = {
+            "session_id": sid,
+            "proc": proc,
+            "backend": backend,
+            "master_fd": master_fd,
+            "read_fd": read_fd,
+            "log_path": str(log_path),
+            "command": cmd,
+            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "input_chars": 0,
+            "output_chars": 0,
+            "started_at": _now_iso(),
+        }
+        _TERMINAL_SESSIONS[sid] = session
+        output = (
+            _terminal_read_available(session, max_output_chars=out_cap, wait_timeout_ms=read_timeout_ms)
+            if include_output
+            else ""
+        )
+        return {
+            "schema": "terminal_support_session.v1",
+            "mode": mode,
+            "session_id": sid,
+            "running": proc.poll() is None,
+            "exit_code": proc.poll(),
+            "command": cmd,
+            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "log_path": str(log_path.relative_to(REPO_PATH)),
+            "backend": backend,
+            "output": _trim_text(output, max_chars=out_cap) if include_output else "",
+        }
+
+    if not session_id:
+        raise ValueError("session_id is required")
+    session = _TERMINAL_SESSIONS.get(session_id)
+    if not isinstance(session, dict):
+        raise ValueError(f"unknown session_id: {session_id}")
+    proc = session["proc"]
+
+    if mode == "send":
+        if input_text:
+            data = input_text.encode("utf-8", errors="replace")
+            if session.get("backend") == "pty":
+                os.write(int(session["master_fd"]), data)
+            else:
+                stdin = proc.stdin
+                if stdin is not None:
+                    stdin.write(data)
+                    stdin.flush()
+            log_path = Path(session["log_path"])
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"\n# [stdin] {input_text}")
+                if not input_text.endswith("\n"):
+                    f.write("\n")
+            session["input_chars"] = int(session.get("input_chars", 0)) + len(input_text)
+        output = (
+            _terminal_read_available(session, max_output_chars=out_cap, wait_timeout_ms=read_timeout_ms)
+            if include_output
+            else ""
+        )
+        return {
+            "schema": "terminal_support_session.v1",
+            "mode": mode,
+            "session_id": session_id,
+            "running": proc.poll() is None,
+            "exit_code": proc.poll(),
+            "output": _trim_text(output, max_chars=out_cap) if include_output else "",
+            "input_chars": int(session.get("input_chars", 0)),
+            "output_chars": int(session.get("output_chars", 0)),
+        }
+
+    if mode == "poll":
+        output = (
+            _terminal_read_available(session, max_output_chars=out_cap, wait_timeout_ms=read_timeout_ms)
+            if include_output
+            else ""
+        )
+        return {
+            "schema": "terminal_support_session.v1",
+            "mode": mode,
+            "session_id": session_id,
+            "running": proc.poll() is None,
+            "exit_code": proc.poll(),
+            "output": _trim_text(output, max_chars=out_cap) if include_output else "",
+            "input_chars": int(session.get("input_chars", 0)),
+            "output_chars": int(session.get("output_chars", 0)),
+        }
+
+    # stop
+    if proc.poll() is None:
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        try:
+            proc.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(Exception):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=1.0)
+    output = (
+        _terminal_read_available(session, max_output_chars=out_cap, wait_timeout_ms=read_timeout_ms)
+        if include_output
+        else ""
+    )
+    if session.get("backend") == "pty":
+        with contextlib.suppress(Exception):
+            os.close(int(session["master_fd"]))
+    else:
+        with contextlib.suppress(Exception):
+            if proc.stdin is not None:
+                proc.stdin.close()
+        with contextlib.suppress(Exception):
+            if proc.stdout is not None:
+                proc.stdout.close()
+    _TERMINAL_SESSIONS.pop(session_id, None)
+    return {
+        "schema": "terminal_support_session.v1",
+        "mode": mode,
+        "session_id": session_id,
+        "running": False,
+        "exit_code": proc.poll(),
+        "output": _trim_text(output, max_chars=out_cap) if include_output else "",
+        "log_path": str(Path(session["log_path"]).relative_to(REPO_PATH)),
+        "input_chars": int(session.get("input_chars", 0)),
+        "output_chars": int(session.get("output_chars", 0)),
     }
 
 

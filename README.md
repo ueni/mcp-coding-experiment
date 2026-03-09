@@ -186,6 +186,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 ### Analysis and Productivity
 
 - `command_runner`
+- `terminal_support_session`
 - `prompt_optimize`
 - `doc_summarizer_small`
 - `code_review_classifier`
