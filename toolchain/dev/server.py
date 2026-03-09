@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import sys
+import re
+import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -650,6 +652,116 @@ def lab_repo_digital_twin(
         str(hotspot_limit),
     ]
     return _run_lab_script("repo_digital_twin.py", args)
+
+
+@mcp.tool()
+def grep(
+    pattern: str,
+    path: str = ".",
+    recursive: bool = True,
+    case_insensitive: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    max_matches: int = 500,
+    max_file_bytes: int = 1048576,
+    encoding: str = "utf-8",
+) -> list[dict[str, Any]]:
+    """Search repository files for a regex pattern and return matches.
+
+    Returns a list of objects: { path, line, column, match, lineText }.
+    Paths are repository-relative; line/column are 1-based.
+    """
+    if max_matches < 1:
+        raise ValueError("max_matches must be >= 1")
+    if max_file_bytes < 1:
+        raise ValueError("max_file_bytes must be >= 1")
+
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    flags = 0
+    if case_insensitive:
+        flags |= re.IGNORECASE
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error as exc:
+        raise ValueError(f"invalid regex pattern: {exc}") from exc
+
+    def is_hidden_path(p: Path) -> bool:
+        try:
+            rel = p.relative_to(REPO_PATH)
+        except ValueError:
+            rel = p
+        return any(part.startswith(".") for part in rel.parts)
+
+    def allowed_by_globs(rel_str: str) -> bool:
+        if include_globs:
+            if not any(fnmatch.fnmatch(rel_str, g) for g in include_globs):
+                return False
+        if exclude_globs and any(fnmatch.fnmatch(rel_str, g) for g in exclude_globs):
+            return False
+        return True
+
+    def is_likely_binary(p: Path) -> bool:
+        try:
+            size = p.stat().st_size
+            if size > max_file_bytes:
+                return True
+            with p.open("rb") as f:
+                chunk = f.read(8192)
+            if b"\x00" in chunk:
+                return True
+        except OSError:
+            return True
+        return False
+
+    results: list[dict[str, Any]] = []
+
+    def search_file(p: Path) -> None:
+        nonlocal results
+        if not p.is_file():
+            return
+        rel_str = str(p.relative_to(REPO_PATH)).replace("\\", "/")
+        if not include_hidden and is_hidden_path(p):
+            return
+        if not allowed_by_globs(rel_str):
+            return
+        if is_likely_binary(p):
+            return
+
+        try:
+            with p.open("r", encoding=encoding, errors="replace") as f:
+                for idx, line in enumerate(f, start=1):
+                    for m in regex.finditer(line):
+                        res = {
+                            "path": rel_str,
+                            "line": idx,
+                            "column": m.start() + 1,
+                            "match": m.group(0),
+                            "lineText": line.rstrip("\n"),
+                        }
+                        results.append(res)
+                        if len(results) >= max_matches:
+                            return
+                    if len(results) >= max_matches:
+                        return
+        except OSError:
+            return
+
+    if root.is_file():
+        search_file(root)
+    else:
+        it = root.rglob("*") if recursive else root.glob("*")
+        for p in it:
+            if len(results) >= max_matches:
+                break
+            if p.is_dir():
+                continue
+            search_file(p)
+
+    return results
 
 
 async def healthz(_request):
