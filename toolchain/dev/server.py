@@ -31,6 +31,26 @@ except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
 try:
+    import sympy as sp
+except ModuleNotFoundError:  # pragma: no cover
+    sp = None
+
+try:
+    import sqlparse
+except ModuleNotFoundError:  # pragma: no cover
+    sqlparse = None
+
+try:
+    from PIL import Image
+except ModuleNotFoundError:  # pragma: no cover
+    Image = None
+
+try:
+    import pytesseract
+except ModuleNotFoundError:  # pragma: no cover
+    pytesseract = None
+
+try:
     from tree_sitter_languages import get_parser as _ts_get_parser
 except ModuleNotFoundError:  # pragma: no cover
     _ts_get_parser = None
@@ -652,6 +672,78 @@ def _local_infer_via_endpoint(
             if isinstance(parsed.get(key), str):
                 return parsed[key]
     return body
+
+
+def _require_sympy() -> None:
+    if sp is None:
+        raise RuntimeError("sympy is not installed in this runtime")
+
+
+def _math_expr(expr: str) -> Any:
+    _require_sympy()
+    return sp.sympify(expr)
+
+
+def _math_steps_stub(mode: str, expr: str) -> list[str]:
+    return [
+        f"Parsed expression for mode '{mode}'.",
+        "Applied symbolic transformation.",
+        "Generated exact and numeric outputs.",
+    ]
+
+
+def _sql_normalize(query: str) -> str:
+    if sqlparse is None:
+        return " ".join(query.split())
+    return sqlparse.format(query, keyword_case="upper", reindent=True)
+
+
+def _extract_diff_lines(diff_text: str) -> list[str]:
+    return [line for line in diff_text.splitlines() if line.startswith("+") or line.startswith("-")]
+
+
+def _simple_translate(text: str, source_lang: str, target_lang: str) -> str:
+    source = source_lang.lower()
+    target = target_lang.lower()
+    key = f"{source}->{target}"
+    lexicons = {
+        "en->de": {
+            "hello": "hallo",
+            "world": "welt",
+            "error": "fehler",
+            "success": "erfolg",
+            "file": "datei",
+            "test": "test",
+        },
+        "en->es": {
+            "hello": "hola",
+            "world": "mundo",
+            "error": "error",
+            "success": "exito",
+            "file": "archivo",
+            "test": "prueba",
+        },
+        "en->fr": {
+            "hello": "bonjour",
+            "world": "monde",
+            "error": "erreur",
+            "success": "succes",
+            "file": "fichier",
+            "test": "test",
+        },
+    }
+    lex = lexicons.get(key)
+    if not lex:
+        return text
+    tokens = re.findall(r"\w+|\W+", text)
+    out: list[str] = []
+    for t in tokens:
+        low = t.lower()
+        if low in lex:
+            out.append(lex[low])
+        else:
+            out.append(t)
+    return "".join(out)
 
 
 def _adaptive_limit(requested: int, soft_cap: int = 500) -> int:
@@ -2768,6 +2860,367 @@ def prompt_optimize(
         "original_chars": len(prompt),
         "optimized_chars": len(optimized),
         "optimized_prompt": optimized,
+    }
+
+
+@mcp.tool()
+def math_parser(
+    text: str,
+    symbols: list[str] | None = None,
+) -> dict[str, Any]:
+    """Parse math expression text into a canonical symbolic form."""
+    _require_sympy()
+    if not text.strip():
+        raise ValueError("text must not be empty")
+    local_symbols = {}
+    for s in symbols or []:
+        local_symbols[s] = sp.symbols(s)
+    expr = sp.sympify(text, locals=local_symbols)
+    return {
+        "schema": "math_parser.v1",
+        "input": text,
+        "parsed": str(expr),
+        "latex": sp.latex(expr),
+        "free_symbols": sorted(str(s) for s in expr.free_symbols),
+    }
+
+
+@mcp.tool()
+def math_solver(
+    mode: str = "simplify",
+    expression: str = "",
+    variable: str = "x",
+    equations: list[str] | None = None,
+    matrix_a: list[list[float]] | None = None,
+    matrix_b: list[list[float]] | None = None,
+    assumptions: dict[str, str] | None = None,
+    include_steps: bool = True,
+) -> dict[str, Any]:
+    """Offline symbolic math solver with exact + numeric outputs."""
+    _require_sympy()
+    if mode not in {"simplify", "solve", "differentiate", "integrate", "matrix", "optimize"}:
+        raise ValueError("mode must be one of: simplify, solve, differentiate, integrate, matrix, optimize")
+    x = sp.symbols(variable, **(assumptions or {}))
+    result: dict[str, Any] = {"schema": "math_solver.v1", "mode": mode}
+
+    if mode == "simplify":
+        expr = _math_expr(expression)
+        exact = sp.simplify(expr)
+        result["exact"] = str(exact)
+        result["numeric"] = str(sp.N(exact))
+    elif mode == "solve":
+        eqs = equations or ([expression] if expression else [])
+        if not eqs:
+            raise ValueError("expression or equations required for solve mode")
+        parsed = []
+        for e in eqs:
+            if "=" in e:
+                left, right = e.split("=", 1)
+                parsed.append(sp.Eq(sp.sympify(left), sp.sympify(right)))
+            else:
+                parsed.append(sp.Eq(sp.sympify(e), 0))
+        sols = sp.solve(parsed, x, dict=True)
+        result["solutions"] = [{str(k): str(v) for k, v in row.items()} for row in sols]
+    elif mode == "differentiate":
+        expr = _math_expr(expression)
+        deriv = sp.diff(expr, x)
+        result["exact"] = str(deriv)
+        result["numeric"] = str(sp.N(deriv))
+    elif mode == "integrate":
+        expr = _math_expr(expression)
+        integ = sp.integrate(expr, x)
+        result["exact"] = str(integ)
+        result["numeric"] = str(sp.N(integ))
+    elif mode == "matrix":
+        if matrix_a is None:
+            raise ValueError("matrix_a is required for matrix mode")
+        A = sp.Matrix(matrix_a)
+        result["shape"] = [int(A.rows), int(A.cols)]
+        result["determinant"] = str(A.det()) if A.rows == A.cols else None
+        result["rank"] = int(A.rank())
+        if matrix_b is not None:
+            B = sp.Matrix(matrix_b)
+            result["product"] = [[str(v) for v in row] for row in (A * B).tolist()]
+    else:  # optimize
+        expr = _math_expr(expression)
+        deriv = sp.diff(expr, x)
+        critical = sp.solve(sp.Eq(deriv, 0), x)
+        result["critical_points"] = [str(v) for v in critical]
+        result["derivative"] = str(deriv)
+
+    if include_steps:
+        result["steps"] = _math_steps_stub(mode, expression or str(equations or ""))
+    return result
+
+
+@mcp.tool()
+def math_verify(
+    left: str,
+    right: str,
+    variables: list[str] | None = None,
+    trials: int = 5,
+) -> dict[str, Any]:
+    """Verify algebraic identity/equality via symbolic simplification and sampling."""
+    _require_sympy()
+    if trials < 1:
+        raise ValueError("trials must be >= 1")
+    l = _math_expr(left)
+    r = _math_expr(right)
+    diff = sp.simplify(l - r)
+    proven = diff == 0
+    checks: list[dict[str, Any]] = []
+    syms = sorted(diff.free_symbols, key=lambda s: str(s))
+    if variables:
+        syms = [sp.symbols(v) for v in variables]
+    if not proven and syms:
+        for i in range(trials):
+            vals = {s: (i + 2) for s in syms}
+            ok = sp.simplify((l - r).subs(vals)) == 0
+            checks.append({"substitution": {str(k): str(v) for k, v in vals.items()}, "ok": bool(ok)})
+    return {
+        "schema": "math_verify.v1",
+        "left": left,
+        "right": right,
+        "proven": bool(proven),
+        "difference": str(diff),
+        "checks": checks,
+    }
+
+
+@mcp.tool()
+def sql_expert(
+    mode: str = "format",
+    query: str = "",
+    dialect: str = "generic",
+    nl_request: str = "",
+) -> dict[str, Any]:
+    """Offline SQL helper for formatting, linting, and NL-to-SQL skeletons."""
+    if mode not in {"format", "lint", "nl2sql"}:
+        raise ValueError("mode must be one of: format, lint, nl2sql")
+    result: dict[str, Any] = {"schema": "sql_expert.v1", "mode": mode, "dialect": dialect}
+    if mode == "format":
+        if not query.strip():
+            raise ValueError("query must not be empty")
+        result["formatted"] = _sql_normalize(query)
+        return result
+    if mode == "lint":
+        if not query.strip():
+            raise ValueError("query must not be empty")
+        issues: list[str] = []
+        q = query.lower()
+        if "select *" in q:
+            issues.append("Avoid SELECT * in production queries.")
+        if " where " not in q and (" update " in q or " delete " in q):
+            issues.append("UPDATE/DELETE without WHERE can affect all rows.")
+        if " order by " in q and " limit " not in q:
+            issues.append("Consider LIMIT when ORDER BY is used in high-cardinality tables.")
+        result["issues"] = issues
+        result["formatted"] = _sql_normalize(query)
+        return result
+    # nl2sql
+    req = nl_request.strip().lower()
+    if not req:
+        raise ValueError("nl_request must not be empty for nl2sql mode")
+    table = "items"
+    if "user" in req:
+        table = "users"
+    elif "order" in req:
+        table = "orders"
+    skeleton = f"SELECT id, * FROM {table} WHERE <condition> ORDER BY id DESC LIMIT 100;"
+    result["sql_skeleton"] = skeleton
+    return result
+
+
+@mcp.tool()
+def security_triage(
+    diff_text: str = "",
+    paths: list[str] | None = None,
+    max_findings: int = 100,
+) -> dict[str, Any]:
+    """Classify security-sensitive changes from diff snippets and path heuristics."""
+    if max_findings < 1:
+        raise ValueError("max_findings must be >= 1")
+    findings: list[dict[str, Any]] = []
+    lines = _extract_diff_lines(diff_text)
+    lower_paths = [p.lower() for p in (paths or [])]
+    patterns = [
+        ("hardcoded_secret", re.compile(r"(api[_-]?key|secret|token)\s*[:=]\s*['\"][^'\"]+['\"]", re.IGNORECASE), "high"),
+        ("command_injection", re.compile(r"(subprocess\.|os\.system|eval\()", re.IGNORECASE), "high"),
+        ("sql_injection", re.compile(r"(select .* \+|f\"select|execute\(.+\+)", re.IGNORECASE), "high"),
+        ("weak_crypto", re.compile(r"\b(md5|sha1)\b", re.IGNORECASE), "medium"),
+    ]
+    for ln in lines:
+        for rule, rx, sev in patterns:
+            if rx.search(ln):
+                findings.append({"rule": rule, "severity": sev, "line": ln[:300]})
+                if len(findings) >= max_findings:
+                    break
+        if len(findings) >= max_findings:
+            break
+    if any("auth" in p or "security" in p or "crypto" in p for p in lower_paths):
+        findings.append({"rule": "sensitive_path", "severity": "medium", "line": "Sensitive path changed"})
+    sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    top = "low"
+    if findings:
+        top = max((f["severity"] for f in findings), key=lambda s: sev_rank.get(s, 0))
+    return {
+        "schema": "security_triage.v1",
+        "finding_count": len(findings),
+        "top_severity": top,
+        "findings": findings[:max_findings],
+    }
+
+
+@mcp.tool()
+def doc_summarizer_small(
+    text: str,
+    max_bullets: int = 8,
+    max_chars: int = 1200,
+) -> dict[str, Any]:
+    """Small offline summarizer for logs/docs using sentence ranking."""
+    if max_bullets < 1:
+        raise ValueError("max_bullets must be >= 1")
+    sentences = re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+    scores = []
+    for s in sentences:
+        if not s.strip():
+            continue
+        score = len(re.findall(r"\b(error|fail|warning|todo|fix|critical|security)\b", s, re.IGNORECASE))
+        score += min(4, len(s) // 80)
+        scores.append((score, s.strip()))
+    scores.sort(key=lambda x: x[0], reverse=True)
+    bullets = [s for _, s in scores[:max_bullets]]
+    summary = "\n".join(f"- {b}" for b in bullets)
+    return {
+        "schema": "doc_summarizer_small.v1",
+        "bullet_count": len(bullets),
+        "summary": _trim_text(summary, max_chars=max_chars),
+    }
+
+
+@mcp.tool()
+def code_review_classifier(
+    findings: list[dict[str, Any]],
+    include_confidence: bool = True,
+) -> dict[str, Any]:
+    """Classify review findings into bug/perf/style/security buckets."""
+    buckets = {"bug": [], "perf": [], "style": [], "security": [], "other": []}
+    for f in findings:
+        text = " ".join(str(f.get(k, "")) for k in ("title", "message", "detail", "rule")).lower()
+        bucket = "other"
+        if any(k in text for k in ("injection", "secret", "xss", "auth", "csrf", "crypto")):
+            bucket = "security"
+        elif any(k in text for k in ("crash", "exception", "null", "wrong", "bug", "incorrect")):
+            bucket = "bug"
+        elif any(k in text for k in ("slow", "n+1", "latency", "optimize", "allocation")):
+            bucket = "perf"
+        elif any(k in text for k in ("format", "naming", "style", "lint", "readability")):
+            bucket = "style"
+        row = dict(f)
+        if include_confidence:
+            row["confidence"] = 0.8 if bucket != "other" else 0.5
+        buckets[bucket].append(row)
+    return {
+        "schema": "code_review_classifier.v1",
+        "counts": {k: len(v) for k, v in buckets.items()},
+        "buckets": buckets,
+    }
+
+
+@mcp.tool()
+def test_gen_small(
+    function_name: str,
+    path: str,
+    framework: str = "pytest",
+    behavior_summary: str = "",
+) -> dict[str, Any]:
+    """Generate a minimal unit-test skeleton for a target function."""
+    if framework not in {"pytest", "unittest"}:
+        raise ValueError("framework must be one of: pytest, unittest")
+    target = _resolve_repo_path(path)
+    if not target.is_file():
+        raise FileNotFoundError(path)
+    module = str(target.relative_to(REPO_PATH)).replace("/", ".")
+    if module.endswith(".py"):
+        module = module[:-3]
+    module = module.replace(".__init__", "")
+    if framework == "pytest":
+        code = (
+            f"from {module} import {function_name}\n\n"
+            f"def test_{function_name}_basic():\n"
+            f"    # {behavior_summary or 'TODO: define expected behavior'}\n"
+            f"    result = {function_name}(...)\n"
+            f"    assert result is not None\n"
+        )
+    else:
+        code = (
+            "import unittest\n"
+            f"from {module} import {function_name}\n\n"
+            "class GeneratedTest(unittest.TestCase):\n"
+            f"    def test_{function_name}_basic(self):\n"
+            f"        # {behavior_summary or 'TODO: define expected behavior'}\n"
+            f"        result = {function_name}(...)\n"
+            "        self.assertIsNotNone(result)\n"
+        )
+    return {"schema": "test_gen_small.v1", "framework": framework, "test_code": code}
+
+
+@mcp.tool()
+def vision_ocr_parser(
+    image_path: str,
+    language: str = "eng",
+    max_chars: int = 5000,
+) -> dict[str, Any]:
+    """Offline OCR parser for local images using pytesseract when available."""
+    path = _resolve_repo_path(image_path)
+    if not path.is_file():
+        raise FileNotFoundError(image_path)
+    if Image is None or pytesseract is None:
+        raise RuntimeError("vision OCR dependencies missing (Pillow/pytesseract)")
+    img = Image.open(path)
+    text = pytesseract.image_to_string(img, lang=language)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return {
+        "schema": "vision_ocr_parser.v1",
+        "image_path": image_path,
+        "line_count": len(lines),
+        "text": _trim_text(text, max_chars=max_chars),
+    }
+
+
+@mcp.tool()
+def translation_small(
+    text: str,
+    source_lang: str = "en",
+    target_lang: str = "de",
+    mode: str = "lexical",
+) -> dict[str, Any]:
+    """Offline small translation helper with lexical fallback."""
+    if mode not in {"lexical", "local_infer"}:
+        raise ValueError("mode must be one of: lexical, local_infer")
+    if mode == "lexical":
+        translated = _simple_translate(text, source_lang, target_lang)
+        return {
+            "schema": "translation_small.v1",
+            "mode": mode,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "translated": translated,
+        }
+    infer = local_infer(
+        prompt=f"Translate from {source_lang} to {target_lang}: {text}",
+        task="translation",
+        backend="auto",
+        output_profile="compact",
+        max_tokens=256,
+    )
+    return {
+        "schema": "translation_small.v1",
+        "mode": mode,
+        "source_lang": source_lang,
+        "target_lang": target_lang,
+        "translated": infer.get("output", ""),
+        "backend": infer.get("backend"),
     }
 
 

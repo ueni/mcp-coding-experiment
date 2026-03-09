@@ -133,6 +133,16 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - risk_scoring
 - json_query
 - prompt_optimize
+- math_parser
+- math_solver
+- math_verify
+- sql_expert
+- security_triage
+- doc_summarizer_small
+- code_review_classifier
+- test_gen_small
+- vision_ocr_parser
+- translation_small
 - local_model_status
 - local_embed
 - local_infer
@@ -180,5 +190,6 @@ Start here: `toolchain/dev/labs/README.md`
 - Tool outputs default to compact responses; adjust with `token_budget_guard` and per-tool `output_profile`.
 - Prefer prompt/tool usage with `fields`, `offset`, `limit`, `summary_mode="quick"`, and `store_result=true` for large outputs.
 - Offline local-model routing is configurable via `LOCAL_INFER_*` and `LOCAL_EMBED_*` environment variables.
+- OCR support uses `tesseract-ocr` plus Python `Pillow`/`pytesseract`.
 - `git commit` still needs Git user identity to be configured in the repo or via environment.
 - In stdio mode, do not write logs to stdout.

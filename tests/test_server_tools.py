@@ -249,6 +249,66 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(out["schema"], "semantic_find.v1")
         self.assertGreaterEqual(out["count"], 1)
 
+    def test_math_tools(self):
+        if self.server.sp is None:
+            self.skipTest("sympy not installed in test runtime")
+        parsed = self.server.math_parser("x**2 + 2*x + 1")
+        self.assertEqual(parsed["schema"], "math_parser.v1")
+        self.assertIn("parsed", parsed)
+
+        solved = self.server.math_solver(mode="solve", expression="x**2 - 1")
+        self.assertEqual(solved["schema"], "math_solver.v1")
+        self.assertIn("solutions", solved)
+
+        verified = self.server.math_verify("x*(x+1)", "x**2 + x")
+        self.assertEqual(verified["schema"], "math_verify.v1")
+        self.assertTrue(verified["proven"])
+
+    def test_sql_security_and_doc_tools(self):
+        sql_fmt = self.server.sql_expert(mode="format", query="select * from users where id=1")
+        self.assertEqual(sql_fmt["schema"], "sql_expert.v1")
+        self.assertIn("formatted", sql_fmt)
+
+        triage = self.server.security_triage(
+            diff_text='+ api_key = "secret"\n+ os.system("rm -rf /")\n',
+            paths=["src/auth.py"],
+        )
+        self.assertEqual(triage["schema"], "security_triage.v1")
+        self.assertGreaterEqual(triage["finding_count"], 1)
+
+        summary = self.server.doc_summarizer_small(
+            "Error occurred. Warning detected. Everything else is fine."
+        )
+        self.assertEqual(summary["schema"], "doc_summarizer_small.v1")
+        self.assertIn("summary", summary)
+
+    def test_classifier_testgen_translation(self):
+        classified = self.server.code_review_classifier(
+            findings=[
+                {"title": "Potential SQL injection in query builder"},
+                {"title": "Slow loop allocation"},
+            ]
+        )
+        self.assertEqual(classified["schema"], "code_review_classifier.v1")
+        self.assertGreaterEqual(classified["counts"]["security"], 1)
+
+        generated = self.server.test_gen_small(
+            function_name="alpha",
+            path="src/sample.py",
+            framework="pytest",
+        )
+        self.assertEqual(generated["schema"], "test_gen_small.v1")
+        self.assertIn("test_code", generated)
+
+        translated = self.server.translation_small(
+            text="hello world",
+            source_lang="en",
+            target_lang="de",
+            mode="lexical",
+        )
+        self.assertEqual(translated["schema"], "translation_small.v1")
+        self.assertNotEqual(translated["translated"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_INFER_ENDPOINT=http://127.0.0.1:11434/api/generate
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates docker.io curl \
+    && apt-get install -y --no-install-recommends git ca-certificates docker.io curl tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
