@@ -13,6 +13,9 @@ import fnmatch
 import uuid
 import hashlib
 import time
+import math
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +67,15 @@ REPO_INDEX_FILE = Path(".build/index/repo_index.json")
 TOOL_CACHE_FILE = Path(".build/cache/tool_cache.json")
 RESULT_STORE_FILE = Path(".build/cache/result_store.json")
 OUTPUT_BASELINE_FILE = Path(".build/reports/TOOL_OUTPUT_BASELINE.json")
+LOCAL_MODELS_DIR = Path(os.getenv("LOCAL_MODELS_DIR", "/models"))
+LOCAL_EMBED_BACKEND = os.getenv("LOCAL_EMBED_BACKEND", "hash").strip().lower()
+LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "").strip()
+LOCAL_EMBED_DIM = int(os.getenv("LOCAL_EMBED_DIM", "256"))
+LOCAL_INFER_BACKEND = os.getenv("LOCAL_INFER_BACKEND", "endpoint").strip().lower()
+LOCAL_INFER_MODEL = os.getenv("LOCAL_INFER_MODEL", "").strip()
+LOCAL_INFER_ENDPOINT = os.getenv(
+    "LOCAL_INFER_ENDPOINT", "http://127.0.0.1:11434/api/generate"
+).strip()
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -536,6 +548,110 @@ def _payload_size_bytes(value: Any) -> int:
         return len(json.dumps(value, ensure_ascii=True).encode("utf-8"))
     except Exception:
         return len(str(value).encode("utf-8"))
+
+
+def _vec_l2(vec: list[float]) -> float:
+    return math.sqrt(sum(x * x for x in vec))
+
+
+def _vec_normalize(vec: list[float]) -> list[float]:
+    n = _vec_l2(vec)
+    if n == 0:
+        return vec
+    return [x / n for x in vec]
+
+
+def _vec_cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    denom = _vec_l2(a) * _vec_l2(b)
+    if denom == 0:
+        return 0.0
+    return sum(x * y for x, y in zip(a, b)) / denom
+
+
+def _hash_embed_one(text: str, dim: int = 256) -> list[float]:
+    if dim < 8:
+        raise ValueError("embedding dimension must be >= 8")
+    vec = [0.0] * dim
+    tokens = re.findall(r"[A-Za-z0-9_./:-]+", text.lower())
+    if not tokens:
+        tokens = [text.lower()]
+    for tok in tokens:
+        h = hashlib.sha256(tok.encode("utf-8")).digest()
+        idx = int.from_bytes(h[:4], "big") % dim
+        sign = -1.0 if (h[4] & 1) else 1.0
+        vec[idx] += sign
+    return _vec_normalize(vec)
+
+
+def _local_embed_vectors(
+    texts: list[str],
+    backend: str = "auto",
+    normalize: bool = True,
+) -> tuple[str, list[list[float]]]:
+    selected = backend.strip().lower()
+    if selected == "auto":
+        selected = LOCAL_EMBED_BACKEND or "hash"
+
+    if selected in {"hash", "toy", "fallback"}:
+        vectors = [_hash_embed_one(t, dim=LOCAL_EMBED_DIM) for t in texts]
+        if normalize:
+            vectors = [_vec_normalize(v) for v in vectors]
+        return ("hash", vectors)
+
+    if selected in {"sentence-transformers", "sentence_transformers"}:
+        try:
+            from sentence_transformers import SentenceTransformer  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "sentence-transformers backend requested but package is unavailable"
+            ) from exc
+        model_ref = LOCAL_EMBED_MODEL
+        if not model_ref:
+            raise RuntimeError("LOCAL_EMBED_MODEL is required for sentence-transformers backend")
+        model = SentenceTransformer(model_ref, device="cpu")
+        vectors_raw = model.encode(texts, normalize_embeddings=normalize)
+        vectors = [[float(x) for x in row] for row in vectors_raw]
+        return ("sentence-transformers", vectors)
+
+    raise ValueError(
+        "unsupported embed backend; expected one of: auto, hash, sentence-transformers"
+    )
+
+
+def _local_infer_via_endpoint(
+    prompt: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    system: str = "",
+) -> str:
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "system": system,
+        "stream": False,
+        "options": {"num_predict": max_tokens, "temperature": temperature},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        LOCAL_INFER_ENDPOINT,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    if isinstance(parsed, dict):
+        for key in ("response", "text", "output", "completion"):
+            if isinstance(parsed.get(key), str):
+                return parsed[key]
+    return body
 
 
 def _adaptive_limit(requested: int, soft_cap: int = 500) -> int:
@@ -1809,6 +1925,8 @@ def semantic_find(
     adaptive_limits: bool = True,
     summary_mode: str = "full",
     store_result: bool = False,
+    use_local_rerank: bool = False,
+    local_rerank_top_k: int = 50,
 ) -> dict[str, Any]:
     """Ranked search over file paths, symbols, and text matches."""
     if not query.strip():
@@ -1906,6 +2024,16 @@ def semantic_find(
                 uniq[key] = row
         ranked = list(uniq.values())
     ranked = ranked[:max_results]
+    if use_local_rerank and ranked:
+        reranked = local_rerank(
+            query=query,
+            candidates=ranked[: max(local_rerank_top_k, max_results)],
+            top_k=max_results,
+            backend="auto",
+            output_profile="normal",
+        )
+        if isinstance(reranked, dict) and isinstance(reranked.get("results"), list):
+            ranked = reranked["results"]
     ranked = _paginate(ranked, offset=offset, limit=limit)
     if profile == "compact":
         ranked = [
@@ -2640,6 +2768,193 @@ def prompt_optimize(
         "original_chars": len(prompt),
         "optimized_chars": len(optimized),
         "optimized_prompt": optimized,
+    }
+
+
+@mcp.tool()
+def local_model_status() -> dict[str, Any]:
+    """Report local model configuration and endpoint availability."""
+    status: dict[str, Any] = {
+        "schema": "local_model_status.v1",
+        "models_dir": str(LOCAL_MODELS_DIR),
+        "models_dir_exists": _resolve_repo_path(".").exists() if str(LOCAL_MODELS_DIR).startswith(str(REPO_PATH)) else LOCAL_MODELS_DIR.exists(),
+        "embed": {
+            "backend": LOCAL_EMBED_BACKEND,
+            "model": LOCAL_EMBED_MODEL,
+            "dim": LOCAL_EMBED_DIM,
+        },
+        "infer": {
+            "backend": LOCAL_INFER_BACKEND,
+            "model": LOCAL_INFER_MODEL,
+            "endpoint": LOCAL_INFER_ENDPOINT,
+        },
+    }
+    if LOCAL_INFER_BACKEND == "endpoint":
+        try:
+            req = urllib.request.Request(
+                LOCAL_INFER_ENDPOINT.replace("/api/generate", "/api/tags"),
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                status["infer"]["endpoint_reachable"] = True
+                status["infer"]["endpoint_status"] = getattr(resp, "status", 200)
+        except Exception as exc:
+            status["infer"]["endpoint_reachable"] = False
+            status["infer"]["endpoint_error"] = str(exc)
+    return status
+
+
+@mcp.tool()
+def local_embed(
+    texts: list[str],
+    backend: str = "auto",
+    normalize: bool = True,
+    output_profile: str | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+    compress: bool = False,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Create local offline embeddings for small specialized tasks."""
+    if not texts:
+        raise ValueError("texts must not be empty")
+    profile = _default_output_profile(output_profile)
+    selected, vectors = _local_embed_vectors(texts, backend=backend, normalize=normalize)
+    rows = [{"index": i, "text": t, "vector": vectors[i]} for i, t in enumerate(texts)]
+    rows = _paginate(rows, offset=offset, limit=limit)
+    result: dict[str, Any] = {
+        "schema": "local_embed.v1",
+        "backend": selected,
+        "count": len(rows),
+        "dim": len(rows[0]["vector"]) if rows else 0,
+        "rows": rows,
+    }
+    if profile == "compact":
+        result = {
+            "schema": "local_embed.compact.v1",
+            "backend": selected,
+            "count": len(rows),
+            "dim": len(rows[0]["vector"]) if rows else 0,
+            "rows": [{"index": r["index"]} for r in rows],
+        }
+    if compress and isinstance(result.get("rows"), list):
+        result["rows_compressed"] = _compress_table(result["rows"])
+        result.pop("rows", None)
+    if store_result:
+        result["result_id"] = _result_store_put("local_embed", result)
+    return result
+
+
+@mcp.tool()
+def local_infer(
+    prompt: str,
+    task: str = "general",
+    backend: str = "auto",
+    model: str = "",
+    max_tokens: int = 256,
+    temperature: float = 0.2,
+    system: str = "",
+    output_profile: str | None = None,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Run local offline inference via endpoint or deterministic fallback."""
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty")
+    if max_tokens < 1:
+        raise ValueError("max_tokens must be >= 1")
+    if temperature < 0:
+        raise ValueError("temperature must be >= 0")
+    profile = _default_output_profile(output_profile)
+    selected = backend.strip().lower()
+    if selected == "auto":
+        selected = LOCAL_INFER_BACKEND or "endpoint"
+    model_name = model or LOCAL_INFER_MODEL or "local-default"
+
+    if selected == "endpoint":
+        try:
+            text = _local_infer_via_endpoint(
+                prompt=prompt,
+                model=model_name,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+            )
+        except Exception as exc:
+            _failure_record(
+                command=["local_infer", "endpoint"],
+                stderr=str(exc),
+                category="local_infer",
+                suggestion="Ensure local inference endpoint is running and reachable.",
+            )
+            text = ""
+            selected = "fallback"
+    if selected in {"fallback", "rule", "hash"}:
+        optimized = prompt_optimize(prompt=prompt, mode="coding")
+        text = optimized["optimized_prompt"][:max_tokens * 6]
+    result = {
+        "schema": "local_infer.v1",
+        "backend": selected,
+        "model": model_name,
+        "task": task,
+        "output": _trim_text(text),
+        "ok": bool(text),
+    }
+    if profile == "compact":
+        result = {
+            "schema": "local_infer.compact.v1",
+            "backend": selected,
+            "model": model_name,
+            "ok": bool(text),
+            "output": _trim_text(text, max_chars=1200),
+        }
+    if store_result:
+        result["result_id"] = _result_store_put("local_infer", result)
+    return result
+
+
+@mcp.tool()
+def local_rerank(
+    query: str,
+    candidates: list[dict[str, Any]],
+    top_k: int = 20,
+    backend: str = "auto",
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Rerank candidate items locally using offline embeddings."""
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    if top_k < 1:
+        raise ValueError("top_k must be >= 1")
+    if not candidates:
+        return {"schema": "local_rerank.v1", "count": 0, "results": []}
+    profile = _default_output_profile(output_profile)
+
+    texts = []
+    for c in candidates:
+        txt = " ".join(
+            str(c.get(k, "")) for k in ("path", "name", "match", "lineText", "kind")
+        ).strip()
+        texts.append(txt)
+    selected, vectors = _local_embed_vectors([query, *texts], backend=backend, normalize=True)
+    qv = vectors[0]
+    scored = []
+    for idx, cand in enumerate(candidates):
+        score = _vec_cosine(qv, vectors[idx + 1])
+        row = dict(cand)
+        row["local_score"] = score
+        scored.append(row)
+    scored.sort(key=lambda x: float(x.get("local_score", 0.0)), reverse=True)
+    scored = scored[:top_k]
+    if profile == "compact":
+        scored = [
+            {"path": r.get("path"), "kind": r.get("kind"), "local_score": r.get("local_score")}
+            for r in scored
+        ]
+    return {
+        "schema": "local_rerank.v1",
+        "backend": selected,
+        "count": len(scored),
+        "results": scored,
     }
 
 

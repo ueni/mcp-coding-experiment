@@ -133,6 +133,10 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - risk_scoring
 - json_query
 - prompt_optimize
+- local_model_status
+- local_embed
+- local_infer
+- local_rerank
 - token_budget_guard
 - cache_control
 - result_handle
@@ -175,5 +179,6 @@ Start here: `toolchain/dev/labs/README.md`
 - Mutating operations require `ALLOW_MUTATIONS=true`.
 - Tool outputs default to compact responses; adjust with `token_budget_guard` and per-tool `output_profile`.
 - Prefer prompt/tool usage with `fields`, `offset`, `limit`, `summary_mode="quick"`, and `store_result=true` for large outputs.
+- Offline local-model routing is configurable via `LOCAL_INFER_*` and `LOCAL_EMBED_*` environment variables.
 - `git commit` still needs Git user identity to be configured in the repo or via environment.
 - In stdio mode, do not write logs to stdout.

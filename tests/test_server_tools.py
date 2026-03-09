@@ -198,6 +198,57 @@ class ServerToolsTest(unittest.TestCase):
             self.assertEqual(out["mode"], mode)
             self.assertLessEqual(out["optimized_chars"], 2000)
 
+    def test_local_model_status(self):
+        out = self.server.local_model_status()
+        self.assertEqual(out["schema"], "local_model_status.v1")
+        self.assertIn("embed", out)
+        self.assertIn("infer", out)
+
+    def test_local_embed_and_rerank(self):
+        emb = self.server.local_embed(
+            texts=["alpha beta", "gamma delta"],
+            backend="hash",
+            output_profile="normal",
+        )
+        self.assertEqual(emb["schema"], "local_embed.v1")
+        self.assertEqual(emb["count"], 2)
+        self.assertGreater(emb["dim"], 0)
+
+        rerank = self.server.local_rerank(
+            query="alpha",
+            candidates=[
+                {"path": "src/sample.py", "kind": "path", "match": "alpha"},
+                {"path": "docs/a.md", "kind": "path", "match": "hello"},
+            ],
+            top_k=2,
+            backend="hash",
+            output_profile="normal",
+        )
+        self.assertEqual(rerank["schema"], "local_rerank.v1")
+        self.assertEqual(rerank["count"], 2)
+
+    def test_local_infer_fallback(self):
+        out = self.server.local_infer(
+            prompt="explain alpha function quickly",
+            backend="fallback",
+            output_profile="compact",
+            max_tokens=64,
+        )
+        self.assertTrue(out["ok"])
+        self.assertIn("output", out)
+
+    def test_semantic_find_with_local_rerank(self):
+        out = self.server.semantic_find(
+            query="alpha sample",
+            path=".",
+            output_profile="normal",
+            max_results=5,
+            use_local_rerank=True,
+            local_rerank_top_k=5,
+        )
+        self.assertEqual(out["schema"], "semantic_find.v1")
+        self.assertGreaterEqual(out["count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
