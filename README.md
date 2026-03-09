@@ -1,23 +1,31 @@
-# mcp-git-server
+# codebase-tooling-mcp
 
-Minimal MCP server for one mounted Git repository.
+MCP server for repository engineering workflows on a single mounted Git repository.
+It exposes safe file, search, analysis, and Git tooling through MCP so assistants can inspect and modify code within `/repo` while honoring mutation controls.
 
-## Use With VS Code Dev Containers
+## Naming and Scope
 
-1. Open this repository in VS Code.
-2. Run `Dev Containers: Reopen in Container`.
-3. Wait for the `mcp-git-server` service to start.
-4. Use the MCP endpoint at `http://localhost:8000/mcp`.
+- Product name: `codebase-tooling-mcp`
+- Docker service name: `codebase-tooling-mcp`
+- Docker image name: `codebase-tooling-mcp:latest`
+- Recommended MCP registration alias: `codebase-tooling-mcp`
+- Scope: one mounted repository at `REPO_PATH` (default `/repo`)
 
-The VS Code entry point stays in [`.devcontainer/devcontainer.json`](/home/user/source/mcp-server-git-local-files/.devcontainer/devcontainer.json), while the underlying container implementation lives in [`toolchain/dev/docker-compose.yml`](/home/user/source/mcp-server-git-local-files/toolchain/dev/docker-compose.yml). The repository is mounted at `/repo` and port `8000` is forwarded automatically.
+## Quickstart (60 seconds)
 
-## Build
+### 1) Build image
 
 ```bash
-docker build -t mcp-git-server ./toolchain/dev
+docker build -t codebase-tooling-mcp ./toolchain/dev
 ```
 
-## Run over Streamable HTTP
+Expected result (tail):
+
+```text
+Successfully tagged codebase-tooling-mcp:latest
+```
+
+### 2) Run HTTP server
 
 ```bash
 docker run --rm \
@@ -27,37 +35,53 @@ docker run --rm \
   -e HOST_CA_CERT_FILE=/host-certs/ca-certificates.crt \
   -v /etc/ssl/certs:/host-certs:ro \
   -v "$PWD:/repo" \
-  mcp-git-server
+  codebase-tooling-mcp
 ```
 
-## Run over stdio
+### 3) Register MCP server
 
 ```bash
-docker run --rm -i \
-  -e MCP_TRANSPORT=stdio \
-  -e ALLOW_MUTATIONS=true \
-  -v "$PWD:/repo" \
-  mcp-git-server
+claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 ```
 
-## MCP endpoint (HTTP mode)
+Expected result (example):
 
 ```text
-http://localhost:8000/mcp
+Added MCP server 'codebase-tooling-mcp'
 ```
 
-## Health endpoint (HTTP mode)
+### 4) Verify health endpoint
+
+```bash
+curl -sS http://localhost:8000/healthz
+```
+
+Expected result:
 
 ```text
-http://localhost:8000/healthz
+ok
 ```
+
+## Use With VS Code Dev Containers
+
+1. Open this repository in VS Code.
+2. Run `Dev Containers: Reopen in Container`.
+3. Wait for the `codebase-tooling-mcp` service to start.
+4. Use the MCP endpoint at `http://localhost:8000/mcp`.
+
+The VS Code entry point is [`.devcontainer/devcontainer.json`](/repo/.devcontainer/devcontainer.json), while the underlying container implementation is [`toolchain/dev/docker-compose.yml`](/repo/toolchain/dev/docker-compose.yml). The repository is mounted at `/repo` and port `8000` is forwarded automatically.
+
+## Endpoints (HTTP mode)
+
+- MCP endpoint: `http://localhost:8000/mcp`
+- Health endpoint: `http://localhost:8000/healthz`
 
 ## Example Claude Code registration
 
 ### HTTP server
 
 ```bash
-claude mcp add --transport http repo-git http://localhost:8000/mcp
+claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 ```
 
 ### Local stdio server via Docker
@@ -65,7 +89,7 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 ```json
 {
   "mcpServers": {
-    "repo-git": {
+    "codebase-tooling-mcp": {
       "command": "docker",
       "args": [
         "run",
@@ -77,131 +101,152 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
         "ALLOW_MUTATIONS=true",
         "-v",
         "/absolute/path/to/repo:/repo",
-        "mcp-git-server"
+        "codebase-tooling-mcp"
       ]
     }
   }
 }
 ```
 
-## Environment variables
+## Configuration Reference
 
-- `MCP_TRANSPORT=http|stdio`
-- `REPO_PATH=/repo`
-- `ALLOW_MUTATIONS=true|false`
-- `HOST=0.0.0.0`
-- `PORT=8000`
-- `MAX_READ_BYTES=262144`
-- `MAX_OUTPUT_CHARS=200000`
-- `ALLOW_ORIGINS=*`
-- `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`
-- `HOST_CA_CERT_FILE=` (optional path to mounted host CA bundle)
+| Variable | Default | Required | Allowed Values | Effect |
+|---|---|---|---|---|
+| `MCP_TRANSPORT` | `http` | No | `http`, `stdio` | Selects server transport mode. |
+| `REPO_PATH` | `/repo` | No | Absolute path | Root path tools may operate on. |
+| `ALLOW_MUTATIONS` | `false` (recommended default) | No | `true`, `false` | Enables/disables write and git-mutating operations. |
+| `HOST` | `0.0.0.0` | No | Host/IP string | Bind address for HTTP mode. |
+| `PORT` | `8000` | No | Integer port | HTTP listen port. |
+| `MAX_READ_BYTES` | `262144` | No | Positive integer | Max bytes read by file tools per request. |
+| `MAX_OUTPUT_CHARS` | `200000` | No | Positive integer | Output truncation limit for tool responses. |
+| `ALLOW_ORIGINS` | `*` | No | CORS origin list | Controls browser/client origins for HTTP mode. |
+| `SSL_CERT_FILE` | `/etc/ssl/certs/ca-certificates.crt` | No | Path | CA bundle for outbound HTTPS. |
+| `HOST_CA_CERT_FILE` | empty | No | Path | Optional mounted host CA bundle path. |
 
-## Tools
+## Safety and Mutation Controls
 
-- repo_info
-- git_init
-- list_files
-- read_file
-- read_document
-- interpret_presentation
-- browse_web
-- write_file
-- delete_path
-- move_path
-- git_status
-- git_diff
-- git_log
-- git_show
-- git_add
-- git_restore
-- git_commit
-- git_checkout
-- git_create_branch
-- git_fetch
-- git_pull
-- git_push
-- grep
-- find_paths
-- replace_in_files
-- read_snippet
-- read_batch
-- semantic_find
-- tree_sitter_core
-- repo_index_daemon
-- symbol_index
-- dependency_map
-- call_graph
-- ast_search
-- apply_unified_diff
-- command_runner
-- impact_tests
-- summarize_diff
-- risk_scoring
-- json_query
-- prompt_optimize
-- math_parser
-- math_solver
-- math_verify
-- sql_expert
-- security_triage
-- doc_summarizer_small
-- code_review_classifier
-- test_gen_small
-- vision_ocr_parser
-- image_interpret
-- translation_small
-- diagram_from_code
-- mermaid_lint_fix
-- drawio_generator
-- diagram_sync_check
-- local_model_status
-- local_embed
-- local_infer
-- local_rerank
-- token_budget_guard
-- cache_control
-- result_handle
-- tool_benchmark
-- self_test
-- output_size_guard
-- memory_upsert
-- memory_get
-- memory_validate
-- failure_memory
-- workspace_facts
-- doc_sync_check
-- api_surface_snapshot
-- self_check_pipeline
-- edit_transaction
-- lab_release_rehearsal
-- lab_refactor_tournament
-- lab_policy_gatekeeper
-- lab_branch_swarm
-- lab_narrated_pr
-- lab_repo_digital_twin
+- Path traversal outside the mounted repository is blocked.
+- Read-only usage is the safest default: keep `ALLOW_MUTATIONS=false` unless changes are required.
+- Mutating operations (for example `write_file`, `delete_path`, `move_path`, Git writes) require `ALLOW_MUTATIONS=true`.
+- `git commit` still requires Git user identity in repo config or environment.
+- In stdio mode, avoid writing logs to stdout to preserve protocol framing.
 
-## Fun Labs
+## Tool Catalog by Category
 
-Prototype automations for advanced workflows live under `toolchain/dev/labs`:
+### Repository and File I/O
 
-- `release_rehearsal.py`: dry-run a release, run checks, synthesize changelog, and emit `.build/reports/RELEASE_REHEARSAL.md`.
-- `refactor_tournament.py`: evaluate multiple refactor strategies on isolated branches and emit `.build/reports/REFACTOR_TOURNAMENT.md`.
-- `policy_gatekeeper.py`: enforce policy-as-code checks and emit `.build/reports/POLICY_GATEKEEPER.md`.
-- `branch_swarm_lab.py`: run strategy swarms with benchmark scoring and emit `.build/reports/BRANCH_SWARM_REPORT.md`.
-- `narrated_pr_generator.py`: generate a narrated PR packet and reviewer checklist in `.build/reports/PR_PACKET.md`.
-- `repo_digital_twin.py`: generate `.build/reports/REPO_DIGITAL_TWIN.json` and `.build/reports/REPO_DIGITAL_TWIN.md` snapshots.
+- `repo_info`
+- `list_files`
+- `read_file`
+- `read_document`
+- `read_snippet`
+- `read_batch`
+- `write_file`
+- `delete_path`
+- `move_path`
+- `find_paths`
+- `replace_in_files`
+- `json_query`
 
-Start here: `toolchain/dev/labs/README.md`
+### Git and Change Management
 
-## Notes
+- `git_init`
+- `git_status`
+- `git_diff`
+- `git_log`
+- `git_show`
+- `git_add`
+- `git_restore`
+- `git_commit`
+- `git_checkout`
+- `git_create_branch`
+- `git_fetch`
+- `git_pull`
+- `git_push`
+- `apply_unified_diff`
+- `edit_transaction`
+- `summarize_diff`
+- `risk_scoring`
+- `security_triage`
 
-- All paths are repository-relative.
-- Path traversal outside the mounted repo is blocked.
-- Mutating operations require `ALLOW_MUTATIONS=true`.
-- Tool outputs default to compact responses; adjust with `token_budget_guard` and per-tool `output_profile`.
-- Prefer prompt/tool usage with `fields`, `offset`, `limit`, `summary_mode="quick"`, and `store_result=true` for large outputs.
-- Offline local-model routing is configurable via `LOCAL_INFER_*` and `LOCAL_EMBED_*` environment variables.
-- OCR support uses `tesseract-ocr` plus Python `Pillow`/`pytesseract`.
-- `git commit` still needs Git user identity to be configured in the repo or via environment.
-- In stdio mode, do not write logs to stdout.
+### Search, Indexing, and Structure
+
+- `grep`
+- `semantic_find`
+- `tree_sitter_core`
+- `repo_index_daemon`
+- `symbol_index`
+- `dependency_map`
+- `call_graph`
+- `ast_search`
+- `impact_tests`
+- `doc_sync_check`
+- `api_surface_snapshot`
+
+### Analysis and Productivity
+
+- `command_runner`
+- `prompt_optimize`
+- `doc_summarizer_small`
+- `code_review_classifier`
+- `test_gen_small`
+- `self_test`
+- `self_check_pipeline`
+- `output_size_guard`
+- `token_budget_guard`
+- `cache_control`
+- `result_handle`
+- `tool_benchmark`
+- `workspace_facts`
+- `failure_memory`
+- `memory_upsert`
+- `memory_get`
+- `memory_validate`
+
+### Math, Data, and Content
+
+- `math_parser`
+- `math_solver`
+- `math_verify`
+- `sql_expert`
+- `vision_ocr_parser`
+- `image_interpret`
+- `translation_small`
+- `interpret_presentation`
+- `browse_web`
+
+### Diagramming and Architecture Docs
+
+- `diagram_from_code`
+- `mermaid_lint_fix`
+- `drawio_generator`
+- `diagram_sync_check`
+
+### Local Model and Retrieval
+
+- `local_model_status`
+- `local_embed`
+- `local_infer`
+- `local_rerank`
+
+### Labs
+
+- `lab_release_rehearsal`
+- `lab_refactor_tournament`
+- `lab_policy_gatekeeper`
+- `lab_branch_swarm`
+- `lab_narrated_pr`
+- `lab_repo_digital_twin`
+
+## Labs and Reports
+
+Prototype automations for advanced workflows live under `toolchain/dev/labs`.
+See [MCP Fun Labs](/repo/docs/labs.md) for command examples and expected outputs.
+
+## Documentation
+
+- [Documentation Index](/repo/docs/index.md)
+- [JSON Settings Files](/repo/docs/json-settings.md)
+- [MCP Fun Labs](/repo/docs/labs.md)
+- [Troubleshooting](/repo/docs/troubleshooting.md)
+- [Release Notes and Documentation Policy](/repo/docs/release-notes-policy.md)

@@ -1,7 +1,7 @@
 services:
-  mcp-git-server:
+  codebase-tooling-mcp:
     build: .
-    image: mcp-git-server:latest
+    image: codebase-tooling-mcp:latest
     environment:
       MCP_TRANSPORT: http
       ALLOW_MUTATIONS: "true"

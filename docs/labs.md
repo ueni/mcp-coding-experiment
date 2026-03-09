@@ -17,6 +17,13 @@ Runs policy checks across repo content and command checks.
 python toolchain/dev/labs/policy_gatekeeper.py --changed-ref HEAD
 ```
 
+Expected result (example):
+
+```text
+Policy checks completed
+Report written: .build/reports/POLICY_GATEKEEPER.md
+```
+
 Config: `.config/dev/labs/policy_gatekeeper.json`
 Output: `.build/reports/POLICY_GATEKEEPER.md`
 
@@ -33,6 +40,13 @@ Runs strategy branches, executes quality + benchmark commands, and ranks strateg
 python toolchain/dev/labs/branch_swarm_lab.py --allow-dirty
 ```
 
+Expected result (example):
+
+```text
+Benchmark complete
+Report written: .build/reports/BRANCH_SWARM_REPORT.md
+```
+
 Config: `.config/dev/labs/branch_swarm_lab.json`
 Output: `.build/reports/BRANCH_SWARM_REPORT.md`
 
@@ -42,6 +56,13 @@ Builds a PR packet from a git range.
 
 ```bash
 python toolchain/dev/labs/narrated_pr_generator.py --base HEAD~1 --head HEAD
+```
+
+Expected result (example):
+
+```text
+PR packet generated
+Report written: .build/reports/PR_PACKET.md
 ```
 
 Output: `.build/reports/PR_PACKET.md`
@@ -54,6 +75,13 @@ Builds a JSON + Markdown digital twin snapshot for architecture and drift monito
 python toolchain/dev/labs/repo_digital_twin.py
 ```
 
+Expected result (example):
+
+```text
+Digital twin generated
+Reports written under .build/reports/
+```
+
 Outputs:
 - `.build/reports/REPO_DIGITAL_TWIN.json`
 - `.build/reports/REPO_DIGITAL_TWIN.md`
@@ -63,6 +91,13 @@ Outputs:
 ```bash
 python toolchain/dev/labs/release_rehearsal.py --allow-dirty
 python toolchain/dev/labs/refactor_tournament.py --allow-dirty
+```
+
+Expected result (example):
+
+```text
+Release/refactor workflow complete
+Report written under .build/reports/
 ```
 
 Configs:
