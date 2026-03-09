@@ -2758,12 +2758,12 @@ def tool_benchmark(
 
     catalog = {
         "find_paths": lambda: find_paths(path=".", recursive=True, max_entries=500, output_profile="compact"),
-        "grep": lambda: grep(pattern="def ", path="toolchain/dev", recursive=True, max_matches=100, output_profile="compact"),
-        "symbol_index": lambda: symbol_index(path="toolchain/dev", recursive=True, max_symbols=1000, output_profile="compact"),
-        "dependency_map": lambda: dependency_map(path="toolchain/dev", recursive=True, max_files=1000, output_profile="compact", summary_mode="quick"),
-        "call_graph": lambda: call_graph(path="toolchain/dev", recursive=True, max_edges=1000, output_profile="compact", summary_mode="quick"),
-        "semantic_find": lambda: semantic_find(query="tool cache", path="toolchain/dev", max_results=20, output_profile="compact"),
-        "tree_sitter_core": lambda: tree_sitter_core(path="toolchain/dev", mode="parse", max_files=20, max_nodes=500, output_profile="compact", summary_mode="quick"),
+        "grep": lambda: grep(pattern="def ", path=".", recursive=True, max_matches=100, output_profile="compact"),
+        "symbol_index": lambda: symbol_index(path=".", recursive=True, max_symbols=1000, output_profile="compact"),
+        "dependency_map": lambda: dependency_map(path=".", recursive=True, max_files=1000, output_profile="compact", summary_mode="quick"),
+        "call_graph": lambda: call_graph(path=".", recursive=True, max_edges=1000, output_profile="compact", summary_mode="quick"),
+        "semantic_find": lambda: semantic_find(query="tool cache", path=".", max_results=20, output_profile="compact"),
+        "tree_sitter_core": lambda: tree_sitter_core(path=".", mode="parse", max_files=20, max_nodes=500, output_profile="compact", summary_mode="quick"),
     }
     selected = tools or list(catalog.keys())
     unknown = [t for t in selected if t not in catalog]
@@ -2795,6 +2795,121 @@ def tool_benchmark(
         )
 
     return {"schema": "tool_benchmark.v1", "results": results}
+
+
+@mcp.tool()
+def self_test(
+    runner: str = "unittest",
+    target: str = "tests",
+    verbose: bool = True,
+    timeout_seconds: int = 600,
+    fail_fast: bool = False,
+) -> dict[str, Any]:
+    """Execute repository self-tests using unittest or pytest."""
+    if runner not in {"unittest", "pytest"}:
+        raise ValueError("runner must be one of: unittest, pytest")
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+
+    out_cap = _token_budget_apply_max(None)
+    _resolve_repo_path(target)
+
+    if runner == "unittest":
+        cmd = [sys.executable, "-m", "unittest"]
+        if verbose:
+            cmd.append("-v")
+        if fail_fast:
+            cmd.append("-f")
+        target_path = _resolve_repo_path(target)
+        if target_path.is_file() and target_path.suffix == ".py":
+            rel_parent = str(target_path.parent.relative_to(REPO_PATH))
+            cmd.extend(
+                [
+                    "discover",
+                    "-s",
+                    rel_parent if rel_parent else ".",
+                    "-p",
+                    target_path.name,
+                ]
+            )
+        else:
+            cmd.append(target)
+    else:
+        cmd = ["pytest"]
+        if verbose:
+            cmd.append("-v")
+        else:
+            cmd.append("-q")
+        if fail_fast:
+            cmd.append("-x")
+        cmd.append(target)
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(REPO_PATH),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        _failure_record(
+            command=cmd,
+            stderr="self_test timed out",
+            stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
+            category="self_test",
+            suggestion="Increase timeout_seconds or narrow the test target.",
+        )
+        return {
+            "schema": "self_test.v1",
+            "runner": runner,
+            "target": target,
+            "ok": False,
+            "timeout": True,
+            "exit_code": None,
+            "command": cmd,
+            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
+            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
+        }
+    except FileNotFoundError as exc:
+        _failure_record(
+            command=cmd,
+            stderr=str(exc),
+            category="self_test",
+            suggestion="Install the selected test runner in the runtime.",
+        )
+        return {
+            "schema": "self_test.v1",
+            "runner": runner,
+            "target": target,
+            "ok": False,
+            "timeout": False,
+            "exit_code": None,
+            "command": cmd,
+            "stdout": "",
+            "stderr": str(exc),
+        }
+
+    if proc.returncode != 0:
+        _failure_record(
+            command=cmd,
+            stderr=proc.stderr,
+            stdout=proc.stdout,
+            category="self_test",
+            suggestion="Inspect failures and rerun with fail_fast=true for faster iteration.",
+        )
+    return {
+        "schema": "self_test.v1",
+        "runner": runner,
+        "target": target,
+        "ok": proc.returncode == 0,
+        "timeout": False,
+        "exit_code": proc.returncode,
+        "command": cmd,
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+    }
 
 
 @mcp.tool()

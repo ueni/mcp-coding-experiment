@@ -137,6 +137,7 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - cache_control
 - result_handle
 - tool_benchmark
+- self_test
 - output_size_guard
 - memory_upsert
 - memory_get
