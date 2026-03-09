@@ -36,6 +36,8 @@ RUN apt-get update \
         curl \
         git \
         gnupg \
+        jq \
+        ripgrep \
         tini \
         tesseract-ocr \
     && install -m 0755 -d /etc/apt/keyrings \
