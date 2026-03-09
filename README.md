@@ -24,6 +24,8 @@ docker run --rm \
   -p 8000:8000 \
   -e MCP_TRANSPORT=http \
   -e ALLOW_MUTATIONS=true \
+  -e HOST_CA_CERT_FILE=/host-certs/ca-certificates.crt \
+  -v /etc/ssl/certs:/host-certs:ro \
   -v "$PWD:/repo" \
   mcp-git-server
 ```
@@ -92,6 +94,8 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - `MAX_READ_BYTES=262144`
 - `MAX_OUTPUT_CHARS=200000`
 - `ALLOW_ORIGINS=*`
+- `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`
+- `HOST_CA_CERT_FILE=` (optional path to mounted host CA bundle)
 
 ## Tools
 
@@ -100,6 +104,7 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - list_files
 - read_file
 - read_document
+- browse_web
 - write_file
 - delete_path
 - move_path

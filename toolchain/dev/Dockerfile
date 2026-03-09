@@ -16,7 +16,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_EMBED_DIM=256 \
     LOCAL_INFER_BACKEND=endpoint \
     LOCAL_INFER_MODEL= \
-    LOCAL_INFER_ENDPOINT=http://127.0.0.1:11434/api/generate
+    LOCAL_INFER_ENDPOINT=http://127.0.0.1:11434/api/generate \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    HOST_CA_CERT_FILE=
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates docker.io curl tesseract-ocr antiword \

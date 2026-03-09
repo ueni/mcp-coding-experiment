@@ -466,6 +466,37 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(odp_out["extension"], ".odp")
         self.assertIn("Hello ODP", odp_out["text"])
 
+    def test_browse_web_html_extract_and_compact(self):
+        class _FakeResp:
+            def __init__(self):
+                self.status = 200
+                self.url = "https://example.com/final"
+                self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+            def read(self, n=-1):
+                body = b"<html><head><title>T</title></head><body><h1>Hello</h1><script>x=1</script><p>World</p></body></html>"
+                return body if n < 0 else body[:n]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with patch.object(self.server, "_urlopen_with_host_certs", return_value=_FakeResp()):
+            out = self.server.browse_web(
+                url="https://example.com",
+                output_profile="compact",
+                max_chars=200,
+            )
+        self.assertEqual(out["schema"], "browse_web.compact.v1")
+        self.assertEqual(out["status"], 200)
+        self.assertIn("Hello World", out["text"])
+
+    def test_browse_web_rejects_non_http_scheme(self):
+        with self.assertRaises(ValueError):
+            self.server.browse_web(url="file:///etc/passwd")
+
 
 if __name__ == "__main__":
     unittest.main()

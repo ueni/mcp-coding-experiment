@@ -14,8 +14,10 @@ import uuid
 import hashlib
 import time
 import math
+import ssl
 import urllib.error
 import urllib.request
+import urllib.parse
 import html
 import zipfile
 import xml.etree.ElementTree as ET
@@ -119,6 +121,7 @@ LOCAL_INFER_MODEL = os.getenv("LOCAL_INFER_MODEL", "").strip()
 LOCAL_INFER_ENDPOINT = os.getenv(
     "LOCAL_INFER_ENDPOINT", "http://127.0.0.1:11434/api/generate"
 ).strip()
+HOST_CA_CERT_FILE = os.getenv("HOST_CA_CERT_FILE", "").strip()
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -149,6 +152,35 @@ def _trim_text(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
         text[:max_chars]
         + f"\n\n[truncated: output exceeded {max_chars} characters; original length={len(text)}]"
     )
+
+
+def _ssl_context_for_url(url: str) -> ssl.SSLContext | None:
+    if not url.lower().startswith("https://"):
+        return None
+    cafile = os.getenv("SSL_CERT_FILE", "").strip() or HOST_CA_CERT_FILE
+    if cafile:
+        p = Path(cafile)
+        if p.is_file():
+            return ssl.create_default_context(cafile=str(p))
+    return ssl.create_default_context()
+
+
+def _urlopen_with_host_certs(
+    req: urllib.request.Request,
+    timeout: int,
+) -> Any:
+    ctx = _ssl_context_for_url(req.full_url)
+    if ctx is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+
+def _html_to_text(raw_html: str) -> str:
+    cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", raw_html)
+    cleaned = re.sub(r"(?is)<[^>]+>", " ", cleaned)
+    cleaned = html.unescape(cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def _ensure_repo_path_exists() -> None:
@@ -851,7 +883,7 @@ def _local_infer_via_endpoint(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with _urlopen_with_host_certs(req, timeout=60) as resp:
         body = resp.read().decode("utf-8", errors="replace")
     try:
         parsed = json.loads(body)
@@ -1486,6 +1518,79 @@ def read_document(
             "truncated": truncated,
             "warnings": warnings,
             "text": text,
+        }
+    return result
+
+
+@mcp.tool()
+def browse_web(
+    url: str,
+    timeout_seconds: int = 15,
+    max_bytes: int = 300000,
+    max_chars: int = 12000,
+    extract_text: bool = True,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Fetch a web page/document over HTTP(S) using host/system certificate store."""
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be >= 1")
+    if max_chars < 1:
+        raise ValueError("max_chars must be >= 1")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("url scheme must be http or https")
+
+    profile = _default_output_profile(output_profile)
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "User-Agent": "repo-git-mcp/1.0 (+browse_web)",
+            "Accept": "text/html,application/xhtml+xml,application/xml,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with _urlopen_with_host_certs(req, timeout=timeout_seconds) as resp:
+            status = int(getattr(resp, "status", 200))
+            final_url = str(getattr(resp, "url", url))
+            content_type = str(resp.headers.get("Content-Type", ""))
+            raw = resp.read(max_bytes + 1)
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"browse failed: {exc}") from exc
+
+    truncated_bytes = len(raw) > max_bytes
+    if truncated_bytes:
+        raw = raw[:max_bytes]
+    charset_match = re.search(r"charset=([A-Za-z0-9._-]+)", content_type, flags=re.IGNORECASE)
+    encoding = charset_match.group(1) if charset_match else "utf-8"
+    text_raw = raw.decode(encoding, errors="replace")
+    text = _html_to_text(text_raw) if extract_text else text_raw
+    text, truncated_chars = _truncate_with_flag(text, max_chars=max_chars)
+
+    result = {
+        "schema": "browse_web.v1",
+        "url": url,
+        "final_url": final_url,
+        "status": status,
+        "content_type": content_type,
+        "encoding": encoding,
+        "extract_text": extract_text,
+        "bytes_read": len(raw),
+        "truncated_bytes": truncated_bytes,
+        "truncated_chars": truncated_chars,
+        "text": text,
+    }
+    if profile == "compact":
+        return {
+            "schema": "browse_web.compact.v1",
+            "url": result["url"],
+            "final_url": result["final_url"],
+            "status": result["status"],
+            "content_type": result["content_type"],
+            "truncated": bool(truncated_bytes or truncated_chars),
+            "text": result["text"],
         }
     return result
 
@@ -3798,7 +3903,7 @@ def local_model_status() -> dict[str, Any]:
                 LOCAL_INFER_ENDPOINT.replace("/api/generate", "/api/tags"),
                 method="GET",
             )
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with _urlopen_with_host_certs(req, timeout=3) as resp:
                 status["infer"]["endpoint_reachable"] = True
                 status["infer"]["endpoint_status"] = getattr(resp, "status", 200)
         except Exception as exc:
