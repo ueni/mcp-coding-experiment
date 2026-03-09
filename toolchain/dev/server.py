@@ -840,13 +840,30 @@ def _cache_save(payload: dict[str, Any]) -> None:
     _json_file_save(TOOL_CACHE_FILE, payload)
 
 
-def _cache_get(tool: str, key: str) -> Any | None:
+def _parse_iso_timestamp(raw: str) -> datetime | None:
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def _cache_get_entry(tool: str, key: str) -> dict[str, Any] | None:
     payload = _cache_load()
     tool_entries = payload["entries"].get(tool, {})
     if not isinstance(tool_entries, dict):
         return None
     row = tool_entries.get(key)
     if not isinstance(row, dict):
+        return None
+    return row
+
+
+def _cache_get(tool: str, key: str) -> Any | None:
+    row = _cache_get_entry(tool, key)
+    if row is None:
         return None
     return row.get("value")
 
@@ -900,6 +917,66 @@ def _cache_stats() -> dict[str, Any]:
             per_tool[tool] = len(rows)
             total += len(rows)
     return {"total_entries": total, "tools": per_tool}
+
+
+def _cache_list_tool(tool: str, limit: int = 50) -> list[dict[str, Any]]:
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    payload = _cache_load()
+    tool_entries = payload.get("entries", {}).get(tool, {})
+    if not isinstance(tool_entries, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for key, row in tool_entries.items():
+        if not isinstance(row, dict):
+            continue
+        value = row.get("value")
+        rows.append(
+            {
+                "key": key,
+                "updated_at": str(row.get("updated_at", "")),
+                "value_type": type(value).__name__,
+                "value_schema": value.get("schema") if isinstance(value, dict) else None,
+            }
+        )
+    rows.sort(key=lambda x: x["updated_at"], reverse=True)
+    return rows[:limit]
+
+
+def _cache_prune(max_age_minutes: int, tool: str | None = None) -> dict[str, Any]:
+    if max_age_minutes < 1:
+        raise ValueError("max_age_minutes must be >= 1")
+    payload = _cache_load()
+    entries = payload.get("entries", {})
+    if not isinstance(entries, dict):
+        entries = {}
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+    removed = 0
+    scanned = 0
+
+    target_tools = [tool] if tool else list(entries.keys())
+    for tool_name in target_tools:
+        tool_entries = entries.get(tool_name, {})
+        if not isinstance(tool_entries, dict):
+            continue
+        kept: dict[str, Any] = {}
+        for key, row in tool_entries.items():
+            scanned += 1
+            if not isinstance(row, dict):
+                removed += 1
+                continue
+            ts = _parse_iso_timestamp(str(row.get("updated_at", "")))
+            if ts is None or ts >= cutoff:
+                kept[key] = row
+            else:
+                removed += 1
+        if kept:
+            entries[tool_name] = kept
+        else:
+            entries.pop(tool_name, None)
+    payload["entries"] = entries
+    _cache_save(payload)
+    return {"removed_entries": removed, "scanned_entries": scanned, "tool": tool or "*", "max_age_minutes": max_age_minutes}
 
 
 def _result_store_load() -> dict[str, Any]:
@@ -5139,14 +5216,23 @@ def token_budget_guard(
 def cache_control(
     mode: str = "stats",
     tool: str | None = None,
+    max_age_minutes: int = 1440,
+    limit: int = 50,
 ) -> dict[str, Any]:
     """Inspect or clear server-side tool cache entries."""
-    if mode not in {"stats", "clear", "clear_tool"}:
-        raise ValueError("mode must be one of: stats, clear, clear_tool")
+    if mode not in {"stats", "clear", "clear_tool", "inspect_tool", "prune"}:
+        raise ValueError("mode must be one of: stats, clear, clear_tool, inspect_tool, prune")
     if mode == "stats":
         return {"mode": mode, **_cache_stats()}
     if mode == "clear":
         return {"mode": mode, **_cache_clear(None)}
+    if mode == "inspect_tool":
+        if not tool:
+            raise ValueError("tool is required for inspect_tool mode")
+        rows = _cache_list_tool(tool=tool, limit=limit)
+        return {"mode": mode, "tool": tool, "count": len(rows), "entries": rows}
+    if mode == "prune":
+        return {"mode": mode, **_cache_prune(max_age_minutes=max_age_minutes, tool=tool)}
     if not tool:
         raise ValueError("tool is required for clear_tool mode")
     return {"mode": mode, **_cache_clear(tool)}
@@ -6190,11 +6276,40 @@ def workflow_compiler(
     goal: str,
     constraints: list[str] | None = None,
     include_rollback: bool = True,
+    use_cache: bool = True,
+    refresh_cache: bool = False,
+    cache_ttl_minutes: int = 240,
 ) -> dict[str, Any]:
     """Compile a goal into an executable MCP workflow plan."""
     if not goal.strip():
         raise ValueError("goal must not be empty")
+    if cache_ttl_minutes < 1:
+        raise ValueError("cache_ttl_minutes must be >= 1")
     cons = constraints or []
+    cache_key = json.dumps(
+        {
+            "v": 2,
+            "goal": goal.strip(),
+            "constraints": cons,
+            "include_rollback": include_rollback,
+        },
+        sort_keys=True,
+    )
+    if use_cache and not refresh_cache:
+        row = _cache_get_entry("workflow_compiler", cache_key)
+        if isinstance(row, dict):
+            cached_at_raw = str(row.get("updated_at", ""))
+            cached_at = _parse_iso_timestamp(cached_at_raw)
+            if cached_at is not None:
+                cache_age = (datetime.now(timezone.utc) - cached_at).total_seconds()
+                if cache_age <= float(cache_ttl_minutes) * 60.0:
+                    val = row.get("value")
+                    if isinstance(val, dict):
+                        out = dict(val)
+                        out["cached"] = True
+                        out["cache_updated_at"] = cached_at_raw
+                        out["cache_key"] = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:12]
+                        return out
     g = goal.lower()
     steps: list[dict[str, Any]] = []
     if any(tok in g for tok in {"release", "ship", "deploy"}):
@@ -6216,13 +6331,18 @@ def workflow_compiler(
             {"tool": "state_snapshot", "when": "before_mutation"},
             {"tool": "state_restore", "when": "on_failure"},
         ]
-    return {
+    out = {
         "schema": "workflow_compiler.v1",
         "goal": goal,
         "constraints": cons,
         "steps": steps,
         "rollback": rollback,
+        "cached": False,
+        "cache_key": hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:12],
     }
+    if use_cache:
+        _cache_set("workflow_compiler", cache_key, out, max_entries=200)
+    return out
 
 
 @mcp.tool()
