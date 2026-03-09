@@ -118,8 +118,10 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - find_paths
 - replace_in_files
 - read_snippet
+- read_batch
 - symbol_index
 - read_symbol
+- dependency_map
 - ast_search
 - apply_unified_diff
 - command_runner

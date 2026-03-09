@@ -59,6 +59,7 @@ SAFE_GIT_SUBCOMMANDS = {
     "branch",
     "ls-files",
 }
+OUTPUT_PROFILES = {"compact", "normal", "verbose"}
 
 mcp = FastMCP(
     "git-repo-manager",
@@ -379,6 +380,88 @@ def _collect_python_symbols(
             }
         )
     return symbols
+
+
+def _module_name_from_relpath(rel_path: Path) -> str:
+    parts = list(rel_path.parts)
+    if not parts:
+        return ""
+    if parts[-1] == "__init__.py":
+        parts = parts[:-1]
+    elif parts[-1].endswith(".py"):
+        parts[-1] = parts[-1][:-3]
+    return ".".join(parts)
+
+
+def _import_candidates(module: str) -> list[str]:
+    parts = module.split(".")
+    candidates: list[str] = []
+    for i in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:i])
+        candidates.append(prefix)
+    return candidates
+
+
+def _validate_output_profile(output_profile: str) -> str:
+    profile = output_profile.strip().lower()
+    if profile not in OUTPUT_PROFILES:
+        raise ValueError("output_profile must be one of: compact, normal, verbose")
+    return profile
+
+
+def _build_snippet(
+    file_path: Path,
+    start_line: int,
+    end_line: int,
+    context_before: int = 0,
+    context_after: int = 0,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    if start_line < 1 or end_line < 1:
+        raise ValueError("start_line and end_line must be >= 1")
+    if end_line < start_line:
+        raise ValueError("end_line must be >= start_line")
+    if context_before < 0 or context_after < 0:
+        raise ValueError("context_before/context_after must be >= 0")
+    if not file_path.is_file():
+        raise FileNotFoundError(str(file_path.relative_to(REPO_PATH)))
+
+    lines = _read_lines(file_path, encoding=encoding)
+    total_lines = len(lines)
+    from_line = max(1, start_line - context_before)
+    to_line = min(total_lines, end_line + context_after)
+    snippet_lines = lines[from_line - 1 : to_line]
+    return {
+        "path": str(file_path.relative_to(REPO_PATH)),
+        "requested_start_line": start_line,
+        "requested_end_line": end_line,
+        "start_line": from_line,
+        "end_line": to_line,
+        "total_lines": total_lines,
+        "content": "\n".join(snippet_lines),
+    }
+
+
+def _symbol_to_profile(symbol: dict[str, Any], profile: str) -> dict[str, Any]:
+    if profile == "compact":
+        return {
+            "path": symbol["path"],
+            "name": symbol["name"],
+            "kind": symbol["kind"],
+            "line_start": symbol["line_start"],
+        }
+    return symbol
+
+
+def _match_to_profile(match: dict[str, Any], profile: str) -> dict[str, Any]:
+    if profile == "compact":
+        return {
+            "path": match["path"],
+            "line": match["line"],
+            "column": match["column"],
+            "match": match["match"],
+        }
+    return match
 
 
 def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
@@ -905,6 +988,7 @@ def find_paths(
     file_type: str = "any",
     max_depth: int | None = None,
     max_entries: int = 1000,
+    output_profile: str = "normal",
 ) -> list[str]:
     """Find files and/or directories under a repository-relative path."""
     if max_entries < 1:
@@ -913,6 +997,7 @@ def find_paths(
         raise ValueError("max_depth must be >= 0")
     if file_type not in {"any", "file", "dir"}:
         raise ValueError("file_type must be one of: any, file, dir")
+    profile = _validate_output_profile(output_profile)
 
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -961,6 +1046,8 @@ def find_paths(
         maybe_add(item)
 
     results.sort()
+    if profile == "compact":
+        return [item[:-1] if item.endswith("/") else item for item in results]
     return results
 
 
@@ -976,6 +1063,7 @@ def grep(
     max_matches: int = 500,
     max_file_bytes: int = 1048576,
     encoding: str = "utf-8",
+    output_profile: str = "normal",
 ) -> list[dict[str, Any]]:
     """Search repository files for a regex pattern and return matches.
 
@@ -986,6 +1074,9 @@ def grep(
         raise ValueError("max_matches must be >= 1")
     if max_file_bytes < 1:
         raise ValueError("max_file_bytes must be >= 1")
+    profile = _validate_output_profile(output_profile)
+    if profile == "compact":
+        max_matches = min(max_matches, 250)
 
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -1025,7 +1116,7 @@ def grep(
                             "match": m.group(0),
                             "lineText": line.rstrip("\n"),
                         }
-                        results.append(res)
+                        results.append(_match_to_profile(res, profile))
                         if len(results) >= max_matches:
                             return
                     if len(results) >= max_matches:
@@ -1178,33 +1269,82 @@ def read_snippet(
     context_before: int = 0,
     context_after: int = 0,
     encoding: str = "utf-8",
+    output_profile: str = "normal",
 ) -> dict[str, Any]:
     """Read a focused line range with optional surrounding context."""
-    if start_line < 1 or end_line < 1:
-        raise ValueError("start_line and end_line must be >= 1")
-    if end_line < start_line:
-        raise ValueError("end_line must be >= start_line")
-    if context_before < 0 or context_after < 0:
-        raise ValueError("context_before/context_after must be >= 0")
-
+    profile = _validate_output_profile(output_profile)
     file_path = _resolve_repo_path(path)
-    if not file_path.is_file():
-        raise FileNotFoundError(path)
+    snippet = _build_snippet(
+        file_path=file_path,
+        start_line=start_line,
+        end_line=end_line,
+        context_before=context_before,
+        context_after=context_after,
+        encoding=encoding,
+    )
+    if profile == "compact":
+        return {
+            "path": snippet["path"],
+            "start_line": snippet["start_line"],
+            "end_line": snippet["end_line"],
+            "content": snippet["content"],
+        }
+    return snippet
 
-    lines = _read_lines(file_path, encoding=encoding)
-    total_lines = len(lines)
-    from_line = max(1, start_line - context_before)
-    to_line = min(total_lines, end_line + context_after)
-    snippet_lines = lines[from_line - 1 : to_line]
+
+@mcp.tool()
+def read_batch(
+    requests: list[dict[str, Any]],
+    encoding: str = "utf-8",
+    max_items: int = 50,
+    output_profile: str = "normal",
+) -> dict[str, Any]:
+    """Read multiple focused snippets in one call."""
+    if max_items < 1:
+        raise ValueError("max_items must be >= 1")
+    profile = _validate_output_profile(output_profile)
+    if len(requests) > max_items:
+        raise ValueError(f"too many requests; max_items={max_items}")
+
+    snippets: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for idx, req in enumerate(requests, start=1):
+        path = req.get("path")
+        start_line = req.get("start_line")
+        end_line = req.get("end_line")
+        context_before = int(req.get("context_before", 0))
+        context_after = int(req.get("context_after", 0))
+        if not isinstance(path, str) or not isinstance(start_line, int) or not isinstance(
+            end_line, int
+        ):
+            errors.append({"index": idx, "error": "path/start_line/end_line are required"})
+            continue
+        try:
+            snippet = _build_snippet(
+                file_path=_resolve_repo_path(path),
+                start_line=start_line,
+                end_line=end_line,
+                context_before=context_before,
+                context_after=context_after,
+                encoding=encoding,
+            )
+            if profile == "compact":
+                snippet = {
+                    "path": snippet["path"],
+                    "start_line": snippet["start_line"],
+                    "end_line": snippet["end_line"],
+                    "content": snippet["content"],
+                }
+            snippets.append(snippet)
+        except Exception as exc:
+            errors.append({"index": idx, "path": path, "error": str(exc)})
 
     return {
-        "path": str(file_path.relative_to(REPO_PATH)),
-        "requested_start_line": start_line,
-        "requested_end_line": end_line,
-        "start_line": from_line,
-        "end_line": to_line,
-        "total_lines": total_lines,
-        "content": "\n".join(snippet_lines),
+        "count": len(snippets),
+        "error_count": len(errors),
+        "snippets": snippets,
+        "errors": errors if profile != "compact" else errors[:10],
     }
 
 
@@ -1215,10 +1355,14 @@ def symbol_index(
     recursive: bool = True,
     max_symbols: int = 5000,
     encoding: str = "utf-8",
+    output_profile: str = "normal",
 ) -> list[dict[str, Any]]:
     """Index Python symbols (classes/functions) for focused navigation."""
     if max_symbols < 1:
         raise ValueError("max_symbols must be >= 1")
+    profile = _validate_output_profile(output_profile)
+    if profile == "compact":
+        max_symbols = min(max_symbols, 2000)
 
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -1242,7 +1386,7 @@ def symbol_index(
         for symbol in extracted:
             if len(symbols) >= max_symbols:
                 return symbols
-            symbols.append(symbol)
+            symbols.append(_symbol_to_profile(symbol, profile))
     return symbols
 
 
@@ -1254,8 +1398,10 @@ def read_symbol(
     include_private: bool = True,
     recursive: bool = True,
     encoding: str = "utf-8",
+    output_profile: str = "normal",
 ) -> dict[str, Any]:
     """Read source for a named Python symbol."""
+    profile = _validate_output_profile(output_profile)
     if occurrence < 1:
         raise ValueError("occurrence must be >= 1")
 
@@ -1266,6 +1412,7 @@ def read_symbol(
         recursive=recursive,
         max_symbols=20000,
         encoding=encoding,
+        output_profile="normal",
     ):
         if symbol["name"] == name:
             matches.append(symbol)
@@ -1284,7 +1431,7 @@ def read_symbol(
     end = min(len(lines), int(target["line_end"]))
     content = "\n".join(lines[start - 1 : end])
 
-    return {
+    result = {
         "path": target["path"],
         "name": target["name"],
         "kind": target["kind"],
@@ -1293,6 +1440,124 @@ def read_symbol(
         "line_end": end,
         "content": content,
     }
+    if profile == "compact":
+        return {
+            "path": result["path"],
+            "name": result["name"],
+            "line_start": result["line_start"],
+            "line_end": result["line_end"],
+            "content": result["content"],
+        }
+    return result
+
+
+@mcp.tool()
+def dependency_map(
+    path: str = ".",
+    recursive: bool = True,
+    include_stdlib: bool = False,
+    max_files: int = 3000,
+    output_profile: str = "normal",
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Build a Python import dependency map for repo-local modules."""
+    if max_files < 1:
+        raise ValueError("max_files must be >= 1")
+    profile = _validate_output_profile(output_profile)
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    module_to_path: dict[str, str] = {}
+    python_files: list[Path] = []
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        if candidate.suffix != ".py":
+            continue
+        rel = candidate.relative_to(REPO_PATH)
+        module = _module_name_from_relpath(rel)
+        rel_str = str(rel).replace("\\", "/")
+        module_to_path[module] = rel_str
+        python_files.append(candidate)
+        if len(python_files) >= max_files:
+            break
+
+    edges: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+
+    for file_path in python_files:
+        rel = str(file_path.relative_to(REPO_PATH)).replace("\\", "/")
+        try:
+            tree = ast.parse(file_path.read_text(encoding=encoding, errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports = [node.module]
+                else:
+                    imports = []
+            else:
+                continue
+
+            for imp in imports:
+                resolved_path = None
+                for candidate_module in _import_candidates(imp):
+                    resolved = module_to_path.get(candidate_module)
+                    if resolved:
+                        resolved_path = resolved
+                        break
+                if resolved_path:
+                    edges.append(
+                        {
+                            "from": rel,
+                            "to": resolved_path,
+                            "import": imp,
+                            "line": int(getattr(node, "lineno", 1)),
+                        }
+                    )
+                elif include_stdlib:
+                    unresolved.append(
+                        {
+                            "from": rel,
+                            "import": imp,
+                            "line": int(getattr(node, "lineno", 1)),
+                        }
+                    )
+
+    result: dict[str, Any] = {
+        "root": str(root.relative_to(REPO_PATH)),
+        "python_file_count": len(python_files),
+        "edge_count": len(edges),
+        "edges": edges,
+    }
+    if profile == "compact":
+        return {
+            "python_file_count": result["python_file_count"],
+            "edge_count": result["edge_count"],
+            "edges": edges[:500],
+        }
+    if profile == "verbose":
+        result["unresolved_imports"] = unresolved
+        inbound: dict[str, int] = {}
+        outbound: dict[str, int] = {}
+        for edge in edges:
+            inbound[edge["to"]] = inbound.get(edge["to"], 0) + 1
+            outbound[edge["from"]] = outbound.get(edge["from"], 0) + 1
+        result["hotspots"] = {
+            "most_imported": sorted(
+                [{"path": k, "count": v} for k, v in inbound.items()],
+                key=lambda x: x["count"],
+                reverse=True,
+            )[:20],
+            "most_importing": sorted(
+                [{"path": k, "count": v} for k, v in outbound.items()],
+                key=lambda x: x["count"],
+                reverse=True,
+            )[:20],
+        }
+    return result
 
 
 @mcp.tool()
@@ -1563,9 +1828,11 @@ def summarize_diff(
     ref: str | None = None,
     staged: bool = False,
     pathspec: str | None = None,
+    output_profile: str = "normal",
 ) -> dict[str, Any]:
     """Return compact structured diff summary with risk hints."""
     _require_git_repo()
+    profile = _validate_output_profile(output_profile)
     args = ["diff"]
     if staged:
         args.append("--staged")
@@ -1610,7 +1877,7 @@ def summarize_diff(
         if "TODO" in line or "FIXME" in line or "XXX" in line:
             todo_hits += 1
 
-    return {
+    result = {
         "file_count": len(files),
         "total_added": total_added,
         "total_deleted": total_deleted,
@@ -1620,6 +1887,18 @@ def summarize_diff(
             "todo_like_additions": todo_hits,
         },
     }
+    if profile == "compact":
+        return {
+            "file_count": result["file_count"],
+            "total_added": result["total_added"],
+            "total_deleted": result["total_deleted"],
+            "risk_flags": result["risk_flags"],
+        }
+    if profile == "verbose":
+        result["files_sorted_by_churn"] = sorted(
+            files, key=lambda x: x["added"] + x["deleted"], reverse=True
+        )
+    return result
 
 
 @mcp.tool()
@@ -1627,8 +1906,10 @@ def json_query(
     path: str,
     query: str = "",
     file_type: str | None = None,
+    output_profile: str = "normal",
 ) -> dict[str, Any]:
     """Query JSON/TOML/YAML content with a dot/index path."""
+    profile = _validate_output_profile(output_profile)
     file_path = _resolve_repo_path(path)
     if not file_path.is_file():
         raise FileNotFoundError(path)
@@ -1651,13 +1932,23 @@ def json_query(
 
     value = _query_value(data, query) if query.strip() else data
     encoded = json.dumps(value, indent=2, ensure_ascii=True)
-    return {
+    result = {
         "path": str(file_path.relative_to(REPO_PATH)),
         "query": query,
         "file_type": fmt,
         "value": value,
         "value_json": _trim_text(encoded),
     }
+    if profile == "compact":
+        return {
+            "path": result["path"],
+            "query": result["query"],
+            "file_type": result["file_type"],
+            "value_json": result["value_json"],
+        }
+    if profile == "verbose":
+        result["value_type"] = type(value).__name__
+    return result
 
 
 @mcp.tool()
