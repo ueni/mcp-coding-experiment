@@ -116,6 +116,14 @@ REUSE_SPDX_REPORT = Path(".build/reports/REUSE.spdx")
 REUSE_LINT_REPORT = Path(".build/reports/REUSE_LINT.txt")
 GOLDEN_BASELINE_FILE = Path(".build/reports/TOOL_GOLDEN_BASELINE.json")
 FLAKY_HISTORY_FILE = Path(".build/reports/FLAKY_TEST_HISTORY.json")
+STATE_SNAPSHOT_DIR = Path(".build/snapshots")
+EXECUTION_REPLAY_DIR = Path(".build/replays")
+ARTIFACT_INDEX_FILE = Path(".build/index/artifact_memory.json")
+TOOL_ROUTER_STATS_FILE = Path(".build/memory/tool_router_stats.json")
+COST_BUDGET_FILE = Path(".build/memory/cost_budget.json")
+APPROVAL_POINTS_FILE = Path(".build/memory/approval_points.json")
+ROOT_CAUSE_FILE = Path(".build/memory/root_cause_memory.json")
+STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
 LOCAL_MODELS_DIR = Path(os.getenv("LOCAL_MODELS_DIR", "/models"))
 LOCAL_EMBED_BACKEND = os.getenv("LOCAL_EMBED_BACKEND", "hash").strip().lower()
 LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "").strip()
@@ -749,6 +757,23 @@ def _json_file_save(path: Path, payload: Any) -> None:
     file_path = _resolve_repo_path(str(path))
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _state_snapshot_index_load() -> dict[str, Any]:
+    payload = _json_file_load(STATE_SNAPSHOT_INDEX_FILE, {"snapshots": {}})
+    if not isinstance(payload, dict):
+        return {"snapshots": {}}
+    snapshots = payload.get("snapshots", {})
+    if not isinstance(snapshots, dict):
+        snapshots = {}
+    return {"snapshots": snapshots}
+
+
+def _state_snapshot_index_save(payload: dict[str, Any]) -> None:
+    snapshots = payload.get("snapshots", {})
+    if not isinstance(snapshots, dict):
+        snapshots = {}
+    _json_file_save(STATE_SNAPSHOT_INDEX_FILE, {"snapshots": snapshots})
 
 
 def _token_budget_load() -> dict[str, Any]:
@@ -1630,6 +1655,39 @@ def _extract_failed_tests_unittest(output: str) -> list[str]:
 def _risk_level_value(level: str) -> int:
     order = {"low": 1, "medium": 2, "high": 3}
     return order.get(level, 0)
+
+
+def _now_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _readme_tool_names() -> set[str]:
+    readme = _resolve_repo_path("README.md")
+    if not readme.is_file():
+        return set()
+    names: set[str] = set()
+    for line in readme.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"- `([^`]+)`", line.strip())
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def _server_tool_names() -> set[str]:
+    server_file = _resolve_repo_path("toolchain/dev/server.py")
+    if not server_file.is_file():
+        server_file = Path(__file__).resolve()
+    names: set[str] = set()
+    lines = server_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != "@mcp.tool()":
+            continue
+        for j in range(i + 1, min(i + 8, len(lines))):
+            m = re.match(r"\s*def\s+([a-zA-Z0-9_]+)\(", lines[j])
+            if m:
+                names.add(m.group(1))
+                break
+    return names
 
 
 def _lossless_blob_store_load(path: Path) -> dict[str, Any]:
@@ -6125,6 +6183,688 @@ def fast_path_dev(
     if store_result:
         out["result_id"] = _result_store_put("fast_path_dev", out)
     return out
+
+
+@mcp.tool()
+def workflow_compiler(
+    goal: str,
+    constraints: list[str] | None = None,
+    include_rollback: bool = True,
+) -> dict[str, Any]:
+    """Compile a goal into an executable MCP workflow plan."""
+    if not goal.strip():
+        raise ValueError("goal must not be empty")
+    cons = constraints or []
+    g = goal.lower()
+    steps: list[dict[str, Any]] = []
+    if any(tok in g for tok in {"release", "ship", "deploy"}):
+        steps.append({"tool": "release_readiness", "args": {"summary_mode": "quick"}})
+    if any(tok in g for tok in {"license", "compliance", "foss"}):
+        steps.append({"tool": "license_monitor", "args": {"run_reuse_lint": True, "generate_spdx": True}})
+    if any(tok in g for tok in {"risk", "security"}):
+        steps.append({"tool": "change_impact_gate", "args": {"block_on_risk_level": "high"}})
+    if any(tok in g for tok in {"speed", "quick", "fast"}):
+        steps.append({"tool": "fast_path_dev", "args": {"task": "quick-check", "refresh_index": True}})
+    if not steps:
+        steps = [
+            {"tool": "repo_index_daemon", "args": {"mode": "refresh", "summary_mode": "quick"}},
+            {"tool": "required_tool_chain", "args": {"required_tools": ["repo_index_daemon"]}},
+        ]
+    rollback = []
+    if include_rollback:
+        rollback = [
+            {"tool": "state_snapshot", "when": "before_mutation"},
+            {"tool": "state_restore", "when": "on_failure"},
+        ]
+    return {
+        "schema": "workflow_compiler.v1",
+        "goal": goal,
+        "constraints": cons,
+        "steps": steps,
+        "rollback": rollback,
+    }
+
+
+@mcp.tool()
+def state_snapshot(
+    label: str = "",
+    include_build_dir: bool = False,
+) -> dict[str, Any]:
+    """Create a git-backed workspace snapshot for quick rollback."""
+    _require_mutations()
+    _require_git_repo()
+    snap_id = f"{_now_stamp()}-{uuid.uuid4().hex[:8]}"
+    safe_label = re.sub(r"[^a-zA-Z0-9_.-]+", "-", label.strip())[:64]
+    name = f"{snap_id}-{safe_label}" if safe_label else snap_id
+    base_head = _git("rev-parse", "HEAD").stdout.strip()
+    stash_label = f"mcp-state-snapshot:{name}"
+
+    args = ["stash", "push", "--include-untracked", "--message", stash_label]
+    if not include_build_dir:
+        args.extend(["--", ".", ":(exclude).build/**"])
+    stash_result = _git(*args, check=False)
+    output = (stash_result.stdout + "\n" + stash_result.stderr).strip()
+
+    stash_commit = ""
+    stash_ref = ""
+    if stash_result.returncode == 0 and "No local changes to save" not in output:
+        stash_commit = _git("rev-parse", "--verify", "stash@{0}").stdout.strip()
+        stash_ref = f"refs/mcp-snapshots/{name}"
+        _git("update-ref", stash_ref, stash_commit)
+        _git("stash", "drop", "stash@{0}")
+        _git("stash", "apply", "--index", stash_commit)
+
+    index = _state_snapshot_index_load()
+    snapshots = index.get("snapshots", {})
+    snapshots[name] = {
+        "snapshot_id": name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "base_head": base_head,
+        "stash_commit": stash_commit,
+        "stash_ref": stash_ref,
+        "include_build_dir": include_build_dir,
+    }
+    index["snapshots"] = snapshots
+    _state_snapshot_index_save(index)
+    return {
+        "schema": "state_snapshot.v1",
+        "snapshot_id": name,
+        "backend": "git-stash",
+        "base_head": base_head,
+        "stash_commit": stash_commit,
+        "stash_ref": stash_ref,
+        "had_changes": bool(stash_commit),
+    }
+
+
+@mcp.tool()
+def state_restore(
+    snapshot_id: str,
+) -> dict[str, Any]:
+    """Restore files from a previously created git-backed snapshot."""
+    _require_mutations()
+    _require_git_repo()
+    if not snapshot_id.strip():
+        raise ValueError("snapshot_id must not be empty")
+    index = _state_snapshot_index_load()
+    snapshots = index.get("snapshots", {})
+    entry = snapshots.get(snapshot_id)
+    if not isinstance(entry, dict):
+        raise FileNotFoundError(f"snapshot_id not found: {snapshot_id}")
+
+    base_head = str(entry.get("base_head", "")).strip()
+    stash_commit = str(entry.get("stash_commit", "")).strip()
+    include_build_dir = bool(entry.get("include_build_dir", False))
+
+    if base_head:
+        _git("reset", "--hard", base_head)
+    clean_args = ["clean", "-fd"]
+    if include_build_dir:
+        clean_args.append("-x")
+    _git(*clean_args)
+    if stash_commit:
+        _git("stash", "apply", "--index", stash_commit)
+
+    return {
+        "schema": "state_restore.v1",
+        "snapshot_id": snapshot_id,
+        "backend": "git-stash",
+        "base_head": base_head,
+        "stash_commit": stash_commit,
+        "restored": True,
+    }
+
+
+@mcp.tool()
+def policy_simulator(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    diff_text: str = "",
+) -> dict[str, Any]:
+    """Simulate policy outcomes for docs/security/risk/license before applying changes."""
+    _require_git_repo()
+    patch = diff_text
+    if not patch.strip():
+        patch = _git("diff", f"{base_ref}...{head_ref}", "--", ".").stdout
+    docs = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+    security = security_triage(diff_text=patch)
+    risk = risk_scoring(ref=head_ref)
+    try:
+        license_out = license_monitor(
+            run_reuse_lint=True,
+            generate_spdx=False,
+            auto_fix_headers=False,
+            download_missing_licenses=False,
+        )
+    except Exception as exc:
+        license_out = {"ok": False, "error": str(exc)}
+    blocking = []
+    if docs.get("needs_docs_update"):
+        blocking.append("docs")
+    if int(security.get("finding_count", 0)) > 0:
+        blocking.append("security")
+    if risk.get("risk_level") == "high":
+        blocking.append("risk")
+    if not license_out.get("ok", False):
+        blocking.append("license")
+    return {
+        "schema": "policy_simulator.v1",
+        "ok": not blocking,
+        "blocking_policies": blocking,
+        "docs": docs,
+        "security": {"finding_count": security.get("finding_count", 0)},
+        "risk": {"risk_level": risk.get("risk_level"), "risk_score": risk.get("risk_score")},
+        "license": {"ok": license_out.get("ok", False)},
+    }
+
+
+@mcp.tool()
+def tool_router_learned(
+    query: str,
+    candidates: list[str],
+    mode: str = "route",
+    selected_tool: str = "",
+    success: bool = True,
+    latency_ms: float = 0.0,
+) -> dict[str, Any]:
+    """Learn simple routing preferences across tools and pick lowest-cost candidate."""
+    if not candidates:
+        raise ValueError("candidates must not be empty")
+    if mode not in {"route", "record"}:
+        raise ValueError("mode must be one of: route, record")
+    payload = _json_file_load(TOOL_ROUTER_STATS_FILE, {"stats": {}})
+    stats = payload.get("stats", {})
+    if not isinstance(stats, dict):
+        stats = {}
+    if mode == "record":
+        if not selected_tool:
+            raise ValueError("selected_tool is required in record mode")
+        row = stats.get(selected_tool, {"calls": 0, "successes": 0, "avg_latency_ms": 0.0})
+        calls = int(row.get("calls", 0)) + 1
+        successes = int(row.get("successes", 0)) + (1 if success else 0)
+        prev = float(row.get("avg_latency_ms", 0.0))
+        lat = float(latency_ms) if latency_ms > 0 else prev
+        avg = ((prev * (calls - 1)) + lat) / max(1, calls)
+        stats[selected_tool] = {"calls": calls, "successes": successes, "avg_latency_ms": round(avg, 4)}
+        payload["stats"] = stats
+        _json_file_save(TOOL_ROUTER_STATS_FILE, payload)
+        return {"schema": "tool_router_learned.v1", "mode": mode, "updated_tool": selected_tool}
+
+    ranked: list[dict[str, Any]] = []
+    for tool in candidates:
+        row = stats.get(tool, {})
+        calls = int(row.get("calls", 0))
+        succ = int(row.get("successes", 0))
+        avg_lat = float(row.get("avg_latency_ms", 500.0 if calls == 0 else row.get("avg_latency_ms", 0.0)))
+        success_rate = (succ / calls) if calls > 0 else 0.5
+        score = (success_rate * 100.0) - min(100.0, avg_lat / 10.0)
+        ranked.append({"tool": tool, "score": round(score, 4), "success_rate": round(success_rate, 4), "avg_latency_ms": round(avg_lat, 4)})
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+    return {
+        "schema": "tool_router_learned.v1",
+        "mode": mode,
+        "query": query,
+        "selected_tool": ranked[0]["tool"],
+        "ranked": ranked,
+    }
+
+
+@mcp.tool()
+def artifact_memory_index(
+    mode: str = "refresh",
+    path: str = ".build/reports",
+    query: str = "",
+    max_entries: int = 1000,
+) -> dict[str, Any]:
+    """Index and query generated artifacts for re-use in low-token workflows."""
+    if mode not in {"refresh", "query", "read", "add"}:
+        raise ValueError("mode must be one of: refresh, query, read, add")
+    if max_entries < 1:
+        raise ValueError("max_entries must be >= 1")
+    idx_file = _resolve_repo_path(str(ARTIFACT_INDEX_FILE))
+    if mode == "refresh":
+        root = _resolve_repo_path(path)
+        rows: list[dict[str, Any]] = []
+        if root.exists():
+            for p in _iter_candidate_files(root, recursive=True):
+                rel = str(p.relative_to(REPO_PATH)).replace("\\", "/")
+                st = p.stat()
+                rows.append(
+                    {
+                        "path": rel,
+                        "size": int(st.st_size),
+                        "mtime_ns": int(st.st_mtime_ns),
+                        "sha256": _file_sha256(p),
+                    }
+                )
+                if len(rows) >= max_entries:
+                    break
+        payload = {"schema": "artifact_memory_index.v1", "generated_at": _now_iso(), "artifacts": rows}
+        _json_file_save(idx_file, payload)
+        return {"schema": "artifact_memory_index.v1", "mode": mode, "count": len(rows), "index_path": str(idx_file.relative_to(REPO_PATH))}
+    if not idx_file.is_file():
+        raise FileNotFoundError(str(idx_file.relative_to(REPO_PATH)))
+    payload = json.loads(idx_file.read_text(encoding="utf-8"))
+    if mode == "read":
+        rows = payload.get("artifacts", [])
+        return {"schema": "artifact_memory_index.v1", "mode": mode, "count": len(rows), "artifacts": rows[:max_entries]}
+    if mode == "query":
+        q = query.lower().strip()
+        rows = payload.get("artifacts", [])
+        if q:
+            rows = [r for r in rows if q in str(r.get("path", "")).lower()]
+        return {"schema": "artifact_memory_index.v1", "mode": mode, "count": len(rows), "artifacts": rows[:max_entries]}
+    # add
+    _require_mutations()
+    rows = payload.get("artifacts", [])
+    candidate = _resolve_repo_path(query)
+    if not candidate.is_file():
+        raise FileNotFoundError(query)
+    rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+    st = candidate.stat()
+    rows.append({"path": rel, "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns), "sha256": _file_sha256(candidate)})
+    payload["artifacts"] = rows[-max_entries:]
+    _json_file_save(idx_file, payload)
+    return {"schema": "artifact_memory_index.v1", "mode": mode, "added": rel, "count": len(payload["artifacts"])}
+
+
+@mcp.tool()
+def constraint_solver_for_tasks(
+    requirements: list[str],
+    actions: list[str],
+) -> dict[str, Any]:
+    """Check hard constraints against proposed actions."""
+    if not requirements:
+        raise ValueError("requirements must not be empty")
+    if not actions:
+        raise ValueError("actions must not be empty")
+    action_text = " ".join(actions).lower()
+    unsatisfied: list[str] = []
+    satisfied: list[str] = []
+    for req in requirements:
+        needle = req.lower().strip()
+        if needle and needle in action_text:
+            satisfied.append(req)
+        else:
+            unsatisfied.append(req)
+    return {
+        "schema": "constraint_solver_for_tasks.v1",
+        "ok": not unsatisfied,
+        "satisfied": satisfied,
+        "unsatisfied": unsatisfied,
+        "actions": actions,
+    }
+
+
+@mcp.tool()
+def spec_to_tests(
+    spec_text: str,
+    framework: str = "pytest",
+    output_path: str = "",
+    mode: str = "generate",
+) -> dict[str, Any]:
+    """Generate test skeletons from natural-language spec bullets."""
+    if framework not in {"pytest", "unittest"}:
+        raise ValueError("framework must be one of: pytest, unittest")
+    if mode not in {"generate", "write"}:
+        raise ValueError("mode must be one of: generate, write")
+    lines = [line.strip("-* ").strip() for line in spec_text.splitlines() if line.strip()]
+    reqs = [line for line in lines if any(tok in line.lower() for tok in {"must", "should", "shall"})]
+    if not reqs:
+        reqs = lines[:5]
+    tests: list[str] = []
+    if framework == "pytest":
+        tests.append("import pytest")
+        tests.append("")
+        for i, req in enumerate(reqs, start=1):
+            name = re.sub(r"[^a-z0-9]+", "_", req.lower()).strip("_")[:48] or f"req_{i}"
+            tests.append(f"def test_spec_{i}_{name}():")
+            tests.append(f"    # {req}")
+            tests.append("    assert True")
+            tests.append("")
+    else:
+        tests.append("import unittest")
+        tests.append("")
+        tests.append("class SpecTests(unittest.TestCase):")
+        for i, req in enumerate(reqs, start=1):
+            name = re.sub(r"[^a-z0-9]+", "_", req.lower()).strip("_")[:48] or f"req_{i}"
+            tests.append(f"    def test_spec_{i}_{name}(self):")
+            tests.append(f"        # {req}")
+            tests.append("        self.assertTrue(True)")
+            tests.append("")
+    test_code = "\n".join(tests).rstrip() + "\n"
+    if mode == "write":
+        _require_mutations()
+        if not output_path:
+            raise ValueError("output_path is required for write mode")
+        out = _resolve_repo_path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(test_code, encoding="utf-8")
+    return {
+        "schema": "spec_to_tests.v1",
+        "framework": framework,
+        "requirements_count": len(reqs),
+        "test_code": test_code,
+        "output_path": output_path if mode == "write" else None,
+    }
+
+
+@mcp.tool()
+def auto_sharding_for_analysis(
+    path: str = ".",
+    shard_size: int = 100,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+) -> dict[str, Any]:
+    """Split candidate files into deterministic shards for large analysis tasks."""
+    if shard_size < 1:
+        raise ValueError("shard_size must be >= 1")
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+    files: list[str] = []
+    for p in _iter_candidate_files(root, recursive=True):
+        rel = str(p.relative_to(REPO_PATH)).replace("\\", "/")
+        if not _allowed_by_globs(rel, include_globs=include_globs, exclude_globs=exclude_globs):
+            continue
+        if rel.startswith(".git/") or rel.startswith(".build/"):
+            continue
+        files.append(rel)
+    files.sort()
+    shards = [files[i : i + shard_size] for i in range(0, len(files), shard_size)]
+    return {
+        "schema": "auto_sharding_for_analysis.v1",
+        "path": path,
+        "file_count": len(files),
+        "shard_size": shard_size,
+        "shard_count": len(shards),
+        "shards": [{"index": i + 1, "count": len(s), "files": s} for i, s in enumerate(shards)],
+    }
+
+
+@mcp.tool()
+def confidence_scoring(
+    checks: list[dict[str, Any]],
+    weight_key: str = "weight",
+) -> dict[str, Any]:
+    """Compute confidence score from structured checks metadata."""
+    if not checks:
+        raise ValueError("checks must not be empty")
+    total_w = 0.0
+    total_s = 0.0
+    details: list[dict[str, Any]] = []
+    for row in checks:
+        ok = bool(row.get("ok", False))
+        w = float(row.get(weight_key, 1.0))
+        w = max(0.0, w)
+        s = w if ok else 0.0
+        total_w += w
+        total_s += s
+        details.append({"name": row.get("name", ""), "ok": ok, "weight": w})
+    confidence = total_s / max(1e-9, total_w)
+    level = "low"
+    if confidence >= 0.8:
+        level = "high"
+    elif confidence >= 0.5:
+        level = "medium"
+    return {
+        "schema": "confidence_scoring.v1",
+        "confidence": round(confidence, 6),
+        "level": level,
+        "details": details,
+    }
+
+
+@mcp.tool()
+def runtime_contract_checker() -> dict[str, Any]:
+    """Check runtime docs/contracts drift for MCP tools."""
+    code_tools = _server_tool_names()
+    readme_tools = _readme_tool_names()
+    missing_in_readme = sorted(code_tools - readme_tools)
+    extra_in_readme = sorted(readme_tools - code_tools)
+    return {
+        "schema": "runtime_contract_checker.v1",
+        "ok": not missing_in_readme and not extra_in_readme,
+        "code_tool_count": len(code_tools),
+        "readme_tool_count": len(readme_tools),
+        "missing_in_readme": missing_in_readme,
+        "extra_in_readme": extra_in_readme,
+    }
+
+
+@mcp.tool()
+def cost_budget_enforcer(
+    mode: str = "check",
+    max_tokens: int = 200000,
+    max_calls: int = 50,
+    max_seconds: int = 600,
+    used_tokens: int = 0,
+    used_calls: int = 0,
+    used_seconds: int = 0,
+) -> dict[str, Any]:
+    """Set/check runtime budgets for token/time/tool-call cost control."""
+    if mode not in {"set", "check", "record"}:
+        raise ValueError("mode must be one of: set, check, record")
+    payload = _json_file_load(
+        COST_BUDGET_FILE,
+        {
+            "limits": {"max_tokens": max_tokens, "max_calls": max_calls, "max_seconds": max_seconds},
+            "used": {"tokens": 0, "calls": 0, "seconds": 0},
+            "updated_at": _now_iso(),
+        },
+    )
+    if mode == "set":
+        _require_mutations()
+        payload["limits"] = {"max_tokens": max_tokens, "max_calls": max_calls, "max_seconds": max_seconds}
+        payload["updated_at"] = _now_iso()
+        _json_file_save(COST_BUDGET_FILE, payload)
+    elif mode == "record":
+        _require_mutations()
+        used = payload.get("used", {})
+        used["tokens"] = int(used.get("tokens", 0)) + int(used_tokens)
+        used["calls"] = int(used.get("calls", 0)) + int(used_calls)
+        used["seconds"] = int(used.get("seconds", 0)) + int(used_seconds)
+        payload["used"] = used
+        payload["updated_at"] = _now_iso()
+        _json_file_save(COST_BUDGET_FILE, payload)
+    limits = payload.get("limits", {})
+    used = payload.get("used", {})
+    over = {
+        "tokens": int(used.get("tokens", 0)) > int(limits.get("max_tokens", 0)),
+        "calls": int(used.get("calls", 0)) > int(limits.get("max_calls", 0)),
+        "seconds": int(used.get("seconds", 0)) > int(limits.get("max_seconds", 0)),
+    }
+    return {
+        "schema": "cost_budget_enforcer.v1",
+        "mode": mode,
+        "ok": not any(over.values()),
+        "limits": limits,
+        "used": used,
+        "over_budget": over,
+    }
+
+
+@mcp.tool()
+def multi_agent_lane(
+    task: str,
+    lanes: list[str] | None = None,
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+) -> dict[str, Any]:
+    """Run specialized analysis lanes and merge into one decision packet."""
+    if not task.strip():
+        raise ValueError("task must not be empty")
+    selected = lanes or ["security", "risk", "docs", "tests"]
+    lane_results: dict[str, Any] = {}
+    if "security" in selected:
+        patch = _git("diff", f"{base_ref}...{head_ref}", "--", ".").stdout
+        lane_results["security"] = security_triage(diff_text=patch, max_findings=20)
+    if "risk" in selected:
+        lane_results["risk"] = risk_scoring(ref=head_ref)
+    if "docs" in selected:
+        lane_results["docs"] = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+    if "tests" in selected:
+        lane_results["tests"] = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
+    confidence = confidence_scoring(
+        checks=[
+            {"name": "security", "ok": int(lane_results.get("security", {}).get("finding_count", 0)) == 0, "weight": 3},
+            {"name": "risk", "ok": lane_results.get("risk", {}).get("risk_level", "low") != "high", "weight": 2},
+            {"name": "docs", "ok": not lane_results.get("docs", {}).get("needs_docs_update", False), "weight": 1},
+            {"name": "tests", "ok": True, "weight": 1},
+        ]
+    )
+    return {
+        "schema": "multi_agent_lane.v1",
+        "task": task,
+        "lanes": selected,
+        "results": lane_results,
+        "confidence": confidence,
+    }
+
+
+@mcp.tool()
+def human_approval_points(
+    mode: str = "create",
+    action: str = "",
+    risk_level: str = "medium",
+    details: str = "",
+    approval_id: str = "",
+    approved: bool = False,
+) -> dict[str, Any]:
+    """Manage human approval checkpoints for risky operations."""
+    if mode not in {"create", "list", "resolve"}:
+        raise ValueError("mode must be one of: create, list, resolve")
+    payload = _json_file_load(APPROVAL_POINTS_FILE, {"items": []})
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        items = []
+    if mode == "list":
+        return {"schema": "human_approval_points.v1", "mode": mode, "count": len(items), "items": items}
+    if mode == "create":
+        _require_mutations()
+        if not action.strip():
+            raise ValueError("action is required for create mode")
+        row = {
+            "approval_id": uuid.uuid4().hex[:12],
+            "action": action,
+            "risk_level": risk_level,
+            "details": details,
+            "status": "pending",
+            "created_at": _now_iso(),
+        }
+        items.append(row)
+        payload["items"] = items
+        _json_file_save(APPROVAL_POINTS_FILE, payload)
+        return {"schema": "human_approval_points.v1", "mode": mode, "item": row}
+    # resolve
+    _require_mutations()
+    if not approval_id:
+        raise ValueError("approval_id is required for resolve mode")
+    updated = None
+    for row in items:
+        if row.get("approval_id") == approval_id:
+            row["status"] = "approved" if approved else "rejected"
+            row["resolved_at"] = _now_iso()
+            updated = row
+            break
+    if updated is None:
+        raise FileNotFoundError(f"approval_id not found: {approval_id}")
+    payload["items"] = items
+    _json_file_save(APPROVAL_POINTS_FILE, payload)
+    return {"schema": "human_approval_points.v1", "mode": mode, "item": updated}
+
+
+@mcp.tool()
+def root_cause_memory(
+    mode: str = "list",
+    issue: str = "",
+    root_cause: str = "",
+    fix: str = "",
+    max_entries: int = 50,
+) -> dict[str, Any]:
+    """Persist and suggest root-cause/fix patterns from prior failures."""
+    if mode not in {"add", "list", "suggest"}:
+        raise ValueError("mode must be one of: add, list, suggest")
+    if max_entries < 1:
+        raise ValueError("max_entries must be >= 1")
+    payload = _json_file_load(ROOT_CAUSE_FILE, {"entries": []})
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    if mode == "add":
+        _require_mutations()
+        if not issue.strip() or not root_cause.strip() or not fix.strip():
+            raise ValueError("issue, root_cause, and fix are required for add mode")
+        row = {
+            "id": uuid.uuid4().hex[:12],
+            "issue": issue,
+            "root_cause": root_cause,
+            "fix": fix,
+            "created_at": _now_iso(),
+        }
+        entries.append(row)
+        payload["entries"] = entries
+        _json_file_save(ROOT_CAUSE_FILE, payload)
+        return {"schema": "root_cause_memory.v1", "mode": mode, "entry": row}
+    if mode == "list":
+        return {"schema": "root_cause_memory.v1", "mode": mode, "count": min(len(entries), max_entries), "entries": entries[-max_entries:]}
+    needle = issue.lower().strip()
+    ranked = []
+    for row in entries:
+        hay = f"{row.get('issue','')} {row.get('root_cause','')} {row.get('fix','')}".lower()
+        score = sum(1 for t in re.split(r"\W+", needle) if t and t in hay)
+        if score > 0:
+            ranked.append((score, row))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    suggestions = [r for _, r in ranked[:max_entries]]
+    return {"schema": "root_cause_memory.v1", "mode": mode, "count": len(suggestions), "suggestions": suggestions}
+
+
+@mcp.tool()
+def execution_replay(
+    mode: str = "start",
+    replay_id: str = "",
+    event: dict[str, Any] | None = None,
+    max_events: int = 1000,
+) -> dict[str, Any]:
+    """Record and replay deterministic execution event streams."""
+    if mode not in {"start", "log", "finish", "read"}:
+        raise ValueError("mode must be one of: start, log, finish, read")
+    if max_events < 1:
+        raise ValueError("max_events must be >= 1")
+    EXECUTION_REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+    if mode == "start":
+        _require_mutations()
+        rid = uuid.uuid4().hex[:12]
+        p = _resolve_repo_path(str(EXECUTION_REPLAY_DIR / f"{rid}.json"))
+        payload = {"schema": "execution_replay.v1", "replay_id": rid, "status": "open", "created_at": _now_iso(), "events": []}
+        _json_file_save(p, payload)
+        return {"schema": "execution_replay.v1", "mode": mode, "replay_id": rid, "path": str(p.relative_to(REPO_PATH))}
+    if not replay_id:
+        raise ValueError("replay_id is required for this mode")
+    p = _resolve_repo_path(str(EXECUTION_REPLAY_DIR / f"{replay_id}.json"))
+    if not p.is_file():
+        raise FileNotFoundError(str(p.relative_to(REPO_PATH)))
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    events = payload.get("events", [])
+    if not isinstance(events, list):
+        events = []
+    if mode == "read":
+        return {"schema": "execution_replay.v1", "mode": mode, "replay_id": replay_id, "status": payload.get("status"), "events": events[:max_events]}
+    _require_mutations()
+    if mode == "log":
+        events.append({"ts": _now_iso(), "event": event or {}})
+        if len(events) > max_events:
+            events = events[-max_events:]
+        payload["events"] = events
+        payload["updated_at"] = _now_iso()
+        _json_file_save(p, payload)
+        return {"schema": "execution_replay.v1", "mode": mode, "replay_id": replay_id, "event_count": len(events)}
+    # finish
+    payload["status"] = "closed"
+    payload["updated_at"] = _now_iso()
+    _json_file_save(p, payload)
+    return {"schema": "execution_replay.v1", "mode": mode, "replay_id": replay_id, "status": "closed", "event_count": len(events)}
 
 
 @mcp.tool()

@@ -850,6 +850,114 @@ class ServerToolsTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertIn("token_budget", out["steps"])
 
+    def test_llm_mcp_power_tools(self):
+        compiled = self.server.workflow_compiler(goal="fast release with risk checks")
+        self.assertEqual(compiled["schema"], "workflow_compiler.v1")
+        self.assertGreaterEqual(len(compiled["steps"]), 1)
+
+        snap = self.server.state_snapshot(label="t")
+        self.assertEqual(snap["schema"], "state_snapshot.v1")
+        self.assertEqual(snap["backend"], "git-stash")
+        self.assertIn("snapshot_id", snap)
+        restored = self.server.state_restore(snapshot_id=snap["snapshot_id"])
+        self.assertEqual(restored["schema"], "state_restore.v1")
+        self.assertEqual(restored["backend"], "git-stash")
+
+        pol = self.server.policy_simulator(base_ref="HEAD", head_ref="HEAD")
+        self.assertEqual(pol["schema"], "policy_simulator.v1")
+        self.assertIn("blocking_policies", pol)
+
+        routed = self.server.tool_router_learned(
+            query="find files",
+            candidates=["find_paths", "grep"],
+            mode="route",
+        )
+        self.assertEqual(routed["schema"], "tool_router_learned.v1")
+        self.assertIn(routed["selected_tool"], {"find_paths", "grep"})
+        rec = self.server.tool_router_learned(
+            query="find files",
+            candidates=["find_paths", "grep"],
+            mode="record",
+            selected_tool="find_paths",
+            success=True,
+            latency_ms=12.0,
+        )
+        self.assertEqual(rec["mode"], "record")
+
+        art = self.server.artifact_memory_index(mode="refresh", path="docs")
+        self.assertEqual(art["schema"], "artifact_memory_index.v1")
+        artq = self.server.artifact_memory_index(mode="query", query="docs")
+        self.assertEqual(artq["schema"], "artifact_memory_index.v1")
+
+        solved = self.server.constraint_solver_for_tasks(
+            requirements=["run tests", "update docs"],
+            actions=["run tests", "commit changes"],
+        )
+        self.assertEqual(solved["schema"], "constraint_solver_for_tasks.v1")
+        self.assertFalse(solved["ok"])
+
+        st = self.server.spec_to_tests(
+            spec_text="- system must authenticate users\n- response should be fast",
+            framework="pytest",
+            mode="generate",
+        )
+        self.assertEqual(st["schema"], "spec_to_tests.v1")
+        self.assertIn("def test_spec_", st["test_code"])
+
+        shards = self.server.auto_sharding_for_analysis(path=".", shard_size=2)
+        self.assertEqual(shards["schema"], "auto_sharding_for_analysis.v1")
+        self.assertGreaterEqual(shards["shard_count"], 1)
+
+        conf = self.server.confidence_scoring(
+            checks=[{"name": "a", "ok": True, "weight": 2}, {"name": "b", "ok": False, "weight": 1}]
+        )
+        self.assertEqual(conf["schema"], "confidence_scoring.v1")
+        self.assertIn(conf["level"], {"low", "medium", "high"})
+
+        contract = self.server.runtime_contract_checker()
+        self.assertEqual(contract["schema"], "runtime_contract_checker.v1")
+        self.assertIn("ok", contract)
+
+        budget_set = self.server.cost_budget_enforcer(mode="set", max_tokens=100, max_calls=10, max_seconds=60)
+        self.assertEqual(budget_set["schema"], "cost_budget_enforcer.v1")
+        budget_record = self.server.cost_budget_enforcer(mode="record", used_tokens=10, used_calls=1, used_seconds=5)
+        self.assertTrue(budget_record["ok"])
+
+        lane = self.server.multi_agent_lane(task="pre-release", base_ref="HEAD", head_ref="HEAD")
+        self.assertEqual(lane["schema"], "multi_agent_lane.v1")
+        self.assertIn("confidence", lane)
+
+        approval = self.server.human_approval_points(mode="create", action="deploy", risk_level="high", details="prod deploy")
+        self.assertEqual(approval["schema"], "human_approval_points.v1")
+        listed = self.server.human_approval_points(mode="list")
+        self.assertGreaterEqual(listed["count"], 1)
+        resolved = self.server.human_approval_points(
+            mode="resolve",
+            approval_id=approval["item"]["approval_id"],
+            approved=True,
+        )
+        self.assertEqual(resolved["item"]["status"], "approved")
+
+        rc_add = self.server.root_cause_memory(
+            mode="add",
+            issue="timeout in tests",
+            root_cause="slow setup",
+            fix="cache fixtures",
+        )
+        self.assertEqual(rc_add["schema"], "root_cause_memory.v1")
+        rc_suggest = self.server.root_cause_memory(mode="suggest", issue="test timeout", max_entries=5)
+        self.assertEqual(rc_suggest["schema"], "root_cause_memory.v1")
+
+        replay = self.server.execution_replay(mode="start")
+        self.assertEqual(replay["schema"], "execution_replay.v1")
+        rid = replay["replay_id"]
+        logged = self.server.execution_replay(mode="log", replay_id=rid, event={"tool": "x"})
+        self.assertEqual(logged["schema"], "execution_replay.v1")
+        read = self.server.execution_replay(mode="read", replay_id=rid)
+        self.assertGreaterEqual(len(read["events"]), 1)
+        done = self.server.execution_replay(mode="finish", replay_id=rid)
+        self.assertEqual(done["status"], "closed")
+
 
 if __name__ == "__main__":
     unittest.main()
