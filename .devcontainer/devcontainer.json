@@ -28,9 +28,13 @@
         "ms-python.vscode-pylance",
         "ms-azuretools.vscode-docker",
         "mhutchie.git-graph"
-      ]
+      ],
+      "settings": {
+        "mcpInlineAutocomplete.endpoint": "http://localhost:8000/mcp"
+      }
     }
   },
+  "postCreateCommand": "mkdir -p /home/app/.vscode-server/extensions && ln -sfn /repo/vscode/mcp-inline-autocomplete /home/app/.vscode-server/extensions/local.mcp-inline-autocomplete-0.0.1",
   "mounts": [
     "source=${localEnv:HOME}/.continue,target=/home/app/.continue,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",
