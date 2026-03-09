@@ -11,6 +11,7 @@ import sys
 import re
 import fnmatch
 import uuid
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,11 @@ try:
     import yaml
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
+
+try:
+    from tree_sitter_languages import get_parser as _ts_get_parser
+except ModuleNotFoundError:  # pragma: no cover
+    _ts_get_parser = None
 
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
@@ -53,6 +59,7 @@ FAILURE_MEMORY_FILE = Path(".build/memory/failure_memory.json")
 TOKEN_BUDGET_FILE = Path(".build/memory/token_budget.json")
 EDIT_TXN_DIR = Path(".build/transactions")
 API_SNAPSHOT_FILE = Path(".build/reports/API_SURFACE.json")
+REPO_INDEX_FILE = Path(".build/index/repo_index.json")
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -501,6 +508,61 @@ def _language_parse_file(path: Path, language: str) -> dict[str, Any]:
             if imp:
                 imports.append(imp.group(1).strip())
     return {"symbols": symbols, "imports": imports}
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _tree_sitter_language_for_ext(ext: str) -> str | None:
+    mapping = {
+        ".py": "python",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".go": "go",
+        ".rs": "rust",
+    }
+    return mapping.get(ext.lower())
+
+
+def _tree_sitter_available() -> bool:
+    return _ts_get_parser is not None
+
+
+def _tree_sitter_parse_nodes(
+    source: str,
+    language: str,
+    node_types: list[str] | None = None,
+    max_nodes: int = 5000,
+) -> list[dict[str, Any]]:
+    if _ts_get_parser is None:
+        raise RuntimeError("tree_sitter_languages is not installed")
+    parser = _ts_get_parser(language)
+    tree = parser.parse(source.encode("utf-8", errors="replace"))
+    wanted = set(node_types or [])
+    results: list[dict[str, Any]] = []
+
+    stack = [tree.root_node]
+    while stack and len(results) < max_nodes:
+        node = stack.pop()
+        if not wanted or node.type in wanted:
+            results.append(
+                {
+                    "type": node.type,
+                    "start_line": int(node.start_point[0]) + 1,
+                    "start_column": int(node.start_point[1]) + 1,
+                    "end_line": int(node.end_point[0]) + 1,
+                    "end_column": int(node.end_point[1]) + 1,
+                }
+            )
+        stack.extend(reversed(node.children))
+    return results
 
 
 def _now_iso() -> str:
@@ -2882,6 +2944,319 @@ def language_parsers(
             ],
         }
     return {"file_count": len(files), "files": files}
+
+
+@mcp.tool()
+def tree_sitter_core(
+    path: str = ".",
+    mode: str = "status",
+    language: str = "auto",
+    node_types: list[str] | None = None,
+    text_pattern: str | None = None,
+    recursive: bool = True,
+    max_files: int = 200,
+    max_nodes: int = 5000,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Parse/search syntax trees via Tree-sitter when available."""
+    if mode not in {"status", "parse", "search"}:
+        raise ValueError("mode must be one of: status, parse, search")
+    if max_files < 1 or max_nodes < 1:
+        raise ValueError("max_files and max_nodes must be >= 1")
+    profile = _default_output_profile(output_profile)
+    available = _tree_sitter_available()
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    if mode == "status":
+        return {"available": available, "engine": "tree_sitter_languages"}
+
+    matched_files = 0
+    total_nodes = 0
+    files: list[dict[str, Any]] = []
+    regex = re.compile(text_pattern, re.IGNORECASE) if text_pattern else None
+
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        ext = candidate.suffix.lower()
+        detected = _tree_sitter_language_for_ext(ext)
+        if not detected:
+            continue
+        lang = detected if language == "auto" else language
+        if language != "auto" and lang != detected:
+            continue
+        source = candidate.read_text(encoding="utf-8", errors="replace")
+        rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+        nodes: list[dict[str, Any]] = []
+
+        if available:
+            try:
+                nodes = _tree_sitter_parse_nodes(
+                    source=source,
+                    language=lang,
+                    node_types=node_types,
+                    max_nodes=max_nodes - total_nodes,
+                )
+            except Exception:
+                nodes = []
+        if not nodes and lang == "python":
+            # Fallback to Python AST if tree-sitter runtime is unavailable.
+            ast_hits = ast_search(
+                path=rel,
+                node_type=(node_types[0] if node_types else "FunctionDef"),
+                max_results=max(1, max_nodes - total_nodes),
+            )
+            nodes = [
+                {
+                    "type": hit["node_type"],
+                    "start_line": hit["line"],
+                    "start_column": hit["column"],
+                    "end_line": hit["end_line"],
+                    "end_column": hit["column"],
+                }
+                for hit in ast_hits
+            ]
+
+        if regex:
+            lines = source.splitlines()
+            filtered: list[dict[str, Any]] = []
+            for n in nodes:
+                s = max(1, int(n["start_line"]))
+                e = min(len(lines), int(n["end_line"]))
+                snippet = "\n".join(lines[s - 1 : e])
+                if regex.search(snippet):
+                    filtered.append(n)
+            nodes = filtered
+
+        if not nodes:
+            continue
+        matched_files += 1
+        total_nodes += len(nodes)
+        file_result: dict[str, Any] = {"path": rel, "language": lang, "node_count": len(nodes)}
+        if profile != "compact":
+            file_result["nodes"] = nodes
+        files.append(file_result)
+        if matched_files >= max_files or total_nodes >= max_nodes:
+            break
+
+    return {
+        "available": available,
+        "mode": mode,
+        "path": str(root.relative_to(REPO_PATH)),
+        "file_count": matched_files,
+        "node_count": total_nodes,
+        "files": files,
+    }
+
+
+@mcp.tool()
+def repo_index_daemon(
+    mode: str = "refresh",
+    path: str = ".",
+    query: str = "",
+    recursive: bool = True,
+    include_hashes: bool = False,
+    max_files: int = 5000,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Build/read/query a persistent repository index keyed by file metadata."""
+    if mode not in {"refresh", "read", "query"}:
+        raise ValueError("mode must be one of: refresh, read, query")
+    if max_files < 1:
+        raise ValueError("max_files must be >= 1")
+    profile = _default_output_profile(output_profile)
+    index_path = _resolve_repo_path(str(REPO_INDEX_FILE))
+
+    if mode in {"read", "query"}:
+        if not index_path.is_file():
+            raise FileNotFoundError(str(REPO_INDEX_FILE))
+        index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+        if mode == "query":
+            value = _query_value(index_payload, query) if query.strip() else index_payload
+            return {
+                "mode": mode,
+                "query": query,
+                "value_json": _trim_text(json.dumps(value, indent=2, ensure_ascii=True)),
+                "value": value if profile != "compact" else None,
+            }
+        if profile == "compact":
+            return {
+                "mode": mode,
+                "generated_at": index_payload.get("generated_at"),
+                "file_count": index_payload.get("file_count", 0),
+                "symbol_count": index_payload.get("symbol_count", 0),
+                "dependency_edge_count": index_payload.get("dependency_edge_count", 0),
+            }
+        return index_payload
+
+    root = _resolve_repo_path(path)
+    if not root.exists():
+        raise FileNotFoundError(path)
+
+    files_meta: list[dict[str, Any]] = []
+    for candidate in _iter_candidate_files(root, recursive=recursive):
+        rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+        stat = candidate.stat()
+        entry = {
+            "path": rel,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+        if include_hashes:
+            try:
+                entry["sha256"] = _file_sha256(candidate)
+            except OSError:
+                entry["sha256"] = ""
+        files_meta.append(entry)
+        if len(files_meta) >= max_files:
+            break
+
+    symbols = symbol_index(
+        path=path,
+        include_private=False,
+        recursive=recursive,
+        max_symbols=20000,
+        output_profile="compact",
+    )
+    dep = dependency_map(
+        path=path,
+        recursive=recursive,
+        include_stdlib=False,
+        max_files=max_files,
+        output_profile="compact",
+    )
+    call = call_graph(
+        path=path,
+        recursive=recursive,
+        max_edges=20000,
+        output_profile="compact",
+    )
+
+    payload: dict[str, Any] = {
+        "generated_at": _now_iso(),
+        "path": str(root.relative_to(REPO_PATH)),
+        "file_count": len(files_meta),
+        "symbol_count": len(symbols),
+        "dependency_edge_count": int(dep.get("edge_count", 0)),
+        "call_edge_count": int(call.get("edge_count", 0)),
+        "files": files_meta if profile != "compact" else files_meta[:300],
+        "symbols": symbols if profile == "verbose" else [],
+        "dependencies": dep.get("edges", []) if profile == "verbose" else [],
+        "call_edges": call.get("edges", []) if profile == "verbose" else [],
+    }
+    if _is_git_repo():
+        payload["git_head"] = _git("rev-parse", "HEAD").stdout.strip()
+        payload["git_branch"] = _git("branch", "--show-current").stdout.strip()
+
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "mode": mode,
+        "index_path": str(REPO_INDEX_FILE),
+        "generated_at": payload["generated_at"],
+        "file_count": payload["file_count"],
+        "symbol_count": payload["symbol_count"],
+        "dependency_edge_count": payload["dependency_edge_count"],
+        "call_edge_count": payload["call_edge_count"],
+    }
+
+
+@mcp.tool()
+def self_check_pipeline(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    run_targeted_tests: bool = True,
+    run_impact_tests: bool = True,
+    run_doc_check: bool = True,
+    run_api_check: bool = True,
+    run_risk_check: bool = True,
+    run_compile_check: bool = True,
+    snapshot_path: str = str(API_SNAPSHOT_FILE),
+    max_compile_files: int = 300,
+) -> dict[str, Any]:
+    """Run a single-call quality gate pipeline and return structured results."""
+    _require_git_repo()
+    if max_compile_files < 1:
+        raise ValueError("max_compile_files must be >= 1")
+
+    result: dict[str, Any] = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "started_at": _now_iso(),
+        "checks": {},
+        "ok": True,
+    }
+
+    diff_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout.strip()
+    changed = [line.strip() for line in diff_out.splitlines() if line.strip()]
+    result["changed_files"] = changed
+
+    if run_compile_check:
+        compile_errors: list[dict[str, Any]] = []
+        py_files = [p for p in changed if p.endswith(".py")][:max_compile_files]
+        for rel in py_files:
+            proc = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(_resolve_repo_path(rel))],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                compile_errors.append({"path": rel, "stderr": _trim_text(proc.stderr)})
+        result["checks"]["compile"] = {
+            "checked_files": len(py_files),
+            "error_count": len(compile_errors),
+            "errors": compile_errors,
+        }
+        if compile_errors:
+            result["ok"] = False
+
+    if run_risk_check:
+        risk = risk_scoring(ref=f"{base_ref}...{head_ref}")
+        result["checks"]["risk"] = risk
+        if risk.get("risk_level") == "high":
+            result["ok"] = False
+
+    if run_doc_check:
+        doc = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+        result["checks"]["docs"] = doc
+        if doc.get("needs_docs_update"):
+            result["ok"] = False
+
+    if run_api_check:
+        if _resolve_repo_path(snapshot_path).is_file():
+            api = api_surface_snapshot(
+                mode="check",
+                snapshot_path=snapshot_path,
+                include_private=False,
+            )
+            result["checks"]["api"] = api
+            if api.get("removed_count", 0) > 0:
+                result["ok"] = False
+        else:
+            result["checks"]["api"] = {
+                "skipped": True,
+                "reason": f"snapshot missing: {snapshot_path}",
+            }
+
+    if run_impact_tests:
+        impacts = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
+        result["checks"]["impact_tests"] = impacts
+
+    if run_targeted_tests:
+        tests = test_targeted(base_ref=base_ref, head_ref=head_ref)
+        result["checks"]["targeted_tests"] = {
+            "ok": tests.get("ok", False),
+            "exit_code": tests.get("exit_code"),
+            "targeted_tests": tests.get("targeted_tests", []),
+            "timeout": tests.get("timeout", False),
+            "stderr": tests.get("stderr", ""),
+        }
+        if not tests.get("ok", False):
+            result["ok"] = False
+
+    result["finished_at"] = _now_iso()
+    return result
 
 
 @mcp.tool()

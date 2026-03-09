@@ -120,6 +120,8 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - read_snippet
 - read_batch
 - semantic_find
+- tree_sitter_core
+- repo_index_daemon
 - symbol_index
 - read_symbol
 - dependency_map
@@ -143,6 +145,7 @@ claude mcp add --transport http repo-git http://localhost:8000/mcp
 - workspace_facts
 - doc_sync_check
 - api_surface_snapshot
+- self_check_pipeline
 - edit_transaction_begin
 - edit_transaction_apply
 - edit_transaction_validate
