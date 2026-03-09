@@ -77,7 +77,7 @@ RUN set -eux; \
     rm -f /tmp/ollama.tgz
 
 RUN groupadd --gid "${APP_GID}" app \
-    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /usr/sbin/nologin app \
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
     && mkdir -p /models /repo/.build/cache /repo/.build/reports \
     && chown -R app:app /app /models /home/app
 
