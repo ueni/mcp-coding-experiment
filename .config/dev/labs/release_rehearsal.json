@@ -7,8 +7,8 @@
     "MCP_DRIFT.md"
   ],
   "checks": [
-    "python -m py_compile toolchain/dev/server.py",
-    "python -m py_compile toolchain/dev/labs/release_rehearsal.py",
-    "python -m py_compile toolchain/dev/labs/refactor_tournament.py"
+    "python -m py_compile source/server.py",
+    "python -m py_compile source/labs/release_rehearsal.py",
+    "python -m py_compile source/labs/refactor_tournament.py"
   ]
 }

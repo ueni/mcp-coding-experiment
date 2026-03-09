@@ -9,11 +9,11 @@
         "mkdir -p .build/tmp"
       ],
       "quality": [
-        "python -m compileall -q toolchain/dev",
-        "for f in toolchain/dev/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
+        "python -m compileall -q source",
+        "for f in source/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
       ],
       "benchmark": [
-        "python -c \"import math,statistics,sys,time;sys.path.insert(0,'toolchain/dev/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
+        "python -c \"import math,statistics,sys,time;sys.path.insert(0,'source/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
       ]
     },
     {
@@ -21,14 +21,14 @@
       "branch": "swarm/precompiled-bytecode",
       "setup": [
         "mkdir -p .build/tmp",
-        "python -m compileall -q toolchain/dev"
+        "python -m compileall -q source"
       ],
       "quality": [
-        "python -m compileall -q toolchain/dev",
-        "for f in toolchain/dev/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
+        "python -m compileall -q source",
+        "for f in source/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
       ],
       "benchmark": [
-        "python -c \"import math,statistics,sys,time;sys.path.insert(0,'toolchain/dev/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
+        "python -c \"import math,statistics,sys,time;sys.path.insert(0,'source/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
       ]
     },
     {
@@ -38,11 +38,11 @@
         "mkdir -p .build/tmp"
       ],
       "quality": [
-        "python -O -m compileall -q toolchain/dev",
-        "for f in toolchain/dev/labs/*.py; do python -O \"$f\" --help >/dev/null || exit 1; done"
+        "python -O -m compileall -q source",
+        "for f in source/labs/*.py; do python -O \"$f\" --help >/dev/null || exit 1; done"
       ],
       "benchmark": [
-        "python -O -c \"import math,statistics,sys,time;sys.path.insert(0,'toolchain/dev/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
+        "python -O -c \"import math,statistics,sys,time;sys.path.insert(0,'source/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
       ]
     },
     {
@@ -52,11 +52,11 @@
         "mkdir -p .build/tmp"
       ],
       "quality": [
-        "python -OO -m compileall -q toolchain/dev",
-        "for f in toolchain/dev/labs/*.py; do python -OO \"$f\" --help >/dev/null || exit 1; done"
+        "python -OO -m compileall -q source",
+        "for f in source/labs/*.py; do python -OO \"$f\" --help >/dev/null || exit 1; done"
       ],
       "benchmark": [
-        "python -OO -c \"import math,statistics,sys,time;sys.path.insert(0,'toolchain/dev/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
+        "python -OO -c \"import math,statistics,sys,time;sys.path.insert(0,'source/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
       ]
     },
     {
@@ -66,11 +66,11 @@
         "mkdir -p .build/tmp"
       ],
       "quality": [
-        "python -S -m compileall -q toolchain/dev",
-        "for f in toolchain/dev/labs/*.py; do python -S \"$f\" --help >/dev/null || exit 1; done"
+        "python -S -m compileall -q source",
+        "for f in source/labs/*.py; do python -S \"$f\" --help >/dev/null || exit 1; done"
       ],
       "benchmark": [
-        "python -S -c \"import math,statistics,sys,time;sys.path.insert(0,'toolchain/dev/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
+        "python -S -c \"import math,statistics,sys,time;sys.path.insert(0,'source/labs');import repo_digital_twin as rdt\ndef run_once():\n files=rdt.collect_tree(5000);hints=rdt.dependency_hints(files);return len(files)+sum(len(v) for v in hints.values())\nfor _ in range(8): run_once()\nsamples=[]\nfor _ in range(30):\n t0=time.perf_counter();run_once();samples.append((time.perf_counter()-t0)*1000)\nmed=statistics.median(samples);p95=sorted(samples)[max(0,math.ceil(0.95*len(samples))-1)];sd=statistics.pstdev(samples)\nprint(f'p50_ms={med:.3f} p95_ms={p95:.3f} stdev_ms={sd:.3f} metric_ms={med:.3f}')\""
       ]
     }
   ]

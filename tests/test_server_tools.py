@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 
 def _load_server_module():
-    module_path = Path(__file__).resolve().parents[1] / "toolchain" / "dev" / "server.py"
+    module_path = Path(__file__).resolve().parents[1] / "source" / "server.py"
     spec = importlib.util.spec_from_file_location("dev_server", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -818,10 +818,10 @@ class ServerToolsTest(unittest.TestCase):
     def test_lossless_codec_roundtrip_and_delta(self):
         payload = {
             "title": "release checklist",
-            "repeat": "toolchain/dev/server.py",
+            "repeat": "source/server.py",
             "nested": {
-                "repeat": "toolchain/dev/server.py",
-                "items": ["toolchain/dev/server.py", "docs/index.md"],
+                "repeat": "source/server.py",
+                "items": ["source/server.py", "docs/index.md"],
             },
         }
         enc = self.server.encode_lossless(
@@ -849,8 +849,8 @@ class ServerToolsTest(unittest.TestCase):
 
         target = {
             "title": "release checklist",
-            "repeat": "toolchain/dev/server.py",
-            "nested": {"repeat": "changed", "items": ["toolchain/dev/server.py"]},
+            "repeat": "source/server.py",
+            "nested": {"repeat": "changed", "items": ["source/server.py"]},
             "new_key": 7,
         }
         delta = self.server.delta_encode(base=payload, target=target)

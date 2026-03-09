@@ -16,7 +16,7 @@ It exposes safe file, search, analysis, and Git tooling through MCP so assistant
 ### 1) Build image
 
 ```bash
-docker build -t codebase-tooling-mcp ./toolchain/dev
+docker build -t codebase-tooling-mcp ./source
 ```
 
 Expected result (tail):
@@ -69,15 +69,15 @@ ok
 3. Wait for the `codebase-tooling-mcp` service to start.
 4. Use the MCP endpoint at `http://localhost:8000/mcp`.
 
-The VS Code entry point is [`.devcontainer/devcontainer.json`](/repo/.devcontainer/devcontainer.json), while the underlying container implementation is [`toolchain/dev/docker-compose.yml`](/repo/toolchain/dev/docker-compose.yml). The repository is mounted at `/repo` and port `8000` is forwarded automatically.
+The VS Code entry point is [`.devcontainer/devcontainer.json`](./.devcontainer/devcontainer.json), while the underlying container implementation is [`source/docker-compose.yml`](./source/docker-compose.yml). The repository is mounted at `/repo` and port `8000` is forwarded automatically.
 
 ### VS Code Inline Autocomplete Extension (MCP-backed)
 
-A minimal extension is included at [`vscode/mcp-inline-autocomplete`](/repo/vscode/mcp-inline-autocomplete).
+A minimal extension is included at [`vscode/mcp-inline-autocomplete`](./vscode/mcp-inline-autocomplete).
 
 Run it in VS Code:
 
-1. Open [`vscode/mcp-inline-autocomplete/package.json`](/repo/vscode/mcp-inline-autocomplete/package.json).
+1. Open [`vscode/mcp-inline-autocomplete/package.json`](./vscode/mcp-inline-autocomplete/package.json).
 2. Press `F5` (Run Extension) to start an Extension Development Host.
 3. In the dev host, open Command Palette and run `MCP Inline Autocomplete: Show Status`.
 4. Start typing in a file; inline suggestions come from MCP tool `autocomplete` at `http://localhost:8000/mcp`.
@@ -291,14 +291,14 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 ## Labs and Reports
 
-Prototype automations for advanced workflows live under `toolchain/dev/labs`.
-See [MCP Fun Labs](/repo/docs/labs.md) for command examples and expected outputs.
+Prototype automations for advanced workflows live under `source/labs`.
+See [MCP Fun Labs](./docs/labs.md) for command examples and expected outputs.
 
 ## Documentation
 
-- [Documentation Index](/repo/docs/index.md)
-- [Tooling White Paper](/repo/docs/tooling-whitepaper.md)
-- [JSON Settings Files](/repo/docs/json-settings.md)
-- [MCP Fun Labs](/repo/docs/labs.md)
-- [Troubleshooting](/repo/docs/troubleshooting.md)
-- [Release Notes and Documentation Policy](/repo/docs/release-notes-policy.md)
+- [Documentation Index](./docs/index.md)
+- [Tooling White Paper](./docs/tooling-whitepaper.md)
+- [JSON Settings Files](./docs/json-settings.md)
+- [MCP Fun Labs](./docs/labs.md)
+- [Troubleshooting](./docs/troubleshooting.md)
+- [Release Notes and Documentation Policy](./docs/release-notes-policy.md)

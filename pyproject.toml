@@ -20,5 +20,5 @@ ignore = ["E501"]
 python_version = "3.12"
 ignore_missing_imports = true
 exclude = [
-  "^toolchain/dev/server\\.py$",
+  "^source/server\\.py$",
 ]

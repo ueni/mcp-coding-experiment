@@ -13,16 +13,16 @@
   ],
   "required_paths": [
     "README.md",
-    "toolchain/dev/server.py",
+    "source/server.py",
     "docs/index.md"
   ],
   "required_when_paths_change": {
-    "toolchain/dev/": [
+    "source/": [
       "README.md"
     ]
   },
   "command_checks": [
-    "python -m py_compile toolchain/dev/server.py"
+    "python -m py_compile source/server.py"
   ],
   "docs_policy": {
     "enabled": true,

@@ -1,7 +1,7 @@
 {
   "name": "codebase-tooling-mcp",
   "dockerComposeFile": [
-    "../toolchain/dev/docker-compose.yml"
+    "../source/docker-compose.yml"
   ],
   "service": "codebase-tooling-mcp",
   "remoteUser": "app",

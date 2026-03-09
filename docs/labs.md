@@ -14,7 +14,7 @@ Workflows implemented in this folder:
 Runs policy checks across repo content and command checks.
 
 ```bash
-python toolchain/dev/labs/policy_gatekeeper.py --changed-ref HEAD
+python source/labs/policy_gatekeeper.py --changed-ref HEAD
 ```
 
 Expected result (example):
@@ -37,7 +37,7 @@ Docs sync policy is config-driven via `docs_policy`:
 Runs strategy branches, executes quality + benchmark commands, and ranks strategies.
 
 ```bash
-python toolchain/dev/labs/branch_swarm_lab.py --allow-dirty
+python source/labs/branch_swarm_lab.py --allow-dirty
 ```
 
 Expected result (example):
@@ -55,7 +55,7 @@ Output: `.build/reports/BRANCH_SWARM_REPORT.md`
 Builds a PR packet from a git range.
 
 ```bash
-python toolchain/dev/labs/narrated_pr_generator.py --base HEAD~1 --head HEAD
+python source/labs/narrated_pr_generator.py --base HEAD~1 --head HEAD
 ```
 
 Expected result (example):
@@ -72,7 +72,7 @@ Output: `.build/reports/PR_PACKET.md`
 Builds a JSON + Markdown digital twin snapshot for architecture and drift monitoring.
 
 ```bash
-python toolchain/dev/labs/repo_digital_twin.py
+python source/labs/repo_digital_twin.py
 ```
 
 Expected result (example):
@@ -89,8 +89,8 @@ Outputs:
 ## Existing Workflows
 
 ```bash
-python toolchain/dev/labs/release_rehearsal.py --allow-dirty
-python toolchain/dev/labs/refactor_tournament.py --allow-dirty
+python source/labs/release_rehearsal.py --allow-dirty
+python source/labs/refactor_tournament.py --allow-dirty
 ```
 
 Expected result (example):

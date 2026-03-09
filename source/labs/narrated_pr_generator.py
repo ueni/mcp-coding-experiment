@@ -66,7 +66,7 @@ def main() -> int:
     files = top_changed_files(base, head)
 
     changed_list = git("diff", "--name-only", f"{base}..{head}").stdout.splitlines()
-    risky = [p for p in changed_list if p.startswith("toolchain/dev/server.py")]
+    risky = [p for p in changed_list if p.startswith("source/server.py")]
 
     lines = [
         "# PR Packet",
@@ -123,8 +123,8 @@ def main() -> int:
             "## Validation Commands",
             "",
             "```bash",
-            "python -m py_compile toolchain/dev/server.py",
-            "python -m py_compile toolchain/dev/labs/*.py",
+            "python -m py_compile source/server.py",
+            "python -m py_compile source/labs/*.py",
             "git diff --name-only " + f"{base}..{head}",
             "```",
             "",

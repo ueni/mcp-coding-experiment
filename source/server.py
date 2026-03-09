@@ -103,7 +103,7 @@ MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "200000"))
 ALLOW_ORIGINS = [
     x.strip() for x in os.getenv("ALLOW_ORIGINS", "*").split(",") if x.strip()
 ]
-LABS_DIR = Path("toolchain/dev/labs")
+LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".build/reports")
 MEMORY_FILE = Path(".build/memory/context_memory.json")
 FAILURE_MEMORY_FILE = Path(".build/memory/failure_memory.json")
@@ -1863,7 +1863,7 @@ def _readme_tool_names() -> set[str]:
 
 
 def _server_tool_names() -> set[str]:
-    server_file = _resolve_repo_path("toolchain/dev/server.py")
+    server_file = _resolve_repo_path("source/server.py")
     if not server_file.is_file():
         server_file = Path(__file__).resolve()
     names: set[str] = set()
@@ -3020,18 +3020,18 @@ def install_git_hooks(
     pre_commit_lines = list(script_lines)
     if include_lab_reports:
         pre_commit_lines.append(
-            '"$PYTHON_BIN" toolchain/dev/labs/policy_gatekeeper.py --changed-ref HEAD '
+            '"$PYTHON_BIN" source/labs/policy_gatekeeper.py --changed-ref HEAD '
             '--report-path .build/reports/POLICY_GATEKEEPER.md'
         )
 
     pre_push_lines = list(script_lines)
     if include_lab_reports:
         pre_push_lines.append(
-            '"$PYTHON_BIN" toolchain/dev/labs/policy_gatekeeper.py --changed-ref HEAD '
+            '"$PYTHON_BIN" source/labs/policy_gatekeeper.py --changed-ref HEAD '
             '--report-path .build/reports/POLICY_GATEKEEPER.md'
         )
         pre_push_lines.append(
-            '"$PYTHON_BIN" toolchain/dev/labs/repo_digital_twin.py '
+            '"$PYTHON_BIN" source/labs/repo_digital_twin.py '
             '--json .build/reports/REPO_DIGITAL_TWIN.json '
             '--md .build/reports/REPO_DIGITAL_TWIN.md'
         )
@@ -5929,7 +5929,7 @@ def commit_lint_tag(
             tags.add("docs")
         if rel.startswith("tests/") or "/test" in rel or rel.endswith("_test.py"):
             tags.add("test")
-        if rel.startswith(".devcontainer/") or rel.startswith("toolchain/dev/") or "Dockerfile" in rel:
+        if rel.startswith(".devcontainer/") or rel.startswith("source/") or "Dockerfile" in rel:
             tags.add("infra")
 
     suggestions: list[str] = []
@@ -6190,8 +6190,8 @@ def change_impact_gate(
     changed_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout
     changed = [line.strip() for line in changed_out.splitlines() if line.strip()]
     critical_patterns = critical_globs or [
-        "toolchain/dev/server.py",
-        "toolchain/dev/Dockerfile",
+        "source/server.py",
+        "source/Dockerfile",
         ".devcontainer/**",
         "**/auth*",
         "**/security*",

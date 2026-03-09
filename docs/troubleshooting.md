@@ -11,7 +11,7 @@ Symptom:
 Fix:
 
 ```bash
-pip install -r toolchain/dev/requirements.txt
+pip install -r source/requirements.txt
 ```
 
 Verify:

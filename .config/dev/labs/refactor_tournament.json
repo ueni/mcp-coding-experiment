@@ -7,34 +7,34 @@
       "branch": "tournament/python-baseline",
       "mutate": [],
       "checks": [
-        "python -m compileall -q toolchain/dev",
-        "for f in toolchain/dev/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
+        "python -m compileall -q source",
+        "for f in source/labs/*.py; do python \"$f\" --help >/dev/null || exit 1; done"
       ]
     },
     {
       "name": "Ruff Autofix + Format",
       "branch": "tournament/ruff-autofix-format",
       "mutate": [
-        "python -m ruff check --fix toolchain/dev",
-        "python -m ruff format toolchain/dev"
+        "python -m ruff check --fix source",
+        "python -m ruff format source"
       ],
       "checks": [
-        "python -m compileall -q toolchain/dev",
-        "python -m ruff check toolchain/dev",
-        "python -m ruff format --check toolchain/dev"
+        "python -m compileall -q source",
+        "python -m ruff check source",
+        "python -m ruff format --check source"
       ]
     },
     {
       "name": "Black + Isort",
       "branch": "tournament/black-isort",
       "mutate": [
-        "python -m isort toolchain/dev",
-        "python -m black toolchain/dev"
+        "python -m isort source",
+        "python -m black source"
       ],
       "checks": [
-        "python -m compileall -q toolchain/dev",
-        "python -m isort --check-only toolchain/dev",
-        "python -m black --check toolchain/dev"
+        "python -m compileall -q source",
+        "python -m isort --check-only source",
+        "python -m black --check source"
       ]
     },
     {
@@ -42,8 +42,8 @@
       "branch": "tournament/type-safety-pass",
       "mutate": [],
       "checks": [
-        "python -m compileall -q toolchain/dev",
-        "python -m mypy toolchain/dev --ignore-missing-imports"
+        "python -m compileall -q source",
+        "python -m mypy source --ignore-missing-imports"
       ]
     },
     {
@@ -51,10 +51,10 @@
       "branch": "tournament/pyupgrade-modernization",
       "allowed_mutate_exit_codes": [0, 123],
       "mutate": [
-        "find toolchain/dev -type f -name '*.py' -print0 | xargs -0 python -m pyupgrade --py312-plus"
+        "find source -type f -name '*.py' -print0 | xargs -0 python -m pyupgrade --py312-plus"
       ],
       "checks": [
-        "python -m compileall -q toolchain/dev"
+        "python -m compileall -q source"
       ]
     }
   ]
