@@ -318,17 +318,47 @@ def _allowed_by_globs(
     return True
 
 
-def _iter_candidate_files(root: Path, recursive: bool) -> Any:
+def _iter_candidate_files(
+    root: Path,
+    recursive: bool,
+    include_hidden: bool = False,
+) -> Any:
     if root.is_file():
-        yield root
+        if include_hidden:
+            yield root
+            return
+        rel = root.relative_to(REPO_PATH)
+        if not _is_hidden_rel_path(rel):
+            yield root
         return
+
     if recursive:
-        for p in root.rglob("*"):
-            if p.is_file():
-                yield p
+        for dirpath, dirnames, filenames in os.walk(root):
+            if not include_hidden:
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            base = Path(dirpath)
+            for name in filenames:
+                if not include_hidden and name.startswith("."):
+                    continue
+                p = base / name
+                if not p.is_file():
+                    continue
+                if include_hidden:
+                    yield p
+                    continue
+                rel = p.relative_to(REPO_PATH)
+                if not _is_hidden_rel_path(rel):
+                    yield p
         return
+
     for p in root.glob("*"):
-        if p.is_file():
+        if not p.is_file():
+            continue
+        if include_hidden:
+            yield p
+            continue
+        rel = p.relative_to(REPO_PATH)
+        if not _is_hidden_rel_path(rel):
             yield p
 
 
@@ -8667,6 +8697,8 @@ def repo_index_daemon(
     files_meta: list[dict[str, Any]] = []
     for candidate in _iter_candidate_files(root, recursive=recursive):
         rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+        if _is_hidden_rel_path(Path(rel)):
+            continue
         stat = candidate.stat()
         entry = {
             "path": rel,
