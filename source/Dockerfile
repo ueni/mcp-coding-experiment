@@ -77,9 +77,7 @@ RUN set -eux; \
       exit 1; \
     fi; \
     curl -fsSL "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" \
-      | OLLAMA_SHA256="${ollama_sha256}" python -c 'import hashlib, io, os, sys, tarfile; data = sys.stdin.buffer.read(); expected = os.environ["OLLAMA_SHA256"]; actual = hashlib.sha256(data).hexdigest(); \
-if actual != expected: print(f"sha256 mismatch: expected {expected}, got {actual}", file=sys.stderr); sys.exit(1); \
-tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractall("/usr/local")'
+      | OLLAMA_SHA256="${ollama_sha256}" python -c 'import hashlib, io, os, sys, tarfile; data = sys.stdin.buffer.read(); expected = os.environ["OLLAMA_SHA256"]; actual = hashlib.sha256(data).hexdigest(); actual == expected or sys.exit(f"sha256 mismatch: expected {expected}, got {actual}"); tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractall("/usr/local")'
 
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
