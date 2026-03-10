@@ -2192,36 +2192,115 @@ def _task_command_from_vscode_task(task: dict[str, Any]) -> list[str]:
     return [*head, *args]
 
 
-def _validate_build_task_command(command: list[str]) -> None:
+def _first_non_flag_token(
+    tokens: list[str],
+    start: int,
+    options_with_values: set[str],
+) -> str:
+    idx = start
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token in options_with_values:
+            idx += 2
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        return token
+    raise ValueError("missing subcommand")
+
+
+def _docker_control_policy(control_profile: str) -> tuple[set[str], set[str]]:
+    profiles = {"build", "compose", "runtime", "all"}
+    if control_profile not in profiles:
+        raise ValueError(
+            f"control_profile must be one of: {', '.join(sorted(profiles))}"
+        )
+
+    docker_build = {"build", "buildx", "pull", "images", "version", "info", "compose"}
+    compose_build = {"build", "config", "images", "ps", "pull"}
+
+    docker_compose = {"compose", "images", "version", "info"}
+    compose_ops = {
+        "build",
+        "config",
+        "images",
+        "ps",
+        "pull",
+        "up",
+        "down",
+        "start",
+        "stop",
+        "restart",
+        "logs",
+    }
+
+    docker_runtime = {
+        "run",
+        "exec",
+        "ps",
+        "logs",
+        "start",
+        "stop",
+        "restart",
+        "rm",
+        "inspect",
+        "cp",
+        "images",
+        "version",
+        "info",
+        "compose",
+    }
+    compose_runtime = {"run", "exec", "ps", "logs", "start", "stop", "restart", "up", "down"}
+
+    if control_profile == "build":
+        return docker_build, compose_build
+    if control_profile == "compose":
+        return docker_compose, compose_ops
+    if control_profile == "runtime":
+        return docker_runtime, compose_runtime
+    return docker_build | docker_compose | docker_runtime, compose_build | compose_ops | compose_runtime
+
+
+def _validate_build_task_command(command: list[str], control_profile: str = "build") -> None:
     if not command:
         raise ValueError("empty command")
+
+    allowed_docker_sub, allowed_compose_sub = _docker_control_policy(control_profile)
     binary = command[0]
     if binary not in {"docker", "docker-compose"}:
-        raise ValueError(f"only docker build control is allowed; got: {binary}")
+        raise ValueError(f"only docker task control is allowed; got: {binary}")
 
     if binary == "docker":
-        if len(command) < 2:
-            raise ValueError("docker command must include a subcommand")
-        sub = command[1]
-        allowed_sub = {"build", "buildx", "compose", "pull", "images", "version", "info"}
-        if sub not in allowed_sub:
-            raise ValueError(f"docker subcommand not allowed for build control: {sub}")
+        sub = _first_non_flag_token(
+            command,
+            1,
+            {"-H", "--host", "--context", "--config", "--tlscacert", "--tlscert", "--tlskey"},
+        )
+        if sub not in allowed_docker_sub:
+            raise ValueError(
+                f"docker subcommand not allowed for control_profile={control_profile}: {sub}"
+            )
         if sub == "compose":
-            if len(command) < 3:
-                raise ValueError("docker compose requires a subcommand")
-            compose_sub = command[2]
-            if compose_sub not in {"build", "config", "images", "ps"}:
+            compose_sub = _first_non_flag_token(
+                command,
+                command.index("compose") + 1,
+                {"-f", "--file", "-p", "--project-name", "--profile", "--env-file", "--project-directory"},
+            )
+            if compose_sub not in allowed_compose_sub:
                 raise ValueError(
-                    f"docker compose subcommand not allowed for build control: {compose_sub}"
+                    f"docker compose subcommand not allowed for control_profile={control_profile}: {compose_sub}"
                 )
         return
 
-    if len(command) < 2:
-        raise ValueError("docker-compose command must include a subcommand")
-    compose_sub = command[1]
-    if compose_sub not in {"build", "config", "images", "ps"}:
+    compose_sub = _first_non_flag_token(
+        command,
+        1,
+        {"-f", "--file", "-p", "--project-name", "--profile", "--env-file", "--project-directory"},
+    )
+    if compose_sub not in allowed_compose_sub:
         raise ValueError(
-            f"docker-compose subcommand not allowed for build control: {compose_sub}"
+            f"docker-compose subcommand not allowed for control_profile={control_profile}: {compose_sub}"
         )
 
 
@@ -2368,8 +2447,9 @@ def docker_cli_status() -> dict[str, Any]:
 def vscode_tasks_list(
     tasks_path: str = ".vscode/tasks.json",
     label_prefix: str = "Docker:",
+    control_profile: str = "build",
 ) -> dict[str, Any]:
-    """List VS Code tasks and whether each is runnable as build-control command."""
+    """List VS Code tasks and whether each is runnable under a Docker control profile."""
     tasks_file, tasks = _load_vscode_tasks(tasks_path)
     rows: list[dict[str, Any]] = []
     for task in tasks:
@@ -2378,7 +2458,7 @@ def vscode_tasks_list(
             continue
         try:
             cmd = _task_command_from_vscode_task(task)
-            _validate_build_task_command(cmd)
+            _validate_build_task_command(cmd, control_profile=control_profile)
             rows.append(
                 {
                     "label": label,
@@ -2398,6 +2478,7 @@ def vscode_tasks_list(
         "schema": "vscode_tasks_list.v1",
         "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
         "label_prefix": label_prefix,
+        "control_profile": control_profile,
         "count": len(rows),
         "tasks": rows,
     }
@@ -2407,10 +2488,11 @@ def vscode_tasks_list(
 def vscode_task_run(
     label: str,
     tasks_path: str = ".vscode/tasks.json",
+    control_profile: str = "build",
     timeout_seconds: int = 1800,
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
-    """Run an approved Docker build task by label from VS Code tasks.json."""
+    """Run an approved Docker task by label from VS Code tasks.json."""
     _require_mutations()
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
@@ -2426,7 +2508,7 @@ def vscode_task_run(
         raise ValueError(f"task not found: {label}")
 
     command = _task_command_from_vscode_task(selected)
-    _validate_build_task_command(command)
+    _validate_build_task_command(command, control_profile=control_profile)
 
     options = selected.get("options", {})
     task_cwd = "."
@@ -2458,6 +2540,7 @@ def vscode_task_run(
             "ok": False,
             "label": label,
             "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
+            "control_profile": control_profile,
             "command": command,
             "cwd": str(workdir.relative_to(REPO_PATH)),
             "exit_code": None,
@@ -2478,6 +2561,7 @@ def vscode_task_run(
         "ok": proc.returncode == 0,
         "label": label,
         "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
+        "control_profile": control_profile,
         "command": command,
         "cwd": str(workdir.relative_to(REPO_PATH)),
         "exit_code": proc.returncode,

@@ -53,6 +53,76 @@
         "cwd": "${workspaceFolder}"
       },
       "problemMatcher": []
+    },
+    {
+      "label": "Docker: Compose Pull Service",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "source/docker-compose.yml",
+        "pull",
+        "codebase-tooling-mcp"
+      ],
+      "group": "build",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Compose Up Service",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "source/docker-compose.yml",
+        "up",
+        "-d",
+        "codebase-tooling-mcp"
+      ],
+      "group": "none",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Compose Logs Service",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "source/docker-compose.yml",
+        "logs",
+        "--tail",
+        "200",
+        "codebase-tooling-mcp"
+      ],
+      "group": "none",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Compose Down",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "source/docker-compose.yml",
+        "down"
+      ],
+      "group": "none",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
     }
   ]
 }
