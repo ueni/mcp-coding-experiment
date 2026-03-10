@@ -5991,6 +5991,69 @@ def _coding_checks(
     }
 
 
+def _coding_pip_install(
+    packages: list[str],
+    upgrade: bool = False,
+    timeout_seconds: int = 600,
+) -> dict[str, Any]:
+    if not packages:
+        raise ValueError("packages must not be empty")
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    py = Path(CODING_VENV_PYTHON)
+    if not py.is_file():
+        raise FileNotFoundError(
+            f"coding venv python not found: {CODING_VENV_PYTHON} (build image with coding venv enabled)"
+        )
+    invalid = [p for p in packages if not p.strip()]
+    if invalid:
+        raise ValueError("packages must not contain empty entries")
+
+    cmd = [CODING_VENV_PYTHON, "-m", "pip", "install"]
+    if upgrade:
+        cmd.append("--upgrade")
+    cmd.extend(packages)
+    out_cap = _token_budget_apply_max(None)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(REPO_PATH),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "schema": "coding_pip.v1",
+            "ok": False,
+            "timeout": True,
+            "exit_code": None,
+            "command": cmd,
+            "venv_python": CODING_VENV_PYTHON,
+            "packages": packages,
+            "stdout": _trim_text(
+                (exc.stdout or "") if isinstance(exc.stdout, str) else "",
+                max_chars=out_cap,
+            ),
+            "stderr": _trim_text(
+                (exc.stderr or "") if isinstance(exc.stderr, str) else "",
+                max_chars=out_cap,
+            ),
+        }
+    return {
+        "schema": "coding_pip.v1",
+        "ok": proc.returncode == 0,
+        "timeout": False,
+        "exit_code": proc.returncode,
+        "command": cmd,
+        "venv_python": CODING_VENV_PYTHON,
+        "packages": packages,
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+    }
+
+
 def local_embed(
     texts: list[str],
     backend: str = "auto",
@@ -6249,10 +6312,12 @@ def model_router(
     check_target: str = ".",
     check_timeout_seconds: int = 600,
     run_checks: bool = False,
+    packages: list[str] | None = None,
+    pip_upgrade: bool = False,
 ) -> dict[str, Any]:
-    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank|coding_infer|coding_check."""
-    if mode not in {"status", "embed", "infer", "autocomplete", "rerank", "coding_infer", "coding_check"}:
-        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank, coding_infer, coding_check")
+    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank|coding_infer|coding_check|coding_pip."""
+    if mode not in {"status", "embed", "infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip"}:
+        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank, coding_infer, coding_check, coding_pip")
     if mode == "status":
         return local_model_status()
     if mode == "embed":
@@ -6306,6 +6371,12 @@ def model_router(
         return _coding_checks(
             profile=check_profile,
             target=check_target,
+            timeout_seconds=check_timeout_seconds,
+        )
+    if mode == "coding_pip":
+        return _coding_pip_install(
+            packages=packages or [],
+            upgrade=pip_upgrade,
             timeout_seconds=check_timeout_seconds,
         )
     if mode == "autocomplete":
