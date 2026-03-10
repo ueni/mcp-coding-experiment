@@ -138,6 +138,9 @@ LOCAL_INFER_ENDPOINT = os.getenv(
     "LOCAL_INFER_ENDPOINT", "http://127.0.0.1:11434/api/generate"
 ).strip()
 HOST_CA_CERT_FILE = os.getenv("HOST_CA_CERT_FILE", "").strip()
+INTERNAL_SELF_TESTS_DIR = Path(
+    os.getenv("INTERNAL_SELF_TESTS_DIR", "/opt/codebase-tooling/defaults/selftests")
+)
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse", "cat"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -6368,39 +6371,66 @@ def self_test(
     timeout_seconds: int = 600,
     fail_fast: bool = False,
 ) -> dict[str, Any]:
-    """Execute repository self-tests using unittest or pytest."""
+    """Execute tests from /repo by default; falls back to internal container selftests when /repo/tests is missing."""
     if runner not in {"unittest", "pytest"}:
         raise ValueError("runner must be one of: unittest, pytest")
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
 
     out_cap = _token_budget_apply_max(None)
-    _resolve_repo_path(target)
+    repo_target_path = _resolve_repo_path(target)
+    use_internal_tests = (
+        target == "tests"
+        and not repo_target_path.exists()
+        and INTERNAL_SELF_TESTS_DIR.is_dir()
+    )
+    resolved_target = str(INTERNAL_SELF_TESTS_DIR) if use_internal_tests else target
+    execution_root = "/" if use_internal_tests else str(REPO_PATH)
 
     if runner == "unittest":
         cmd = [sys.executable, "-m", "unittest"]
-        target_path = _resolve_repo_path(target)
-        if target_path.is_file() and target_path.suffix == ".py":
-            rel_parent = str(target_path.parent.relative_to(REPO_PATH))
-            cmd.extend(
-                [
-                    "discover",
-                    "-s",
-                    rel_parent if rel_parent else ".",
-                    "-p",
-                    target_path.name,
-                ]
-            )
+        if use_internal_tests:
+            cmd.extend(["discover", "-s", str(INTERNAL_SELF_TESTS_DIR)])
             if verbose:
                 cmd.append("-v")
             if fail_fast:
                 cmd.append("-f")
         else:
-            if verbose:
-                cmd.append("-v")
-            if fail_fast:
-                cmd.append("-f")
-            cmd.append(target)
+            target_path = repo_target_path
+            if target_path.is_file() and target_path.suffix == ".py":
+                rel_parent = str(target_path.parent.relative_to(REPO_PATH))
+                cmd.extend(
+                    [
+                        "discover",
+                        "-s",
+                        rel_parent if rel_parent else ".",
+                        "-p",
+                        target_path.name,
+                    ]
+                )
+                if verbose:
+                    cmd.append("-v")
+                if fail_fast:
+                    cmd.append("-f")
+            elif target_path.is_dir():
+                rel_dir = str(target_path.relative_to(REPO_PATH))
+                cmd.extend(
+                    [
+                        "discover",
+                        "-s",
+                        rel_dir if rel_dir else ".",
+                    ]
+                )
+                if verbose:
+                    cmd.append("-v")
+                if fail_fast:
+                    cmd.append("-f")
+            else:
+                if verbose:
+                    cmd.append("-v")
+                if fail_fast:
+                    cmd.append("-f")
+                cmd.append(target)
     else:
         cmd = ["pytest"]
         if verbose:
@@ -6409,12 +6439,12 @@ def self_test(
             cmd.append("-q")
         if fail_fast:
             cmd.append("-x")
-        cmd.append(target)
+        cmd.append(resolved_target)
 
     try:
         proc = subprocess.run(
             cmd,
-            cwd=str(REPO_PATH),
+            cwd=execution_root,
             check=False,
             capture_output=True,
             text=True,
@@ -6432,6 +6462,8 @@ def self_test(
             "schema": "self_test.v1",
             "runner": runner,
             "target": target,
+            "resolved_target": resolved_target,
+            "execution_root": execution_root,
             "ok": False,
             "timeout": True,
             "exit_code": None,
@@ -6450,6 +6482,8 @@ def self_test(
             "schema": "self_test.v1",
             "runner": runner,
             "target": target,
+            "resolved_target": resolved_target,
+            "execution_root": execution_root,
             "ok": False,
             "timeout": False,
             "exit_code": None,
@@ -6470,6 +6504,8 @@ def self_test(
         "schema": "self_test.v1",
         "runner": runner,
         "target": target,
+        "resolved_target": resolved_target,
+        "execution_root": execution_root,
         "ok": proc.returncode == 0,
         "timeout": False,
         "exit_code": proc.returncode,
