@@ -2526,7 +2526,6 @@ def repo_info() -> dict[str, Any]:
     return info
 
 
-@mcp.tool()
 def docker_cli_status() -> dict[str, Any]:
     """Report docker CLI/socket awareness and daemon reachability signals."""
     return {
@@ -2579,7 +2578,6 @@ def docker_task_router(
     }
 
 
-@mcp.tool()
 def vscode_tasks_list(
     tasks_path: str = ".vscode/tasks.json",
     label_prefix: str = "Docker:",
@@ -2620,7 +2618,6 @@ def vscode_tasks_list(
     }
 
 
-@mcp.tool()
 def vscode_task_run(
     label: str,
     tasks_path: str = ".vscode/tasks.json",
@@ -4055,7 +4052,6 @@ def read_batch(
     }
 
 
-@mcp.tool()
 def semantic_find(
     query: str,
     path: str = ".",
@@ -4213,7 +4209,6 @@ def semantic_find(
     return result
 
 
-@mcp.tool()
 def symbol_index(
     path: str = ".",
     include_private: bool = False,
@@ -4281,7 +4276,6 @@ def symbol_index(
     return profiled
 
 
-@mcp.tool()
 def dependency_map(
     path: str = ".",
     recursive: bool = True,
@@ -4451,7 +4445,6 @@ def dependency_map(
     return result
 
 
-@mcp.tool()
 def call_graph(
     path: str = ".",
     recursive: bool = True,
@@ -7366,7 +7359,6 @@ def workflow_compiler(
     return out
 
 
-@mcp.tool()
 def state_snapshot(
     label: str = "",
     include_build_dir: bool = False,
@@ -7418,7 +7410,6 @@ def state_snapshot(
     }
 
 
-@mcp.tool()
 def state_restore(
     snapshot_id: str,
 ) -> dict[str, Any]:
@@ -8289,7 +8280,6 @@ def failure_memory(
     return {"mode": mode, "count": len(suggestions), "suggestions": suggestions}
 
 
-@mcp.tool()
 def edit_transaction(
     mode: str = "begin",
     transaction_id: str = "",
@@ -8824,7 +8814,6 @@ def tree_sitter_core(
     return result
 
 
-@mcp.tool()
 def repo_index_daemon(
     mode: str = "refresh",
     path: str = ".",
@@ -9272,7 +9261,6 @@ def self_check_pipeline(
     return result
 
 
-@mcp.tool()
 def memory_upsert(
     namespace: str,
     key: str,
@@ -9330,7 +9318,6 @@ def memory_upsert(
     }
 
 
-@mcp.tool()
 def memory_summary_upsert(
     namespace: str,
     focus: str,
@@ -9385,7 +9372,6 @@ def memory_summary_upsert(
     }
 
 
-@mcp.tool()
 def memory_decision_record(
     namespace: str,
     topic: str,
@@ -9444,7 +9430,6 @@ def memory_decision_record(
     }
 
 
-@mcp.tool()
 def memory_get(
     namespace: str | None = None,
     key: str | None = None,
@@ -9510,7 +9495,6 @@ def memory_get(
     }
 
 
-@mcp.tool()
 def memory_validate(
     validate_paths: bool = True,
     drop_expired: bool = False,

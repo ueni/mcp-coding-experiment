@@ -223,7 +223,6 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `git_push`
 - `apply_unified_diff`
 - `workspace_transaction` (preferred router for edit/snapshot/restore flows)
-- `edit_transaction`
 - `summarize_diff`
 - `risk_scoring`
 - `security_triage`
@@ -232,12 +231,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 - `grep`
 - `code_index_router` (preferred router for refresh/query/symbols/deps/calls/search)
-- `semantic_find`
 - `tree_sitter_core`
-- `repo_index_daemon`
-- `symbol_index`
-- `dependency_map`
-- `call_graph`
 - `ast_search`
 - `impact_tests`
 - `doc_sync_check`
@@ -262,9 +256,6 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `docker_task_router` (preferred router for docker task status/list/run)
 - `failure_memory`
 - `memory_router` (preferred router for memory upsert/get/validate/summary/decision)
-- `memory_upsert`
-- `memory_get`
-- `memory_validate`
 - `license_monitor`
 - `install_git_hooks`
 - `commit_lint_tag`
@@ -276,8 +267,6 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `required_tool_chain`
 - `fast_path_dev`
 - `workflow_compiler`
-- `state_snapshot`
-- `state_restore`
 - `policy_simulator`
 - `tool_router_learned`
 - `artifact_memory_index`
