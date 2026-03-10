@@ -66,7 +66,10 @@ cat > .devcontainer/devcontainer.json <<EOF
   "workspaceFolder": "/repo",
   "containerEnv": {
     "DOCKER_HOST": "unix:///var/run/docker.sock",
-    "MCP_APPLY_REPO_DEFAULTS": "true"
+    "MCP_APPLY_REPO_DEFAULTS": "true",
+    "MCP_TRANSPORT": "http",
+    "ALLOW_MUTATIONS": "true",
+    "HOST_CA_CERT_FILE": "/host-certs/ca-certificates.crt"
   },
   "forwardPorts": [
     8000
@@ -94,8 +97,9 @@ cat > .devcontainer/devcontainer.json <<EOF
   "mounts": [
     "source=\${localEnv:HOME}/.continue,target=/home/app/.continue,type=bind,consistency=cached",
     "source=\${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",
-    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
-    "source=\${localWorkspaceFolder},target=/repo,type=bind,consistency=cached"
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
+    "source=\${localWorkspaceFolder},target=/repo,type=bind,consistency=cached",
+    "source=/etc/ssl/certs:/host-certs,ro,target=/host-certs,type=bind,consistency=cached"
   ]
 }
 EOF
