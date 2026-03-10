@@ -303,6 +303,42 @@ class ServerToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.server.model_router(mode="parallel_infer", prompts=[], max_parallel=2)
 
+    def test_model_router_infer_auto_parallel_upgrade(self):
+        parallel_payload = {
+            "schema": "parallel_infer.v1",
+            "count": 2,
+            "ok_count": 2,
+            "error_count": 0,
+            "max_parallel": 2,
+            "rows": [],
+        }
+        with patch.object(self.server, "_parallel_infer", return_value=parallel_payload) as pinf, patch.object(
+            self.server, "local_infer", return_value={"schema": "local_infer.v1", "ok": True}
+        ) as linf:
+            out = self.server.model_router(
+                mode="infer",
+                prompt="- summarize docs\n- review changed files",
+                backend="fallback",
+                max_parallel=2,
+            )
+        self.assertEqual(out["schema"], "model_router.infer_auto_parallel.v1")
+        self.assertTrue(out["upgraded"])
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["result"]["schema"], "parallel_infer.v1")
+        self.assertEqual(pinf.call_count, 1)
+        self.assertEqual(linf.call_count, 0)
+
+    def test_model_router_infer_auto_parallel_can_be_disabled(self):
+        with patch.object(self.server, "local_infer", return_value={"schema": "local_infer.v1", "ok": True}) as linf:
+            out = self.server.model_router(
+                mode="infer",
+                prompt="- summarize docs\n- review changed files",
+                backend="fallback",
+                auto_parallel_when_possible=False,
+            )
+        self.assertEqual(out["schema"], "local_infer.v1")
+        self.assertEqual(linf.call_count, 1)
+
     def test_autocomplete_fallback(self):
         out = self.server.autocomplete(
             prefix="def handler():",

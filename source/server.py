@@ -6776,6 +6776,37 @@ def _parallel_infer(
     }
 
 
+def _infer_batch_from_prompt(prompt: str) -> list[str]:
+    text = prompt.strip()
+    if not text:
+        return []
+
+    # Explicit separators first.
+    for sep in ("\n---\n", "\n|||\n"):
+        if sep in text:
+            parts = [p.strip() for p in text.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                return parts
+
+    # Bullet list tasks.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    bullet = [re.sub(r"^[-*]\s+", "", ln) for ln in lines if re.match(r"^[-*]\s+\S", ln)]
+    if len(bullet) >= 2:
+        return bullet
+
+    # Numbered tasks.
+    numbered = [re.sub(r"^\d+[.)]\s+", "", ln) for ln in lines if re.match(r"^\d+[.)]\s+\S", ln)]
+    if len(numbered) >= 2:
+        return numbered
+
+    # Inline splitter.
+    if " || " in text:
+        parts = [p.strip() for p in text.split(" || ") if p.strip()]
+        if len(parts) >= 2:
+            return parts
+    return []
+
+
 @mcp.tool()
 def model_router(
     mode: str = "status",
@@ -6811,6 +6842,7 @@ def model_router(
     sandbox_action: str = "list",
     prompts: list[str] | None = None,
     max_parallel: int = 4,
+    auto_parallel_when_possible: bool = True,
 ) -> dict[str, Any]:
     """Strict model router: mode MUST be one of status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; required params are enforced per mode; returns deterministic schema payloads or explicit validation errors."""
     if mode not in {"status", "embed", "infer", "parallel_infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip", "coding_sandbox"}:
@@ -6829,6 +6861,29 @@ def model_router(
             store_result=store_result,
         )
     if mode == "infer":
+        inferred_batch = prompts or []
+        if not inferred_batch and auto_parallel_when_possible:
+            inferred_batch = _infer_batch_from_prompt(prompt)
+        if len(inferred_batch) >= 2:
+            parallel = _parallel_infer(
+                prompts=inferred_batch,
+                task=task,
+                backend=backend,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                output_profile=output_profile,
+                store_result=store_result,
+                max_parallel=max_parallel,
+            )
+            return {
+                "schema": "model_router.infer_auto_parallel.v1",
+                "upgraded": True,
+                "reason": "detected_independent_batch",
+                "count": len(inferred_batch),
+                "result": parallel,
+            }
         return local_infer(
             prompt=prompt,
             task=task,
