@@ -5820,7 +5820,6 @@ def diagram_sync_check(
     }
 
 
-@mcp.tool()
 def local_model_status() -> dict[str, Any]:
     """Report local model configuration and endpoint availability."""
     status: dict[str, Any] = {
@@ -5853,7 +5852,6 @@ def local_model_status() -> dict[str, Any]:
     return status
 
 
-@mcp.tool()
 def local_embed(
     texts: list[str],
     backend: str = "auto",
@@ -5894,7 +5892,6 @@ def local_embed(
     return result
 
 
-@mcp.tool()
 def local_infer(
     prompt: str,
     task: str = "general",
@@ -6040,7 +6037,6 @@ def autocomplete(
     return result
 
 
-@mcp.tool()
 def local_rerank(
     query: str,
     candidates: list[dict[str, Any]],
@@ -6084,6 +6080,81 @@ def local_rerank(
         "count": len(scored),
         "results": scored,
     }
+
+
+@mcp.tool()
+def model_router(
+    mode: str = "status",
+    prompt: str = "",
+    task: str = "general",
+    prefix: str = "",
+    suffix: str = "",
+    language: str = "",
+    texts: list[str] | None = None,
+    query: str = "",
+    candidates: list[dict[str, Any]] | None = None,
+    backend: str = "auto",
+    model: str = "",
+    max_tokens: int = 256,
+    temperature: float = 0.2,
+    system: str = "",
+    stop: list[str] | None = None,
+    normalize: bool = True,
+    top_k: int = 20,
+    output_profile: str | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+    compress: bool = False,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Unified router for local model operations: status, embed, infer, autocomplete, rerank."""
+    if mode not in {"status", "embed", "infer", "autocomplete", "rerank"}:
+        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank")
+    if mode == "status":
+        return local_model_status()
+    if mode == "embed":
+        return local_embed(
+            texts=texts or [],
+            backend=backend,
+            normalize=normalize,
+            output_profile=output_profile,
+            offset=offset,
+            limit=limit,
+            compress=compress,
+            store_result=store_result,
+        )
+    if mode == "infer":
+        return local_infer(
+            prompt=prompt,
+            task=task,
+            backend=backend,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            output_profile=output_profile,
+            store_result=store_result,
+        )
+    if mode == "autocomplete":
+        return autocomplete(
+            prefix=prefix,
+            suffix=suffix,
+            language=language,
+            backend=backend,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop,
+            output_profile=output_profile,
+            store_result=store_result,
+        )
+    return local_rerank(
+        query=query,
+        candidates=candidates or [],
+        top_k=top_k,
+        backend=backend,
+        output_profile=output_profile,
+    )
 
 
 @mcp.tool()
