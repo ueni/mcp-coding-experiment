@@ -802,6 +802,79 @@ def _memory_save(payload: dict[str, Any]) -> None:
     )
 
 
+def _memory_trace_reusable_script_success(
+    script_rel: str,
+    *,
+    profile: str,
+    steps: list[dict[str, Any]],
+    venv_python: str,
+) -> dict[str, Any]:
+    if not ALLOW_MUTATIONS:
+        return {"recorded": False, "reason": "mutations_disabled"}
+    rel = script_rel.strip().replace("\\", "/")
+    if not rel:
+        return {"recorded": False, "reason": "empty_script_path"}
+    if Path(rel).suffix.lower() not in {".py", ".sh", ".bash", ".zsh"}:
+        return {"recorded": False, "reason": "unsupported_script_type"}
+
+    payload = _memory_load()
+    entries = payload["entries"]
+    now_iso = _now_iso()
+    key = f"script:{rel}"
+    command_recipes = [step.get("command", []) for step in steps if isinstance(step, dict)]
+
+    for entry in entries:
+        if entry.get("namespace") != "reusable_scripts":
+            continue
+        if entry.get("key") != key:
+            continue
+        value = entry.get("value", {})
+        if not isinstance(value, dict):
+            value = {}
+        prev_count = int(value.get("success_count", 0) or 0)
+        value.update(
+            {
+                "script_path": rel,
+                "last_success_profile": profile,
+                "last_success_at": now_iso,
+                "success_count": prev_count + 1,
+                "venv_python": venv_python,
+                "check_recipe": command_recipes,
+            }
+        )
+        entry["value"] = value
+        entry["source"] = "model_router.coding_check.auto"
+        entry["confidence"] = 1.0
+        entry["tags"] = ["script", "reusable", "success", "coding-check"]
+        entry["updated_at"] = now_iso
+        entry["expires_at"] = _to_iso_expiry(180)
+        _memory_save(payload)
+        return {"recorded": True, "namespace": "reusable_scripts", "key": key}
+
+    entries.append(
+        {
+            "namespace": "reusable_scripts",
+            "key": key,
+            "value": {
+                "script_path": rel,
+                "last_success_profile": profile,
+                "last_success_at": now_iso,
+                "success_count": 1,
+                "venv_python": venv_python,
+                "check_recipe": command_recipes,
+            },
+            "confidence": 1.0,
+            "source": "model_router.coding_check.auto",
+            "tags": ["script", "reusable", "success", "coding-check"],
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "expires_at": _to_iso_expiry(180),
+        }
+    )
+    _memory_save(payload)
+    return {"recorded": True, "namespace": "reusable_scripts", "key": key}
+
+
 def _decision_priority(decided_by: str) -> int:
     who = decided_by.strip().lower()
     if who == "human":
@@ -5984,7 +6057,16 @@ def _coding_checks(
             break
 
     ok = bool(steps) and all(bool(s.get("ok")) for s in steps)
-    return {
+    trace: dict[str, Any] | None = None
+    if ok and target_path.is_file():
+        trace = _memory_trace_reusable_script_success(
+            str(target_path.relative_to(REPO_PATH)),
+            profile=profile_norm,
+            steps=steps,
+            venv_python=py_exec,
+        )
+
+    result = {
         "schema": "coding_checks.v1",
         "profile": profile_norm,
         "target": rel_target,
@@ -5992,6 +6074,9 @@ def _coding_checks(
         "ok": ok,
         "steps": steps,
     }
+    if trace is not None:
+        result["memory_trace"] = trace
+    return result
 
 
 def _coding_pip_install(
