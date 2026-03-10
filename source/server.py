@@ -145,6 +145,9 @@ CODING_VENV_PYTHON = os.getenv(
     "CODING_VENV_PYTHON", "/opt/codebase-tooling/coding-venv/bin/python"
 ).strip()
 CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", "qwen2.5-coder:7b").strip()
+CODING_SANDBOX_ROOT = Path(
+    os.getenv("CODING_SANDBOX_ROOT", ".build/sandboxes/coding")
+)
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse", "cat"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -5909,6 +5912,7 @@ def _coding_checks(
     profile: str = "quick",
     target: str = ".",
     timeout_seconds: int = 600,
+    python_executable: str | None = None,
 ) -> dict[str, Any]:
     profile_norm = profile.strip().lower()
     if profile_norm not in {"quick", "lint", "type", "tests", "full"}:
@@ -5918,25 +5922,24 @@ def _coding_checks(
 
     target_path = _resolve_repo_path(target)
     rel_target = str(target_path.relative_to(REPO_PATH)) if target_path != REPO_PATH else "."
-    py = Path(CODING_VENV_PYTHON)
+    py_exec = python_executable or CODING_VENV_PYTHON
+    py = Path(py_exec)
     if not py.is_file():
         raise FileNotFoundError(
-            f"coding venv python not found: {CODING_VENV_PYTHON} (build image with coding venv enabled)"
+            f"coding venv python not found: {py_exec} (build image with coding venv enabled)"
         )
 
     steps: list[dict[str, Any]] = []
     commands: list[list[str]] = []
     if profile_norm in {"quick", "lint", "full"}:
-        commands.append([CODING_VENV_PYTHON, "-m", "ruff", "check", rel_target])
+        commands.append([py_exec, "-m", "ruff", "check", rel_target])
     if profile_norm in {"type", "full"}:
-        commands.append(
-            [CODING_VENV_PYTHON, "-m", "mypy", rel_target, "--ignore-missing-imports"]
-        )
+        commands.append([py_exec, "-m", "mypy", rel_target, "--ignore-missing-imports"])
     if profile_norm in {"quick", "tests", "full"}:
         test_target = rel_target
         if rel_target == "." and (REPO_PATH / "tests").is_dir():
             test_target = "tests"
-        commands.append([CODING_VENV_PYTHON, "-m", "pytest", "-q", test_target])
+        commands.append([py_exec, "-m", "pytest", "-q", test_target])
 
     out_cap = _token_budget_apply_max(None)
     for cmd in commands:
@@ -5985,7 +5988,7 @@ def _coding_checks(
         "schema": "coding_checks.v1",
         "profile": profile_norm,
         "target": rel_target,
-        "venv_python": CODING_VENV_PYTHON,
+        "venv_python": py_exec,
         "ok": ok,
         "steps": steps,
     }
@@ -5995,21 +5998,23 @@ def _coding_pip_install(
     packages: list[str],
     upgrade: bool = False,
     timeout_seconds: int = 600,
+    python_executable: str | None = None,
 ) -> dict[str, Any]:
     if not packages:
         raise ValueError("packages must not be empty")
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
-    py = Path(CODING_VENV_PYTHON)
+    py_exec = python_executable or CODING_VENV_PYTHON
+    py = Path(py_exec)
     if not py.is_file():
         raise FileNotFoundError(
-            f"coding venv python not found: {CODING_VENV_PYTHON} (build image with coding venv enabled)"
+            f"coding venv python not found: {py_exec} (build image with coding venv enabled)"
         )
     invalid = [p for p in packages if not p.strip()]
     if invalid:
         raise ValueError("packages must not contain empty entries")
 
-    cmd = [CODING_VENV_PYTHON, "-m", "pip", "install"]
+    cmd = [py_exec, "-m", "pip", "install"]
     if upgrade:
         cmd.append("--upgrade")
     cmd.extend(packages)
@@ -6030,7 +6035,7 @@ def _coding_pip_install(
             "timeout": True,
             "exit_code": None,
             "command": cmd,
-            "venv_python": CODING_VENV_PYTHON,
+            "venv_python": py_exec,
             "packages": packages,
             "stdout": _trim_text(
                 (exc.stdout or "") if isinstance(exc.stdout, str) else "",
@@ -6047,11 +6052,99 @@ def _coding_pip_install(
         "timeout": False,
         "exit_code": proc.returncode,
         "command": cmd,
-        "venv_python": CODING_VENV_PYTHON,
+        "venv_python": py_exec,
         "packages": packages,
         "stdout": _trim_text(proc.stdout, max_chars=out_cap),
         "stderr": _trim_text(proc.stderr, max_chars=out_cap),
     }
+
+
+def _coding_sandbox_prepare(
+    sandbox_mode: str = "shared",
+    sandbox_id: str = "",
+) -> dict[str, Any]:
+    mode = sandbox_mode.strip().lower()
+    if mode not in {"shared", "isolated"}:
+        raise ValueError("sandbox_mode must be one of: shared, isolated")
+
+    base_python = Path(CODING_VENV_PYTHON)
+    if not base_python.is_file():
+        raise FileNotFoundError(
+            f"coding base venv python not found: {CODING_VENV_PYTHON}"
+        )
+    if mode == "shared":
+        return {
+            "mode": "shared",
+            "sandbox_id": "",
+            "sandbox_path": "",
+            "venv_python": str(base_python),
+            "created": False,
+        }
+
+    token = sandbox_id.strip() or f"sbox-{uuid.uuid4().hex[:10]}"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", token):
+        raise ValueError("sandbox_id contains invalid characters")
+
+    root = _resolve_repo_path(str(CODING_SANDBOX_ROOT))
+    root.mkdir(parents=True, exist_ok=True)
+    sandbox_dir = root / token
+    venv_dir = sandbox_dir / "venv"
+    venv_python = venv_dir / "bin" / "python"
+    created = False
+    if not venv_python.is_file():
+        source_venv = base_python.parent.parent
+        sandbox_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_venv, venv_dir, symlinks=True, dirs_exist_ok=True)
+        created = True
+    if not venv_python.is_file():
+        raise RuntimeError(f"failed to prepare isolated sandbox venv: {venv_python}")
+    return {
+        "mode": "isolated",
+        "sandbox_id": token,
+        "sandbox_path": str(sandbox_dir.relative_to(REPO_PATH)),
+        "venv_python": str(venv_python),
+        "created": created,
+    }
+
+
+def _coding_sandbox_manage(action: str, sandbox_id: str = "") -> dict[str, Any]:
+    act = action.strip().lower()
+    root = _resolve_repo_path(str(CODING_SANDBOX_ROOT))
+    if act == "list":
+        if not root.exists():
+            return {"schema": "coding_sandbox.v1", "action": "list", "items": []}
+        rows = []
+        for p in sorted(root.glob("*")):
+            if not p.is_dir():
+                continue
+            rows.append(
+                {
+                    "sandbox_id": p.name,
+                    "sandbox_path": str(p.relative_to(REPO_PATH)),
+                    "venv_python_exists": (p / "venv" / "bin" / "python").is_file(),
+                }
+            )
+        return {"schema": "coding_sandbox.v1", "action": "list", "items": rows}
+    if act == "delete":
+        token = sandbox_id.strip()
+        if not token:
+            raise ValueError("sandbox_id is required for delete action")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", token):
+            raise ValueError("sandbox_id contains invalid characters")
+        target = root / token
+        existed = target.exists()
+        if target.exists():
+            shutil.rmtree(target)
+        return {
+            "schema": "coding_sandbox.v1",
+            "action": "delete",
+            "sandbox_id": token,
+            "deleted": existed,
+        }
+    if act == "create":
+        prepared = _coding_sandbox_prepare("isolated", sandbox_id=sandbox_id)
+        return {"schema": "coding_sandbox.v1", "action": "create", **prepared}
+    raise ValueError("sandbox_action must be one of: create, delete, list")
 
 
 def local_embed(
@@ -6314,10 +6407,13 @@ def model_router(
     run_checks: bool = False,
     packages: list[str] | None = None,
     pip_upgrade: bool = False,
+    sandbox_mode: str = "shared",
+    sandbox_id: str = "",
+    sandbox_action: str = "list",
 ) -> dict[str, Any]:
-    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank|coding_infer|coding_check|coding_pip."""
-    if mode not in {"status", "embed", "infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip"}:
-        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank, coding_infer, coding_check, coding_pip")
+    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
+    if mode not in {"status", "embed", "infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip", "coding_sandbox"}:
+        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox")
     if mode == "status":
         return local_model_status()
     if mode == "embed":
@@ -6344,6 +6440,7 @@ def model_router(
             store_result=store_result,
         )
     if mode == "coding_infer":
+        sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
         infer_result = local_infer(
             prompt=prompt,
             task="coding",
@@ -6359,26 +6456,36 @@ def model_router(
             "schema": "model_router.coding_infer.v1",
             "infer": infer_result,
             "check_requested": run_checks,
+            "sandbox": sandbox,
         }
         if run_checks:
             payload["checks"] = _coding_checks(
                 profile=check_profile,
                 target=check_target,
                 timeout_seconds=check_timeout_seconds,
+                python_executable=str(sandbox["venv_python"]),
             )
         return payload
     if mode == "coding_check":
+        sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
         return _coding_checks(
             profile=check_profile,
             target=check_target,
             timeout_seconds=check_timeout_seconds,
+            python_executable=str(sandbox["venv_python"]),
         )
     if mode == "coding_pip":
-        return _coding_pip_install(
+        sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
+        result = _coding_pip_install(
             packages=packages or [],
             upgrade=pip_upgrade,
             timeout_seconds=check_timeout_seconds,
+            python_executable=str(sandbox["venv_python"]),
         )
+        result["sandbox"] = sandbox
+        return result
+    if mode == "coding_sandbox":
+        return _coding_sandbox_manage(action=sandbox_action, sandbox_id=sandbox_id)
     if mode == "autocomplete":
         return autocomplete(
             prefix=prefix,
