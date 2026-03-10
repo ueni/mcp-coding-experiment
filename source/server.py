@@ -757,24 +757,86 @@ def _query_value(data: Any, query: str) -> Any:
 def _memory_load() -> dict[str, Any]:
     memory_path = _resolve_repo_path(str(MEMORY_FILE))
     if not memory_path.exists():
-        return {"entries": []}
+        return {"entries": [], "summaries": [], "decisions": []}
     try:
         payload = json.loads(memory_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {"entries": []}
+        return {"entries": [], "summaries": [], "decisions": []}
     if not isinstance(payload, dict):
-        return {"entries": []}
+        return {"entries": [], "summaries": [], "decisions": []}
     entries = payload.get("entries", [])
     if not isinstance(entries, list):
         entries = []
-    return {"entries": entries}
+    summaries = payload.get("summaries", [])
+    if not isinstance(summaries, list):
+        summaries = []
+    decisions = payload.get("decisions", [])
+    if not isinstance(decisions, list):
+        decisions = []
+    return {"entries": entries, "summaries": summaries, "decisions": decisions}
 
 
 def _memory_save(payload: dict[str, Any]) -> None:
     memory_path = _resolve_repo_path(str(MEMORY_FILE))
     memory_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized = {
+        "entries": payload.get("entries", []),
+        "summaries": payload.get("summaries", []),
+        "decisions": payload.get("decisions", []),
+    }
     memory_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(normalized, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
+def _decision_priority(decided_by: str) -> int:
+    who = decided_by.strip().lower()
+    if who == "human":
+        return 2
+    if who == "llm":
+        return 1
+    return 0
+
+
+def _effective_decisions(
+    decisions: list[dict[str, Any]],
+    now: datetime,
+    namespace: str | None = None,
+    include_expired: bool = False,
+) -> list[dict[str, Any]]:
+    selected: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in decisions:
+        ns = str(row.get("namespace", ""))
+        topic = str(row.get("topic", ""))
+        if not ns or not topic:
+            continue
+        if namespace is not None and ns != namespace:
+            continue
+        expired = _is_expired(row.get("expires_at"), now)
+        if expired and not include_expired:
+            continue
+        key = (ns, topic)
+        prev = selected.get(key)
+        row_pri = _decision_priority(str(row.get("decided_by", "")))
+        row_ts = _parse_iso_timestamp(str(row.get("updated_at", ""))) or datetime.min.replace(
+            tzinfo=timezone.utc
+        )
+        if prev is None:
+            copied = dict(row)
+            copied["expired"] = expired
+            selected[key] = copied
+            continue
+        prev_pri = _decision_priority(str(prev.get("decided_by", "")))
+        prev_ts = _parse_iso_timestamp(str(prev.get("updated_at", ""))) or datetime.min.replace(
+            tzinfo=timezone.utc
+        )
+        if (row_pri, row_ts) >= (prev_pri, prev_ts):
+            copied = dict(row)
+            copied["expired"] = expired
+            selected[key] = copied
+    return sorted(
+        selected.values(),
+        key=lambda x: (str(x.get("namespace", "")), str(x.get("topic", ""))),
     )
 
 
@@ -9002,11 +9064,127 @@ def memory_upsert(
 
 
 @mcp.tool()
+def memory_summary_upsert(
+    namespace: str,
+    focus: str,
+    summary: str,
+    ttl_days: int | None = None,
+    confidence: float = 1.0,
+    source: str = "agent",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create or update memory summary/focus records for context retention."""
+    _require_mutations()
+    if not namespace.strip() or not focus.strip():
+        raise ValueError("namespace and focus must not be empty")
+    if confidence < 0 or confidence > 1:
+        raise ValueError("confidence must be in range [0, 1]")
+    payload = _memory_load()
+    summaries = payload["summaries"]
+    now_iso = _now_iso()
+    expires_at = _to_iso_expiry(ttl_days)
+    updated = False
+    for row in summaries:
+        if row.get("namespace") == namespace and row.get("focus") == focus:
+            row["summary"] = summary
+            row["confidence"] = confidence
+            row["source"] = source
+            row["tags"] = tags or []
+            row["updated_at"] = now_iso
+            row["expires_at"] = expires_at
+            updated = True
+            break
+    if not updated:
+        summaries.append(
+            {
+                "namespace": namespace,
+                "focus": focus,
+                "summary": summary,
+                "confidence": confidence,
+                "source": source,
+                "tags": tags or [],
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "expires_at": expires_at,
+            }
+        )
+    _memory_save(payload)
+    return {
+        "path": str(MEMORY_FILE),
+        "namespace": namespace,
+        "focus": focus,
+        "updated": True,
+        "expires_at": expires_at,
+    }
+
+
+@mcp.tool()
+def memory_decision_record(
+    namespace: str,
+    topic: str,
+    decision: Any,
+    decided_by: str = "llm",
+    rationale: str = "",
+    ttl_days: int | None = None,
+    confidence: float = 1.0,
+    source: str = "agent",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Record a decision with human-over-llm priority semantics."""
+    _require_mutations()
+    if not namespace.strip() or not topic.strip():
+        raise ValueError("namespace and topic must not be empty")
+    if decided_by not in {"human", "llm"}:
+        raise ValueError("decided_by must be one of: human, llm")
+    if confidence < 0 or confidence > 1:
+        raise ValueError("confidence must be in range [0, 1]")
+    payload = _memory_load()
+    decisions = payload["decisions"]
+    now_iso = _now_iso()
+    expires_at = _to_iso_expiry(ttl_days)
+    row = {
+        "id": uuid.uuid4().hex[:12],
+        "namespace": namespace,
+        "topic": topic,
+        "decision": decision,
+        "decided_by": decided_by,
+        "rationale": rationale,
+        "confidence": confidence,
+        "source": source,
+        "tags": tags or [],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "expires_at": expires_at,
+    }
+    decisions.append(row)
+    _memory_save(payload)
+    now = datetime.now(timezone.utc)
+    effective = _effective_decisions(
+        decisions=decisions,
+        now=now,
+        namespace=namespace,
+        include_expired=False,
+    )
+    resolved = None
+    for item in effective:
+        if item.get("topic") == topic:
+            resolved = item
+            break
+    return {
+        "path": str(MEMORY_FILE),
+        "recorded": row,
+        "effective_decision": resolved,
+    }
+
+
+@mcp.tool()
 def memory_get(
     namespace: str | None = None,
     key: str | None = None,
     include_expired: bool = False,
     max_entries: int = 200,
+    include_summaries: bool = True,
+    include_effective_decisions: bool = True,
 ) -> dict[str, Any]:
     """Read context memory entries with namespace/key filters."""
     if max_entries < 1:
@@ -9014,6 +9192,7 @@ def memory_get(
     payload = _memory_load()
     now = datetime.now(timezone.utc)
     entries_out: list[dict[str, Any]] = []
+    summaries_out: list[dict[str, Any]] = []
 
     for entry in payload["entries"]:
         if namespace is not None and entry.get("namespace") != namespace:
@@ -9029,10 +9208,38 @@ def memory_get(
         if len(entries_out) >= max_entries:
             break
 
+    if include_summaries:
+        for row in payload["summaries"]:
+            if namespace is not None and row.get("namespace") != namespace:
+                continue
+            expired = _is_expired(row.get("expires_at"), now)
+            if expired and not include_expired:
+                continue
+            copied = dict(row)
+            copied["expired"] = expired
+            summaries_out.append(copied)
+            if len(summaries_out) >= max_entries:
+                break
+
+    effective_decisions = (
+        _effective_decisions(
+            decisions=payload["decisions"],
+            now=now,
+            namespace=namespace,
+            include_expired=include_expired,
+        )[:max_entries]
+        if include_effective_decisions
+        else []
+    )
+
     return {
         "path": str(MEMORY_FILE),
         "count": len(entries_out),
         "entries": entries_out,
+        "summary_count": len(summaries_out),
+        "summaries": summaries_out,
+        "effective_decision_count": len(effective_decisions),
+        "effective_decisions": effective_decisions,
     }
 
 
@@ -9047,10 +9254,14 @@ def memory_validate(
         raise ValueError("max_entries must be >= 1")
     payload = _memory_load()
     entries = payload["entries"][:max_entries]
+    summaries = payload["summaries"][:max_entries]
+    decisions = payload["decisions"][:max_entries]
     now = datetime.now(timezone.utc)
 
     stale: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
+    kept_summaries: list[dict[str, Any]] = []
+    kept_decisions: list[dict[str, Any]] = []
     dropped = 0
 
     for entry in entries:
@@ -9079,15 +9290,43 @@ def memory_validate(
             stale.append(record)
         kept.append(entry)
 
+    stale_summaries = 0
+    for row in summaries:
+        expired = _is_expired(row.get("expires_at"), now)
+        if expired and drop_expired:
+            dropped += 1
+            stale_summaries += 1
+            continue
+        if expired:
+            stale_summaries += 1
+        kept_summaries.append(row)
+
+    stale_decisions = 0
+    for row in decisions:
+        expired = _is_expired(row.get("expires_at"), now)
+        if expired and drop_expired:
+            dropped += 1
+            stale_decisions += 1
+            continue
+        if expired:
+            stale_decisions += 1
+        kept_decisions.append(row)
+
     if drop_expired:
         _require_mutations()
         payload["entries"] = kept
+        payload["summaries"] = kept_summaries
+        payload["decisions"] = kept_decisions
         _memory_save(payload)
 
     return {
         "path": str(MEMORY_FILE),
         "total_checked": len(entries),
         "stale_count": len(stale),
+        "summary_checked": len(summaries),
+        "summary_stale_count": stale_summaries,
+        "decision_checked": len(decisions),
+        "decision_stale_count": stale_decisions,
         "dropped_expired": dropped,
         "stale_entries": stale,
     }
