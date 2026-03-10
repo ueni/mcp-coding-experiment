@@ -76,10 +76,9 @@ RUN set -eux; \
       echo "Missing Ollama SHA256 for architecture ${ollama_arch}." >&2; \
       exit 1; \
     fi; \
-    curl -fsSLo /tmp/ollama.tgz "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}"; \
-    echo "${ollama_sha256}  /tmp/ollama.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/ollama.tgz -C /usr/local; \
-    rm -f /tmp/ollama.tgz
+    curl -fsSL "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" \
+      | tee >(sha256sum -c <(printf '%s  -\n' "${ollama_sha256}")) \
+      | tar -xzf - -C /usr/local
 
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
