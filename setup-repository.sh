@@ -99,7 +99,7 @@ cat > .devcontainer/devcontainer.json <<EOF
     "source=\${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
     "source=\${localWorkspaceFolder},target=/repo,type=bind,consistency=cached",
-    "source=/etc/ssl/certs,target=/host-certs,type=bind,consistency=cached,readOnly=true"
+    "source=/etc/ssl/certs,target=/etc/ssl/certs,type=bind,consistency=cached,readOnly=true"
   ]
 }
 EOF
