@@ -32,6 +32,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_INFER_BACKEND=endpoint \
     LOCAL_INFER_MODEL= \
     LOCAL_INFER_ENDPOINT=http://127.0.0.1:11434/api/generate \
+    CODING_VENV_PYTHON=/opt/codebase-tooling/coding-venv/bin/python \
+    CODING_DEFAULT_MODEL=qwen2.5-coder:7b \
     CONTINUE_OLLAMA_MODELS=qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOST_CA_CERT_FILE= \
@@ -69,6 +71,13 @@ RUN pip install --no-cache-dir \
     pyupgrade==3.21.2 \
     ruff==0.15.5
 
+RUN python -m venv /opt/codebase-tooling/coding-venv \
+    && /opt/codebase-tooling/coding-venv/bin/pip install --no-cache-dir \
+       --root-user-action=ignore \
+       pytest==8.4.2 \
+       mypy==1.18.2 \
+       ruff==0.15.5
+
 RUN set -eux; \
     ollama_sha256=""; \
     case "$(dpkg --print-architecture)" in \
@@ -86,7 +95,7 @@ RUN set -eux; \
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
     && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults \
-    && chown -R app:app /app /models /home/app
+    && chown -R app:app /app /models /home/app /opt/codebase-tooling
 
 COPY --chown=app:app server.py ./
 COPY --chown=app:app entrypoint.sh ./

@@ -141,6 +141,10 @@ HOST_CA_CERT_FILE = os.getenv("HOST_CA_CERT_FILE", "").strip()
 INTERNAL_SELF_TESTS_DIR = Path(
     os.getenv("INTERNAL_SELF_TESTS_DIR", "/opt/codebase-tooling/defaults/selftests")
 )
+CODING_VENV_PYTHON = os.getenv(
+    "CODING_VENV_PYTHON", "/opt/codebase-tooling/coding-venv/bin/python"
+).strip()
+CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", "qwen2.5-coder:7b").strip()
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse", "cat"}
 SAFE_GIT_SUBCOMMANDS = {
     "status",
@@ -5865,6 +5869,7 @@ def diagram_sync_check(
 
 def local_model_status() -> dict[str, Any]:
     """Report local model configuration and endpoint availability."""
+    coding_python = Path(CODING_VENV_PYTHON)
     status: dict[str, Any] = {
         "schema": "local_model_status.v1",
         "models_dir": str(LOCAL_MODELS_DIR),
@@ -5878,6 +5883,11 @@ def local_model_status() -> dict[str, Any]:
             "backend": LOCAL_INFER_BACKEND,
             "model": LOCAL_INFER_MODEL,
             "endpoint": LOCAL_INFER_ENDPOINT,
+        },
+        "coding": {
+            "default_model": CODING_DEFAULT_MODEL,
+            "venv_python": str(coding_python),
+            "venv_python_exists": coding_python.is_file(),
         },
     }
     if LOCAL_INFER_BACKEND == "endpoint":
@@ -5893,6 +5903,92 @@ def local_model_status() -> dict[str, Any]:
             status["infer"]["endpoint_reachable"] = False
             status["infer"]["endpoint_error"] = str(exc)
     return status
+
+
+def _coding_checks(
+    profile: str = "quick",
+    target: str = ".",
+    timeout_seconds: int = 600,
+) -> dict[str, Any]:
+    profile_norm = profile.strip().lower()
+    if profile_norm not in {"quick", "lint", "type", "tests", "full"}:
+        raise ValueError("profile must be one of: quick, lint, type, tests, full")
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+
+    target_path = _resolve_repo_path(target)
+    rel_target = str(target_path.relative_to(REPO_PATH)) if target_path != REPO_PATH else "."
+    py = Path(CODING_VENV_PYTHON)
+    if not py.is_file():
+        raise FileNotFoundError(
+            f"coding venv python not found: {CODING_VENV_PYTHON} (build image with coding venv enabled)"
+        )
+
+    steps: list[dict[str, Any]] = []
+    commands: list[list[str]] = []
+    if profile_norm in {"quick", "lint", "full"}:
+        commands.append([CODING_VENV_PYTHON, "-m", "ruff", "check", rel_target])
+    if profile_norm in {"type", "full"}:
+        commands.append(
+            [CODING_VENV_PYTHON, "-m", "mypy", rel_target, "--ignore-missing-imports"]
+        )
+    if profile_norm in {"quick", "tests", "full"}:
+        test_target = rel_target
+        if rel_target == "." and (REPO_PATH / "tests").is_dir():
+            test_target = "tests"
+        commands.append([CODING_VENV_PYTHON, "-m", "pytest", "-q", test_target])
+
+    out_cap = _token_budget_apply_max(None)
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(REPO_PATH),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            steps.append(
+                {
+                    "command": cmd,
+                    "ok": proc.returncode == 0,
+                    "exit_code": proc.returncode,
+                    "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+                    "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+                    "timeout": False,
+                }
+            )
+            if proc.returncode != 0:
+                break
+        except subprocess.TimeoutExpired as exc:
+            steps.append(
+                {
+                    "command": cmd,
+                    "ok": False,
+                    "exit_code": None,
+                    "stdout": _trim_text(
+                        (exc.stdout or "") if isinstance(exc.stdout, str) else "",
+                        max_chars=out_cap,
+                    ),
+                    "stderr": _trim_text(
+                        (exc.stderr or "") if isinstance(exc.stderr, str) else "",
+                        max_chars=out_cap,
+                    ),
+                    "timeout": True,
+                }
+            )
+            break
+
+    ok = bool(steps) and all(bool(s.get("ok")) for s in steps)
+    return {
+        "schema": "coding_checks.v1",
+        "profile": profile_norm,
+        "target": rel_target,
+        "venv_python": CODING_VENV_PYTHON,
+        "ok": ok,
+        "steps": steps,
+    }
 
 
 def local_embed(
@@ -6149,10 +6245,14 @@ def model_router(
     limit: int | None = None,
     compress: bool = False,
     store_result: bool = False,
+    check_profile: str = "quick",
+    check_target: str = ".",
+    check_timeout_seconds: int = 600,
+    run_checks: bool = False,
 ) -> dict[str, Any]:
-    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank with strict per-mode input validation."""
-    if mode not in {"status", "embed", "infer", "autocomplete", "rerank"}:
-        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank")
+    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank|coding_infer|coding_check."""
+    if mode not in {"status", "embed", "infer", "autocomplete", "rerank", "coding_infer", "coding_check"}:
+        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank, coding_infer, coding_check")
     if mode == "status":
         return local_model_status()
     if mode == "embed":
@@ -6177,6 +6277,36 @@ def model_router(
             system=system,
             output_profile=output_profile,
             store_result=store_result,
+        )
+    if mode == "coding_infer":
+        infer_result = local_infer(
+            prompt=prompt,
+            task="coding",
+            backend=backend,
+            model=model or CODING_DEFAULT_MODEL,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            output_profile=output_profile,
+            store_result=store_result,
+        )
+        payload: dict[str, Any] = {
+            "schema": "model_router.coding_infer.v1",
+            "infer": infer_result,
+            "check_requested": run_checks,
+        }
+        if run_checks:
+            payload["checks"] = _coding_checks(
+                profile=check_profile,
+                target=check_target,
+                timeout_seconds=check_timeout_seconds,
+            )
+        return payload
+    if mode == "coding_check":
+        return _coding_checks(
+            profile=check_profile,
+            target=check_target,
+            timeout_seconds=check_timeout_seconds,
         )
     if mode == "autocomplete":
         return autocomplete(
