@@ -155,8 +155,11 @@ mcp = FastMCP(
     "git-repo-manager",
     instructions=(
         "Manage exactly one mounted Git repository and its files with minimal output. "
-        "Prefer compact schemas, selective fields, pagination, and cached/indexed workflows. "
-        "All paths are relative to the repository root."
+        "Prefer router tools first (`model_router`, `code_index_router`, `memory_router`, "
+        "`workspace_transaction`, `docker_task_router`) and call non-router tools only when "
+        "router modes cannot satisfy the task. "
+        "Use compact schemas, selective fields, pagination, and indexed workflows. "
+        "All paths are repository-relative."
     ),
 )
 
@@ -2503,7 +2506,7 @@ def _build_log_proposals(stdout: str, stderr: str) -> list[dict[str, str]]:
 
 @mcp.tool()
 def repo_info() -> dict[str, Any]:
-    """Return repository state and server settings."""
+    """Read-only capability probe: repo/git/docker state, branch/head, and server limits."""
     _ensure_repo_path_exists()
 
     info: dict[str, Any] = {
@@ -2544,7 +2547,7 @@ def docker_task_router(
     timeout_seconds: int = 1800,
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
-    """Unified Docker task control router: status, list, run."""
+    """Docker task gateway. mode=status|list|run; run requires exact task label and returns execution diagnostics."""
     if mode not in {"status", "list", "run"}:
         raise ValueError("mode must be one of: status, list, run")
     if mode == "status":
@@ -6008,7 +6011,7 @@ def autocomplete(
     output_profile: str | None = None,
     store_result: bool = False,
 ) -> dict[str, Any]:
-    """Generate code autocomplete text using a local model endpoint or fallback."""
+    """Compatibility autocomplete endpoint. Prefer model_router(mode='autocomplete') for new integrations."""
     if not prefix:
         raise ValueError("prefix must not be empty")
     if max_tokens < 1:
@@ -6144,7 +6147,7 @@ def model_router(
     compress: bool = False,
     store_result: bool = False,
 ) -> dict[str, Any]:
-    """Unified router for local model operations: status, embed, infer, autocomplete, rerank."""
+    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank with strict per-mode input validation."""
     if mode not in {"status", "embed", "infer", "autocomplete", "rerank"}:
         raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank")
     if mode == "status":
@@ -7458,7 +7461,7 @@ def workspace_transaction(
     snapshot_id: str = "",
     include_build_dir: bool = False,
 ) -> dict[str, Any]:
-    """Unified workspace mutation router for transactions and snapshots."""
+    """Workspace mutation gateway for transaction lifecycle plus git-backed snapshot/restore."""
     allowed = {
         "begin",
         "apply",
@@ -7794,7 +7797,7 @@ def confidence_scoring(
 
 @mcp.tool()
 def runtime_contract_checker() -> dict[str, Any]:
-    """Check runtime docs/contracts drift for MCP tools."""
+    """Verify runtime tool exposure vs README contract and report drift."""
     code_tools = _server_tool_names()
     readme_tools = _readme_tool_names()
     missing_in_readme = sorted(code_tools - readme_tools)
@@ -9044,7 +9047,7 @@ def code_index_router(
     store_result: bool = False,
     incremental: bool = True,
 ) -> dict[str, Any]:
-    """Unified router for repository index/search operations."""
+    """Primary code-intel gateway: refresh/read/query index plus symbols/deps/calls/search modes."""
     allowed = {"refresh", "read", "query", "symbols", "deps", "calls", "search"}
     if mode not in allowed:
         raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
@@ -9606,7 +9609,7 @@ def memory_router(
     validate_paths: bool = True,
     drop_expired: bool = False,
 ) -> dict[str, Any]:
-    """Unified router for memory read/write/summary/decision operations."""
+    """Primary memory gateway for entries, summaries, and decisions with optional validation."""
     allowed = {"upsert", "summary_upsert", "decision_record", "get", "validate"}
     if mode not in allowed:
         raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
