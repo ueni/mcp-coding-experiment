@@ -111,7 +111,7 @@ The script finds the repository root by locating `.git` and creates only:
 When the devcontainer starts, the image applies default repository files if they
 are missing:
 
-- `.continue/mcpServers/http-mcp-server.yaml`
+- `.continue/mcpServers/codebase-tooling-mcp.yaml`
 - `.config/labs/*.json`
 - `/.build/` entry in `.gitignore`
 

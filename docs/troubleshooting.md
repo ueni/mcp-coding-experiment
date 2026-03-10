@@ -87,7 +87,7 @@ Checks:
 
 Symptom:
 
-- `.continue/mcpServers/http-mcp-server.yaml` is missing.
+- `.continue/mcpServers/codebase-tooling-mcp.yaml` is missing.
 - `.config/labs/` is missing.
 - `/.build/` was not added to `.gitignore`.
 - `~/.codex/config.toml` does not contain the MCP server entry.

@@ -18,8 +18,8 @@ apply_repo_defaults() {
   fi
 
   mkdir -p /repo/.continue/mcpServers
-  if [[ ! -f /repo/.continue/mcpServers/http-mcp-server.yaml ]]; then
-    cp "${defaults_root}/continue/http-mcp-server.yaml" /repo/.continue/mcpServers/http-mcp-server.yaml
+  if [[ ! -f /repo/.continue/mcpServers/codebase-tooling-mcp.yaml ]]; then
+    cp "${defaults_root}/continue/codebase-tooling-mcp.yaml" /repo/.continue/mcpServers/codebase-tooling-mcp.yaml
   fi
 
   mkdir -p /home/app/.codex
