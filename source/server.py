@@ -167,11 +167,13 @@ mcp = FastMCP(
     "git-repo-manager",
     instructions=(
         "Manage exactly one mounted Git repository and its files with minimal output. "
-        "Prefer router tools first (`model_router`, `code_index_router`, `memory_router`, "
+        "Must use router tools first (`model_router`, `code_index_router`, `memory_router`, "
         "`workspace_transaction`, `docker_task_router`) and call non-router tools only when "
-        "router modes cannot satisfy the task. "
-        "Use compact schemas, selective fields, pagination, and indexed workflows. "
-        "All paths are repository-relative."
+        "router modes cannot satisfy the request. "
+        "Always validate mode values and required parameters before executing actions. "
+        "Prefer compact schemas, selective fields, pagination, and indexed workflows; "
+        "use summary_mode=quick before full payloads where possible. "
+        "All paths are repository-relative; reject path escapes and return explicit errors."
     ),
 )
 
@@ -185,6 +187,39 @@ def _trim_text(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
         text[:max_chars]
         + f"\n\n[truncated: output exceeded {max_chars} characters; original length={len(text)}]"
     )
+
+
+def _strictness_score_text(text: str) -> dict[str, Any]:
+    raw = text.strip()
+    low = raw.lower()
+    score = 0
+    reasons: list[str] = []
+    if raw:
+        score += 10
+        reasons.append("non_empty")
+    if len(raw.split()) >= 10:
+        score += 10
+        reasons.append("has_context")
+    if len(raw.split()) >= 20:
+        score += 10
+        reasons.append("has_detail")
+    if any(k in low for k in ["must", "required", "only", "do not", "forbid"]):
+        score += 20
+        reasons.append("has_constraints")
+    if "one of" in low or "mode=" in low or "mode " in low:
+        score += 15
+        reasons.append("has_enumeration")
+    if any(k in low for k in ["schema", "output", "return"]):
+        score += 10
+        reasons.append("has_output_contract")
+    if any(k in low for k in ["error", "raise", "invalid"]):
+        score += 10
+        reasons.append("has_failure_contract")
+    if any(k in low for k in ["prefer", "router", "compact", "offset", "limit", "fields"]):
+        score += 15
+        reasons.append("has_tooling_directives")
+    score = max(0, min(100, score))
+    return {"score": score, "reasons": reasons}
 
 
 def _ssl_context_for_url(url: str) -> ssl.SSLContext | None:
@@ -5298,28 +5333,104 @@ def prompt_optimize(
         raise ValueError("prompt must not be empty")
     if max_chars < 100:
         raise ValueError("max_chars must be >= 100")
-    if mode not in {"coding", "review", "search"}:
-        raise ValueError("mode must be one of: coding, review, search")
+    if mode not in {"coding", "review", "search", "tooling_strict"}:
+        raise ValueError("mode must be one of: coding, review, search, tooling_strict")
 
     header = {
         "coding": "Goal: implement minimal safe change. Use compact outputs and bounded queries.",
         "review": "Goal: find high-severity issues first. Return concise findings with file/line.",
         "search": "Goal: locate exact targets quickly. Use fields, pagination, and result handles.",
+        "tooling_strict": (
+            "Goal: strict tool usage. Must use router tools first; call non-router tools only if router modes cannot satisfy request."
+        ),
     }[mode]
     suffix = (
-        "Constraints: prefer output_profile=compact; set fields; use offset/limit; "
-        "use summary_mode=quick first; store_result=true for large outputs."
+        "Constraints: must validate modes/required params before execution; prefer output_profile=compact; "
+        "set fields; use offset/limit; use summary_mode=quick first; store_result=true for large outputs; "
+        "return deterministic schema-first responses and explicit errors for invalid input."
     )
     body = re.sub(r"\s+", " ", prompt.strip())
+    before = _strictness_score_text(body)
     optimized = f"{header} Request: {body} {suffix}".strip()
     if len(optimized) > max_chars:
         optimized = optimized[:max_chars]
+    after = _strictness_score_text(optimized)
     return {
         "schema": "prompt_optimize.v1",
         "mode": mode,
         "original_chars": len(prompt),
         "optimized_chars": len(optimized),
         "optimized_prompt": optimized,
+        "strictness_score_before": before["score"],
+        "strictness_score_after": after["score"],
+        "strictness_reasons_after": after["reasons"],
+    }
+
+
+@mcp.tool()
+def tool_prompt_score(
+    scope: str = "all",
+    top_n: int = 20,
+) -> dict[str, Any]:
+    """Score MCP prompt strictness (global instructions + tool docstrings) and return weakest prompts first."""
+    if scope not in {"all", "routers", "core"}:
+        raise ValueError("scope must be one of: all, routers, core")
+    if top_n < 1:
+        raise ValueError("top_n must be >= 1")
+
+    source_path = _resolve_repo_path("source/server.py")
+    if not source_path.is_file():
+        source_path = Path(__file__).resolve()
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    rows: list[dict[str, Any]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        is_tool = False
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute):
+                if isinstance(dec.func.value, ast.Name) and dec.func.value.id == "mcp" and dec.func.attr == "tool":
+                    is_tool = True
+                    break
+        if not is_tool:
+            continue
+        name = node.name
+        if scope == "routers" and not name.endswith("_router"):
+            continue
+        if scope == "core" and name not in {
+            "model_router",
+            "memory_router",
+            "code_index_router",
+            "workspace_transaction",
+            "docker_task_router",
+            "command_runner",
+            "self_test",
+            "prompt_optimize",
+        }:
+            continue
+        doc = ast.get_docstring(node) or ""
+        score = _strictness_score_text(doc)
+        rows.append(
+            {
+                "tool": name,
+                "score": score["score"],
+                "doc_chars": len(doc),
+                "reasons": score["reasons"],
+            }
+        )
+    rows.sort(key=lambda r: int(r["score"]))
+    ins = _strictness_score_text(mcp.instructions or "")
+    avg = round(sum(int(r["score"]) for r in rows) / len(rows), 2) if rows else 0.0
+    return {
+        "schema": "tool_prompt_score.v1",
+        "scope": scope,
+        "tool_count": len(rows),
+        "avg_score": avg,
+        "global_instruction_score": ins["score"],
+        "global_instruction_reasons": ins["reasons"],
+        "lowest_tools": rows[:top_n],
+        "highest_tools": list(reversed(rows[-top_n:])),
     }
 
 

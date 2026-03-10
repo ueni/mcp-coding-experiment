@@ -231,10 +231,21 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(out["default_output_profile"], "compact")
 
     def test_prompt_optimize_modes(self):
-        for mode in ("coding", "review", "search"):
+        for mode in ("coding", "review", "search", "tooling_strict"):
             out = self.server.prompt_optimize("Need minimal output", mode=mode)
             self.assertEqual(out["mode"], mode)
             self.assertLessEqual(out["optimized_chars"], 2000)
+            self.assertIn("strictness_score_before", out)
+            self.assertIn("strictness_score_after", out)
+            self.assertGreaterEqual(out["strictness_score_after"], out["strictness_score_before"])
+
+    def test_tool_prompt_score(self):
+        out = self.server.tool_prompt_score(scope="core", top_n=5)
+        self.assertEqual(out["schema"], "tool_prompt_score.v1")
+        self.assertEqual(out["scope"], "core")
+        self.assertGreaterEqual(out["tool_count"], 1)
+        self.assertIn("avg_score", out)
+        self.assertIn("lowest_tools", out)
 
     def test_local_model_status(self):
         out = self.server.local_model_status()

@@ -242,6 +242,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `command_runner`
 - `terminal_support_session`
 - `prompt_optimize`
+- `tool_prompt_score`
 - `doc_summarizer_small`
 - `code_review_classifier`
 - `test_gen_small`
