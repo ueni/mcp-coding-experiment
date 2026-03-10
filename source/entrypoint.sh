@@ -119,9 +119,15 @@ apply_repo_defaults() {
 
   if [[ ! -f /repo/.gitignore ]]; then
     cp "${defaults_root}/gitignore" /repo/.gitignore
-  elif ! grep -qxF '/.build/' /repo/.gitignore; then
-    printf '\n# codebase-tooling-mcp\n/.build/\n' >> /repo/.gitignore
   fi
+  if ! grep -qxF '# codebase-tooling-mcp generated' /repo/.gitignore; then
+    printf '\n# codebase-tooling-mcp generated\n' >> /repo/.gitignore
+  fi
+  for entry in '/.build/' '/.continue/' '/.config/' '/.devcontainer/'; do
+    if ! grep -qxF "${entry}" /repo/.gitignore; then
+      printf '%s\n' "${entry}" >> /repo/.gitignore
+    fi
+  done
 }
 
 if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then

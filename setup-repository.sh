@@ -40,6 +40,7 @@ fail_if_exists() {
 
 require_cmd mkdir
 require_cmd cp
+require_cmd grep
 
 REPO_ROOT=$(find_repo_root || true)
 if [ -z "$REPO_ROOT" ]; then
@@ -50,6 +51,16 @@ fi
 cd "$REPO_ROOT"
 
 REPO_NAME=$(basename "$REPO_ROOT")
+
+ensure_gitignore_entry() {
+  entry=$1
+  if [ ! -f .gitignore ]; then
+    : > .gitignore
+  fi
+  if ! grep -qxF "$entry" .gitignore; then
+    printf '%s\n' "$entry" >> .gitignore
+  fi
+}
 
 log "Bootstrapping codebase-tooling-mcp devcontainer into $REPO_ROOT"
 
@@ -105,8 +116,20 @@ cat > .devcontainer/devcontainer.json <<EOF
 }
 EOF
 
+if [ ! -f .gitignore ]; then
+  : > .gitignore
+fi
+if ! grep -qxF '# codebase-tooling-mcp generated' .gitignore; then
+  printf '\n# codebase-tooling-mcp generated\n' >> .gitignore
+fi
+ensure_gitignore_entry '/.build/'
+ensure_gitignore_entry '/.continue/'
+ensure_gitignore_entry '/.config/'
+ensure_gitignore_entry '/.devcontainer/'
+
 log "Created:"
 log "  .devcontainer/devcontainer.json"
+log "  .gitignore entries for generated hidden folders"
 log ""
 log "The container image provides the inline autocomplete extension and repo defaults."
 log "Next step: open this repository in VS Code and run 'Dev Containers: Reopen in Container'."

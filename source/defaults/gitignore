@@ -1,1 +1,5 @@
-.build/
+# codebase-tooling-mcp generated
+/.build/
+/.continue/
+/.config/
+/.devcontainer/
