@@ -109,3 +109,7 @@ Report written under .build/reports/
 Configs:
 - `.config/labs/release_rehearsal.json`
 - `.config/labs/refactor_tournament.json`
+- `.config/labs/release_rehearsal_cpp_gtest.json` (Linux C/C++ + CMake/CTest/GoogleTest)
+- `.config/labs/release_rehearsal_mcu_gcc.json` (GCC MCU + optional host-side gtest stage)
+- `.config/labs/refactor_tournament_cpp_tooling.json` (clang-format/cppcheck oriented strategies)
+- `.config/labs/policy_gatekeeper_cpp_mcu.json` (policy profile for C/C++ + MCU repos)

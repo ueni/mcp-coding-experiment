@@ -1,0 +1,53 @@
+{
+  "default_target_branch": "main",
+  "max_file_size_bytes": 800000,
+  "forbidden_patterns": [
+    "AKIA[0-9A-Z]{16}",
+    "(?i)aws_secret_access_key",
+    "(?i)private[_-]?key",
+    "(?i)password\\s*=\\s*['\"][^'\"]+['\"]"
+  ],
+  "forbidden_pattern_excluded_paths": [
+    ".build/",
+    ".config/labs/policy_gatekeeper_cpp_mcu.json"
+  ],
+  "required_paths": [
+    "README.md",
+    "docs/index.md"
+  ],
+  "required_when_paths_change": {
+    "src/": [
+      "README.md"
+    ],
+    "include/": [
+      "README.md"
+    ],
+    "firmware/": [
+      "README.md"
+    ],
+    "boards/": [
+      "README.md"
+    ]
+  },
+  "command_checks": [
+    "if [ -f CMakeLists.txt ]; then cmake -S . -B build/lab-policy -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON && cmake --build build/lab-policy -j; elif [ -f Makefile ]; then make -n >/dev/null; else echo 'Missing CMakeLists.txt or Makefile' >&2; exit 1; fi",
+    "if command -v cppcheck >/dev/null 2>&1; then cppcheck --enable=warning,style,performance,portability --error-exitcode=1 src include tests; else echo 'cppcheck not installed; skipping'; fi",
+    "if command -v arm-none-eabi-gcc >/dev/null 2>&1; then arm-none-eabi-gcc --version >/dev/null; else echo 'arm-none-eabi-gcc not installed; skipping MCU compiler check'; fi"
+  ],
+  "docs_policy": {
+    "enabled": true,
+    "target_branch": "main",
+    "doc_roots": [
+      "docs/",
+      "README.md"
+    ],
+    "index_path": "docs/index.md",
+    "impl_path_prefixes": [
+      "src/",
+      "include/",
+      "firmware/",
+      "boards/"
+    ],
+    "require_docs_for_impl_diff": true
+  }
+}
