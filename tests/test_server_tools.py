@@ -5,6 +5,7 @@
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -1008,6 +1009,213 @@ class ServerToolsTest(unittest.TestCase):
         self.assertGreaterEqual(len(read["events"]), 1)
         done = self.server.execution_replay(mode="finish", replay_id=rid)
         self.assertEqual(done["status"], "closed")
+
+    def test_model_router_coding_modes_and_validation(self):
+        with self.assertRaises(ValueError):
+            self.server.model_router(mode="not_a_mode")
+
+        with patch.object(
+            self.server,
+            "local_infer",
+            return_value={"schema": "local_infer.v1", "model": "qwen2.5-coder:7b", "ok": True},
+        ), patch.object(
+            self.server,
+            "_coding_checks",
+            return_value={"schema": "coding_checks.v1", "ok": True, "steps": []},
+        ), patch.object(
+            self.server,
+            "CODING_VENV_PYTHON",
+            sys.executable,
+        ):
+            out = self.server.model_router(
+                mode="coding_infer",
+                prompt="write function",
+                run_checks=True,
+                sandbox_mode="shared",
+            )
+        self.assertEqual(out["schema"], "model_router.coding_infer.v1")
+        self.assertTrue(out["check_requested"])
+        self.assertIn("checks", out)
+        self.assertIn("sandbox", out)
+
+        with patch.object(
+            self.server,
+            "CODING_VENV_PYTHON",
+            str(self.repo_path / "does-not-exist" / "python"),
+        ):
+            with self.assertRaises(FileNotFoundError):
+                self.server.model_router(
+                    mode="coding_check",
+                    check_profile="lint",
+                    check_target="src/sample.py",
+                )
+
+    def test_model_router_coding_sandbox_lifecycle(self):
+        base_venv = self.repo_path / ".build" / "base-venv"
+        subprocess.run(["python", "-m", "venv", str(base_venv)], check=True)
+        python_bin = base_venv / "bin" / "python"
+
+        with patch.object(self.server, "CODING_VENV_PYTHON", str(python_bin)):
+            created = self.server.model_router(
+                mode="coding_sandbox",
+                sandbox_action="create",
+                sandbox_id="sbox-test",
+            )
+            self.assertEqual(created["schema"], "coding_sandbox.v1")
+            self.assertEqual(created["action"], "create")
+            self.assertEqual(created["sandbox_id"], "sbox-test")
+
+            listed = self.server.model_router(mode="coding_sandbox", sandbox_action="list")
+            ids = {row["sandbox_id"] for row in listed["items"]}
+            self.assertIn("sbox-test", ids)
+
+            deleted = self.server.model_router(
+                mode="coding_sandbox",
+                sandbox_action="delete",
+                sandbox_id="sbox-test",
+            )
+            self.assertTrue(deleted["deleted"])
+
+    def test_memory_router_auto_compact_and_usage_stats(self):
+        for i in range(10):
+            self.server.memory_router(
+                mode="upsert",
+                namespace="compact_demo",
+                key=f"k{i}",
+                value={"n": i, "payload": "x" * 180},
+                ttl_days=30,
+            )
+
+        out = self.server.memory_router(
+            mode="get",
+            namespace="compact_demo",
+            max_entries=100,
+            auto_compact=True,
+            compact_threshold_entries=5,
+            compact_threshold_chars=1000,
+            compact_keep_entries=3,
+        )
+        result = out["result"]
+        self.assertGreaterEqual(result["count"], 10)
+        self.assertIn("usage_stats", result)
+        self.assertIn("events", result["usage_stats"])
+        self.assertTrue(result["auto_compact"]["compacted"])
+
+        compact = self.server.memory_router(
+            mode="auto_compact",
+            namespace="compact_demo",
+            compact_threshold_entries=5,
+            compact_threshold_chars=1000,
+            compact_keep_entries=3,
+        )
+        self.assertTrue(compact["result"]["compacted"])
+
+    def test_self_test_internal_and_repo_target_routing(self):
+        internal_dir = self.repo_path / "internal_selftests"
+        internal_dir.mkdir(parents=True, exist_ok=True)
+        (internal_dir / "test_internal.py").write_text(
+            "import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(self.server, "INTERNAL_SELF_TESTS_DIR", internal_dir):
+            default_out = self.server.self_test(
+                runner="unittest",
+                target="tests",
+                verbose=False,
+                timeout_seconds=60,
+                fail_fast=True,
+            )
+        self.assertTrue(default_out["ok"])
+        self.assertEqual(default_out["execution_root"], "/")
+        self.assertEqual(default_out["resolved_target"], str(internal_dir))
+
+        repo_out = self.server.self_test(
+            runner="unittest",
+            target="repo:tests/test_smoke.py",
+            verbose=False,
+            timeout_seconds=60,
+            fail_fast=True,
+        )
+        self.assertTrue(repo_out["ok"])
+        self.assertEqual(repo_out["execution_root"], str(self.repo_path))
+        self.assertEqual(repo_out["resolved_target"], "tests/test_smoke.py")
+
+        with self.assertRaises(ValueError):
+            self.server.self_test(runner="unittest", target="repo:", timeout_seconds=10)
+
+    def test_docker_task_router_validation_paths(self):
+        vscode_dir = self.repo_path / ".vscode"
+        vscode_dir.mkdir(parents=True, exist_ok=True)
+        tasks_path = vscode_dir / "tasks.json"
+        tasks_path.write_text(
+            json.dumps(
+                {
+                    "version": "2.0.0",
+                    "tasks": [
+                        {
+                            "label": "Docker: blocked",
+                            "type": "shell",
+                            "command": "docker run hello-world",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ValueError):
+            self.server.docker_task_router(mode="run")
+
+        listed = self.server.docker_task_router(
+            mode="list",
+            tasks_path=".vscode/tasks.json",
+            control_profile="build",
+        )
+        self.assertEqual(listed["schema"], "docker_task_router.v1")
+        self.assertEqual(listed["result"]["count"], 1)
+        self.assertFalse(listed["result"]["tasks"][0]["ok"])
+
+        with self.assertRaises(ValueError):
+            self.server.docker_task_router(
+                mode="run",
+                label="Docker: blocked",
+                tasks_path=".vscode/tasks.json",
+                control_profile="build",
+            )
+
+    def test_helper_paths_for_add_include_item_iter_candidates(self):
+        proposals = self.server._build_log_proposals("no space left on device", "")
+        self.assertGreaterEqual(len(proposals), 1)
+        self.assertIn("disk space", proposals[0]["issue"].lower())
+
+        hidden_dir = self.repo_path / ".hidden"
+        hidden_dir.mkdir(parents=True, exist_ok=True)
+        hidden_file = hidden_dir / "x.txt"
+        hidden_file.write_text("x\n", encoding="utf-8")
+        visible_file = self.repo_path / "visible.txt"
+        visible_file.write_text("y\n", encoding="utf-8")
+
+        out_no_hidden = self.server.list_files(path=".", recursive=True, include_hidden=False)
+        self.assertIn("visible.txt", out_no_hidden)
+        self.assertFalse(any(p.startswith(".hidden/") for p in out_no_hidden))
+
+        out_with_hidden = self.server.list_files(path=".", recursive=True, include_hidden=True)
+        self.assertTrue(any(p.startswith(".hidden/") for p in out_with_hidden))
+
+        replaced = self.server.replace_in_files(
+            path="visible.txt",
+            pattern="y",
+            replacement="z",
+            recursive=False,
+            dry_run=False,
+            regex=False,
+            include_hidden=True,
+            max_files=5,
+            max_replacements=5,
+        )
+        self.assertEqual(len(replaced["files_changed"]), 1)
+        self.assertEqual(replaced["total_replacements"], 1)
 
 
 if __name__ == "__main__":
