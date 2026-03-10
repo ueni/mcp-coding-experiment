@@ -275,6 +275,23 @@ class ServerToolsTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertIn("output", out)
 
+    def test_model_router_parallel_infer(self):
+        out = self.server.model_router(
+            mode="parallel_infer",
+            prompts=["alpha", "beta", "gamma"],
+            backend="fallback",
+            max_parallel=2,
+            output_profile="compact",
+            max_tokens=32,
+        )
+        self.assertEqual(out["schema"], "parallel_infer.v1")
+        self.assertEqual(out["count"], 3)
+        self.assertEqual(len(out["rows"]), 3)
+        self.assertEqual(out["max_parallel"], 2)
+
+        with self.assertRaises(ValueError):
+            self.server.model_router(mode="parallel_infer", prompts=[], max_parallel=2)
+
     def test_autocomplete_fallback(self):
         out = self.server.autocomplete(
             prefix="def handler():",

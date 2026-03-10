@@ -24,6 +24,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import pty
 import select
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -6600,6 +6601,70 @@ def local_rerank(
     }
 
 
+def _parallel_infer(
+    prompts: list[str],
+    task: str,
+    backend: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    system: str,
+    output_profile: str | None,
+    store_result: bool,
+    max_parallel: int,
+) -> dict[str, Any]:
+    if not prompts:
+        raise ValueError("prompts must not be empty for parallel_infer")
+    if max_parallel < 1:
+        raise ValueError("max_parallel must be >= 1")
+    cleaned = [str(p) for p in prompts]
+    if any(not p.strip() for p in cleaned):
+        raise ValueError("prompts must not contain empty strings")
+
+    rows: list[dict[str, Any]] = [None] * len(cleaned)  # type: ignore[list-item]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as ex:
+        future_map = {
+            ex.submit(
+                local_infer,
+                prompt=p,
+                task=task,
+                backend=backend,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                output_profile=output_profile,
+                store_result=store_result,
+            ): idx
+            for idx, p in enumerate(cleaned)
+        }
+        for fut in concurrent.futures.as_completed(future_map):
+            idx = future_map[fut]
+            try:
+                out = fut.result()
+                rows[idx] = {
+                    "index": idx,
+                    "ok": bool(out.get("ok", False)),
+                    "result": out,
+                }
+            except Exception as exc:
+                rows[idx] = {
+                    "index": idx,
+                    "ok": False,
+                    "error": str(exc),
+                }
+
+    success = sum(1 for r in rows if isinstance(r, dict) and bool(r.get("ok")))
+    return {
+        "schema": "parallel_infer.v1",
+        "count": len(rows),
+        "ok_count": success,
+        "error_count": len(rows) - success,
+        "max_parallel": max_parallel,
+        "rows": rows,
+    }
+
+
 @mcp.tool()
 def model_router(
     mode: str = "status",
@@ -6633,10 +6698,12 @@ def model_router(
     sandbox_mode: str = "shared",
     sandbox_id: str = "",
     sandbox_action: str = "list",
+    prompts: list[str] | None = None,
+    max_parallel: int = 4,
 ) -> dict[str, Any]:
-    """Primary model gateway. mode=status|embed|infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
-    if mode not in {"status", "embed", "infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip", "coding_sandbox"}:
-        raise ValueError("mode must be one of: status, embed, infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox")
+    """Primary model gateway. mode=status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
+    if mode not in {"status", "embed", "infer", "parallel_infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip", "coding_sandbox"}:
+        raise ValueError("mode must be one of: status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox")
     if mode == "status":
         return local_model_status()
     if mode == "embed":
@@ -6661,6 +6728,19 @@ def model_router(
             system=system,
             output_profile=output_profile,
             store_result=store_result,
+        )
+    if mode == "parallel_infer":
+        return _parallel_infer(
+            prompts=prompts or [],
+            task=task,
+            backend=backend,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            output_profile=output_profile,
+            store_result=store_result,
+            max_parallel=max_parallel,
         )
     if mode == "coding_infer":
         sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)

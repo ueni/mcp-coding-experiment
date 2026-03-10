@@ -307,7 +307,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 ### Local Model and Retrieval
 
-- `model_router` (status, embed, infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox)
+- `model_router` (status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox)
 - `autocomplete` (compatibility alias; prefer `model_router`)
 
 ### Labs
