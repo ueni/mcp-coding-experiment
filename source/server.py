@@ -107,6 +107,7 @@ ALLOW_ORIGINS = [
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".build/reports")
 MEMORY_FILE = Path(".build/memory/context_memory.json")
+MEMORY_STATS_FILE = Path(".build/memory/memory_stats.json")
 FAILURE_MEMORY_FILE = Path(".build/memory/failure_memory.json")
 TOKEN_BUDGET_FILE = Path(".build/memory/token_budget.json")
 EDIT_TXN_DIR = Path(".build/transactions")
@@ -800,6 +801,143 @@ def _memory_save(payload: dict[str, Any]) -> None:
     memory_path.write_text(
         json.dumps(normalized, indent=2, sort_keys=True), encoding="utf-8"
     )
+
+
+def _memory_stats_load() -> dict[str, Any]:
+    path = _resolve_repo_path(str(MEMORY_STATS_FILE))
+    if not path.exists():
+        return {
+            "events": {"get": 0, "hit": 0, "miss": 0, "compact": 0, "summary_upsert": 0},
+            "last_event_at": "",
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {
+            "events": {"get": 0, "hit": 0, "miss": 0, "compact": 0, "summary_upsert": 0},
+            "last_event_at": "",
+        }
+    if not isinstance(payload, dict):
+        payload = {}
+    events = payload.get("events", {})
+    if not isinstance(events, dict):
+        events = {}
+    base = {"get": 0, "hit": 0, "miss": 0, "compact": 0, "summary_upsert": 0}
+    for k in base:
+        v = events.get(k, 0)
+        base[k] = int(v) if isinstance(v, int) and v >= 0 else 0
+    return {"events": base, "last_event_at": str(payload.get("last_event_at", ""))}
+
+
+def _memory_stats_save(payload: dict[str, Any]) -> None:
+    path = _resolve_repo_path(str(MEMORY_STATS_FILE))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _memory_stats_record(event: str) -> None:
+    stats = _memory_stats_load()
+    events = stats.get("events", {})
+    events[event] = int(events.get(event, 0)) + 1
+    stats["events"] = events
+    stats["last_event_at"] = _now_iso()
+    _memory_stats_save(stats)
+
+
+def _memory_entry_rank(entry: dict[str, Any]) -> tuple[float, float]:
+    confidence = float(entry.get("confidence", 0.0) or 0.0)
+    ts = _parse_iso_timestamp(str(entry.get("updated_at", "")))
+    epoch = ts.timestamp() if ts else 0.0
+    return confidence, epoch
+
+
+def memory_auto_compact(
+    namespace: str | None = None,
+    threshold_entries: int = 80,
+    threshold_chars: int = 16000,
+    keep_entries: int = 40,
+    summary_max_chars: int = 1200,
+    drop_expired: bool = False,
+) -> dict[str, Any]:
+    """Compact memory when size thresholds are exceeded by writing/updating summary records."""
+    if threshold_entries < 1:
+        raise ValueError("threshold_entries must be >= 1")
+    if threshold_chars < 256:
+        raise ValueError("threshold_chars must be >= 256")
+    if keep_entries < 1:
+        raise ValueError("keep_entries must be >= 1")
+    if summary_max_chars < 128:
+        raise ValueError("summary_max_chars must be >= 128")
+
+    payload = _memory_load()
+    now = datetime.now(timezone.utc)
+    entries = []
+    for row in payload["entries"]:
+        if namespace is not None and row.get("namespace") != namespace:
+            continue
+        if _is_expired(row.get("expires_at"), now) and not drop_expired:
+            continue
+        entries.append(row)
+    entries_sorted = sorted(entries, key=_memory_entry_rank, reverse=True)
+    serialized = json.dumps(entries_sorted, ensure_ascii=False)
+    over_threshold = len(entries_sorted) > threshold_entries or len(serialized) > threshold_chars
+    if not over_threshold:
+        return {
+            "schema": "memory_auto_compact.v1",
+            "compacted": False,
+            "namespace": namespace,
+            "entry_count": len(entries_sorted),
+            "entry_chars": len(serialized),
+            "threshold_entries": threshold_entries,
+            "threshold_chars": threshold_chars,
+        }
+    if not ALLOW_MUTATIONS:
+        return {
+            "schema": "memory_auto_compact.v1",
+            "compacted": False,
+            "namespace": namespace,
+            "entry_count": len(entries_sorted),
+            "entry_chars": len(serialized),
+            "threshold_entries": threshold_entries,
+            "threshold_chars": threshold_chars,
+            "reason": "mutations_disabled",
+        }
+
+    focus_ns = namespace or "global"
+    top = entries_sorted[:keep_entries]
+    lines = []
+    for row in top:
+        key = str(row.get("key", ""))[:64]
+        val = row.get("value")
+        val_txt = _trim_text(json.dumps(val, ensure_ascii=False), max_chars=180)
+        lines.append(f"- {key}: {val_txt}")
+    summary_text = _trim_text(
+        f"Auto-compact summary for namespace={focus_ns}. Kept top {len(top)} of {len(entries_sorted)} entries.\n"
+        + "\n".join(lines),
+        max_chars=summary_max_chars,
+    )
+    memory_summary_upsert(
+        namespace=focus_ns,
+        focus="auto_compact",
+        summary=summary_text,
+        ttl_days=60,
+        confidence=0.9,
+        source="memory.auto_compact",
+        tags=["auto", "compact", "summary"],
+    )
+    _memory_stats_record("compact")
+    _memory_stats_record("summary_upsert")
+    return {
+        "schema": "memory_auto_compact.v1",
+        "compacted": True,
+        "namespace": namespace,
+        "entry_count": len(entries_sorted),
+        "entry_chars": len(serialized),
+        "kept_entries": len(top),
+        "threshold_entries": threshold_entries,
+        "threshold_chars": threshold_chars,
+        "summary_focus": "auto_compact",
+    }
 
 
 def _memory_trace_reusable_script_success(
@@ -9878,10 +10016,16 @@ def memory_get(
     max_entries: int = 200,
     include_summaries: bool = True,
     include_effective_decisions: bool = True,
+    auto_compact: bool = False,
+    compact_threshold_entries: int = 80,
+    compact_threshold_chars: int = 16000,
+    compact_keep_entries: int = 40,
+    compact_summary_max_chars: int = 1200,
 ) -> dict[str, Any]:
     """Read context memory entries with namespace/key filters."""
     if max_entries < 1:
         raise ValueError("max_entries must be >= 1")
+    _memory_stats_record("get")
     payload = _memory_load()
     now = datetime.now(timezone.utc)
     entries_out: list[dict[str, Any]] = []
@@ -9924,8 +10068,23 @@ def memory_get(
         if include_effective_decisions
         else []
     )
+    if entries_out:
+        _memory_stats_record("hit")
+    else:
+        _memory_stats_record("miss")
 
-    return {
+    compact_result: dict[str, Any] | None = None
+    if auto_compact:
+        compact_result = memory_auto_compact(
+            namespace=namespace,
+            threshold_entries=compact_threshold_entries,
+            threshold_chars=compact_threshold_chars,
+            keep_entries=compact_keep_entries,
+            summary_max_chars=compact_summary_max_chars,
+            drop_expired=False,
+        )
+
+    result = {
         "path": str(MEMORY_FILE),
         "count": len(entries_out),
         "entries": entries_out,
@@ -9933,7 +10092,11 @@ def memory_get(
         "summaries": summaries_out,
         "effective_decision_count": len(effective_decisions),
         "effective_decisions": effective_decisions,
+        "usage_stats": _memory_stats_load(),
     }
+    if compact_result is not None:
+        result["auto_compact"] = compact_result
+    return result
 
 
 def memory_validate(
@@ -10046,9 +10209,14 @@ def memory_router(
     include_effective_decisions: bool = True,
     validate_paths: bool = True,
     drop_expired: bool = False,
+    auto_compact: bool = False,
+    compact_threshold_entries: int = 80,
+    compact_threshold_chars: int = 16000,
+    compact_keep_entries: int = 40,
+    compact_summary_max_chars: int = 1200,
 ) -> dict[str, Any]:
     """Primary memory gateway for entries, summaries, and decisions with optional validation."""
-    allowed = {"upsert", "summary_upsert", "decision_record", "get", "validate"}
+    allowed = {"upsert", "summary_upsert", "decision_record", "get", "validate", "auto_compact"}
     if mode not in allowed:
         raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
     if mode == "upsert":
@@ -10095,6 +10263,15 @@ def memory_router(
             drop_expired=drop_expired,
             max_entries=max_entries,
         )
+    elif mode == "auto_compact":
+        result = memory_auto_compact(
+            namespace=namespace,
+            threshold_entries=compact_threshold_entries,
+            threshold_chars=compact_threshold_chars,
+            keep_entries=compact_keep_entries,
+            summary_max_chars=compact_summary_max_chars,
+            drop_expired=drop_expired,
+        )
     else:
         result = memory_get(
             namespace=namespace,
@@ -10103,6 +10280,11 @@ def memory_router(
             max_entries=max_entries,
             include_summaries=include_summaries,
             include_effective_decisions=include_effective_decisions,
+            auto_compact=auto_compact,
+            compact_threshold_entries=compact_threshold_entries,
+            compact_threshold_chars=compact_threshold_chars,
+            compact_keep_entries=compact_keep_entries,
+            compact_summary_max_chars=compact_summary_max_chars,
         )
     return {
         "schema": "memory_router.v1",
