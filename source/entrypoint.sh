@@ -127,7 +127,7 @@ apply_repo_defaults() {
 if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then
   maybe_fix_docker_sock_group
   bootstrap_user_home_from_host_mounts
-  exec su -s /bin/bash app -c "/app/entrypoint.sh --as-app"
+  exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"
 fi
 
 if [[ "${1:-}" == "--as-app" ]]; then
