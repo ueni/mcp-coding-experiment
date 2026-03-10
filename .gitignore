@@ -26,3 +26,6 @@ env/
 .DS_Store
 .idea/
 .vscode/
+
+# codebase-tooling-mcp
+/.build/

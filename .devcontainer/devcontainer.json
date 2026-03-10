@@ -5,7 +5,7 @@
   ],
   "service": "codebase-tooling-mcp",
   "remoteUser": "app",
-  "containerUser": "app",
+  "containerUser": "root",
   "workspaceFolder": "/repo",
   "shutdownAction": "stopCompose",
   "containerEnv": {
@@ -28,6 +28,7 @@
         "ms-python.python",
         "ms-python.vscode-pylance",
         "ms-azuretools.vscode-docker",
+        "openai.chatgpt",
         "mhutchie.git-graph"
       ],
       "settings": {
@@ -36,6 +37,7 @@
     }
   },
   "mounts": [
+    "source=${localEnv:HOME}/.codex,target=/home/app/.codex,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.continue,target=/home/app/.continue,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"

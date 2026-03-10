@@ -62,14 +62,13 @@ cat > .devcontainer/devcontainer.json <<EOF
   "image": "${IMAGE_REF}",
   "overrideCommand": false,
   "remoteUser": "app",
-  "containerUser": "app",
+  "containerUser": "root",
   "workspaceFolder": "/repo",
   "containerEnv": {
     "DOCKER_HOST": "unix:///var/run/docker.sock",
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
     "ALLOW_MUTATIONS": "true",
-    "HOST_CA_CERT_FILE": "/host-certs/ca-certificates.crt"
   },
   "forwardPorts": [
     8000
@@ -101,8 +100,7 @@ cat > .devcontainer/devcontainer.json <<EOF
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
     "source=\${localWorkspaceFolder},target=/repo,type=bind,consistency=cached",
     "source=/etc/ssl/certs,target=/etc/ssl/certs,type=bind,consistency=cached,readOnly=true"
-  ],
-  "postStartCommand": "if [ -S /var/run/docker.sock ]; then SOCK_GID=\$(stat -c '%g' /var/run/docker.sock); SOCK_GROUP=\$(getent group \"\$SOCK_GID\" | cut -d: -f1 || true); if [ -z \"\$SOCK_GROUP\" ]; then SOCK_GROUP=docker-host; sudo groupadd --gid \"\$SOCK_GID\" \"\$SOCK_GROUP\" || true; fi; sudo usermod -aG \"\$SOCK_GROUP\" app; fi"
+  ]
 }
 EOF
 

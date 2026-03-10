@@ -8,6 +8,31 @@ set -euo pipefail
 
 umask 027
 
+maybe_fix_docker_sock_group() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    return
+  fi
+  if [[ ! -S /var/run/docker.sock ]]; then
+    return
+  fi
+  if ! command -v usermod >/dev/null 2>&1; then
+    return
+  fi
+
+  local sock_gid sock_group
+  sock_gid="$(stat -c '%g' /var/run/docker.sock)"
+  sock_group="$(getent group "${sock_gid}" | cut -d: -f1 || true)"
+
+  if [[ -z "${sock_group}" ]] && command -v groupadd >/dev/null 2>&1; then
+    sock_group="docker-host"
+    groupadd --gid "${sock_gid}" "${sock_group}" || true
+  fi
+
+  if [[ -n "${sock_group}" ]]; then
+    usermod -aG "${sock_group}" app || true
+  fi
+}
+
 apply_repo_defaults() {
   local defaults_root="/opt/codebase-tooling/defaults"
   if [[ "${MCP_APPLY_REPO_DEFAULTS:-false}" != "true" ]]; then
@@ -43,6 +68,15 @@ apply_repo_defaults() {
     printf '\n# codebase-tooling-mcp\n/.build/\n' >> /repo/.gitignore
   fi
 }
+
+if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then
+  maybe_fix_docker_sock_group
+  exec su -s /bin/bash app -c "/app/entrypoint.sh --as-app"
+fi
+
+if [[ "${1:-}" == "--as-app" ]]; then
+  shift
+fi
 
 apply_repo_defaults
 
