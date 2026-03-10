@@ -95,6 +95,7 @@ cat > .devcontainer/devcontainer.json <<EOF
     "source=\${localEnv:HOME}/.continue,target=/home/app/.continue,type=bind,consistency=cached",
     "source=\${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+    "source=\${localWorkspaceFolder},target=/repo,type=bind,consistency=cached"
   ]
 }
 EOF
