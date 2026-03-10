@@ -6,26 +6,6 @@ SPDX-License-Identifier: MIT
 
 # Troubleshooting
 
-## `pytest` is not installed
-
-Symptom:
-
-```text
-[Errno 2] No such file or directory: 'pytest'
-```
-
-Fix:
-
-```bash
-pip install -r source/requirements.txt
-```
-
-Verify:
-
-```bash
-pytest -v tests
-```
-
 ## No tests discovered
 
 Symptom:
@@ -102,3 +82,17 @@ Checks:
 - Confirm `ALLOW_MUTATIONS=true` when mutation tools are required.
 - Keep it `false` for read-only sessions.
 - Confirm paths are inside the mounted repository root.
+
+## Default bootstrap files not created
+
+Symptom:
+
+- `.continue/mcpServers/http-mcp-server.yaml` is missing.
+- `.config/labs/` is missing.
+- `/.build/` was not added to `.gitignore`.
+
+Checks:
+
+- Confirm the repository was opened with the generated `.devcontainer/devcontainer.json`.
+- Confirm the container environment includes `MCP_APPLY_REPO_DEFAULTS=true`.
+- Rebuild or reopen the devcontainer so the image entrypoint runs again.

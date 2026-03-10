@@ -8,6 +8,11 @@ SPDX-License-Identifier: MIT
 
 This page documents the JSON configuration files under `.config/labs`.
 
+When a repository is bootstrapped via
+`curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh`
+and then opened in the devcontainer image, these files are created
+automatically if they do not already exist.
+
 ## `.config/labs/policy_gatekeeper.json`
 
 Controls policy checks executed by `policy_gatekeeper.py`.

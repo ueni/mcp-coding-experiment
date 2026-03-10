@@ -95,6 +95,29 @@ Key settings (in VS Code Settings):
 - `mcpInlineAutocomplete.temperature`
 - `mcpInlineAutocomplete.enabledLanguages`
 
+## Bootstrap Another Repository
+
+To add this MCP setup to another repository using the published image
+`ueniueni/codebase-tooling-mcp:latest`, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh
+```
+
+The script finds the repository root by locating `.git` and creates only:
+
+- `.devcontainer/devcontainer.json`
+
+When the devcontainer starts, the image applies default repository files if they
+are missing:
+
+- `.continue/mcpServers/http-mcp-server.yaml`
+- `.config/labs/*.json`
+- `/.build/` entry in `.gitignore`
+
+The inline autocomplete extension is bundled into the image, so the target
+repository does not need a local `vscode/mcp-inline-autocomplete/` copy.
+
 ## Endpoints (HTTP mode)
 
 - MCP endpoint: `http://localhost:8000/mcp`
