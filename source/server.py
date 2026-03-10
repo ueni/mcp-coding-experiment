@@ -2115,6 +2115,48 @@ def _delta_remove_value(root: Any, parts: list[str]) -> Any:
     return root
 
 
+def _docker_cli_status() -> dict[str, Any]:
+    docker_bin = shutil.which("docker")
+    socket_path = Path("/var/run/docker.sock")
+    status: dict[str, Any] = {
+        "docker_cli_present": bool(docker_bin),
+        "docker_cli_path": docker_bin or "",
+        "docker_socket_present": socket_path.exists(),
+        "docker_socket_is_socket": socket_path.is_socket(),
+    }
+    if docker_bin:
+        try:
+            version = subprocess.run(
+                [docker_bin, "version", "--format", "{{json .}}"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            status["docker_version_rc"] = version.returncode
+            if version.stdout.strip():
+                with contextlib.suppress(json.JSONDecodeError):
+                    payload = json.loads(version.stdout)
+                    status["docker_client_version"] = (
+                        payload.get("Client", {}).get("Version", "")
+                        if isinstance(payload, dict)
+                        else ""
+                    )
+                    status["docker_server_version"] = (
+                        payload.get("Server", {}).get("Version", "")
+                        if isinstance(payload, dict)
+                        else ""
+                    )
+            if version.stderr.strip():
+                status["docker_version_stderr"] = _trim_text(
+                    version.stderr.strip(),
+                    max_chars=2000,
+                )
+        except Exception as exc:
+            status["docker_error"] = str(exc)
+    return status
+
+
 @mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Return repository state and server settings."""
@@ -2128,6 +2170,7 @@ def repo_info() -> dict[str, Any]:
         "transport": MCP_TRANSPORT,
         "max_read_bytes": MAX_READ_BYTES,
         "max_output_chars": MAX_OUTPUT_CHARS,
+        "docker": _docker_cli_status(),
     }
 
     if info["is_git_repo"]:
@@ -2137,6 +2180,15 @@ def repo_info() -> dict[str, Any]:
         info["dirty"] = bool(status)
 
     return info
+
+
+@mcp.tool()
+def docker_cli_status() -> dict[str, Any]:
+    """Report docker CLI/socket awareness and daemon reachability signals."""
+    return {
+        "schema": "docker_cli_status.v1",
+        **_docker_cli_status(),
+    }
 
 
 @mcp.tool()
