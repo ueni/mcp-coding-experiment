@@ -18,43 +18,30 @@ require_cmd() {
   fi
 }
 
-repo_slug_from_remote() {
-  remote_url=$1
-  case "$remote_url" in
-    git@github.com:*)
-      slug=${remote_url#git@github.com:}
-      ;;
-    ssh://git@github.com/*)
-      slug=${remote_url#ssh://git@github.com/}
-      ;;
-    https://github.com/*)
-      slug=${remote_url#https://github.com/}
-      ;;
-    http://github.com/*)
-      slug=${remote_url#http://github.com/}
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  slug=${slug%.git}
-  printf '%s\n' "$slug"
+find_repo_root() {
+  current_dir=$(pwd)
+  while [ "$current_dir" != "/" ]; do
+    if [ -e "$current_dir/.git" ]; then
+      printf '%s\n' "$current_dir"
+      return 0
+    fi
+    current_dir=$(dirname "$current_dir")
+  done
+  return 1
 }
 
-backup_if_exists() {
+fail_if_exists() {
   target=$1
   if [ -e "$target" ]; then
-    backup="${target}.bak"
-    cp -R "$target" "$backup"
-    log "Backed up $target -> $backup"
+    log "Refusing to overwrite existing path: $target"
+    exit 1
   fi
 }
 
-require_cmd git
 require_cmd mkdir
 require_cmd cp
 
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+REPO_ROOT=$(find_repo_root || true)
 if [ -z "$REPO_ROOT" ]; then
   log "This script must run inside a Git repository."
   exit 1
@@ -62,24 +49,13 @@ fi
 
 cd "$REPO_ROOT"
 
-REMOTE_URL=$(git remote get-url origin 2>/dev/null || true)
-if [ -z "$REMOTE_URL" ]; then
-  log "Git remote 'origin' is not configured."
-  exit 1
-fi
+REPO_NAME=$(basename "$REPO_ROOT")
 
-REPO_SLUG=$(repo_slug_from_remote "$REMOTE_URL" || true)
-if [ -z "$REPO_SLUG" ]; then
-  log "Unable to derive a GitHub repository slug from remote origin: $REMOTE_URL"
-  exit 1
-fi
-REPO_NAME=${REPO_SLUG##*/}
-
-log "Bootstrapping codebase-tooling-mcp devcontainer into $REPO_SLUG"
+log "Bootstrapping codebase-tooling-mcp devcontainer into $REPO_ROOT"
 
 mkdir -p .devcontainer
 
-backup_if_exists .devcontainer/devcontainer.json
+fail_if_exists .devcontainer/devcontainer.json
 cat > .devcontainer/devcontainer.json <<EOF
 {
   "name": "${REPO_NAME}",
