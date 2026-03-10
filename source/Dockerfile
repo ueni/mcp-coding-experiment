@@ -91,6 +91,7 @@ RUN groupadd --gid "${APP_GID}" app \
 COPY --chown=app:app server.py ./
 COPY --chown=app:app entrypoint.sh ./
 COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
+COPY --chown=app:app defaults/selftests/ /opt/codebase-tooling/defaults/selftests/
 RUN chmod 0755 /app/entrypoint.sh
 
 RUN mkdir -p /home/app/.vscode-server/extensions \

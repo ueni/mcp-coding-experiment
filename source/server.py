@@ -6371,20 +6371,27 @@ def self_test(
     timeout_seconds: int = 600,
     fail_fast: bool = False,
 ) -> dict[str, Any]:
-    """Execute tests from /repo by default; falls back to internal container selftests when /repo/tests is missing."""
+    """Execute in-image selftests by default (`target=tests`); use `target=repo:<path>` to force /repo tests."""
     if runner not in {"unittest", "pytest"}:
         raise ValueError("runner must be one of: unittest, pytest")
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
 
     out_cap = _token_budget_apply_max(None)
-    repo_target_path = _resolve_repo_path(target)
+    target_raw = target.strip()
+    force_repo_target = target_raw.startswith("repo:")
+    target_value = target_raw.split(":", 1)[1] if force_repo_target else target_raw
+    if force_repo_target and not target_value:
+        raise ValueError("repo target must not be empty (expected repo:<path>)")
+
+    internal_aliases = {"tests", "internal", "selftests", "container-selftests"}
     use_internal_tests = (
-        target == "tests"
-        and not repo_target_path.exists()
+        not force_repo_target
+        and target_value in internal_aliases
         and INTERNAL_SELF_TESTS_DIR.is_dir()
     )
-    resolved_target = str(INTERNAL_SELF_TESTS_DIR) if use_internal_tests else target
+    repo_target_path = None if use_internal_tests else _resolve_repo_path(target_value)
+    resolved_target = str(INTERNAL_SELF_TESTS_DIR) if use_internal_tests else target_value
     execution_root = "/" if use_internal_tests else str(REPO_PATH)
 
     if runner == "unittest":
@@ -6397,6 +6404,8 @@ def self_test(
                 cmd.append("-f")
         else:
             target_path = repo_target_path
+            if target_path is None:
+                raise RuntimeError("repo target path resolution failed")
             if target_path.is_file() and target_path.suffix == ".py":
                 rel_parent = str(target_path.parent.relative_to(REPO_PATH))
                 cmd.extend(
@@ -6430,7 +6439,7 @@ def self_test(
                     cmd.append("-v")
                 if fail_fast:
                     cmd.append("-f")
-                cmd.append(target)
+                cmd.append(target_value)
     else:
         cmd = ["pytest"]
         if verbose:
