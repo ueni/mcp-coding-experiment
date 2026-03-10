@@ -6812,7 +6812,7 @@ def model_router(
     prompts: list[str] | None = None,
     max_parallel: int = 4,
 ) -> dict[str, Any]:
-    """Primary model gateway. mode=status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
+    """Strict model router: mode MUST be one of status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; required params are enforced per mode; returns deterministic schema payloads or explicit validation errors."""
     if mode not in {"status", "embed", "infer", "parallel_infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip", "coding_sandbox"}:
         raise ValueError("mode must be one of: status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox")
     if mode == "status":
