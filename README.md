@@ -115,6 +115,10 @@ are missing:
 - `.config/labs/*.json`
 - `/.build/` entry in `.gitignore`
 
+The image also ensures a default Codex MCP client entry exists at:
+
+- `~/.codex/config.toml`
+
 The inline autocomplete extension is bundled into the image, so the target
 repository does not need a local `vscode/mcp-inline-autocomplete/` copy.
 

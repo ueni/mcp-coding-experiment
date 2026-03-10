@@ -22,6 +22,13 @@ apply_repo_defaults() {
     cp "${defaults_root}/continue/http-mcp-server.yaml" /repo/.continue/mcpServers/http-mcp-server.yaml
   fi
 
+  mkdir -p /home/app/.codex
+  if [[ ! -f /home/app/.codex/config.toml ]]; then
+    cp "${defaults_root}/codex/config.toml" /home/app/.codex/config.toml
+  elif ! grep -q '^\[mcp_servers.codebase_tooling_mcp\]$' /home/app/.codex/config.toml; then
+    printf '\n[mcp_servers.codebase_tooling_mcp]\nurl = "http://localhost:8000/mcp"\n' >> /home/app/.codex/config.toml
+  fi
+
   mkdir -p /repo/.config/labs
   while IFS= read -r config_path; do
     config_name=$(basename "${config_path}")
