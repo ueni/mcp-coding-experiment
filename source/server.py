@@ -4912,7 +4912,7 @@ def command_runner(
     timeout_seconds: int = 30,
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
-    """Run a whitelisted command without shell interpolation."""
+    """Strict command executor: MUST use a SAFE_COMMANDS binary, required command list, returns schema-stable stdout/stderr or explicit timeout/file-not-found error payload."""
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
     out_cap = _token_budget_apply_max(max_output_chars)
@@ -7093,7 +7093,7 @@ def self_test(
     timeout_seconds: int = 600,
     fail_fast: bool = False,
 ) -> dict[str, Any]:
-    """Execute in-image selftests by default (`target=tests`); use `target=repo:<path>` to force /repo tests."""
+    """Strict test runner: mode is implicit by runner (one of unittest|pytest), target is required (`tests` defaults to in-image selftests), `repo:<path>` forces repository scope, and returns explicit timeout/runner-missing failure payloads."""
     if runner not in {"unittest", "pytest"}:
         raise ValueError("runner must be one of: unittest, pytest")
     if timeout_seconds < 1:
@@ -8228,7 +8228,7 @@ def workspace_transaction(
     snapshot_id: str = "",
     include_build_dir: bool = False,
 ) -> dict[str, Any]:
-    """Workspace mutation gateway for transaction lifecycle plus git-backed snapshot/restore."""
+    """Strict workspace mutation router: mode MUST be one of begin|apply|validate|rollback|commit|snapshot|restore; restore requires snapshot_id; returns `workspace_transaction.v1` with deterministic nested `result` or explicit validation error."""
     allowed = {
         "begin",
         "apply",
@@ -9814,7 +9814,7 @@ def code_index_router(
     store_result: bool = False,
     incremental: bool = True,
 ) -> dict[str, Any]:
-    """Primary code-intel gateway: refresh/read/query index plus symbols/deps/calls/search modes."""
+    """Strict code-intel router: mode MUST be one of refresh|read|query|symbols|deps|calls|search, requires mode-compatible params, and returns `code_index_router.v1` with deterministic nested `result` (reject invalid mode/args explicitly)."""
     allowed = {"refresh", "read", "query", "symbols", "deps", "calls", "search"}
     if mode not in allowed:
         raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
@@ -10406,7 +10406,7 @@ def memory_router(
     compact_keep_entries: int = 40,
     compact_summary_max_chars: int = 1200,
 ) -> dict[str, Any]:
-    """Primary memory gateway for entries, summaries, and decisions with optional validation."""
+    """Strict memory router: mode MUST be one of upsert|summary_upsert|decision_record|get|validate|auto_compact; required fields are enforced per mode; returns `memory_router.v1` with deterministic nested `result` and explicit parameter errors."""
     allowed = {"upsert", "summary_upsert", "decision_record", "get", "validate", "auto_compact"}
     if mode not in allowed:
         raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
