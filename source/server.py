@@ -2536,6 +2536,50 @@ def docker_cli_status() -> dict[str, Any]:
 
 
 @mcp.tool()
+def docker_task_router(
+    mode: str = "status",
+    label: str = "",
+    tasks_path: str = ".vscode/tasks.json",
+    label_prefix: str = "Docker:",
+    control_profile: str = "build",
+    timeout_seconds: int = 1800,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
+    """Unified Docker task control router: status, list, run."""
+    if mode not in {"status", "list", "run"}:
+        raise ValueError("mode must be one of: status, list, run")
+    if mode == "status":
+        return {
+            "schema": "docker_task_router.v1",
+            "mode": mode,
+            "result": docker_cli_status(),
+        }
+    if mode == "list":
+        return {
+            "schema": "docker_task_router.v1",
+            "mode": mode,
+            "result": vscode_tasks_list(
+                tasks_path=tasks_path,
+                label_prefix=label_prefix,
+                control_profile=control_profile,
+            ),
+        }
+    if not label.strip():
+        raise ValueError("label is required for run mode")
+    return {
+        "schema": "docker_task_router.v1",
+        "mode": mode,
+        "result": vscode_task_run(
+            label=label,
+            tasks_path=tasks_path,
+            control_profile=control_profile,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        ),
+    }
+
+
+@mcp.tool()
 def vscode_tasks_list(
     tasks_path: str = ".vscode/tasks.json",
     label_prefix: str = "Docker:",
@@ -7413,6 +7457,51 @@ def state_restore(
 
 
 @mcp.tool()
+def workspace_transaction(
+    mode: str = "begin",
+    transaction_id: str = "",
+    label: str = "",
+    changes: list[dict[str, Any]] | None = None,
+    create_dirs: bool = True,
+    delete_metadata: bool = False,
+    snapshot_id: str = "",
+    include_build_dir: bool = False,
+) -> dict[str, Any]:
+    """Unified workspace mutation router for transactions and snapshots."""
+    allowed = {
+        "begin",
+        "apply",
+        "validate",
+        "rollback",
+        "commit",
+        "snapshot",
+        "restore",
+    }
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "snapshot":
+        result = state_snapshot(label=label, include_build_dir=include_build_dir)
+    elif mode == "restore":
+        if not snapshot_id.strip():
+            raise ValueError("snapshot_id is required for restore mode")
+        result = state_restore(snapshot_id=snapshot_id)
+    else:
+        result = edit_transaction(
+            mode=mode,
+            transaction_id=transaction_id,
+            label=label,
+            changes=changes,
+            create_dirs=create_dirs,
+            delete_metadata=delete_metadata,
+        )
+    return {
+        "schema": "workspace_transaction.v1",
+        "mode": mode,
+        "result": result,
+    }
+
+
+@mcp.tool()
 def policy_simulator(
     base_ref: str = "HEAD~1",
     head_ref: str = "HEAD",
@@ -8944,6 +9033,113 @@ def repo_index_daemon(
 
 
 @mcp.tool()
+def code_index_router(
+    mode: str = "refresh",
+    path: str = ".",
+    query: str = "",
+    recursive: bool = True,
+    output_profile: str | None = None,
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+    max_files: int = 5000,
+    max_symbols: int = 20000,
+    max_edges: int = 20000,
+    include_hashes: bool = False,
+    include_private: bool = False,
+    include_stdlib: bool = False,
+    local_rerank_top_k: int = 25,
+    use_local_rerank: bool = True,
+    summary_mode: str = "full",
+    compress: bool = False,
+    store_result: bool = False,
+    incremental: bool = True,
+) -> dict[str, Any]:
+    """Unified router for repository index/search operations."""
+    allowed = {"refresh", "read", "query", "symbols", "deps", "calls", "search"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+
+    if mode in {"refresh", "read", "query"}:
+        result = repo_index_daemon(
+            mode=mode,
+            path=path,
+            query=query,
+            recursive=recursive,
+            include_hashes=include_hashes,
+            max_files=max_files,
+            output_profile=output_profile,
+            fields=fields,
+            offset=offset,
+            limit=limit,
+            summary_mode=summary_mode,
+            compress=compress,
+            store_result=store_result,
+            incremental=incremental,
+        )
+    elif mode == "symbols":
+        result = symbol_index(
+            path=path,
+            recursive=recursive,
+            include_private=include_private,
+            max_symbols=max_symbols,
+            output_profile=output_profile,
+            fields=fields,
+            offset=offset,
+            limit=limit,
+            summary_mode=summary_mode,
+            compress=compress,
+            store_result=store_result,
+        )
+    elif mode == "deps":
+        result = dependency_map(
+            path=path,
+            recursive=recursive,
+            include_stdlib=include_stdlib,
+            max_files=max_files,
+            output_profile=output_profile,
+            fields=fields,
+            offset=offset,
+            limit=limit,
+            summary_mode=summary_mode,
+            compress=compress,
+            store_result=store_result,
+        )
+    elif mode == "calls":
+        result = call_graph(
+            path=path,
+            recursive=recursive,
+            max_edges=max_edges,
+            output_profile=output_profile,
+            fields=fields,
+            offset=offset,
+            limit=limit,
+            summary_mode=summary_mode,
+            compress=compress,
+            store_result=store_result,
+        )
+    else:
+        result = semantic_find(
+            query=query,
+            path=path,
+            use_local_rerank=use_local_rerank,
+            local_rerank_top_k=local_rerank_top_k,
+            output_profile=output_profile,
+            fields=fields,
+            offset=offset,
+            limit=limit,
+            summary_mode=summary_mode,
+            compress=compress,
+            store_result=store_result,
+        )
+    return {
+        "schema": "code_index_router.v1",
+        "mode": mode,
+        "result": result,
+    }
+
+
+@mcp.tool()
 def self_check_pipeline(
     base_ref: str = "HEAD~1",
     head_ref: str = "HEAD",
@@ -9400,6 +9596,93 @@ def memory_validate(
         "decision_stale_count": stale_decisions,
         "dropped_expired": dropped,
         "stale_entries": stale,
+    }
+
+
+@mcp.tool()
+def memory_router(
+    mode: str = "get",
+    namespace: str | None = None,
+    key: str | None = None,
+    value: Any = None,
+    ttl_days: int | None = None,
+    confidence: float = 1.0,
+    source: str = "agent",
+    tags: list[str] | None = None,
+    focus: str = "",
+    summary: str = "",
+    topic: str = "",
+    decision: Any = None,
+    decided_by: str = "llm",
+    rationale: str = "",
+    include_expired: bool = False,
+    max_entries: int = 200,
+    include_summaries: bool = True,
+    include_effective_decisions: bool = True,
+    validate_paths: bool = True,
+    drop_expired: bool = False,
+) -> dict[str, Any]:
+    """Unified router for memory read/write/summary/decision operations."""
+    allowed = {"upsert", "summary_upsert", "decision_record", "get", "validate"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "upsert":
+        if namespace is None or key is None:
+            raise ValueError("namespace and key are required for upsert mode")
+        result = memory_upsert(
+            namespace=namespace,
+            key=key,
+            value=value,
+            ttl_days=ttl_days,
+            confidence=confidence,
+            source=source,
+            tags=tags,
+        )
+    elif mode == "summary_upsert":
+        if namespace is None:
+            raise ValueError("namespace is required for summary_upsert mode")
+        result = memory_summary_upsert(
+            namespace=namespace,
+            focus=focus,
+            summary=summary,
+            ttl_days=ttl_days,
+            confidence=confidence,
+            source=source,
+            tags=tags,
+        )
+    elif mode == "decision_record":
+        if namespace is None:
+            raise ValueError("namespace is required for decision_record mode")
+        result = memory_decision_record(
+            namespace=namespace,
+            topic=topic,
+            decision=decision,
+            decided_by=decided_by,
+            rationale=rationale,
+            ttl_days=ttl_days,
+            confidence=confidence,
+            source=source,
+            tags=tags,
+        )
+    elif mode == "validate":
+        result = memory_validate(
+            validate_paths=validate_paths,
+            drop_expired=drop_expired,
+            max_entries=max_entries,
+        )
+    else:
+        result = memory_get(
+            namespace=namespace,
+            key=key,
+            include_expired=include_expired,
+            max_entries=max_entries,
+            include_summaries=include_summaries,
+            include_effective_decisions=include_effective_decisions,
+        )
+    return {
+        "schema": "memory_router.v1",
+        "mode": mode,
+        "result": result,
     }
 
 
