@@ -2225,6 +2225,111 @@ def _validate_build_task_command(command: list[str]) -> None:
         )
 
 
+def _summarize_build_log(stdout: str, stderr: str, max_lines: int = 120) -> str:
+    joined = "\n".join(x for x in [stdout, stderr] if x).strip()
+    if not joined:
+        return ""
+    lines = joined.splitlines()
+    if len(lines) <= max_lines:
+        return joined
+    return "\n".join(lines[-max_lines:])
+
+
+def _build_log_proposals(stdout: str, stderr: str) -> list[dict[str, str]]:
+    text = "\n".join([stdout or "", stderr or ""]).lower()
+    proposals: list[dict[str, str]] = []
+
+    def add(issue: str, proposal: str, confidence: str = "medium") -> None:
+        proposals.append(
+            {
+                "issue": issue,
+                "proposal": proposal,
+                "confidence": confidence,
+            }
+        )
+
+    if any(x in text for x in ["no space left on device", "insufficient disk space"]):
+        add(
+            "Docker build ran out of disk space.",
+            "Run `docker system prune -af --volumes` and retry the build.",
+            "high",
+        )
+    if "failed to solve with frontend dockerfile.v0" in text and "not found" in text:
+        add(
+            "Dockerfile step references missing file or stage.",
+            "Check COPY/ADD sources and multi-stage `--from=` names in the Dockerfile.",
+            "high",
+        )
+    if "pull access denied" in text or "requested access to the resource is denied" in text:
+        add(
+            "Image pull denied (auth or image name problem).",
+            "Run `docker login`, verify image name/tag, and confirm registry permissions.",
+            "high",
+        )
+    if "error getting credentials" in text or "credential helper" in text:
+        add(
+            "Docker credential helper failed.",
+            "Fix `~/.docker/config.json` credsStore/credHelpers or authenticate with `docker login`.",
+            "medium",
+        )
+    if "network timed out" in text or "tls handshake timeout" in text:
+        add(
+            "Network timeout while pulling/downloading dependencies.",
+            "Retry build, validate proxy/firewall settings, and check registry reachability.",
+            "medium",
+        )
+    if "apt-get" in text and "temporary failure resolving" in text:
+        add(
+            "DNS resolution failed during package install.",
+            "Check container DNS/network; retry with stable DNS or mirror settings.",
+            "high",
+        )
+    if "permission denied" in text and "/var/run/docker.sock" in text:
+        add(
+            "No permission to access Docker socket.",
+            "Ensure container user is in the docker socket group and reopen/rebuild devcontainer.",
+            "high",
+        )
+    if "executor failed running" in text and "exit code: 127" in text:
+        add(
+            "Command not found during Docker build step.",
+            "Install required package/binary before the failing RUN command.",
+            "high",
+        )
+    if "executor failed running" in text and "exit code: 1" in text:
+        add(
+            "Build RUN step failed with a generic non-zero exit code.",
+            "Inspect the failing step in build log and split complex RUN commands for clearer errors.",
+            "medium",
+        )
+    if "failed to read dockerfile" in text:
+        add(
+            "Dockerfile path is wrong for selected build context.",
+            "Verify task build context and Dockerfile path (`-f`) in `.vscode/tasks.json`.",
+            "high",
+        )
+    if "cannot connect to the docker daemon" in text:
+        add(
+            "Docker daemon is unreachable.",
+            "Check daemon status/socket mount and run `docker_cli_status` before retrying.",
+            "high",
+        )
+    if "context canceled" in text:
+        add(
+            "Build context transfer canceled/interrupted.",
+            "Retry the build and check for large context or unstable Docker daemon.",
+            "low",
+        )
+
+    if not proposals:
+        add(
+            "No known build-failure signature matched.",
+            "Inspect the final failing step in `build_log_tail` and rerun with `--progress=plain` for detail.",
+            "low",
+        )
+    return proposals
+
+
 @mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Return repository state and server settings."""
@@ -2344,6 +2449,10 @@ def vscode_task_run(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
+        timeout_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        timeout_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        build_log_tail = _summarize_build_log(timeout_stdout, timeout_stderr)
+        proposals = _build_log_proposals(timeout_stdout, timeout_stderr)
         return {
             "schema": "vscode_task_run.v1",
             "ok": False,
@@ -2353,9 +2462,16 @@ def vscode_task_run(
             "cwd": str(workdir.relative_to(REPO_PATH)),
             "exit_code": None,
             "timeout": True,
-            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
-            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
+            "stdout": _trim_text(timeout_stdout, max_chars=out_cap),
+            "stderr": _trim_text(timeout_stderr, max_chars=out_cap),
+            "build_log_tail": _trim_text(build_log_tail, max_chars=out_cap),
+            "proposals": proposals,
         }
+
+    build_log_tail = _summarize_build_log(proc.stdout, proc.stderr)
+    proposals: list[dict[str, str]] = []
+    if proc.returncode != 0:
+        proposals = _build_log_proposals(proc.stdout, proc.stderr)
 
     return {
         "schema": "vscode_task_run.v1",
@@ -2368,6 +2484,8 @@ def vscode_task_run(
         "timeout": False,
         "stdout": _trim_text(proc.stdout, max_chars=out_cap),
         "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+        "build_log_tail": _trim_text(build_log_tail, max_chars=out_cap),
+        "proposals": proposals,
     }
 
 
