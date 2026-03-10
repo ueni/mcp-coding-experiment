@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Docker: Build Image (Task)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "echo Running VS Code task: Docker: Build Image",
+      "preLaunchTask": "Docker: Build Image"
+    },
+    {
+      "name": "Docker: Compose Build Service (Task)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "echo Running VS Code task: Docker: Compose Build Service",
+      "preLaunchTask": "Docker: Compose Build Service"
+    }
+  ]
+}

@@ -25,7 +25,9 @@ env/
 # Editor/OS noise
 .DS_Store
 .idea/
-.vscode/
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
 
 # codebase-tooling-mcp
 /.build/

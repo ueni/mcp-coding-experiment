@@ -6,6 +6,7 @@ import ast
 import json
 import os
 import shutil
+import shlex
 import subprocess
 import sys
 import re
@@ -2157,6 +2158,73 @@ def _docker_cli_status() -> dict[str, Any]:
     return status
 
 
+def _load_vscode_tasks(tasks_path: str = ".vscode/tasks.json") -> tuple[Path, list[dict[str, Any]]]:
+    path = _resolve_repo_path(tasks_path)
+    if not path.is_file():
+        raise FileNotFoundError(tasks_path)
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid tasks.json: root must be an object")
+    tasks = payload.get("tasks", [])
+    if not isinstance(tasks, list):
+        raise ValueError("invalid tasks.json: tasks must be an array")
+    normalized: list[dict[str, Any]] = []
+    for item in tasks:
+        if isinstance(item, dict):
+            normalized.append(item)
+    return path, normalized
+
+
+def _task_command_from_vscode_task(task: dict[str, Any]) -> list[str]:
+    command_value = task.get("command")
+    if not isinstance(command_value, str) or not command_value.strip():
+        raise ValueError("task command must be a non-empty string")
+    args_value = task.get("args", [])
+    if args_value is None:
+        args_value = []
+    if not isinstance(args_value, list):
+        raise ValueError("task args must be an array")
+    args: list[str] = [str(x) for x in args_value]
+    head = shlex.split(command_value)
+    if not head:
+        raise ValueError("task command must not be empty")
+    return [*head, *args]
+
+
+def _validate_build_task_command(command: list[str]) -> None:
+    if not command:
+        raise ValueError("empty command")
+    binary = command[0]
+    if binary not in {"docker", "docker-compose"}:
+        raise ValueError(f"only docker build control is allowed; got: {binary}")
+
+    if binary == "docker":
+        if len(command) < 2:
+            raise ValueError("docker command must include a subcommand")
+        sub = command[1]
+        allowed_sub = {"build", "buildx", "compose", "pull", "images", "version", "info"}
+        if sub not in allowed_sub:
+            raise ValueError(f"docker subcommand not allowed for build control: {sub}")
+        if sub == "compose":
+            if len(command) < 3:
+                raise ValueError("docker compose requires a subcommand")
+            compose_sub = command[2]
+            if compose_sub not in {"build", "config", "images", "ps"}:
+                raise ValueError(
+                    f"docker compose subcommand not allowed for build control: {compose_sub}"
+                )
+        return
+
+    if len(command) < 2:
+        raise ValueError("docker-compose command must include a subcommand")
+    compose_sub = command[1]
+    if compose_sub not in {"build", "config", "images", "ps"}:
+        raise ValueError(
+            f"docker-compose subcommand not allowed for build control: {compose_sub}"
+        )
+
+
 @mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Return repository state and server settings."""
@@ -2188,6 +2256,118 @@ def docker_cli_status() -> dict[str, Any]:
     return {
         "schema": "docker_cli_status.v1",
         **_docker_cli_status(),
+    }
+
+
+@mcp.tool()
+def vscode_tasks_list(
+    tasks_path: str = ".vscode/tasks.json",
+    label_prefix: str = "Docker:",
+) -> dict[str, Any]:
+    """List VS Code tasks and whether each is runnable as build-control command."""
+    tasks_file, tasks = _load_vscode_tasks(tasks_path)
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        label = str(task.get("label", "")).strip()
+        if label_prefix and not label.startswith(label_prefix):
+            continue
+        try:
+            cmd = _task_command_from_vscode_task(task)
+            _validate_build_task_command(cmd)
+            rows.append(
+                {
+                    "label": label,
+                    "ok": True,
+                    "command": cmd,
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "label": label,
+                    "ok": False,
+                    "error": str(exc),
+                }
+            )
+    return {
+        "schema": "vscode_tasks_list.v1",
+        "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
+        "label_prefix": label_prefix,
+        "count": len(rows),
+        "tasks": rows,
+    }
+
+
+@mcp.tool()
+def vscode_task_run(
+    label: str,
+    tasks_path: str = ".vscode/tasks.json",
+    timeout_seconds: int = 1800,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
+    """Run an approved Docker build task by label from VS Code tasks.json."""
+    _require_mutations()
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    out_cap = _token_budget_apply_max(max_output_chars)
+    tasks_file, tasks = _load_vscode_tasks(tasks_path)
+
+    selected: dict[str, Any] | None = None
+    for task in tasks:
+        if str(task.get("label", "")).strip() == label:
+            selected = task
+            break
+    if selected is None:
+        raise ValueError(f"task not found: {label}")
+
+    command = _task_command_from_vscode_task(selected)
+    _validate_build_task_command(command)
+
+    options = selected.get("options", {})
+    task_cwd = "."
+    if isinstance(options, dict):
+        task_cwd_value = options.get("cwd")
+        if isinstance(task_cwd_value, str) and task_cwd_value.strip():
+            task_cwd = task_cwd_value
+    if task_cwd.startswith("${workspaceFolder}"):
+        suffix = task_cwd[len("${workspaceFolder}") :].lstrip("/\\")
+        task_cwd = suffix or "."
+    workdir = _resolve_repo_path(task_cwd)
+
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(workdir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "schema": "vscode_task_run.v1",
+            "ok": False,
+            "label": label,
+            "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
+            "command": command,
+            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "exit_code": None,
+            "timeout": True,
+            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
+            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
+        }
+
+    return {
+        "schema": "vscode_task_run.v1",
+        "ok": proc.returncode == 0,
+        "label": label,
+        "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
+        "command": command,
+        "cwd": str(workdir.relative_to(REPO_PATH)),
+        "exit_code": proc.returncode,
+        "timeout": False,
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
     }
 
 

@@ -1,0 +1,58 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Docker: Build Image",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "build",
+        "-t",
+        "codebase-tooling-mcp:latest",
+        "./source"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Build Image (No Cache)",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "build",
+        "--no-cache",
+        "-t",
+        "codebase-tooling-mcp:latest",
+        "./source"
+      ],
+      "group": "build",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Compose Build Service",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "source/docker-compose.yml",
+        "build",
+        "codebase-tooling-mcp"
+      ],
+      "group": "build",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
