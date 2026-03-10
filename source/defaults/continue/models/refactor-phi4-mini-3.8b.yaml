@@ -1,0 +1,12 @@
+name: refactor-phi4-mini-3.8b
+version: 0.0.1
+schema: v1
+models:
+  - name: Refactor - Phi4 Mini 3.8B
+    provider: ollama
+    model: phi4-mini:3.8b
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - chat
+      - edit
+      - apply

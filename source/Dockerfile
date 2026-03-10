@@ -30,6 +30,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_INFER_BACKEND=endpoint \
     LOCAL_INFER_MODEL= \
     LOCAL_INFER_ENDPOINT=http://127.0.0.1:11434/api/generate \
+    CONTINUE_OLLAMA_MODELS=qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOST_CA_CERT_FILE= \
     MCP_APPLY_REPO_DEFAULTS=false

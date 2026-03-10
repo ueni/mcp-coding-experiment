@@ -8,6 +8,24 @@ set -euo pipefail
 
 umask 027
 
+ensure_ollama_models_installed() {
+  local models_csv="${CONTINUE_OLLAMA_MODELS:-qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b}"
+  local model_name=""
+  local old_ifs="${IFS}"
+  IFS=','
+  for model_name in ${models_csv}; do
+    model_name="$(echo "${model_name}" | xargs)"
+    if [[ -z "${model_name}" ]]; then
+      continue
+    fi
+    if ollama show "${model_name}" >/dev/null 2>&1; then
+      continue
+    fi
+    ollama pull "${model_name}"
+  done
+  IFS="${old_ifs}"
+}
+
 bootstrap_user_home_from_host_mounts() {
   if [[ "$(id -u)" -ne 0 ]]; then
     return
@@ -73,6 +91,16 @@ apply_repo_defaults() {
   if [[ ! -f /repo/.continue/mcpServers/codebase-tooling-mcp.yaml ]]; then
     cp "${defaults_root}/continue/codebase-tooling-mcp.yaml" /repo/.continue/mcpServers/codebase-tooling-mcp.yaml
   fi
+  mkdir -p /repo/.continue/models
+  while IFS= read -r model_path; do
+    model_name=$(basename "${model_path}")
+    if [[ ! -f "/repo/.continue/models/${model_name}" ]]; then
+      cp "${model_path}" "/repo/.continue/models/${model_name}"
+    fi
+  done < <(find "${defaults_root}/continue/models" -maxdepth 1 -type f -name '*.yaml' | sort)
+  if [[ ! -f /repo/.continue/model-routing.yaml ]]; then
+    cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
+  fi
 
   mkdir -p /home/app/.codex
   if [[ ! -f /home/app/.codex/config.toml ]]; then
@@ -123,5 +151,7 @@ if [[ "${ready}" -ne 1 ]]; then
   echo "ollama failed to start; see /tmp/ollama.log" >&2
   exit 1
 fi
+
+ensure_ollama_models_installed
 
 exec python /app/server.py

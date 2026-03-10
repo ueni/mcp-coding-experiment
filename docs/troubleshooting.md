@@ -87,6 +87,8 @@ Checks:
 
 Symptom:
 
+- `.continue/models/` does not contain the default specialist model files.
+- `.continue/model-routing.yaml` is missing.
 - `.continue/mcpServers/codebase-tooling-mcp.yaml` is missing.
 - `.config/labs/` is missing.
 - `/.build/` was not added to `.gitignore`.

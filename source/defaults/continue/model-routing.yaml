@@ -1,0 +1,26 @@
+schema: v1
+router:
+  model: granite3.2:2b
+  file: .continue/models/router-granite3.2-2b.yaml
+routes:
+  coding:
+    model: qwen2.5-coder:7b
+    file: .continue/models/coding-qwen2.5-coder-7b.yaml
+  refactor:
+    model: phi4-mini:3.8b
+    file: .continue/models/refactor-phi4-mini-3.8b.yaml
+  review:
+    model: phi4-mini-reasoning:3.8b
+    file: .continue/models/review-phi4-mini-reasoning-3.8b.yaml
+  security:
+    model: deepseek-r1:1.5b
+    file: .continue/models/security-deepseek-r1-1.5b.yaml
+  math:
+    model: deepscaler:1.5b
+    file: .continue/models/math-deepscaler-1.5b.yaml
+  vision:
+    model: granite3.2-vision:2b
+    file: .continue/models/vision-granite3.2-vision-2b.yaml
+  research:
+    model: llama3.2:3b
+    file: .continue/models/research-llama3.2-3b.yaml

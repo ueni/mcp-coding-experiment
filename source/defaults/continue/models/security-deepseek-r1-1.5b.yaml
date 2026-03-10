@@ -1,0 +1,10 @@
+name: security-deepseek-r1-1.5b
+version: 0.0.1
+schema: v1
+models:
+  - name: Security - DeepSeek R1 1.5B
+    provider: ollama
+    model: deepseek-r1:1.5b
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - chat
