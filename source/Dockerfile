@@ -14,6 +14,8 @@ ARG OLLAMA_SHA256_ARM64="45e089fd5fb31fd08d2be151bb537d3047a2be1f3437b41f35372fc
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore \
     DEBIAN_FRONTEND=noninteractive \
     REPO_PATH=/repo \
     HOST=0.0.0.0 \
@@ -58,13 +60,14 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 RUN pip install --no-cache-dir \
-    black \
-    isort \
-    mypy \
-    pyupgrade \
-    ruff
+    --root-user-action=ignore \
+    black==26.3.0 \
+    isort==8.0.1 \
+    mypy==1.18.2 \
+    pyupgrade==3.21.2 \
+    ruff==0.15.5
 
 RUN set -eux; \
     ollama_sha256=""; \
