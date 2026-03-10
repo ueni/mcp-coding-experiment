@@ -95,8 +95,9 @@ cat > .devcontainer/devcontainer.json <<EOF
     }
   },
   "mounts": [
-    "source=\${localEnv:HOME}/.continue,target=/home/app/.continue,type=bind,consistency=cached",
-    "source=\${localEnv:HOME}/.gitconfig,target=/home/app/.gitconfig,type=bind,consistency=cached",
+    "source=\${localEnv:HOME}/.codex,target=/host/.codex,type=bind,consistency=cached",readOnly=true,
+    "source=\${localEnv:HOME}/.continue,target=/host/.continue,type=bind,consistency=cached,readOnly=true",
+    "source=\${localEnv:HOME}/.gitconfig,target=/host/.gitconfig,type=bind,consistency=cached,readOnly=true",
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
     "source=\${localWorkspaceFolder},target=/repo,type=bind,consistency=cached",
     "source=/etc/ssl/certs,target=/etc/ssl/certs,type=bind,consistency=cached,readOnly=true"

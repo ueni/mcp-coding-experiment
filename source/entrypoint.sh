@@ -8,6 +8,33 @@ set -euo pipefail
 
 umask 027
 
+bootstrap_user_home_from_host_mounts() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    return
+  fi
+
+  if [[ -d /host/.continue ]]; then
+    mkdir -p /home/app/.continue
+    if ! find /home/app/.continue -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      cp -a /host/.continue/. /home/app/.continue/
+      chown -R app:app /home/app/.continue
+    fi
+  fi
+
+  if [[ -d /host/.codex ]]; then
+    mkdir -p /home/app/.codex
+    if ! find /home/app/.codex -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      cp -a /host/.codex/. /home/app/.codex/
+      chown -R app:app /home/app/.codex
+    fi
+  fi
+
+  if [[ -f /host/.gitconfig ]] && [[ ! -f /home/app/.gitconfig ]]; then
+    cp /host/.gitconfig /home/app/.gitconfig
+    chown app:app /home/app/.gitconfig
+  fi
+}
+
 maybe_fix_docker_sock_group() {
   if [[ "$(id -u)" -ne 0 ]]; then
     return
@@ -71,6 +98,7 @@ apply_repo_defaults() {
 
 if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then
   maybe_fix_docker_sock_group
+  bootstrap_user_home_from_host_mounts
   exec su -s /bin/bash app -c "/app/entrypoint.sh --as-app"
 fi
 

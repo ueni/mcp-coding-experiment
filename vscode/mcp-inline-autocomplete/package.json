@@ -11,8 +11,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:mcpInlineAutocomplete.status"
+    "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
