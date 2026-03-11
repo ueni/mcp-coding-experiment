@@ -6559,6 +6559,53 @@ def _coding_pip_install(
     }
 
 
+def _coding_stream_payload_from_steps(
+    steps: list[dict[str, Any]] | None,
+    max_events: int = 200,
+) -> dict[str, Any]:
+    stdout_stream: list[dict[str, Any]] = []
+    stderr_stream: list[dict[str, Any]] = []
+    out_cap = _token_budget_apply_max(None)
+    for idx, step in enumerate(steps or []):
+        if len(stdout_stream) + len(stderr_stream) >= max_events:
+            break
+        cmd = step.get("command", [])
+        if not isinstance(cmd, list):
+            cmd = []
+        out = str(step.get("stdout", "") or "")
+        err = str(step.get("stderr", "") or "")
+        if out:
+            stdout_stream.append(
+                {
+                    "index": idx,
+                    "command": cmd,
+                    "chunk": _trim_text(out, max_chars=min(4000, out_cap)),
+                }
+            )
+        if err:
+            stderr_stream.append(
+                {
+                    "index": idx,
+                    "command": cmd,
+                    "chunk": _trim_text(err, max_chars=min(4000, out_cap)),
+                }
+            )
+    stdout_text = _trim_text(
+        "\n".join(item["chunk"] for item in stdout_stream if item.get("chunk")),
+        max_chars=out_cap,
+    )
+    stderr_text = _trim_text(
+        "\n".join(item["chunk"] for item in stderr_stream if item.get("chunk")),
+        max_chars=out_cap,
+    )
+    return {
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "stdout_stream": stdout_stream,
+        "stderr_stream": stderr_stream,
+    }
+
+
 def _coding_sandbox_prepare(
     sandbox_mode: str = "shared",
     sandbox_id: str = "",
@@ -7308,23 +7355,31 @@ def model_router(
             "infer": infer_result,
             "check_requested": run_checks,
             "sandbox": sandbox,
+            "stdout": "",
+            "stderr": "",
+            "stdout_stream": [],
+            "stderr_stream": [],
         }
         if run_checks:
-            payload["checks"] = _coding_checks(
+            checks = _coding_checks(
                 profile=check_profile,
                 target=check_target,
                 timeout_seconds=check_timeout_seconds,
                 python_executable=str(sandbox["venv_python"]),
             )
+            payload["checks"] = checks
+            payload.update(_coding_stream_payload_from_steps(checks.get("steps", [])))
         return payload
     if mode == "coding_check":
         sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
-        return _coding_checks(
+        checks = _coding_checks(
             profile=check_profile,
             target=check_target,
             timeout_seconds=check_timeout_seconds,
             python_executable=str(sandbox["venv_python"]),
         )
+        checks.update(_coding_stream_payload_from_steps(checks.get("steps", [])))
+        return checks
     if mode == "coding_pip":
         sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
         result = _coding_pip_install(
@@ -7332,6 +7387,18 @@ def model_router(
             upgrade=pip_upgrade,
             timeout_seconds=check_timeout_seconds,
             python_executable=str(sandbox["venv_python"]),
+        )
+        stdout_chunk = _trim_text(str(result.get("stdout", "") or ""), max_chars=4000)
+        stderr_chunk = _trim_text(str(result.get("stderr", "") or ""), max_chars=4000)
+        result["stdout_stream"] = (
+            [{"index": 0, "command": result.get("command", []), "chunk": stdout_chunk}]
+            if stdout_chunk
+            else []
+        )
+        result["stderr_stream"] = (
+            [{"index": 0, "command": result.get("command", []), "chunk": stderr_chunk}]
+            if stderr_chunk
+            else []
         )
         result["sandbox"] = sandbox
         return result

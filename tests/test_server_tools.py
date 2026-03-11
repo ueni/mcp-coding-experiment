@@ -1177,6 +1177,8 @@ class ServerToolsTest(unittest.TestCase):
         self.assertTrue(out["check_requested"])
         self.assertIn("checks", out)
         self.assertIn("sandbox", out)
+        self.assertIn("stdout_stream", out)
+        self.assertIn("stderr_stream", out)
 
         with patch.object(
             self.server,
@@ -1189,6 +1191,49 @@ class ServerToolsTest(unittest.TestCase):
                     check_profile="lint",
                     check_target="src/sample.py",
                 )
+
+    def test_model_router_coding_check_and_pip_include_stream_fields(self):
+        checks_payload = {
+            "schema": "coding_checks.v1",
+            "ok": False,
+            "steps": [
+                {
+                    "command": ["python", "-m", "pytest", "-q"],
+                    "stdout": "collected 1 item",
+                    "stderr": "E AssertionError",
+                }
+            ],
+        }
+        with patch.object(self.server, "_coding_checks", return_value=checks_payload), patch.object(
+            self.server, "_coding_sandbox_prepare", return_value={"venv_python": sys.executable}
+        ):
+            out = self.server.model_router(
+                mode="coding_check",
+                check_profile="quick",
+                check_target="src/sample.py",
+            )
+        self.assertIn("stdout_stream", out)
+        self.assertIn("stderr_stream", out)
+        self.assertGreaterEqual(len(out["stdout_stream"]), 1)
+        self.assertGreaterEqual(len(out["stderr_stream"]), 1)
+
+        pip_payload = {
+            "schema": "coding_pip.v1",
+            "ok": True,
+            "command": [sys.executable, "-m", "pip", "install", "pytest"],
+            "stdout": "Successfully installed pytest",
+            "stderr": "",
+        }
+        with patch.object(self.server, "_coding_pip_install", return_value=pip_payload), patch.object(
+            self.server, "_coding_sandbox_prepare", return_value={"venv_python": sys.executable}
+        ):
+            out_pip = self.server.model_router(
+                mode="coding_pip",
+                packages=["pytest"],
+            )
+        self.assertIn("stdout_stream", out_pip)
+        self.assertIn("stderr_stream", out_pip)
+        self.assertGreaterEqual(len(out_pip["stdout_stream"]), 1)
 
     def test_model_router_coding_sandbox_lifecycle(self):
         base_venv = self.repo_path / ".build" / "base-venv"
