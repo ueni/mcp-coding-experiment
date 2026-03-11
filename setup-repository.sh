@@ -126,10 +126,12 @@ ensure_gitignore_entry '/.build/'
 ensure_gitignore_entry '/.continue/'
 ensure_gitignore_entry '/.config/'
 ensure_gitignore_entry '/.devcontainer/'
+ensure_gitignore_entry '/.gitignore_codebase_tooling_mcp.touched'
+: > .gitignore_codebase_tooling_mcp.touched
 
 log "Created:"
 log "  .devcontainer/devcontainer.json"
-log "  .gitignore entries for generated hidden folders"
+log "  .gitignore entries for generated hidden folders (one-time bootstrap)"
 log ""
 log "The container image provides the inline autocomplete extension and repo defaults."
 log "Next step: open this repository in VS Code and run 'Dev Containers: Reopen in Container'."

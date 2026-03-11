@@ -176,14 +176,18 @@ apply_repo_defaults() {
   if [[ ! -f /repo/.gitignore ]]; then
     cp "${defaults_root}/gitignore" /repo/.gitignore
   fi
-  if ! grep -qxF '# codebase-tooling-mcp generated' /repo/.gitignore; then
-    printf '\n# codebase-tooling-mcp generated\n' >> /repo/.gitignore
-  fi
-  for entry in '/.build/' '/.continue/' '/.config/' '/.devcontainer/'; do
-    if ! grep -qxF "${entry}" /repo/.gitignore; then
-      printf '%s\n' "${entry}" >> /repo/.gitignore
+  local gitignore_touch_file="/repo/.gitignore_codebase_tooling_mcp.touched"
+  if [[ ! -f "${gitignore_touch_file}" ]]; then
+    if ! grep -qxF '# codebase-tooling-mcp generated' /repo/.gitignore; then
+      printf '\n# codebase-tooling-mcp generated\n' >> /repo/.gitignore
     fi
-  done
+    for entry in '/.build/' '/.continue/' '/.config/' '/.devcontainer/' '/.gitignore_codebase_tooling_mcp.touched'; do
+      if ! grep -qxF "${entry}" /repo/.gitignore; then
+        printf '%s\n' "${entry}" >> /repo/.gitignore
+      fi
+    done
+    : > "${gitignore_touch_file}"
+  fi
 }
 
 if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then

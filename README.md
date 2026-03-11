@@ -158,11 +158,15 @@ are missing:
 - `.continue/model-routing.yaml` (routing map for router/specialists)
 - `.continue/mcpServers/codebase-tooling-mcp.yaml`
 - `.config/labs/*.json`
-- `/.build/`, `/.continue/`, `/.config/`, `/.devcontainer/` entries in `.gitignore`
+- `/.build/`, `/.continue/`, `/.config/`, `/.devcontainer/`, `/.gitignore_codebase_tooling_mcp.touched` entries in `.gitignore` (one-time bootstrap)
 
 The image also ensures a default Codex MCP client entry exists at:
 
 - `~/.codex/config.toml`
+
+The `.gitignore` bootstrap is intentionally one-time. A marker file
+`.gitignore_codebase_tooling_mcp.touched` is created on first apply; after that,
+removed generated entries are not re-added automatically.
 
 For home-config portability, the generated devcontainer mounts host paths under
 `/host` for `~/.continue` and `~/.gitconfig`, and mounts `~/.codex` directly to
