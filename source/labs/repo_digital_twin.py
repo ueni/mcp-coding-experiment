@@ -30,7 +30,7 @@ def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 def collect_tree(max_files: int) -> list[str]:
     cp = git("ls-files")
     files = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
-    return files[:max_files]
+    return files
 
 
 def hotspots(limit: int) -> list[dict[str, Any]]:
@@ -74,7 +74,8 @@ def main() -> int:
     branch = git("branch", "--show-current").stdout.strip() or "HEAD"
     dirty = bool(git("status", "--porcelain").stdout.strip())
 
-    files = collect_tree(args.max_files)
+    all_files = collect_tree(args.max_files)
+    files = all_files[: args.max_files]
     hs = hotspots(args.hotspot_limit)
 
     twin: dict[str, Any] = {
@@ -85,7 +86,8 @@ def main() -> int:
             "dirty": dirty,
         },
         "inventory": {
-            "tracked_file_count": len(files),
+            "tracked_file_count": len(all_files),
+            "listed_file_count": len(files),
             "files": files,
         },
         "hotspots": hs,
@@ -93,7 +95,9 @@ def main() -> int:
         "drift_markers": {
             "has_xray": Path("MCP_XRAY.md").exists(),
             "has_drift": Path("MCP_DRIFT.md").exists(),
-            "has_gatekeeper_report": Path("POLICY_GATEKEEPER.md").exists(),
+            "has_gatekeeper_report": Path(
+                ".build/reports/POLICY_GATEKEEPER.md"
+            ).exists(),
         },
     }
 
@@ -113,7 +117,8 @@ def main() -> int:
         "",
         "## Inventory",
         "",
-        f"- Tracked files: `{len(files)}`",
+        f"- Tracked files: `{len(all_files)}`",
+        f"- Listed files (max-files={args.max_files}): `{len(files)}`",
         "",
         "## Hotspots",
         "",

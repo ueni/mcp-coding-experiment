@@ -102,6 +102,7 @@ def main() -> int:
 
     results: list[dict[str, Any]] = []
     created_branch = False
+    all_ok = False
 
     try:
         git("checkout", "-b", rehearsal_branch)
@@ -203,7 +204,7 @@ def main() -> int:
             git("branch", "-D", rehearsal_branch, check=False)
 
     print(f"Wrote {report_path}")
-    return 0
+    return 0 if all_ok else 2
 
 
 if __name__ == "__main__":

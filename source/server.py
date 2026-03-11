@@ -10633,7 +10633,7 @@ starlette_app = Starlette(
     routes=[
         Route("/", root, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
-        Mount("/", app=mcp.streamable_http_app()),
+        Mount("/mcp", app=mcp.streamable_http_app()),
     ],
     lifespan=lifespan,
 )
