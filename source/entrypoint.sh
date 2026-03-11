@@ -8,8 +8,64 @@ set -euo pipefail
 
 umask 027
 
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+sanitize_positive_int() {
+  local raw="${1:-}"
+  local fallback="${2:-1}"
+  local var_name="${3:-value}"
+  if [[ "${raw}" =~ ^[0-9]+$ ]] && [[ "${raw}" -gt 0 ]]; then
+    echo "${raw}"
+    return 0
+  fi
+  echo "Invalid ${var_name}='${raw}'; using default ${fallback}" >&2
+  echo "${fallback}"
+}
+
+_ollama_probe_url() {
+  local host_port="${1:-127.0.0.1:11434}"
+  local host="${host_port%:*}"
+  local port="${host_port##*:}"
+  if [[ "${host}" == "0.0.0.0" ]] || [[ "${host}" == "::" ]]; then
+    host="127.0.0.1"
+  fi
+  echo "http://${host}:${port}/api/tags"
+}
+
+start_ollama_with_host() {
+  local host_port="${1}"
+  local probe_url
+  probe_url="$(_ollama_probe_url "${host_port}")"
+  export OLLAMA_HOST="${host_port}"
+  ollama serve >/tmp/ollama.log 2>&1 &
+  local ollama_pid=$!
+  local ready=0
+  for _ in $(seq 1 "${OLLAMA_STARTUP_TIMEOUT}"); do
+    if curl -fsS "${probe_url}" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "${ready}" -eq 1 ]]; then
+    return 0
+  fi
+  kill "${ollama_pid}" >/dev/null 2>&1 || true
+  wait "${ollama_pid}" >/dev/null 2>&1 || true
+  return 1
+}
+
 ensure_ollama_models_installed() {
-  local models_csv="${CONTINUE_OLLAMA_MODELS:-qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b}"
+  local models_csv="${CONTINUE_OLLAMA_MODELS-qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b}"
+  if [[ -z "${models_csv// }" ]]; then
+    echo "CONTINUE_OLLAMA_MODELS is empty; skipping Ollama model pre-pull" >&2
+    return 0
+  fi
   local model_name=""
   local old_ifs="${IFS}"
   IFS=','
@@ -146,25 +202,39 @@ fi
 
 export HOME="${HOME:-/home/app}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
+OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
+OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"
+OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
+OLLAMA_FALLBACK_HOST="${OLLAMA_FALLBACK_HOST:-0.0.0.0:11434}"
+OLLAMA_STARTUP_TIMEOUT="$(sanitize_positive_int "${OLLAMA_STARTUP_TIMEOUT}" 30 "OLLAMA_STARTUP_TIMEOUT")"
 
 apply_repo_defaults
 
-ollama serve >/tmp/ollama.log 2>&1 &
-
-ready=0
-for _ in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-    ready=1
-    break
+if is_truthy "${OLLAMA_ENABLED}"; then
+  started=0
+  hosts=("${OLLAMA_HOST}")
+  if [[ -n "${OLLAMA_FALLBACK_HOST}" ]] && [[ "${OLLAMA_FALLBACK_HOST}" != "${OLLAMA_HOST}" ]]; then
+    hosts+=("${OLLAMA_FALLBACK_HOST}")
   fi
-  sleep 1
-done
 
-if [[ "${ready}" -ne 1 ]]; then
-  echo "ollama failed to start; see /tmp/ollama.log" >&2
-  exit 1
+  for host in "${hosts[@]}"; do
+    if start_ollama_with_host "${host}"; then
+      echo "ollama ready on ${host}" >&2
+      started=1
+      break
+    fi
+    echo "ollama failed to start on ${host}; see /tmp/ollama.log" >&2
+  done
+
+  if [[ "${started}" -ne 1 ]]; then
+    echo "continuing without Ollama" >&2
+  elif ! ensure_ollama_models_installed; then
+    echo "ollama started, but model ensure failed; see logs above" >&2
+    echo "continuing with running Ollama and current model set" >&2
+  fi
+else
+  echo "OLLAMA_ENABLED=false; skipping Ollama startup" >&2
 fi
 
-ensure_ollama_models_installed
 
 exec python /app/server.py
