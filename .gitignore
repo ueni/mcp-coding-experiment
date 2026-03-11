@@ -31,3 +31,8 @@ env/
 
 # codebase-tooling-mcp
 /.build/
+
+# codebase-tooling-mcp generated
+/.continue/
+/.config/
+/.devcontainer/
