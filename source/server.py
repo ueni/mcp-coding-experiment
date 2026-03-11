@@ -7033,10 +7033,10 @@ def _summarize_file_two_sentences(rel_path: str, text: str, max_chars: int) -> s
             max_sentences=2,
             max_chars=max_chars,
         )
-    if low_path.endswith("source/docker-compose.yml"):
+    if low_path.endswith(".devcontainer/devcontainer.json"):
         return _compact_sentences(
-            "source/docker-compose.yml defines the codebase-tooling-mcp service, image/build settings, and port mapping for HTTP access. "
-            "It configures repository mounting and key environment variables including MCP transport, mutation mode, and Ollama host options.",
+            ".devcontainer/devcontainer.json defines the development container build, workspace mount, and editor customization settings. "
+            "It configures runtime environment variables, ports, and host mounts for local MCP usage without requiring docker-compose.",
             max_sentences=2,
             max_chars=max_chars,
         )

@@ -38,50 +38,23 @@
       "problemMatcher": []
     },
     {
-      "label": "Docker: Compose Build Service",
+      "label": "Docker: Run Container",
       "type": "process",
       "command": "docker",
       "args": [
-        "compose",
-        "-f",
-        "source/docker-compose.yml",
-        "build",
-        "codebase-tooling-mcp"
-      ],
-      "group": "build",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": []
-    },
-    {
-      "label": "Docker: Compose Pull Service",
-      "type": "process",
-      "command": "docker",
-      "args": [
-        "compose",
-        "-f",
-        "source/docker-compose.yml",
-        "pull",
-        "codebase-tooling-mcp"
-      ],
-      "group": "build",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": []
-    },
-    {
-      "label": "Docker: Compose Up Service",
-      "type": "process",
-      "command": "docker",
-      "args": [
-        "compose",
-        "-f",
-        "source/docker-compose.yml",
-        "up",
+        "run",
         "-d",
-        "codebase-tooling-mcp"
+        "--name",
+        "codebase-tooling-mcp",
+        "-p",
+        "8000:8000",
+        "-e",
+        "MCP_TRANSPORT=http",
+        "-e",
+        "ALLOW_MUTATIONS=true",
+        "-v",
+        "${workspaceFolder}:/repo",
+        "codebase-tooling-mcp:latest"
       ],
       "group": "none",
       "options": {
@@ -90,13 +63,10 @@
       "problemMatcher": []
     },
     {
-      "label": "Docker: Compose Logs Service",
+      "label": "Docker: Container Logs",
       "type": "process",
       "command": "docker",
       "args": [
-        "compose",
-        "-f",
-        "source/docker-compose.yml",
         "logs",
         "--tail",
         "200",
@@ -109,14 +79,27 @@
       "problemMatcher": []
     },
     {
-      "label": "Docker: Compose Down",
+      "label": "Docker: Stop Container",
       "type": "process",
       "command": "docker",
       "args": [
-        "compose",
+        "stop",
+        "codebase-tooling-mcp"
+      ],
+      "group": "none",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Remove Container",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "rm",
         "-f",
-        "source/docker-compose.yml",
-        "down"
+        "codebase-tooling-mcp"
       ],
       "group": "none",
       "options": {

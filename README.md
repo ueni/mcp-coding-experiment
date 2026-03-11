@@ -72,10 +72,53 @@ ok
 
 1. Open this repository in VS Code.
 2. Run `Dev Containers: Reopen in Container`.
-3. Wait for the `codebase-tooling-mcp` service to start.
+3. Wait for the `codebase-tooling-mcp` container to build and start.
 4. Use the MCP endpoint at `http://localhost:8000/mcp`.
 
-The VS Code entry point is [`.devcontainer/devcontainer.json`](./.devcontainer/devcontainer.json), while the underlying container implementation is [`source/docker-compose.yml`](./source/docker-compose.yml). The repository is mounted at `/repo` and port `8000` is forwarded automatically.
+The VS Code entry point is [`.devcontainer/devcontainer.json`](./.devcontainer/devcontainer.json). This repository uses a single-file devcontainer setup (no required `docker-compose.yml`).
+
+Inline devcontainer example (non-compose):
+
+```json
+{
+  "name": "codebase-tooling-mcp",
+  "build": {
+    "context": "..",
+    "dockerfile": "../source/Dockerfile"
+  },
+  "workspaceFolder": "/repo",
+  "containerEnv": {
+    "MCP_TRANSPORT": "http",
+    "ALLOW_MUTATIONS": "true"
+  },
+  "forwardPorts": [8000]
+}
+```
+
+If you still want compose for local runs outside VS Code, use this inline example:
+
+```yaml
+services:
+  codebase-tooling-mcp:
+    image: codebase-tooling-mcp:latest
+    build: ./source
+    environment:
+      MCP_TRANSPORT: http
+      ALLOW_MUTATIONS: "true"
+      REPO_PATH: /repo
+      HOST: 0.0.0.0
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/repo
+```
+
+Run it with:
+
+```bash
+docker compose up --build
+```
 
 ### VS Code Inline Autocomplete Extension (MCP-backed)
 
