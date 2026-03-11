@@ -6877,6 +6877,124 @@ def local_rerank(
     }
 
 
+def _extract_prompt_file_paths(prompt: str, max_paths: int = 4) -> list[str]:
+    if max_paths < 1:
+        return []
+    pattern = re.compile(
+        r"(?<![\w/.-])(?:\./)?(?:[A-Za-z0-9_.-]+/)*(?:\.[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)"
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in pattern.finditer(prompt):
+        raw = m.group(0).strip("`'\"()[]{}<>,:;")
+        if not raw:
+            continue
+        if raw.startswith("./"):
+            raw = raw[2:]
+        candidate = raw.replace("\\", "/")
+        if candidate in seen:
+            continue
+        with contextlib.suppress(Exception):
+            resolved = _resolve_repo_path(candidate)
+            if resolved.is_file():
+                seen.add(candidate)
+                out.append(candidate)
+                if len(out) >= max_paths:
+                    break
+    return out
+
+
+def _extract_codebase_tooling_generated_ignores(text: str) -> list[str]:
+    lines = text.splitlines()
+    marker = "# codebase-tooling-mcp generated"
+    start = -1
+    for idx, line in enumerate(lines):
+        if line.strip() == marker:
+            start = idx + 1
+            break
+    if start < 0:
+        return []
+    entries: list[str] = []
+    for line in lines[start:]:
+        item = line.strip()
+        if not item:
+            continue
+        if item.startswith("#"):
+            if entries:
+                break
+            continue
+        if item.startswith("/"):
+            entries.append(item)
+        elif entries:
+            break
+    return entries
+
+
+def _extract_env_keys(text: str, prefixes: tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        m = re.match(r"^\s*([A-Z][A-Z0-9_]*):", line)
+        if not m:
+            continue
+        key = m.group(1)
+        if not key.startswith(prefixes):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _tool_assisted_infer(prompt: str, max_tokens: int = 256) -> str:
+    paths = _extract_prompt_file_paths(prompt)
+    if not paths:
+        return ""
+    lower = prompt.lower()
+    parts: list[str] = []
+    max_chars = max(600, min(6000, max_tokens * 20))
+
+    for rel_path in paths:
+        file_path = _resolve_repo_path(rel_path)
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        if "codex" in lower and "mount" in lower and "target" in lower:
+            m = re.search(
+                r"source=\$\{localEnv:HOME\}/\.codex,target=([^,\"]+)",
+                text,
+            )
+            if m:
+                parts.append(m.group(1))
+                continue
+        if "ignore" in lower and "generated" in lower:
+            entries = _extract_codebase_tooling_generated_ignores(text)
+            if entries:
+                parts.append(", ".join(entries))
+                continue
+        if "ollama" in lower and "environment" in lower:
+            keys = _extract_env_keys(text, prefixes=("OLLAMA_", "CONTINUE_OLLAMA_"))
+            if keys:
+                parts.append(", ".join(keys))
+                continue
+        if "tags probe" in lower or ("optional" in lower and "probe" in lower):
+            if "include_ollama_probe" in text and "tags_probe" in text:
+                parts.append(
+                    "tags probe is optional; controlled by include_ollama_probe and omitted when false."
+                )
+                continue
+        if "summarize" in lower or "summary" in lower:
+            summary = doc_summarizer_small(text=text, max_bullets=2, max_chars=max_chars)
+            s = str(summary.get("summary", "")).strip()
+            if s:
+                normalized = " ".join(seg.strip("- ").strip() for seg in s.splitlines() if seg.strip())
+                parts.append(f"{rel_path}: {normalized}")
+                continue
+        preview_lines = [ln.strip() for ln in text.splitlines() if ln.strip()][:3]
+        if preview_lines:
+            parts.append(f"{rel_path}: " + " ".join(preview_lines))
+    return _trim_text(" ".join(parts), max_chars=max_chars)
+
+
 def _parallel_infer(
     prompts: list[str],
     task: str,
@@ -6901,16 +7019,16 @@ def _parallel_infer(
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as ex:
         future_map = {
             ex.submit(
-                local_infer,
-                prompt=p,
-                task=task,
-                backend=backend,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system,
-                output_profile=output_profile,
-                store_result=store_result,
+                _parallel_infer_one,
+                p,
+                task,
+                backend,
+                model,
+                max_tokens,
+                temperature,
+                system,
+                output_profile,
+                store_result,
             ): idx
             for idx, p in enumerate(cleaned)
         }
@@ -6939,6 +7057,54 @@ def _parallel_infer(
         "max_parallel": max_parallel,
         "rows": rows,
     }
+
+
+def _parallel_infer_one(
+    prompt: str,
+    task: str,
+    backend: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    system: str,
+    output_profile: str | None,
+    store_result: bool,
+) -> dict[str, Any]:
+    selected = backend.strip().lower()
+    if selected in {"auto", "fallback", "rule", "hash"}:
+        tool_text = _tool_assisted_infer(prompt=prompt, max_tokens=max_tokens)
+        if tool_text:
+            profile = _default_output_profile(output_profile)
+            out = {
+                "schema": "local_infer.v1",
+                "backend": "tool_fallback",
+                "model": model or LOCAL_INFER_MODEL or "local-default",
+                "task": task,
+                "output": tool_text,
+                "ok": True,
+            }
+            if profile == "compact":
+                out = {
+                    "schema": "local_infer.compact.v1",
+                    "backend": "tool_fallback",
+                    "model": model or LOCAL_INFER_MODEL or "local-default",
+                    "ok": True,
+                    "output": _trim_text(tool_text, max_chars=1200),
+                }
+            if store_result:
+                out["result_id"] = _result_store_put("local_infer", out)
+            return out
+    return local_infer(
+        prompt=prompt,
+        task=task,
+        backend=backend,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=system,
+        output_profile=output_profile,
+        store_result=store_result,
+    )
 
 
 def _infer_batch_from_prompt(prompt: str) -> list[str]:

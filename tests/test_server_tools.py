@@ -335,6 +335,30 @@ class ServerToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.server.model_router(mode="parallel_infer", prompts=[], max_parallel=2)
 
+    def test_model_router_parallel_infer_tool_backed_fallback(self):
+        (self.repo_path / ".gitignore").write_text(
+            "# codebase-tooling-mcp generated\n/.build/\n/.continue/\n",
+            encoding="utf-8",
+        )
+        out = self.server.model_router(
+            mode="parallel_infer",
+            prompts=[
+                "From .gitignore, list the codebase-tooling generated ignore entries.",
+            ],
+            backend="fallback",
+            output_profile="compact",
+            max_parallel=1,
+            max_tokens=64,
+        )
+        self.assertEqual(out["schema"], "parallel_infer.v1")
+        self.assertEqual(out["ok_count"], 1)
+        row = out["rows"][0]
+        self.assertTrue(row["ok"])
+        result = row["result"]
+        self.assertEqual(result["backend"], "tool_fallback")
+        self.assertIn("/.build/", result["output"])
+        self.assertIn("/.continue/", result["output"])
+
     def test_model_router_infer_auto_parallel_upgrade(self):
         parallel_payload = {
             "schema": "parallel_infer.v1",
