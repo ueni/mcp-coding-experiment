@@ -133,12 +133,19 @@ apply_repo_defaults() {
 if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then
   maybe_fix_docker_sock_group
   bootstrap_user_home_from_host_mounts
+  export HOME="/home/app"
+  export USER="app"
+  export LOGNAME="app"
+  export OLLAMA_MODELS="${OLLAMA_MODELS:-/home/app/.ollama/models}"
   exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"
 fi
 
 if [[ "${1:-}" == "--as-app" ]]; then
   shift
 fi
+
+export HOME="${HOME:-/home/app}"
+export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
 
 apply_repo_defaults
 
