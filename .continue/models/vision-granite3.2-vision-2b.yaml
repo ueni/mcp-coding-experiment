@@ -1,0 +1,10 @@
+name: vision-granite3.2-vision-2b
+version: 0.0.1
+schema: v1
+models:
+  - name: Vision - Granite 3.2 Vision 2B
+    provider: ollama
+    model: granite3.2-vision:2b
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - chat

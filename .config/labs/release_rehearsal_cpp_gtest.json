@@ -1,0 +1,14 @@
+{
+  "target_branch": "main",
+  "changelog_from": "HEAD~10",
+  "report_path": ".build/reports/RELEASE_REHEARSAL_CPP_GTEST.md",
+  "artifacts": [
+    "build/lab-release/compile_commands.json",
+    "build/lab-release/Testing/Temporary/LastTest.log"
+  ],
+  "checks": [
+    "if command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then true; else echo 'Missing C/C++ compiler (gcc or clang)' >&2; exit 1; fi",
+    "if [ -f CMakeLists.txt ]; then cmake -S . -B build/lab-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON && cmake --build build/lab-release -j; elif [ -f Makefile ]; then make -j; else echo 'Missing CMakeLists.txt or Makefile' >&2; exit 1; fi",
+    "if [ -f CMakeLists.txt ]; then ctest --test-dir build/lab-release --output-on-failure; elif [ -x ./build/tests/runTests ]; then ./build/tests/runTests; else echo 'No standard test entrypoint detected (ctest or ./build/tests/runTests)' >&2; exit 1; fi"
+  ]
+}

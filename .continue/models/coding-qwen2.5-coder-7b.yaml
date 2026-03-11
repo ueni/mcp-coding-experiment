@@ -1,0 +1,13 @@
+name: coding-qwen2.5-coder-7b
+version: 0.0.1
+schema: v1
+models:
+  - name: Coding - Qwen2.5 Coder 7B
+    provider: ollama
+    model: qwen2.5-coder:7b
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - chat
+      - edit
+      - apply
+      - autocomplete

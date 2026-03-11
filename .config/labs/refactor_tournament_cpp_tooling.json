@@ -1,0 +1,34 @@
+{
+  "base_ref": "HEAD",
+  "report_path": ".build/reports/REFACTOR_TOURNAMENT_CPP_TOOLING.md",
+  "strategies": [
+    {
+      "name": "C/C++ Baseline",
+      "branch": "tournament/cpp-baseline",
+      "mutate": [],
+      "checks": [
+        "if [ -f CMakeLists.txt ]; then cmake -S . -B build/lab-tournament-baseline -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON && cmake --build build/lab-tournament-baseline -j && ctest --test-dir build/lab-tournament-baseline --output-on-failure; elif [ -f Makefile ]; then make -j; else echo 'Missing CMakeLists.txt or Makefile' >&2; exit 1; fi"
+      ]
+    },
+    {
+      "name": "Clang-Format Autofix",
+      "branch": "tournament/clang-format-autofix",
+      "mutate": [
+        "if command -v clang-format >/dev/null 2>&1; then find src include tests -type f \\( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \\) -print0 2>/dev/null | xargs -0 -r clang-format -i; else echo 'Missing clang-format' >&2; exit 1; fi"
+      ],
+      "checks": [
+        "if command -v clang-format >/dev/null 2>&1; then find src include tests -type f \\( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \\) -print0 2>/dev/null | xargs -0 -r clang-format --dry-run --Werror; else echo 'Missing clang-format' >&2; exit 1; fi",
+        "if [ -f CMakeLists.txt ]; then cmake -S . -B build/lab-tournament-format -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON && cmake --build build/lab-tournament-format -j && ctest --test-dir build/lab-tournament-format --output-on-failure; elif [ -f Makefile ]; then make -j; else echo 'Missing CMakeLists.txt or Makefile' >&2; exit 1; fi"
+      ]
+    },
+    {
+      "name": "Cppcheck Pass",
+      "branch": "tournament/cppcheck-pass",
+      "mutate": [],
+      "checks": [
+        "if command -v cppcheck >/dev/null 2>&1; then cppcheck --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 --std=c++20 src include tests; else echo 'cppcheck not installed; skipping static analysis'; fi",
+        "if [ -f CMakeLists.txt ]; then cmake -S . -B build/lab-tournament-cppcheck -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON && cmake --build build/lab-tournament-cppcheck -j && ctest --test-dir build/lab-tournament-cppcheck --output-on-failure; elif [ -f Makefile ]; then make -j; else echo 'Missing CMakeLists.txt or Makefile' >&2; exit 1; fi"
+      ]
+    }
+  ]
+}

@@ -33,6 +33,3 @@ env/
 /.build/
 
 # codebase-tooling-mcp generated
-/.continue/
-/.config/
-/.devcontainer/

@@ -1,0 +1,10 @@
+name: research-llama3.2-3b
+version: 0.0.1
+schema: v1
+models:
+  - name: Research - Llama 3.2 3B
+    provider: ollama
+    model: llama3.2:3b
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - chat

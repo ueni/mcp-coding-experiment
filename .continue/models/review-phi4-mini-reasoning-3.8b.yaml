@@ -1,0 +1,10 @@
+name: review-phi4-mini-reasoning-3.8b
+version: 0.0.1
+schema: v1
+models:
+  - name: Review - Phi4 Mini Reasoning 3.8B
+    provider: ollama
+    model: phi4-mini-reasoning:3.8b
+    apiBase: http://127.0.0.1:11434
+    roles:
+      - chat
