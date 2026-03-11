@@ -10633,7 +10633,9 @@ starlette_app = Starlette(
     routes=[
         Route("/", root, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
-        Mount("/mcp", app=mcp.streamable_http_app()),
+        # FastMCP's streamable HTTP app serves MCP routes under `/mcp` internally.
+        # Mount at root so the public MCP endpoint is exactly `/mcp`.
+        Mount("/", app=mcp.streamable_http_app()),
     ],
     lifespan=lifespan,
 )
