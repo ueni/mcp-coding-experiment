@@ -1,7 +1,7 @@
 {
   "name": "codebase-tooling-mcp",
   "build": {
-    "context": "..",
+    "context": "../source",
     "dockerfile": "../source/Dockerfile"
   },
   "overrideCommand": false,
@@ -43,6 +43,7 @@
     "source=${localEnv:HOME}/.codex,target=/home/app/.codex,type=bind,consistency=cached,readOnly=true",
     "source=${localEnv:HOME}/.continue,target=/host/.continue,type=bind,consistency=cached,readOnly=true",
     "source=${localEnv:HOME}/.gitconfig,target=/host/.gitconfig,type=bind,consistency=cached,readOnly=true",
+    "source=${localWorkspaceFolder},target=/repo,type=bind,consistency=cached",
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
   ]
 }

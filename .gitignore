@@ -32,4 +32,9 @@ env/
 # codebase-tooling-mcp
 /.build/
 
+
 # codebase-tooling-mcp generated
+/.continue/
+/.config/
+/.devcontainer/
+/.gitignore_codebase_tooling_mcp.touched

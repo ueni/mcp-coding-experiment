@@ -97,15 +97,17 @@ RUN groupadd --gid "${APP_GID}" app \
     && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults \
     && chown -R app:app /app /models /home/app /opt/codebase-tooling
 
-COPY --chown=app:app server.py ./
-COPY --chown=app:app entrypoint.sh ./
 COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
-COPY --chown=app:app defaults/selftests/ /opt/codebase-tooling/defaults/selftests/
-RUN chmod 0755 /app/entrypoint.sh
 
 RUN mkdir -p /home/app/.vscode-server/extensions \
     && ln -sfn /opt/codebase-tooling/defaults/extensions/local.mcp-inline-autocomplete-0.0.1 /home/app/.vscode-server/extensions/local.mcp-inline-autocomplete-0.0.1 \
     && chown -R app:app /opt/codebase-tooling /home/app/.vscode-server
+
+# Keep high-churn app files in the last layers to speed iterative rebuilds.
+COPY --chown=app:app server.py ./
+COPY --chown=app:app entrypoint.sh ./
+RUN chmod 0755 /app/entrypoint.sh
+RUN ln -sf /usr/local/bin/python3 /usr/bin/python3
 
 EXPOSE 8000
 EXPOSE 11434
