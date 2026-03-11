@@ -359,6 +359,26 @@ class ServerToolsTest(unittest.TestCase):
         self.assertIn("/.build/", result["output"])
         self.assertIn("/.continue/", result["output"])
 
+    def test_model_router_parallel_infer_tool_backed_summary_is_concise(self):
+        out = self.server.model_router(
+            mode="parallel_infer",
+            prompts=[
+                "Summarize src/sample.py in 2 concise sentences focused on behavior.",
+            ],
+            backend="fallback",
+            output_profile="compact",
+            max_parallel=1,
+            max_tokens=96,
+        )
+        self.assertEqual(out["schema"], "parallel_infer.v1")
+        row = out["rows"][0]
+        result = row["result"]
+        self.assertEqual(result["backend"], "tool_fallback")
+        text = result["output"]
+        self.assertIn("alpha", text.lower())
+        self.assertNotIn("[truncated:", text)
+        self.assertLessEqual(len(text), 420)
+
     def test_model_router_infer_auto_parallel_upgrade(self):
         parallel_payload = {
             "schema": "parallel_infer.v1",

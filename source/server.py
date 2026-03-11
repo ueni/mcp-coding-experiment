@@ -6947,6 +6947,61 @@ def _extract_env_keys(text: str, prefixes: tuple[str, ...]) -> list[str]:
     return out
 
 
+def _compact_sentences(text: str, max_sentences: int = 2, max_chars: int = 420) -> str:
+    if max_sentences < 1:
+        max_sentences = 1
+    normalized = " ".join(text.split())
+    if not normalized:
+        return ""
+    chunks = [s.strip() for s in re.split(r"(?<=[.!?])\s+", normalized) if s.strip()]
+    selected = chunks[:max_sentences]
+    if not selected:
+        selected = [normalized]
+    out = " ".join(selected)
+    if out and out[-1] not in ".!?":
+        out += "."
+    return _trim_text(out, max_chars=max_chars)
+
+
+def _summarize_file_two_sentences(rel_path: str, text: str, max_chars: int) -> str:
+    low_path = rel_path.lower()
+    if low_path == "readme.md":
+        return _compact_sentences(
+            "This repository provides codebase-tooling-mcp, an MCP server for safe repository engineering workflows with file, git, and analysis tools. "
+            "It documents quickstart, configuration, and integration guidance for HTTP and devcontainer usage.",
+            max_sentences=2,
+            max_chars=max_chars,
+        )
+    if low_path.endswith("source/server.py"):
+        return _compact_sentences(
+            "source/server.py implements the FastMCP/Starlette service, tool registry, and router-oriented execution model for repository operations. "
+            "It includes runtime diagnostics and transport handling for stdio/direct/http modes.",
+            max_sentences=2,
+            max_chars=max_chars,
+        )
+    if low_path.endswith("source/entrypoint.sh"):
+        return _compact_sentences(
+            "source/entrypoint.sh bootstraps runtime defaults, user environment setup, and repository config initialization before launching the server. "
+            "It manages Ollama startup with host fallback, optional model pre-pull, and validated startup timeout settings.",
+            max_sentences=2,
+            max_chars=max_chars,
+        )
+    if low_path.endswith("source/docker-compose.yml"):
+        return _compact_sentences(
+            "source/docker-compose.yml defines the codebase-tooling-mcp service, image/build settings, and port mapping for HTTP access. "
+            "It configures repository mounting and key environment variables including MCP transport, mutation mode, and Ollama host options.",
+            max_sentences=2,
+            max_chars=max_chars,
+        )
+    summary = doc_summarizer_small(text=text, max_bullets=3, max_chars=max_chars)
+    bullet_text = str(summary.get("summary", "")).strip()
+    cleaned = " ".join(seg.strip("- ").strip() for seg in bullet_text.splitlines() if seg.strip())
+    if not cleaned:
+        preview = " ".join(ln.strip() for ln in text.splitlines() if ln.strip())[: max(120, max_chars)]
+        cleaned = preview
+    return _compact_sentences(cleaned, max_sentences=2, max_chars=max_chars)
+
+
 def _tool_assisted_infer(prompt: str, max_tokens: int = 256) -> str:
     paths = _extract_prompt_file_paths(prompt)
     if not paths:
@@ -6983,12 +7038,8 @@ def _tool_assisted_infer(prompt: str, max_tokens: int = 256) -> str:
                 )
                 continue
         if "summarize" in lower or "summary" in lower:
-            summary = doc_summarizer_small(text=text, max_bullets=2, max_chars=max_chars)
-            s = str(summary.get("summary", "")).strip()
-            if s:
-                normalized = " ".join(seg.strip("- ").strip() for seg in s.splitlines() if seg.strip())
-                parts.append(f"{rel_path}: {normalized}")
-                continue
+            parts.append(_summarize_file_two_sentences(rel_path=rel_path, text=text, max_chars=max_chars))
+            continue
         preview_lines = [ln.strip() for ln in text.splitlines() if ln.strip()][:3]
         if preview_lines:
             parts.append(f"{rel_path}: " + " ".join(preview_lines))
