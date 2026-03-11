@@ -2578,6 +2578,97 @@ def _docker_cli_status() -> dict[str, Any]:
     return status
 
 
+def _list_listening_ports() -> set[int]:
+    ports: set[int] = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        with contextlib.suppress(FileNotFoundError, PermissionError):
+            with open(table, "r", encoding="utf-8", errors="replace") as f:
+                for line in f.readlines()[1:]:
+                    cols = line.split()
+                    if len(cols) < 4 or cols[3] != "0A":
+                        continue
+                    local_addr = cols[1]
+                    if ":" not in local_addr:
+                        continue
+                    port_hex = local_addr.rsplit(":", 1)[1]
+                    with contextlib.suppress(ValueError):
+                        ports.add(int(port_hex, 16))
+    return ports
+
+
+def _count_processes_with_tokens(*tokens: str) -> int:
+    wanted = tuple(t for t in tokens if t)
+    if not wanted:
+        return 0
+    count = 0
+    proc_root = Path("/proc")
+    with contextlib.suppress(FileNotFoundError, PermissionError):
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            cmdline_path = entry / "cmdline"
+            try:
+                raw = cmdline_path.read_bytes()
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            text = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+            if text and all(tok in text for tok in wanted):
+                count += 1
+    return count
+
+
+def _ollama_tags_url() -> str:
+    parsed = urllib.parse.urlparse(LOCAL_INFER_ENDPOINT)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}/api/tags"
+    return "http://127.0.0.1:11434/api/tags"
+
+
+def _probe_http(url: str, timeout: float = 2.0) -> dict[str, Any]:
+    result: dict[str, Any] = {"url": url, "reachable": False}
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with _urlopen_with_host_certs(req, timeout=timeout) as resp:
+            result["reachable"] = True
+            result["status"] = int(getattr(resp, "status", 200))
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
+    listening_ports = _list_listening_ports()
+    http_mode = MCP_TRANSPORT in {"http", "streamable-http", "streamable_http"}
+    ollama_tags_url = _ollama_tags_url()
+    ollama_probe: dict[str, Any] = (
+        _probe_http(ollama_tags_url, timeout=2.0) if include_ollama_probe else {}
+    )
+    ollama_processes = _count_processes_with_tokens("ollama", "serve")
+
+    return {
+        "schema": "runtime_state.v1",
+        "timestamp": _now_iso(),
+        "transport": MCP_TRANSPORT,
+        "server": {
+            "pid": os.getpid(),
+            "host": HOST,
+            "port": PORT,
+            "http_mode": http_mode,
+            "port_listening": (PORT in listening_ports) if http_mode else None,
+            "python_server_processes": _count_processes_with_tokens("python", "server.py"),
+        },
+        "ollama": {
+            "host_env": os.getenv("OLLAMA_HOST", ""),
+            "models_dir_env": os.getenv("OLLAMA_MODELS", ""),
+            "serve_processes": ollama_processes,
+            "running": ollama_processes > 0,
+            "port_11434_listening": 11434 in listening_ports,
+            "tags_probe": ollama_probe,
+        },
+        "docker": _docker_cli_status(),
+    }
+
+
 def _load_vscode_tasks(tasks_path: str = ".vscode/tasks.json") -> tuple[Path, list[dict[str, Any]]]:
     path = _resolve_repo_path(tasks_path)
     if not path.is_file():
@@ -2852,6 +2943,12 @@ def repo_info() -> dict[str, Any]:
         info["dirty"] = bool(status)
 
     return info
+
+
+@mcp.tool()
+def runtime_state() -> dict[str, Any]:
+    """Return process/port/dependency runtime state for server and optional Ollama."""
+    return _runtime_state_payload(include_ollama_probe=True)
 
 
 def docker_cli_status() -> dict[str, Any]:
@@ -10608,6 +10705,9 @@ def memory_router(
 
 
 async def healthz(_request):
+    runtime = _runtime_state_payload(include_ollama_probe=False)
+    server_state = runtime.get("server", {})
+    ollama_state = runtime.get("ollama", {})
     return JSONResponse(
         {
             "ok": True,
@@ -10615,6 +10715,16 @@ async def healthz(_request):
             "is_git_repo": _is_git_repo(),
             "allow_mutations": ALLOW_MUTATIONS,
             "transport": MCP_TRANSPORT,
+            "server": {
+                "http_mode": server_state.get("http_mode"),
+                "port": server_state.get("port"),
+                "port_listening": server_state.get("port_listening"),
+            },
+            "ollama": {
+                "running": ollama_state.get("running"),
+                "serve_processes": ollama_state.get("serve_processes"),
+                "port_11434_listening": ollama_state.get("port_11434_listening"),
+            },
         }
     )
 
