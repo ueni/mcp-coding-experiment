@@ -260,6 +260,69 @@ def _ensure_repo_path_exists() -> None:
     REPO_PATH.mkdir(parents=True, exist_ok=True)
 
 
+def _mcp_resource_json(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+def _decode_resource_path(path: str) -> str:
+    return urllib.parse.unquote(path)
+
+
+@mcp.resource(
+    "repo://summary",
+    name="repo_summary_resource",
+    description="Repository summary and basic server capability flags.",
+    mime_type="application/json",
+)
+def repo_summary_resource() -> str:
+    _ensure_repo_path_exists()
+    branch = ""
+    head = ""
+    is_git_repo = _is_git_repo()
+    if is_git_repo:
+        branch = _git("branch", "--show-current").stdout.strip()
+        head = _git("rev-parse", "HEAD").stdout.strip()
+    payload = {
+        "schema": "resource.repo_summary.v1",
+        "repo_path": str(REPO_PATH),
+        "is_git_repo": is_git_repo,
+        "current_branch": branch,
+        "head": head,
+        "allow_mutations": ALLOW_MUTATIONS,
+        "max_read_bytes": MAX_READ_BYTES,
+        "max_output_chars": MAX_OUTPUT_CHARS,
+    }
+    return _mcp_resource_json(payload)
+
+
+@mcp.resource(
+    "repo://file/{path}",
+    name="repo_file_resource",
+    description="Read a UTF-8 file from the repository by relative path.",
+    mime_type="text/plain",
+)
+def repo_file_resource(path: str) -> str:
+    return read_file(path=_decode_resource_path(path))
+
+
+@mcp.resource(
+    "repo://tree/{path}",
+    name="repo_tree_resource",
+    description="List repository entries under a relative path.",
+    mime_type="application/json",
+)
+def repo_tree_resource(path: str) -> str:
+    decoded_path = _decode_resource_path(path)
+    entries = list_files(path=decoded_path, recursive=True, include_hidden=False, max_entries=1000)
+    payload = {
+        "schema": "resource.repo_tree.v1",
+        "path": decoded_path,
+        "entries": entries,
+        "count": len(entries),
+    }
+    return _mcp_resource_json(payload)
+
+
 def _is_git_repo() -> bool:
     try:
         result = subprocess.run(

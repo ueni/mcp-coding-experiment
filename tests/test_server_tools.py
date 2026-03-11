@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 import importlib.util
+import asyncio
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -81,6 +83,36 @@ class ServerToolsTest(unittest.TestCase):
         self.assertEqual(out["schema"], "prompt_optimize.v1")
         self.assertIn("optimized_prompt", out)
         self.assertGreater(out["optimized_chars"], 0)
+
+    def test_mcp_resources_and_templates(self):
+        async def run_checks():
+            resources = await self.server.mcp.list_resources()
+            templates = await self.server.mcp.list_resource_templates()
+
+            resource_uris = {str(item.model_dump().get("uri")) for item in resources}
+            template_uris = {item.model_dump().get("uriTemplate") for item in templates}
+
+            self.assertIn("repo://summary", resource_uris)
+            self.assertIn("repo://file/{path}", template_uris)
+            self.assertIn("repo://tree/{path}", template_uris)
+
+            summary_contents = await self.server.mcp.read_resource("repo://summary")
+            self.assertGreaterEqual(len(summary_contents), 1)
+            summary_payload = json.loads(summary_contents[0].content)
+            self.assertEqual(summary_payload["schema"], "resource.repo_summary.v1")
+
+            encoded_file = urllib.parse.quote("src/sample.py", safe="")
+            file_contents = await self.server.mcp.read_resource(f"repo://file/{encoded_file}")
+            self.assertGreaterEqual(len(file_contents), 1)
+            self.assertIn("def alpha", file_contents[0].content)
+
+            tree_contents = await self.server.mcp.read_resource("repo://tree/src")
+            self.assertGreaterEqual(len(tree_contents), 1)
+            tree_payload = json.loads(tree_contents[0].content)
+            self.assertEqual(tree_payload["schema"], "resource.repo_tree.v1")
+            self.assertIn("src/sample.py", tree_payload["entries"])
+
+        asyncio.run(run_checks())
 
     def test_terminal_support_session(self):
         started = self.server.terminal_support_session(
