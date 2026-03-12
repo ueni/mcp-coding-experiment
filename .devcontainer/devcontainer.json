@@ -40,7 +40,7 @@
     }
   },
   "mounts": [
-    "source=${localEnv:HOME}/.codex,target=/home/app/.codex,type=bind,consistency=cached,readOnly=true",
+    "source=${localEnv:HOME}/.codex,target=/home/app/.codex,type=bind,consistency=cached,readOnly=false",
     "source=${localEnv:HOME}/.continue,target=/host/.continue,type=bind,consistency=cached,readOnly=true",
     "source=${localEnv:HOME}/.gitconfig,target=/host/.gitconfig,type=bind,consistency=cached,readOnly=true",
     "source=${localWorkspaceFolder},target=/repo,type=bind,consistency=cached",
