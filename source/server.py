@@ -2959,6 +2959,55 @@ def docker_cli_status() -> dict[str, Any]:
     }
 
 
+class DockerTaskRouterService:
+    """Application service for Docker-related task routing."""
+
+    def route(
+        self,
+        mode: str = "status",
+        label: str = "",
+        tasks_path: str = ".vscode/tasks.json",
+        label_prefix: str = "Docker:",
+        control_profile: str = "build",
+        timeout_seconds: int = 1800,
+        max_output_chars: int | None = None,
+    ) -> dict[str, Any]:
+        if mode not in {"status", "list", "run"}:
+            raise ValueError("mode must be one of: status, list, run")
+        if mode == "status":
+            return {
+                "schema": "docker_task_router.v1",
+                "mode": mode,
+                "result": docker_cli_status(),
+            }
+        if mode == "list":
+            return {
+                "schema": "docker_task_router.v1",
+                "mode": mode,
+                "result": vscode_tasks_list(
+                    tasks_path=tasks_path,
+                    label_prefix=label_prefix,
+                    control_profile=control_profile,
+                ),
+            }
+        if not label.strip():
+            raise ValueError("label is required for run mode")
+        return {
+            "schema": "docker_task_router.v1",
+            "mode": mode,
+            "result": vscode_task_run(
+                label=label,
+                tasks_path=tasks_path,
+                control_profile=control_profile,
+                timeout_seconds=timeout_seconds,
+                max_output_chars=max_output_chars,
+            ),
+        }
+
+
+_DOCKER_TASK_ROUTER_SERVICE = DockerTaskRouterService()
+
+
 @mcp.tool()
 def docker_task_router(
     mode: str = "status",
@@ -2970,37 +3019,15 @@ def docker_task_router(
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
     """Docker task gateway. mode=status|list|run; run requires exact task label and returns execution diagnostics."""
-    if mode not in {"status", "list", "run"}:
-        raise ValueError("mode must be one of: status, list, run")
-    if mode == "status":
-        return {
-            "schema": "docker_task_router.v1",
-            "mode": mode,
-            "result": docker_cli_status(),
-        }
-    if mode == "list":
-        return {
-            "schema": "docker_task_router.v1",
-            "mode": mode,
-            "result": vscode_tasks_list(
-                tasks_path=tasks_path,
-                label_prefix=label_prefix,
-                control_profile=control_profile,
-            ),
-        }
-    if not label.strip():
-        raise ValueError("label is required for run mode")
-    return {
-        "schema": "docker_task_router.v1",
-        "mode": mode,
-        "result": vscode_task_run(
-            label=label,
-            tasks_path=tasks_path,
-            control_profile=control_profile,
-            timeout_seconds=timeout_seconds,
-            max_output_chars=max_output_chars,
-        ),
-    }
+    return _DOCKER_TASK_ROUTER_SERVICE.route(
+        mode=mode,
+        label=label,
+        tasks_path=tasks_path,
+        label_prefix=label_prefix,
+        control_profile=control_profile,
+        timeout_seconds=timeout_seconds,
+        max_output_chars=max_output_chars,
+    )
 
 
 def vscode_tasks_list(
@@ -7236,6 +7263,224 @@ def _infer_batch_from_prompt(prompt: str) -> list[str]:
     return []
 
 
+class ModelRouterService:
+    """Application service for local model and coding router orchestration."""
+
+    def route(
+        self,
+        mode: str = "status",
+        prompt: str = "",
+        task: str = "general",
+        prefix: str = "",
+        suffix: str = "",
+        language: str = "",
+        texts: list[str] | None = None,
+        query: str = "",
+        candidates: list[dict[str, Any]] | None = None,
+        backend: str = "auto",
+        model: str = "",
+        max_tokens: int = 256,
+        temperature: float = 0.2,
+        system: str = "",
+        stop: list[str] | None = None,
+        normalize: bool = True,
+        top_k: int = 20,
+        output_profile: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+        compress: bool = False,
+        store_result: bool = False,
+        check_profile: str = "quick",
+        check_target: str = ".",
+        check_timeout_seconds: int = 600,
+        run_checks: bool = False,
+        packages: list[str] | None = None,
+        pip_upgrade: bool = False,
+        sandbox_mode: str = "shared",
+        sandbox_id: str = "",
+        sandbox_action: str = "list",
+        prompts: list[str] | None = None,
+        max_parallel: int = 4,
+        auto_parallel_when_possible: bool = True,
+    ) -> dict[str, Any]:
+        if mode not in {
+            "status",
+            "embed",
+            "infer",
+            "parallel_infer",
+            "autocomplete",
+            "rerank",
+            "coding_infer",
+            "coding_check",
+            "coding_pip",
+            "coding_sandbox",
+        }:
+            raise ValueError(
+                "mode must be one of: status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
+            )
+        if mode == "status":
+            return local_model_status()
+        if mode == "embed":
+            return local_embed(
+                texts=texts or [],
+                backend=backend,
+                normalize=normalize,
+                output_profile=output_profile,
+                offset=offset,
+                limit=limit,
+                compress=compress,
+                store_result=store_result,
+            )
+        if mode == "infer":
+            inferred_batch = prompts or []
+            if not inferred_batch and auto_parallel_when_possible:
+                inferred_batch = _infer_batch_from_prompt(prompt)
+            if len(inferred_batch) >= 2:
+                parallel = _parallel_infer(
+                    prompts=inferred_batch,
+                    task=task,
+                    backend=backend,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system,
+                    output_profile=output_profile,
+                    store_result=store_result,
+                    max_parallel=max_parallel,
+                )
+                return {
+                    "schema": "model_router.infer_auto_parallel.v1",
+                    "upgraded": True,
+                    "reason": "detected_independent_batch",
+                    "count": len(inferred_batch),
+                    "result": parallel,
+                }
+            return local_infer(
+                prompt=prompt,
+                task=task,
+                backend=backend,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                output_profile=output_profile,
+                store_result=store_result,
+            )
+        if mode == "parallel_infer":
+            return _parallel_infer(
+                prompts=prompts or [],
+                task=task,
+                backend=backend,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                output_profile=output_profile,
+                store_result=store_result,
+                max_parallel=max_parallel,
+            )
+        if mode == "coding_infer":
+            sandbox = _coding_sandbox_prepare(
+                sandbox_mode=sandbox_mode, sandbox_id=sandbox_id
+            )
+            infer_result = local_infer(
+                prompt=prompt,
+                task="coding",
+                backend=backend,
+                model=model or CODING_DEFAULT_MODEL,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                output_profile=output_profile,
+                store_result=store_result,
+            )
+            payload: dict[str, Any] = {
+                "schema": "model_router.coding_infer.v1",
+                "infer": infer_result,
+                "check_requested": run_checks,
+                "sandbox": sandbox,
+                "stdout": "",
+                "stderr": "",
+                "stdout_stream": [],
+                "stderr_stream": [],
+            }
+            if run_checks:
+                checks = _coding_checks(
+                    profile=check_profile,
+                    target=check_target,
+                    timeout_seconds=check_timeout_seconds,
+                    python_executable=str(sandbox["venv_python"]),
+                )
+                payload["checks"] = checks
+                payload.update(_coding_stream_payload_from_steps(checks.get("steps", [])))
+            return payload
+        if mode == "coding_check":
+            sandbox = _coding_sandbox_prepare(
+                sandbox_mode=sandbox_mode, sandbox_id=sandbox_id
+            )
+            checks = _coding_checks(
+                profile=check_profile,
+                target=check_target,
+                timeout_seconds=check_timeout_seconds,
+                python_executable=str(sandbox["venv_python"]),
+            )
+            checks.update(_coding_stream_payload_from_steps(checks.get("steps", [])))
+            return checks
+        if mode == "coding_pip":
+            sandbox = _coding_sandbox_prepare(
+                sandbox_mode=sandbox_mode, sandbox_id=sandbox_id
+            )
+            result = _coding_pip_install(
+                packages=packages or [],
+                upgrade=pip_upgrade,
+                timeout_seconds=check_timeout_seconds,
+                python_executable=str(sandbox["venv_python"]),
+            )
+            stdout_chunk = _trim_text(
+                str(result.get("stdout", "") or ""), max_chars=4000
+            )
+            stderr_chunk = _trim_text(
+                str(result.get("stderr", "") or ""), max_chars=4000
+            )
+            result["stdout_stream"] = (
+                [{"index": 0, "command": result.get("command", []), "chunk": stdout_chunk}]
+                if stdout_chunk
+                else []
+            )
+            result["stderr_stream"] = (
+                [{"index": 0, "command": result.get("command", []), "chunk": stderr_chunk}]
+                if stderr_chunk
+                else []
+            )
+            result["sandbox"] = sandbox
+            return result
+        if mode == "coding_sandbox":
+            return _coding_sandbox_manage(action=sandbox_action, sandbox_id=sandbox_id)
+        if mode == "autocomplete":
+            return autocomplete(
+                prefix=prefix,
+                suffix=suffix,
+                language=language,
+                backend=backend,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=stop,
+                output_profile=output_profile,
+                store_result=store_result,
+            )
+        return local_rerank(
+            query=query,
+            candidates=candidates or [],
+            top_k=top_k,
+            backend=backend,
+            output_profile=output_profile,
+        )
+
+
+_MODEL_ROUTER_SERVICE = ModelRouterService()
+
+
 @mcp.tool()
 def model_router(
     mode: str = "status",
@@ -7274,155 +7519,41 @@ def model_router(
     auto_parallel_when_possible: bool = True,
 ) -> dict[str, Any]:
     """Strict model router: mode MUST be one of status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; required params are enforced per mode; returns deterministic schema payloads or explicit validation errors."""
-    if mode not in {"status", "embed", "infer", "parallel_infer", "autocomplete", "rerank", "coding_infer", "coding_check", "coding_pip", "coding_sandbox"}:
-        raise ValueError("mode must be one of: status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox")
-    if mode == "status":
-        return local_model_status()
-    if mode == "embed":
-        return local_embed(
-            texts=texts or [],
-            backend=backend,
-            normalize=normalize,
-            output_profile=output_profile,
-            offset=offset,
-            limit=limit,
-            compress=compress,
-            store_result=store_result,
-        )
-    if mode == "infer":
-        inferred_batch = prompts or []
-        if not inferred_batch and auto_parallel_when_possible:
-            inferred_batch = _infer_batch_from_prompt(prompt)
-        if len(inferred_batch) >= 2:
-            parallel = _parallel_infer(
-                prompts=inferred_batch,
-                task=task,
-                backend=backend,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system,
-                output_profile=output_profile,
-                store_result=store_result,
-                max_parallel=max_parallel,
-            )
-            return {
-                "schema": "model_router.infer_auto_parallel.v1",
-                "upgraded": True,
-                "reason": "detected_independent_batch",
-                "count": len(inferred_batch),
-                "result": parallel,
-            }
-        return local_infer(
-            prompt=prompt,
-            task=task,
-            backend=backend,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            output_profile=output_profile,
-            store_result=store_result,
-        )
-    if mode == "parallel_infer":
-        return _parallel_infer(
-            prompts=prompts or [],
-            task=task,
-            backend=backend,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            output_profile=output_profile,
-            store_result=store_result,
-            max_parallel=max_parallel,
-        )
-    if mode == "coding_infer":
-        sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
-        infer_result = local_infer(
-            prompt=prompt,
-            task="coding",
-            backend=backend,
-            model=model or CODING_DEFAULT_MODEL,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            output_profile=output_profile,
-            store_result=store_result,
-        )
-        payload: dict[str, Any] = {
-            "schema": "model_router.coding_infer.v1",
-            "infer": infer_result,
-            "check_requested": run_checks,
-            "sandbox": sandbox,
-            "stdout": "",
-            "stderr": "",
-            "stdout_stream": [],
-            "stderr_stream": [],
-        }
-        if run_checks:
-            checks = _coding_checks(
-                profile=check_profile,
-                target=check_target,
-                timeout_seconds=check_timeout_seconds,
-                python_executable=str(sandbox["venv_python"]),
-            )
-            payload["checks"] = checks
-            payload.update(_coding_stream_payload_from_steps(checks.get("steps", [])))
-        return payload
-    if mode == "coding_check":
-        sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
-        checks = _coding_checks(
-            profile=check_profile,
-            target=check_target,
-            timeout_seconds=check_timeout_seconds,
-            python_executable=str(sandbox["venv_python"]),
-        )
-        checks.update(_coding_stream_payload_from_steps(checks.get("steps", [])))
-        return checks
-    if mode == "coding_pip":
-        sandbox = _coding_sandbox_prepare(sandbox_mode=sandbox_mode, sandbox_id=sandbox_id)
-        result = _coding_pip_install(
-            packages=packages or [],
-            upgrade=pip_upgrade,
-            timeout_seconds=check_timeout_seconds,
-            python_executable=str(sandbox["venv_python"]),
-        )
-        stdout_chunk = _trim_text(str(result.get("stdout", "") or ""), max_chars=4000)
-        stderr_chunk = _trim_text(str(result.get("stderr", "") or ""), max_chars=4000)
-        result["stdout_stream"] = (
-            [{"index": 0, "command": result.get("command", []), "chunk": stdout_chunk}]
-            if stdout_chunk
-            else []
-        )
-        result["stderr_stream"] = (
-            [{"index": 0, "command": result.get("command", []), "chunk": stderr_chunk}]
-            if stderr_chunk
-            else []
-        )
-        result["sandbox"] = sandbox
-        return result
-    if mode == "coding_sandbox":
-        return _coding_sandbox_manage(action=sandbox_action, sandbox_id=sandbox_id)
-    if mode == "autocomplete":
-        return autocomplete(
-            prefix=prefix,
-            suffix=suffix,
-            language=language,
-            backend=backend,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=stop,
-            output_profile=output_profile,
-            store_result=store_result,
-        )
-    return local_rerank(
+    return _MODEL_ROUTER_SERVICE.route(
+        mode=mode,
+        prompt=prompt,
+        task=task,
+        prefix=prefix,
+        suffix=suffix,
+        language=language,
+        texts=texts,
         query=query,
-        candidates=candidates or [],
-        top_k=top_k,
+        candidates=candidates,
         backend=backend,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=system,
+        stop=stop,
+        normalize=normalize,
+        top_k=top_k,
         output_profile=output_profile,
+        offset=offset,
+        limit=limit,
+        compress=compress,
+        store_result=store_result,
+        check_profile=check_profile,
+        check_target=check_target,
+        check_timeout_seconds=check_timeout_seconds,
+        run_checks=run_checks,
+        packages=packages,
+        pip_upgrade=pip_upgrade,
+        sandbox_mode=sandbox_mode,
+        sandbox_id=sandbox_id,
+        sandbox_action=sandbox_action,
+        prompts=prompts,
+        max_parallel=max_parallel,
+        auto_parallel_when_possible=auto_parallel_when_possible,
     )
 
 
@@ -10295,6 +10426,115 @@ def repo_index_daemon(
     return result
 
 
+class CodeIndexRouterService:
+    """Application service for code indexing and semantic-search routing."""
+
+    def route(
+        self,
+        mode: str = "refresh",
+        path: str = ".",
+        query: str = "",
+        recursive: bool = True,
+        output_profile: str | None = None,
+        fields: list[str] | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+        max_files: int = 5000,
+        max_symbols: int = 20000,
+        max_edges: int = 20000,
+        include_hashes: bool = False,
+        include_private: bool = False,
+        include_stdlib: bool = False,
+        local_rerank_top_k: int = 25,
+        use_local_rerank: bool = True,
+        summary_mode: str = "full",
+        compress: bool = False,
+        store_result: bool = False,
+        incremental: bool = True,
+    ) -> dict[str, Any]:
+        allowed = {"refresh", "read", "query", "symbols", "deps", "calls", "search"}
+        if mode not in allowed:
+            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+
+        if mode in {"refresh", "read", "query"}:
+            result = repo_index_daemon(
+                mode=mode,
+                path=path,
+                query=query,
+                recursive=recursive,
+                include_hashes=include_hashes,
+                max_files=max_files,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+                incremental=incremental,
+            )
+        elif mode == "symbols":
+            result = symbol_index(
+                path=path,
+                recursive=recursive,
+                include_private=include_private,
+                max_symbols=max_symbols,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+            )
+        elif mode == "deps":
+            result = dependency_map(
+                path=path,
+                recursive=recursive,
+                include_stdlib=include_stdlib,
+                max_files=max_files,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        elif mode == "calls":
+            result = call_graph(
+                path=path,
+                recursive=recursive,
+                max_edges=max_edges,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        else:
+            result = semantic_find(
+                query=query,
+                path=path,
+                use_local_rerank=use_local_rerank,
+                local_rerank_top_k=local_rerank_top_k,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        return {
+            "schema": "code_index_router.v1",
+            "mode": mode,
+            "result": result,
+        }
+
+
+_CODE_INDEX_ROUTER_SERVICE = CodeIndexRouterService()
+
+
 @mcp.tool()
 def code_index_router(
     mode: str = "refresh",
@@ -10319,87 +10559,28 @@ def code_index_router(
     incremental: bool = True,
 ) -> dict[str, Any]:
     """Strict code-intel router: mode MUST be one of refresh|read|query|symbols|deps|calls|search, requires mode-compatible params, and returns `code_index_router.v1` with deterministic nested `result` (reject invalid mode/args explicitly)."""
-    allowed = {"refresh", "read", "query", "symbols", "deps", "calls", "search"}
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-
-    if mode in {"refresh", "read", "query"}:
-        result = repo_index_daemon(
-            mode=mode,
-            path=path,
-            query=query,
-            recursive=recursive,
-            include_hashes=include_hashes,
-            max_files=max_files,
-            output_profile=output_profile,
-            fields=fields,
-            offset=offset,
-            limit=limit,
-            summary_mode=summary_mode,
-            compress=compress,
-            store_result=store_result,
-            incremental=incremental,
-        )
-    elif mode == "symbols":
-        result = symbol_index(
-            path=path,
-            recursive=recursive,
-            include_private=include_private,
-            max_symbols=max_symbols,
-            output_profile=output_profile,
-            fields=fields,
-            offset=offset,
-            limit=limit,
-            summary_mode=summary_mode,
-            compress=compress,
-            store_result=store_result,
-        )
-    elif mode == "deps":
-        result = dependency_map(
-            path=path,
-            recursive=recursive,
-            include_stdlib=include_stdlib,
-            max_files=max_files,
-            output_profile=output_profile,
-            fields=fields,
-            offset=offset,
-            limit=limit,
-            summary_mode=summary_mode,
-            compress=compress,
-            store_result=store_result,
-        )
-    elif mode == "calls":
-        result = call_graph(
-            path=path,
-            recursive=recursive,
-            max_edges=max_edges,
-            output_profile=output_profile,
-            fields=fields,
-            offset=offset,
-            limit=limit,
-            summary_mode=summary_mode,
-            compress=compress,
-            store_result=store_result,
-        )
-    else:
-        result = semantic_find(
-            query=query,
-            path=path,
-            use_local_rerank=use_local_rerank,
-            local_rerank_top_k=local_rerank_top_k,
-            output_profile=output_profile,
-            fields=fields,
-            offset=offset,
-            limit=limit,
-            summary_mode=summary_mode,
-            compress=compress,
-            store_result=store_result,
-        )
-    return {
-        "schema": "code_index_router.v1",
-        "mode": mode,
-        "result": result,
-    }
+    return _CODE_INDEX_ROUTER_SERVICE.route(
+        mode=mode,
+        path=path,
+        query=query,
+        recursive=recursive,
+        output_profile=output_profile,
+        fields=fields,
+        offset=offset,
+        limit=limit,
+        max_files=max_files,
+        max_symbols=max_symbols,
+        max_edges=max_edges,
+        include_hashes=include_hashes,
+        include_private=include_private,
+        include_stdlib=include_stdlib,
+        local_rerank_top_k=local_rerank_top_k,
+        use_local_rerank=use_local_rerank,
+        summary_mode=summary_mode,
+        compress=compress,
+        store_result=store_result,
+        incremental=incremental,
+    )
 
 
 @mcp.tool()
@@ -10882,6 +11063,124 @@ def memory_validate(
     }
 
 
+class MemoryRouterService:
+    """Application service for context-memory operations and policy routing."""
+
+    def route(
+        self,
+        mode: str = "get",
+        namespace: str | None = None,
+        key: str | None = None,
+        value: Any = None,
+        ttl_days: int | None = None,
+        confidence: float = 1.0,
+        source: str = "agent",
+        tags: list[str] | None = None,
+        focus: str = "",
+        summary: str = "",
+        topic: str = "",
+        decision: Any = None,
+        decided_by: str = "llm",
+        rationale: str = "",
+        include_expired: bool = False,
+        max_entries: int = 200,
+        include_summaries: bool = True,
+        include_effective_decisions: bool = True,
+        validate_paths: bool = True,
+        drop_expired: bool = False,
+        auto_compact: bool = False,
+        compact_threshold_entries: int = 80,
+        compact_threshold_chars: int = 16000,
+        compact_keep_entries: int = 40,
+        compact_summary_max_chars: int = 1200,
+    ) -> dict[str, Any]:
+        allowed = {
+            "upsert",
+            "summary_upsert",
+            "decision_record",
+            "get",
+            "validate",
+            "auto_compact",
+        }
+        if mode not in allowed:
+            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+        if mode == "upsert":
+            if namespace is None or key is None:
+                raise ValueError("namespace and key are required for upsert mode")
+            result = memory_upsert(
+                namespace=namespace,
+                key=key,
+                value=value,
+                ttl_days=ttl_days,
+                confidence=confidence,
+                source=source,
+                tags=tags,
+            )
+        elif mode == "summary_upsert":
+            if namespace is None:
+                raise ValueError("namespace is required for summary_upsert mode")
+            result = memory_summary_upsert(
+                namespace=namespace,
+                focus=focus,
+                summary=summary,
+                ttl_days=ttl_days,
+                confidence=confidence,
+                source=source,
+                tags=tags,
+            )
+        elif mode == "decision_record":
+            if namespace is None:
+                raise ValueError("namespace is required for decision_record mode")
+            result = memory_decision_record(
+                namespace=namespace,
+                topic=topic,
+                decision=decision,
+                decided_by=decided_by,
+                rationale=rationale,
+                ttl_days=ttl_days,
+                confidence=confidence,
+                source=source,
+                tags=tags,
+            )
+        elif mode == "validate":
+            result = memory_validate(
+                validate_paths=validate_paths,
+                drop_expired=drop_expired,
+                max_entries=max_entries,
+            )
+        elif mode == "auto_compact":
+            result = memory_auto_compact(
+                namespace=namespace,
+                threshold_entries=compact_threshold_entries,
+                threshold_chars=compact_threshold_chars,
+                keep_entries=compact_keep_entries,
+                summary_max_chars=compact_summary_max_chars,
+                drop_expired=drop_expired,
+            )
+        else:
+            result = memory_get(
+                namespace=namespace,
+                key=key,
+                include_expired=include_expired,
+                max_entries=max_entries,
+                include_summaries=include_summaries,
+                include_effective_decisions=include_effective_decisions,
+                auto_compact=auto_compact,
+                compact_threshold_entries=compact_threshold_entries,
+                compact_threshold_chars=compact_threshold_chars,
+                compact_keep_entries=compact_keep_entries,
+                compact_summary_max_chars=compact_summary_max_chars,
+            )
+        return {
+            "schema": "memory_router.v1",
+            "mode": mode,
+            "result": result,
+        }
+
+
+_MEMORY_ROUTER_SERVICE = MemoryRouterService()
+
+
 @mcp.tool()
 def memory_router(
     mode: str = "get",
@@ -10910,82 +11209,34 @@ def memory_router(
     compact_keep_entries: int = 40,
     compact_summary_max_chars: int = 1200,
 ) -> dict[str, Any]:
-    """Strict memory router: mode MUST be one of upsert|summary_upsert|decision_record|get|validate|auto_compact; required fields are enforced per mode; returns `memory_router.v1` with deterministic nested `result` and explicit parameter errors."""
-    allowed = {"upsert", "summary_upsert", "decision_record", "get", "validate", "auto_compact"}
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-    if mode == "upsert":
-        if namespace is None or key is None:
-            raise ValueError("namespace and key are required for upsert mode")
-        result = memory_upsert(
-            namespace=namespace,
-            key=key,
-            value=value,
-            ttl_days=ttl_days,
-            confidence=confidence,
-            source=source,
-            tags=tags,
-        )
-    elif mode == "summary_upsert":
-        if namespace is None:
-            raise ValueError("namespace is required for summary_upsert mode")
-        result = memory_summary_upsert(
-            namespace=namespace,
-            focus=focus,
-            summary=summary,
-            ttl_days=ttl_days,
-            confidence=confidence,
-            source=source,
-            tags=tags,
-        )
-    elif mode == "decision_record":
-        if namespace is None:
-            raise ValueError("namespace is required for decision_record mode")
-        result = memory_decision_record(
-            namespace=namespace,
-            topic=topic,
-            decision=decision,
-            decided_by=decided_by,
-            rationale=rationale,
-            ttl_days=ttl_days,
-            confidence=confidence,
-            source=source,
-            tags=tags,
-        )
-    elif mode == "validate":
-        result = memory_validate(
-            validate_paths=validate_paths,
-            drop_expired=drop_expired,
-            max_entries=max_entries,
-        )
-    elif mode == "auto_compact":
-        result = memory_auto_compact(
-            namespace=namespace,
-            threshold_entries=compact_threshold_entries,
-            threshold_chars=compact_threshold_chars,
-            keep_entries=compact_keep_entries,
-            summary_max_chars=compact_summary_max_chars,
-            drop_expired=drop_expired,
-        )
-    else:
-        result = memory_get(
-            namespace=namespace,
-            key=key,
-            include_expired=include_expired,
-            max_entries=max_entries,
-            include_summaries=include_summaries,
-            include_effective_decisions=include_effective_decisions,
-            auto_compact=auto_compact,
-            compact_threshold_entries=compact_threshold_entries,
-            compact_threshold_chars=compact_threshold_chars,
-            compact_keep_entries=compact_keep_entries,
-            compact_summary_max_chars=compact_summary_max_chars,
-        )
-    return {
-        "schema": "memory_router.v1",
-        "mode": mode,
-        "result": result,
-    }
+    """Strict memory router: mode MUST be one of upsert|summary_upsert|decision_record|get|validate|auto_compact; required fields are enforced per mode; returns `memory_router.v1` with deterministic nested `result` (reject invalid mode/args explicitly)."""
+    return _MEMORY_ROUTER_SERVICE.route(
+        mode=mode,
+        namespace=namespace,
+        key=key,
+        value=value,
+        ttl_days=ttl_days,
+        confidence=confidence,
+        source=source,
+        tags=tags,
+        focus=focus,
+        summary=summary,
+        topic=topic,
+        decision=decision,
+        decided_by=decided_by,
+        rationale=rationale,
+        include_expired=include_expired,
+        max_entries=max_entries,
+        include_summaries=include_summaries,
+        include_effective_decisions=include_effective_decisions,
+        validate_paths=validate_paths,
+        drop_expired=drop_expired,
+        auto_compact=auto_compact,
+        compact_threshold_entries=compact_threshold_entries,
+        compact_threshold_chars=compact_threshold_chars,
+        compact_keep_entries=compact_keep_entries,
+        compact_summary_max_chars=compact_summary_max_chars,
+    )
 
 
 async def healthz(_request):
