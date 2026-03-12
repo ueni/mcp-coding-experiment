@@ -2,81 +2,18 @@
 #
 # SPDX-License-Identifier: MIT
 
-import importlib.util
 import asyncio
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
 import urllib.parse
 import zipfile
-from pathlib import Path
 from unittest.mock import patch
 
+from tests.server_test_support import ServerToolsTestBase
 
-def _load_server_module():
-    module_path = Path(__file__).resolve().parents[1] / "source" / "server.py"
-    spec = importlib.util.spec_from_file_location("dev_server", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
-    return module
-
-
-class ServerToolsTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.server = _load_server_module()
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.repo_path = Path(self.tmp.name).resolve()
-
-        subprocess.run(["git", "-C", str(self.repo_path), "init", "-b", "main"], check=True)
-        subprocess.run(
-            ["git", "-C", str(self.repo_path), "config", "user.email", "ci@example.com"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo_path), "config", "user.name", "CI Bot"],
-            check=True,
-        )
-
-        (self.repo_path / "src").mkdir(parents=True, exist_ok=True)
-        (self.repo_path / "tests").mkdir(parents=True, exist_ok=True)
-        (self.repo_path / "docs").mkdir(parents=True, exist_ok=True)
-        (self.repo_path / "README.md").write_text("# Test Repo\n", encoding="utf-8")
-        (self.repo_path / "src" / "sample.py").write_text(
-            "import os\n\n"
-            "def alpha(x):\n"
-            "    return x + 1\n\n"
-            "def beta(y):\n"
-            "    return alpha(y)\n",
-            encoding="utf-8",
-        )
-        (self.repo_path / "tests" / "test_sample.py").write_text(
-            "from src.sample import alpha\n\n"
-            "def test_alpha():\n"
-            "    assert alpha(1) == 2\n",
-            encoding="utf-8",
-        )
-        (self.repo_path / "tests" / "test_smoke.py").write_text(
-            "import unittest\n\n"
-            "class SmokeTest(unittest.TestCase):\n"
-            "    def test_ok(self):\n"
-            "        self.assertTrue(True)\n",
-            encoding="utf-8",
-        )
-        (self.repo_path / "docs" / "a.md").write_text("hello world\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(self.repo_path), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(self.repo_path), "commit", "-m", "init"], check=True)
-
-        self.server.REPO_PATH = self.repo_path
-        self.server.ALLOW_MUTATIONS = True
-
-    def tearDown(self):
-        self.tmp.cleanup()
+class ServerToolsTest(ServerToolsTestBase):
 
     def test_prompt_optimize(self):
         out = self.server.prompt_optimize("Please analyze the code and make a safe fix.")
@@ -233,6 +170,29 @@ class ServerToolsTest(unittest.TestCase):
         )
         self.assertEqual(query["mode"], "query")
         self.assertIn("value_json", query)
+
+    def test_code_index_router_modes(self):
+        refreshed = self.server.code_index_router(
+            mode="refresh",
+            path=".",
+            output_profile="compact",
+            summary_mode="quick",
+        )
+        self.assertEqual(refreshed["schema"], "code_index_router.v1")
+        self.assertEqual(refreshed["mode"], "refresh")
+        self.assertIn("schema", refreshed["result"])
+
+        symbols = self.server.code_index_router(
+            mode="symbols",
+            path="src",
+            output_profile="compact",
+            summary_mode="quick",
+            limit=10,
+        )
+        self.assertEqual(symbols["schema"], "code_index_router.v1")
+        self.assertEqual(symbols["mode"], "symbols")
+        self.assertIsInstance(symbols["result"], list)
+        self.assertGreaterEqual(len(symbols["result"]), 1)
 
     def test_tool_benchmark(self):
         out = self.server.tool_benchmark(tools=["find_paths", "grep"], iterations=1, warmup=0)

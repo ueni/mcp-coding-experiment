@@ -26,3 +26,12 @@ ignore_missing_imports = true
 exclude = [
   "^source/server\\.py$",
 ]
+
+[tool.coverage.run]
+source = ["source"]
+
+[tool.coverage.report]
+fail_under = 90
+exclude_lines = [
+  "pragma: no cover",
+]
