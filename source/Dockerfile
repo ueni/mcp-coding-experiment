@@ -89,7 +89,8 @@ RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
        mypy==1.18.2 \
        ruff==0.15.5
 
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
+    set -eux; \
     ollama_sha256=""; \
     case "$(dpkg --print-architecture)" in \
       amd64) ollama_arch="amd64"; ollama_sha256="${OLLAMA_SHA256_AMD64}" ;; \
@@ -100,8 +101,11 @@ RUN set -eux; \
       echo "Missing Ollama SHA256 for architecture ${ollama_arch}." >&2; \
       exit 1; \
     fi; \
-    curl -fsSL "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" \
-      | OLLAMA_SHA256="${ollama_sha256}" python -c 'import hashlib, io, os, sys, tarfile; data = sys.stdin.buffer.read(); expected = os.environ["OLLAMA_SHA256"]; actual = hashlib.sha256(data).hexdigest(); actual == expected or sys.exit(f"sha256 mismatch: expected {expected}, got {actual}"); tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractall("/usr/local")'
+    ollama_tgz="/var/cache/buildkit/ollama/ollama-${OLLAMA_VERSION}-linux-${ollama_arch}.tgz"; \
+    if [ ! -f "${ollama_tgz}" ]; then \
+      curl -fsSL "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" -o "${ollama_tgz}"; \
+    fi; \
+    OLLAMA_SHA256="${ollama_sha256}" OLLAMA_TGZ="${ollama_tgz}" python -c 'import hashlib, os, pathlib, sys, tarfile; tgz_path = pathlib.Path(os.environ["OLLAMA_TGZ"]); expected = os.environ["OLLAMA_SHA256"]; data = tgz_path.read_bytes(); actual = hashlib.sha256(data).hexdigest(); actual == expected or sys.exit(f"sha256 mismatch: expected {expected}, got {actual}"); tarfile.open(tgz_path, mode="r:gz").extractall("/usr/local")'
 
 RUN mkdir -p /tmp/ollama-models \
     && export OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS=/tmp/ollama-models \
