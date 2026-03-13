@@ -1,21 +1,25 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) Nico Ueberfeldt
 
+import asyncio
 import contextlib
 import ast
 import json
 import os
+import queue
 import shutil
 import shlex
 import subprocess
 import sys
 import re
 import fnmatch
+import threading
 import uuid
 import hashlib
 import time
 import math
 import ssl
+from collections import deque
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -87,7 +91,7 @@ except ModuleNotFoundError:  # pragma: no cover
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.routing import Mount, Route
 
 REPO_PATH = Path(os.getenv("REPO_PATH", "/repo")).resolve()
@@ -183,6 +187,13 @@ mcp = FastMCP(
 )
 
 _TERMINAL_SESSIONS: dict[str, dict[str, Any]] = {}
+SSE_EVENT_HISTORY_MAX = max(10, int(os.getenv("SSE_EVENT_HISTORY_MAX", "200")))
+SSE_SUBSCRIBER_QUEUE_MAX = max(10, int(os.getenv("SSE_SUBSCRIBER_QUEUE_MAX", "200")))
+SSE_HEARTBEAT_SECONDS = max(1.0, float(os.getenv("SSE_HEARTBEAT_SECONDS", "2")))
+_SSE_EVENT_HISTORY: deque[dict[str, Any]] = deque(maxlen=SSE_EVENT_HISTORY_MAX)
+_SSE_SUBSCRIBERS: dict[str, queue.Queue[dict[str, Any]]] = {}
+_SSE_LOCK = threading.Lock()
+_SSE_EVENT_SEQ = 0
 
 
 def _trim_text(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
@@ -192,6 +203,176 @@ def _trim_text(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
         text[:max_chars]
         + f"\n\n[truncated: output exceeded {max_chars} characters; original length={len(text)}]"
     )
+
+
+def _sse_subscriber_count() -> int:
+    with _SSE_LOCK:
+        return len(_SSE_SUBSCRIBERS)
+
+
+def _sse_recent_event_count() -> int:
+    with _SSE_LOCK:
+        return len(_SSE_EVENT_HISTORY)
+
+
+def _sse_encode_event(entry: dict[str, Any]) -> str:
+    lines = [f"id: {entry.get('id', '')}", f"event: {entry.get('event', 'message')}"]
+    payload = json.dumps(entry, ensure_ascii=True, sort_keys=True)
+    for line in payload.splitlines() or [""]:
+        lines.append(f"data: {line}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _sse_replay(limit: int = 20) -> list[dict[str, Any]]:
+    clamped = max(0, min(limit, SSE_EVENT_HISTORY_MAX))
+    with _SSE_LOCK:
+        history = list(_SSE_EVENT_HISTORY)
+    if clamped == 0:
+        return []
+    return history[-clamped:]
+
+
+def _sse_publish(event: str, **payload: Any) -> dict[str, Any]:
+    global _SSE_EVENT_SEQ
+    entry = {"event": event, "timestamp": _now_iso(), **payload}
+    with _SSE_LOCK:
+        _SSE_EVENT_SEQ += 1
+        entry["id"] = _SSE_EVENT_SEQ
+        _SSE_EVENT_HISTORY.append(entry)
+        subscribers = list(_SSE_SUBSCRIBERS.values())
+    for subscriber in subscribers:
+        with contextlib.suppress(queue.Full):
+            subscriber.put_nowait(entry)
+    return entry
+
+
+def _split_sse_chunks(text: str, max_chars: int = 2000) -> list[str]:
+    if not text:
+        return []
+    return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+
+
+def _run_observed_subprocess(
+    command: list[str],
+    cwd: str,
+    event_source: str,
+    timeout_seconds: int | None = None,
+    input_text: str | None = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    run_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+    _sse_publish(
+        "tool.start",
+        source=event_source,
+        run_id=run_id,
+        command=command,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        _sse_publish(
+            "tool.error",
+            source=event_source,
+            run_id=run_id,
+            command=command,
+            cwd=cwd,
+            error=str(exc),
+        )
+        raise
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _reader(pipe: Any, stream_name: str, sink: list[str]) -> None:
+        if pipe is None:
+            return
+        try:
+            for chunk in iter(pipe.readline, ""):
+                if not chunk:
+                    break
+                sink.append(chunk)
+                for part in _split_sse_chunks(chunk):
+                    _sse_publish(
+                        "tool.output",
+                        source=event_source,
+                        run_id=run_id,
+                        command=command,
+                        cwd=cwd,
+                        stream=stream_name,
+                        chunk=part,
+                    )
+        finally:
+            with contextlib.suppress(Exception):
+                pipe.close()
+
+    stdout_thread = threading.Thread(
+        target=_reader,
+        args=(proc.stdout, "stdout", stdout_chunks),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_reader,
+        args=(proc.stderr, "stderr", stderr_chunks),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    if input_text is not None and proc.stdin is not None:
+        with contextlib.suppress(BrokenPipeError):
+            proc.stdin.write(input_text)
+            proc.stdin.flush()
+        with contextlib.suppress(Exception):
+            proc.stdin.close()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=1.0)
+
+    stdout_thread.join(timeout=1.0)
+    stderr_thread.join(timeout=1.0)
+    stdout = "".join(stdout_chunks)
+    stderr = "".join(stderr_chunks)
+    duration_ms = int((time.time() - started_at) * 1000)
+    exit_code = None if timed_out else proc.returncode
+    _sse_publish(
+        "tool.finish",
+        source=event_source,
+        run_id=run_id,
+        command=command,
+        cwd=cwd,
+        timed_out=timed_out,
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+        stdout_chars=len(stdout),
+        stderr_chars=len(stderr),
+    )
+    return {
+        "run_id": run_id,
+        "timed_out": timed_out,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "duration_ms": duration_ms,
+    }
 
 
 def _strictness_score_text(text: str) -> dict[str, Any]:
@@ -2091,29 +2272,27 @@ def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
     if not script_path.is_file():
         raise FileNotFoundError(script_rel)
 
-    proc = subprocess.run(
+    observed = _run_observed_subprocess(
         [sys.executable, str(script_path), *args],
-        check=False,
-        capture_output=True,
-        text=True,
         cwd=str(REPO_PATH),
+        event_source="lab_script",
     )
 
-    stdout = _trim_text(proc.stdout.strip())
-    stderr = _trim_text(proc.stderr.strip())
+    stdout = _trim_text(observed["stdout"].strip())
+    stderr = _trim_text(observed["stderr"].strip())
     result: dict[str, Any] = {
         "script": script_rel,
         "args": args,
-        "exit_code": proc.returncode,
-        "ok": proc.returncode == 0,
+        "exit_code": observed["exit_code"],
+        "ok": observed["exit_code"] == 0,
         "stdout": stdout,
         "stderr": stderr,
         "reports": _list_report_files(),
     }
 
-    if proc.returncode != 0:
+    if observed["exit_code"] != 0:
         msg = (
-            stderr or stdout or f"{script_name} failed with exit code {proc.returncode}"
+            stderr or stdout or f"{script_name} failed with exit code {observed['exit_code']}"
         )
         raise RuntimeError(msg)
 
@@ -2135,20 +2314,19 @@ def _run_reuse(args: list[str], timeout_seconds: int = 120) -> dict[str, Any]:
     _require_reuse_cli()
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
-    proc = subprocess.run(
+    observed = _run_observed_subprocess(
         ["reuse", *args],
         cwd=str(REPO_PATH),
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
+        event_source="reuse",
+        timeout_seconds=timeout_seconds,
     )
     return {
-        "ok": proc.returncode == 0,
-        "exit_code": proc.returncode,
+        "ok": observed["exit_code"] == 0 and not observed["timed_out"],
+        "exit_code": observed["exit_code"],
         "command": ["reuse", *args],
-        "stdout": _trim_text(proc.stdout.strip()),
-        "stderr": _trim_text(proc.stderr.strip()),
+        "stdout": _trim_text(observed["stdout"].strip()),
+        "stderr": _trim_text(observed["stderr"].strip()),
+        "timeout": observed["timed_out"],
     }
 
 
@@ -2705,6 +2883,10 @@ def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
             "http_mode": http_mode,
             "port_listening": (PORT in listening_ports) if http_mode else None,
             "python_server_processes": _count_processes_with_tokens("python", "server.py"),
+        },
+        "sse": {
+            "subscribers": _sse_subscriber_count(),
+            "buffered_events": _sse_recent_event_count(),
         },
         "ollama": {
             "host_env": ollama_host_env,
@@ -5167,31 +5349,12 @@ def command_runner(
 
     workdir = _resolve_repo_path(cwd)
     try:
-        proc = subprocess.run(
+        observed = _run_observed_subprocess(
             command,
             cwd=str(workdir),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+            event_source="command_runner",
+            timeout_seconds=timeout_seconds,
         )
-    except subprocess.TimeoutExpired as exc:
-        _failure_record(
-            command=command,
-            stderr="command timed out",
-            stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
-            category="command_runner",
-            suggestion="Increase timeout_seconds or narrow command scope.",
-        )
-        return {
-            "ok": False,
-            "exit_code": None,
-            "command": command,
-            "cwd": str(workdir.relative_to(REPO_PATH)),
-            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
-            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
-            "timeout": True,
-        }
     except FileNotFoundError as exc:
         _failure_record(
             command=command,
@@ -5208,21 +5371,39 @@ def command_runner(
             "stderr": str(exc),
             "timeout": False,
         }
-    if proc.returncode != 0:
+    if observed["timed_out"]:
         _failure_record(
             command=command,
-            stderr=proc.stderr,
-            stdout=proc.stdout,
+            stderr="command timed out",
+            stdout=observed["stdout"],
+            category="command_runner",
+            suggestion="Increase timeout_seconds or narrow command scope.",
+        )
+        return {
+            "ok": False,
+            "exit_code": None,
+            "command": command,
+            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
+            "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
+            "timeout": True,
+        }
+    if observed["exit_code"] != 0:
+        _failure_record(
+            command=command,
+            stderr=observed["stderr"],
+            stdout=observed["stdout"],
             category="command_runner",
             suggestion="Inspect stderr and retry with narrower scope or valid flags.",
         )
     return {
-        "ok": proc.returncode == 0,
-        "exit_code": proc.returncode,
+        "ok": observed["exit_code"] == 0,
+        "exit_code": observed["exit_code"],
         "command": command,
         "cwd": str(workdir.relative_to(REPO_PATH)),
-        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
-        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+        "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
+        "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
+        "timeout": False,
     }
 
 
@@ -5325,6 +5506,22 @@ def terminal_support_session(
             if include_output
             else ""
         )
+        _sse_publish(
+            "terminal.start",
+            session_id=sid,
+            command=cmd,
+            cwd=str(workdir.relative_to(REPO_PATH)),
+            backend=backend,
+            running=proc.poll() is None,
+        )
+        if output:
+            _sse_publish(
+                "terminal.output",
+                session_id=sid,
+                command=cmd,
+                cwd=str(workdir.relative_to(REPO_PATH)),
+                chunk=_trim_text(output, max_chars=4000),
+            )
         return {
             "schema": "terminal_support_session.v1",
             "mode": mode,
@@ -5361,11 +5558,26 @@ def terminal_support_session(
                 if not input_text.endswith("\n"):
                     f.write("\n")
             session["input_chars"] = int(session.get("input_chars", 0)) + len(input_text)
+            _sse_publish(
+                "terminal.input",
+                session_id=session_id,
+                command=session.get("command", []),
+                cwd=session.get("cwd", "."),
+                chunk=_trim_text(input_text, max_chars=4000),
+            )
         output = (
             _terminal_read_available(session, max_output_chars=out_cap, wait_timeout_ms=read_timeout_ms)
             if include_output
             else ""
         )
+        if output:
+            _sse_publish(
+                "terminal.output",
+                session_id=session_id,
+                command=session.get("command", []),
+                cwd=session.get("cwd", "."),
+                chunk=_trim_text(output, max_chars=4000),
+            )
         return {
             "schema": "terminal_support_session.v1",
             "mode": mode,
@@ -5383,6 +5595,14 @@ def terminal_support_session(
             if include_output
             else ""
         )
+        if output:
+            _sse_publish(
+                "terminal.output",
+                session_id=session_id,
+                command=session.get("command", []),
+                cwd=session.get("cwd", "."),
+                chunk=_trim_text(output, max_chars=4000),
+            )
         return {
             "schema": "terminal_support_session.v1",
             "mode": mode,
@@ -5421,6 +5641,21 @@ def terminal_support_session(
             if proc.stdout is not None:
                 proc.stdout.close()
     _TERMINAL_SESSIONS.pop(session_id, None)
+    if output:
+        _sse_publish(
+            "terminal.output",
+            session_id=session_id,
+            command=session.get("command", []),
+            cwd=session.get("cwd", "."),
+            chunk=_trim_text(output, max_chars=4000),
+        )
+    _sse_publish(
+        "terminal.stop",
+        session_id=session_id,
+        command=session.get("command", []),
+        cwd=session.get("cwd", "."),
+        exit_code=proc.poll(),
+    )
     return {
         "schema": "terminal_support_session.v1",
         "mode": mode,
@@ -7933,35 +8168,12 @@ def self_test(
         cmd.append(resolved_target)
 
     try:
-        proc = subprocess.run(
+        observed = _run_observed_subprocess(
             cmd,
             cwd=execution_root,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+            event_source="self_test",
+            timeout_seconds=timeout_seconds,
         )
-    except subprocess.TimeoutExpired as exc:
-        _failure_record(
-            command=cmd,
-            stderr="self_test timed out",
-            stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
-            category="self_test",
-            suggestion="Increase timeout_seconds or narrow the test target.",
-        )
-        return {
-            "schema": "self_test.v1",
-            "runner": runner,
-            "target": target,
-            "resolved_target": resolved_target,
-            "execution_root": execution_root,
-            "ok": False,
-            "timeout": True,
-            "exit_code": None,
-            "command": cmd,
-            "stdout": _trim_text((exc.stdout or "") if isinstance(exc.stdout, str) else "", max_chars=out_cap),
-            "stderr": _trim_text((exc.stderr or "") if isinstance(exc.stderr, str) else "", max_chars=out_cap),
-        }
     except FileNotFoundError as exc:
         _failure_record(
             command=cmd,
@@ -7983,11 +8195,33 @@ def self_test(
             "stderr": str(exc),
         }
 
-    if proc.returncode != 0:
+    if observed["timed_out"]:
         _failure_record(
             command=cmd,
-            stderr=proc.stderr,
-            stdout=proc.stdout,
+            stderr="self_test timed out",
+            stdout=observed["stdout"],
+            category="self_test",
+            suggestion="Increase timeout_seconds or narrow the test target.",
+        )
+        return {
+            "schema": "self_test.v1",
+            "runner": runner,
+            "target": target,
+            "resolved_target": resolved_target,
+            "execution_root": execution_root,
+            "ok": False,
+            "timeout": True,
+            "exit_code": None,
+            "command": cmd,
+            "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
+            "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
+        }
+
+    if observed["exit_code"] != 0:
+        _failure_record(
+            command=cmd,
+            stderr=observed["stderr"],
+            stdout=observed["stdout"],
             category="self_test",
             suggestion="Inspect failures and rerun with fail_fast=true for faster iteration.",
         )
@@ -7997,12 +8231,12 @@ def self_test(
         "target": target,
         "resolved_target": resolved_target,
         "execution_root": execution_root,
-        "ok": proc.returncode == 0,
+        "ok": observed["exit_code"] == 0,
         "timeout": False,
-        "exit_code": proc.returncode,
+        "exit_code": observed["exit_code"],
         "command": cmd,
-        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
-        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+        "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
+        "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
     }
 
 
@@ -11395,6 +11629,48 @@ async def root(_request):
     return PlainTextResponse("git-repo-manager MCP server")
 
 
+async def sse_events(request):
+    raw_last = request.query_params.get("last", "20").strip()
+    try:
+        last = int(raw_last or "20")
+    except ValueError:
+        last = 20
+    subscriber_id = uuid.uuid4().hex[:12]
+    subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=SSE_SUBSCRIBER_QUEUE_MAX)
+    replay = _sse_replay(limit=last)
+    with _SSE_LOCK:
+        _SSE_SUBSCRIBERS[subscriber_id] = subscriber
+    _sse_publish("sse.connected", subscriber_id=subscriber_id, replayed=len(replay))
+
+    async def _event_stream():
+        try:
+            for entry in replay:
+                yield _sse_encode_event(entry)
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    entry = subscriber.get_nowait()
+                    yield _sse_encode_event(entry)
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+                    await asyncio.sleep(SSE_HEARTBEAT_SECONDS)
+        finally:
+            with _SSE_LOCK:
+                _SSE_SUBSCRIBERS.pop(subscriber_id, None)
+            _sse_publish("sse.disconnected", subscriber_id=subscriber_id)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: Starlette):
     async with mcp.session_manager.run():
@@ -11405,6 +11681,7 @@ starlette_app = Starlette(
     routes=[
         Route("/", root, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/sse", sse_events, methods=["GET"]),
         # FastMCP's streamable HTTP app serves MCP routes under `/mcp` internally.
         # Mount at root so the public MCP endpoint is exactly `/mcp`.
         Mount("/", app=mcp.streamable_http_app()),
