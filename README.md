@@ -237,6 +237,14 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 | `SSL_CERT_FILE` | `/etc/ssl/certs/ca-certificates.crt` | No | Path | CA bundle for outbound HTTPS. |
 | `HOST_CA_CERT_FILE` | empty | No | Path | Optional mounted host CA bundle path. |
 
+## Continue + Ollama Contract
+
+- The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
+- This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
+- `source/entrypoint.sh` is responsible for pre-pulling the models listed in `CONTINUE_OLLAMA_MODELS`, but it now does that in the background after Ollama is reachable so the MCP server can start immediately; `source/server.py` only reports endpoint and model state.
+- Setting `CONTINUE_OLLAMA_MODELS` to an empty value is an explicit opt-out of model pre-pull. In that mode, Continue may report `model not found` until models are installed manually.
+- A `404` on `http://127.0.0.1:2345/v1/` does not invalidate the native Ollama integration in this repo; the native base and `/api/tags` are the relevant health checks.
+
 ## Safety and Mutation Controls
 
 - Path traversal outside the mounted repository is blocked.

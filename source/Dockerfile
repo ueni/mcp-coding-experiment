@@ -13,6 +13,7 @@ ARG APP_GID=1000
 ARG OLLAMA_VERSION=0.12.2
 ARG OLLAMA_SHA256_AMD64="abe5d1a64f813445a184bc44885bec08f8d6d8a95076ffb80ef96ed23124b64b"
 ARG OLLAMA_SHA256_ARM64="45e089fd5fb31fd08d2be151bb537d3047a2be1f3437b41f35372fc5a7e5981c"
+ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:7b"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -38,6 +39,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CODING_VENV_PYTHON=/opt/codebase-tooling/coding-venv/bin/python \
     CODING_DEFAULT_MODEL=qwen2.5-coder:7b \
     CONTINUE_OLLAMA_MODELS=qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b \
+    OLLAMA_PRELOAD_MODELS=${OLLAMA_PRELOAD_MODELS} \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOST_CA_CERT_FILE= \
     MCP_APPLY_REPO_DEFAULTS=false
@@ -101,9 +103,29 @@ RUN set -eux; \
     curl -fsSL "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" \
       | OLLAMA_SHA256="${ollama_sha256}" python -c 'import hashlib, io, os, sys, tarfile; data = sys.stdin.buffer.read(); expected = os.environ["OLLAMA_SHA256"]; actual = hashlib.sha256(data).hexdigest(); actual == expected or sys.exit(f"sha256 mismatch: expected {expected}, got {actual}"); tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractall("/usr/local")'
 
+RUN mkdir -p /tmp/ollama-models \
+    && export OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS=/tmp/ollama-models \
+    && ollama serve >/tmp/ollama-build.log 2>&1 & \
+    pid=$! \
+    && ready=0 \
+    && for _ in $(seq 1 30); do \
+         if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then ready=1; break; fi; \
+         sleep 1; \
+       done \
+    && if [ "$ready" -ne 1 ]; then cat /tmp/ollama-build.log >&2; kill "$pid"; wait "$pid" || true; exit 1; fi \
+    && IFS=',' read -ra preload_models <<<"${OLLAMA_PRELOAD_MODELS}" \
+    && for model in "${preload_models[@]}"; do \
+         model="$(echo "$model" | xargs)"; \
+         if [ -n "$model" ]; then ollama pull "$model"; fi; \
+       done \
+    && kill "$pid" \
+    && wait "$pid" || true
+
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
-    && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults \
+    && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults /home/app/.ollama \
+    && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
+    && rm -rf /tmp/ollama-models \
     && chown -R app:app /app /models /home/app /opt/codebase-tooling
 
 COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/

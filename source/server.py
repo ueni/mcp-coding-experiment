@@ -2617,11 +2617,58 @@ def _count_processes_with_tokens(*tokens: str) -> int:
     return count
 
 
-def _ollama_tags_url() -> str:
+def _ollama_native_base_url() -> str:
     parsed = urllib.parse.urlparse(LOCAL_INFER_ENDPOINT)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}/api/tags"
-    return "http://127.0.0.1:11434/api/tags"
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return "http://127.0.0.1:11434"
+
+
+def _ollama_tags_url() -> str:
+    return f"{_ollama_native_base_url()}/api/tags"
+
+
+def _ollama_openai_base_url() -> str:
+    return f"{_ollama_native_base_url()}/v1/"
+
+
+def _parse_model_csv(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _fetch_ollama_tags(timeout: float = 3.0) -> dict[str, Any]:
+    tags_url = _ollama_tags_url()
+    result: dict[str, Any] = {"url": tags_url, "reachable": False, "model_ids": []}
+    try:
+        req = urllib.request.Request(tags_url, method="GET")
+        with _urlopen_with_host_certs(req, timeout=timeout) as resp:
+            result["reachable"] = True
+            result["status"] = int(getattr(resp, "status", 200))
+            body = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        result["parse_error"] = "Invalid JSON from /api/tags"
+        return result
+
+    models = parsed.get("models") if isinstance(parsed, dict) else None
+    if not isinstance(models, list):
+        result["parse_error"] = "Expected 'models' list in /api/tags response"
+        return result
+
+    model_ids: list[str] = []
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("model") or entry.get("name")
+        if isinstance(model_id, str) and model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    result["model_ids"] = model_ids
+    return result
 
 
 def _probe_http(url: str, timeout: float = 2.0) -> dict[str, Any]:
@@ -6394,8 +6441,15 @@ def diagram_sync_check(
 
 
 def local_model_status() -> dict[str, Any]:
-    """Report local model configuration and endpoint availability."""
+    """Report local model configuration, bootstrap contract, and endpoint availability."""
     coding_python = Path(CODING_VENV_PYTHON)
+    bootstrap_models_raw = os.getenv(
+        "CONTINUE_OLLAMA_MODELS",
+        "qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b",
+    )
+    bootstrap_models = _parse_model_csv(bootstrap_models_raw)
+    native_api_base = _ollama_native_base_url()
+    openai_compat_base = _ollama_openai_base_url()
     status: dict[str, Any] = {
         "schema": "local_model_status.v1",
         "models_dir": str(LOCAL_MODELS_DIR),
@@ -6409,25 +6463,88 @@ def local_model_status() -> dict[str, Any]:
             "backend": LOCAL_INFER_BACKEND,
             "model": LOCAL_INFER_MODEL,
             "endpoint": LOCAL_INFER_ENDPOINT,
+            "native_api_base": native_api_base,
+            "tags_url": _ollama_tags_url(),
+            "openai_compat_base": openai_compat_base,
         },
         "coding": {
             "default_model": CODING_DEFAULT_MODEL,
             "venv_python": str(coding_python),
             "venv_python_exists": coding_python.is_file(),
+            "default_model_installed": None,
+            "default_model_in_bootstrap_list": CODING_DEFAULT_MODEL in bootstrap_models,
         },
+        "ollama": {
+            "api_contract": "native_ollama",
+            "bootstrap_enabled": bool(bootstrap_models),
+            "bootstrap_models": bootstrap_models,
+            "installed_models": [],
+            "installed_models_count": 0,
+        },
+        "diagnostics": [],
     }
+    diagnostics: list[str] = status["diagnostics"]
     if LOCAL_INFER_BACKEND == "endpoint":
-        try:
-            req = urllib.request.Request(
-                LOCAL_INFER_ENDPOINT.replace("/api/generate", "/api/tags"),
-                method="GET",
+        tags_status = _fetch_ollama_tags(timeout=3.0)
+        status["infer"]["endpoint_reachable"] = tags_status.get("reachable", False)
+        if "status" in tags_status:
+            status["infer"]["endpoint_status"] = tags_status["status"]
+        if "error" in tags_status:
+            status["infer"]["endpoint_error"] = tags_status["error"]
+        if "parse_error" in tags_status:
+            status["infer"]["endpoint_parse_error"] = tags_status["parse_error"]
+
+        openai_probe = _probe_http(openai_compat_base, timeout=2.0)
+        status["infer"]["openai_compat_base_reachable"] = openai_probe.get(
+            "reachable", False
+        )
+        if "status" in openai_probe:
+            status["infer"]["openai_compat_base_status"] = openai_probe["status"]
+        if "error" in openai_probe:
+            status["infer"]["openai_compat_base_error"] = openai_probe["error"]
+
+        installed_models = tags_status.get("model_ids", [])
+        status["ollama"]["installed_models"] = installed_models
+        status["ollama"]["installed_models_count"] = len(installed_models)
+        status["coding"]["default_model_installed"] = (
+            CODING_DEFAULT_MODEL in installed_models if CODING_DEFAULT_MODEL else None
+        )
+
+        if not status["infer"]["endpoint_reachable"]:
+            diagnostics.append(
+                "Native Ollama tags endpoint is unreachable. Local inference diagnostics are incomplete until the endpoint responds."
             )
-            with _urlopen_with_host_certs(req, timeout=3) as resp:
-                status["infer"]["endpoint_reachable"] = True
-                status["infer"]["endpoint_status"] = getattr(resp, "status", 200)
-        except Exception as exc:
-            status["infer"]["endpoint_reachable"] = False
-            status["infer"]["endpoint_error"] = str(exc)
+        else:
+            if not installed_models:
+                if status["ollama"]["bootstrap_enabled"]:
+                    diagnostics.append(
+                        "Ollama is reachable but no models are installed. Startup pre-pull did not produce any available models."
+                    )
+                else:
+                    diagnostics.append(
+                        "Ollama is reachable but no models are installed. CONTINUE_OLLAMA_MODELS is empty, so startup pre-pull is intentionally disabled."
+                    )
+            if CODING_DEFAULT_MODEL and CODING_DEFAULT_MODEL not in installed_models:
+                diagnostics.append(
+                    f"CODING_DEFAULT_MODEL '{CODING_DEFAULT_MODEL}' is not installed in Ollama."
+                )
+            if (
+                CODING_DEFAULT_MODEL
+                and status["ollama"]["bootstrap_enabled"]
+                and CODING_DEFAULT_MODEL not in bootstrap_models
+            ):
+                diagnostics.append(
+                    f"CODING_DEFAULT_MODEL '{CODING_DEFAULT_MODEL}' is not included in CONTINUE_OLLAMA_MODELS."
+                )
+            if not status["infer"]["openai_compat_base_reachable"]:
+                diagnostics.append(
+                    f"Native Ollama is reachable at {native_api_base}, but the /v1/ root is not. Continue's ollama provider should use apiBase {native_api_base} without /v1."
+                )
+    else:
+        status["infer"]["endpoint_reachable"] = None
+        diagnostics.append(
+            "LOCAL_INFER_BACKEND is not 'endpoint'; Ollama endpoint diagnostics were skipped."
+        )
     return status
 
 

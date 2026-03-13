@@ -8,6 +8,8 @@ set -euo pipefail
 
 umask 027
 
+DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b"
+
 is_truthy() {
   case "${1:-}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;
@@ -37,6 +39,35 @@ _ollama_probe_url() {
   echo "http://${host}:${port}/api/tags"
 }
 
+iter_ollama_models() {
+  local models_csv="${1:-}"
+  local model_name=""
+  local old_ifs="${IFS}"
+  IFS=','
+  for model_name in ${models_csv}; do
+    model_name="$(echo "${model_name}" | xargs)"
+    if [[ -n "${model_name}" ]]; then
+      printf '%s\n' "${model_name}"
+    fi
+  done
+  IFS="${old_ifs}"
+}
+
+csv_has_model() {
+  local models_csv="${1:-}"
+  local wanted="${2:-}"
+  local model_name=""
+  if [[ -z "${wanted}" ]]; then
+    return 1
+  fi
+  while IFS= read -r model_name; do
+    if [[ "${model_name}" == "${wanted}" ]]; then
+      return 0
+    fi
+  done < <(iter_ollama_models "${models_csv}")
+  return 1
+}
+
 start_ollama_with_host() {
   local host_port="${1}"
   local probe_url
@@ -61,25 +92,58 @@ start_ollama_with_host() {
 }
 
 ensure_ollama_models_installed() {
-  local models_csv="${CONTINUE_OLLAMA_MODELS-qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b}"
+  local models_csv="${CONTINUE_OLLAMA_MODELS-${DEFAULT_CONTINUE_OLLAMA_MODELS}}"
+  local model_name=""
+  local missing_models=()
+
   if [[ -z "${models_csv// }" ]]; then
-    echo "CONTINUE_OLLAMA_MODELS is empty; skipping Ollama model pre-pull" >&2
+    echo "CONTINUE_OLLAMA_MODELS is empty; skipping Ollama model pre-pull. This is an explicit opt-out, so Continue may report 'model not found' until models are installed manually." >&2
+    if [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
+      echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' will not be pulled automatically while CONTINUE_OLLAMA_MODELS is empty." >&2
+    fi
     return 0
   fi
-  local model_name=""
-  local old_ifs="${IFS}"
-  IFS=','
-  for model_name in ${models_csv}; do
-    model_name="$(echo "${model_name}" | xargs)"
-    if [[ -z "${model_name}" ]]; then
-      continue
-    fi
+
+  if [[ -n "${CODING_DEFAULT_MODEL:-}" ]] && ! csv_has_model "${models_csv}" "${CODING_DEFAULT_MODEL}"; then
+    echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' is not included in CONTINUE_OLLAMA_MODELS. Bootstrap will not guarantee the coding model is present." >&2
+  fi
+
+  while IFS= read -r model_name; do
     if ollama show "${model_name}" >/dev/null 2>&1; then
       continue
     fi
     ollama pull "${model_name}"
-  done
-  IFS="${old_ifs}"
+  done < <(iter_ollama_models "${models_csv}")
+
+  while IFS= read -r model_name; do
+    if ! ollama show "${model_name}" >/dev/null 2>&1; then
+      missing_models+=("${model_name}")
+    fi
+  done < <(iter_ollama_models "${models_csv}")
+
+  if [[ ${#missing_models[@]} -gt 0 ]]; then
+    echo "Missing Ollama models after bootstrap: ${missing_models[*]}" >&2
+    return 1
+  fi
+
+  if [[ -n "${CODING_DEFAULT_MODEL:-}" ]] && ! ollama show "${CODING_DEFAULT_MODEL}" >/dev/null 2>&1; then
+    echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' is unavailable after Ollama bootstrap." >&2
+    return 1
+  fi
+
+  return 0
+}
+
+ensure_ollama_model_installed() {
+  local model_name="${1:-}"
+  if [[ -z "${model_name}" ]]; then
+    return 0
+  fi
+  if ollama show "${model_name}" >/dev/null 2>&1; then
+    return 0
+  fi
+  ollama pull "${model_name}"
+  ollama show "${model_name}" >/dev/null 2>&1
 }
 
 bootstrap_user_home_from_host_mounts() {
@@ -206,10 +270,12 @@ fi
 
 export HOME="${HOME:-/home/app}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
+CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:7b}"
 OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
 OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
 OLLAMA_FALLBACK_HOST="${OLLAMA_FALLBACK_HOST:-0.0.0.0:11434}"
+OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-true}"
 OLLAMA_STARTUP_TIMEOUT="$(sanitize_positive_int "${OLLAMA_STARTUP_TIMEOUT}" 30 "OLLAMA_STARTUP_TIMEOUT")"
 
 apply_repo_defaults
@@ -232,9 +298,21 @@ if is_truthy "${OLLAMA_ENABLED}"; then
 
   if [[ "${started}" -ne 1 ]]; then
     echo "continuing without Ollama" >&2
-  elif ! ensure_ollama_models_installed; then
-    echo "ollama started, but model ensure failed; see logs above" >&2
-    echo "continuing with running Ollama and current model set" >&2
+  else
+    if is_truthy "${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL}" && [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
+      echo "ensuring default Ollama model '${CODING_DEFAULT_MODEL}' before server startup" >&2
+      if ! ensure_ollama_model_installed "${CODING_DEFAULT_MODEL}"; then
+        echo "failed to install default Ollama model '${CODING_DEFAULT_MODEL}' before server startup" >&2
+        echo "continuing with running Ollama and current model set" >&2
+      fi
+    fi
+    (
+      if ! ensure_ollama_models_installed; then
+        echo "ollama model ensure failed in background; see logs above" >&2
+        echo "continuing with running Ollama and current model set" >&2
+      fi
+    ) &
+    echo "ollama model ensure running in background" >&2
   fi
 else
   echo "OLLAMA_ENABLED=false; skipping Ollama startup" >&2
