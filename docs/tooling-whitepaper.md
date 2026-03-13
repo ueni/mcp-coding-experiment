@@ -125,7 +125,7 @@ Public tools:
 - `autocomplete`
 - `repo_info`, `runtime_state`
 - `repo_router`, `workspace_transaction`, `git_router`
-- `code_index_router`, `model_router`, `memory_router`, `docker_task_router`, `tool_router`
+- `code_index_router`, `model_router`, `memory_router`, `docker_router`, `vscode_router`, `tool_router`
 - `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`
 - `math_router`, `document_router`, `diagram_router`
 - `sql_expert`, `browse_web`

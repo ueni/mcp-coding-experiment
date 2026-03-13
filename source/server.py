@@ -141,7 +141,9 @@ PUBLIC_MCP_TOOL_NAMES = {
     "code_index_router",
     "model_router",
     "memory_router",
-    "docker_task_router",
+    "docker_router",
+    "vscode_router",
+    "command_runner",
     "tool_router",
     "quality_router",
     "governance_router",
@@ -195,7 +197,7 @@ mcp = FastMCP(
     instructions=(
         "Manage exactly one mounted Git repository and its files with minimal output. "
         "Must use router tools first (`model_router`, `code_index_router`, `memory_router`, "
-        "`workspace_transaction`, `docker_task_router`) and call non-router tools only when "
+        "`workspace_transaction`, `docker_router`, `vscode_router`) and call non-router tools only when "
         "router modes cannot satisfy the request. "
         "Execution policy (highest priority): if there are 2+ independent inference tasks, MUST call "
         "`model_router(mode='parallel_infer')`; use `model_router(mode='infer')` only for a single dependent task. "
@@ -3344,30 +3346,122 @@ def docker_cli_status() -> dict[str, Any]:
     }
 
 
-class DockerTaskRouterService:
-    """Application service for Docker-related task routing."""
+def docker_cli_run(
+    command: list[str],
+    cwd: str = ".",
+    control_profile: str = "build",
+    timeout_seconds: int = 1800,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
+    """Run a validated Docker CLI command directly."""
+    _require_mutations()
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    out_cap = _token_budget_apply_max(max_output_chars)
+    _validate_build_task_command(command, control_profile=control_profile)
+
+    workdir = _resolve_repo_path(cwd)
+
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(workdir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timeout_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        timeout_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        build_log_tail = _summarize_build_log(timeout_stdout, timeout_stderr)
+        proposals = _build_log_proposals(timeout_stdout, timeout_stderr)
+        return {
+            "schema": "docker_cli_run.v1",
+            "ok": False,
+            "command": command,
+            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "control_profile": control_profile,
+            "exit_code": None,
+            "timeout": True,
+            "stdout": _trim_text(timeout_stdout, max_chars=out_cap),
+            "stderr": _trim_text(timeout_stderr, max_chars=out_cap),
+            "build_log_tail": _trim_text(build_log_tail, max_chars=out_cap),
+            "proposals": proposals,
+        }
+
+    build_log_tail = _summarize_build_log(proc.stdout, proc.stderr)
+    proposals: list[dict[str, str]] = []
+    if proc.returncode != 0:
+        proposals = _build_log_proposals(proc.stdout, proc.stderr)
+    return {
+        "schema": "docker_cli_run.v1",
+        "ok": proc.returncode == 0,
+        "command": command,
+        "cwd": str(workdir.relative_to(REPO_PATH)),
+        "control_profile": control_profile,
+        "exit_code": proc.returncode,
+        "timeout": False,
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+        "build_log_tail": _trim_text(build_log_tail, max_chars=out_cap),
+        "proposals": proposals,
+    }
+
+
+class DockerRouterService:
+    """Application service for Docker CLI routing."""
 
     def route(
         self,
         mode: str = "status",
-        label: str = "",
-        tasks_path: str = ".vscode/tasks.json",
-        label_prefix: str = "Docker:",
+        command: list[str] | None = None,
+        cwd: str = ".",
         control_profile: str = "build",
         timeout_seconds: int = 1800,
         max_output_chars: int | None = None,
     ) -> dict[str, Any]:
-        if mode not in {"status", "list", "run"}:
-            raise ValueError("mode must be one of: status, list, run")
+        if mode not in {"status", "run"}:
+            raise ValueError("mode must be one of: status, run")
         if mode == "status":
             return {
-                "schema": "docker_task_router.v1",
+                "schema": "docker_router.v1",
                 "mode": mode,
                 "result": docker_cli_status(),
             }
+        if not command:
+            raise ValueError("command is required for run mode")
+        return {
+            "schema": "docker_router.v1",
+            "mode": mode,
+            "result": docker_cli_run(
+                command=command,
+                cwd=cwd,
+                control_profile=control_profile,
+                timeout_seconds=timeout_seconds,
+                max_output_chars=max_output_chars,
+            ),
+        }
+
+
+class VSCodeRouterService:
+    """Application service for VS Code tasks routing."""
+
+    def route(
+        self,
+        mode: str = "list",
+        label: str = "",
+        tasks_path: str = ".vscode/tasks.json",
+        label_prefix: str = "",
+        control_profile: str = "build",
+        timeout_seconds: int = 1800,
+        max_output_chars: int | None = None,
+    ) -> dict[str, Any]:
+        if mode not in {"list", "run"}:
+            raise ValueError("mode must be one of: list, run")
         if mode == "list":
             return {
-                "schema": "docker_task_router.v1",
+                "schema": "vscode_router.v1",
                 "mode": mode,
                 "result": vscode_tasks_list(
                     tasks_path=tasks_path,
@@ -3378,7 +3472,7 @@ class DockerTaskRouterService:
         if not label.strip():
             raise ValueError("label is required for run mode")
         return {
-            "schema": "docker_task_router.v1",
+            "schema": "vscode_router.v1",
             "mode": mode,
             "result": vscode_task_run(
                 label=label,
@@ -3390,21 +3484,42 @@ class DockerTaskRouterService:
         }
 
 
-_DOCKER_TASK_ROUTER_SERVICE = DockerTaskRouterService()
+_DOCKER_ROUTER_SERVICE = DockerRouterService()
+_VSCODE_ROUTER_SERVICE = VSCodeRouterService()
 
 
 @mcp.tool()
-def docker_task_router(
+def docker_router(
     mode: str = "status",
-    label: str = "",
-    tasks_path: str = ".vscode/tasks.json",
-    label_prefix: str = "Docker:",
+    command: list[str] | None = None,
+    cwd: str = ".",
     control_profile: str = "build",
     timeout_seconds: int = 1800,
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
-    """Docker task gateway. mode=status|list|run; run requires exact task label and returns execution diagnostics."""
-    return _DOCKER_TASK_ROUTER_SERVICE.route(
+    """Docker CLI gateway. mode=status|run; run validates the command against the selected control profile."""
+    return _DOCKER_ROUTER_SERVICE.route(
+        mode=mode,
+        command=command,
+        cwd=cwd,
+        control_profile=control_profile,
+        timeout_seconds=timeout_seconds,
+        max_output_chars=max_output_chars,
+    )
+
+
+@mcp.tool()
+def vscode_router(
+    mode: str = "list",
+    label: str = "",
+    tasks_path: str = ".vscode/tasks.json",
+    label_prefix: str = "",
+    control_profile: str = "build",
+    timeout_seconds: int = 1800,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
+    """VS Code task gateway. mode=list|run; list filters tasks.json and run executes one exact label."""
+    return _VSCODE_ROUTER_SERVICE.route(
         mode=mode,
         label=label,
         tasks_path=tasks_path,
@@ -3417,10 +3532,10 @@ def docker_task_router(
 
 def vscode_tasks_list(
     tasks_path: str = ".vscode/tasks.json",
-    label_prefix: str = "Docker:",
+    label_prefix: str = "",
     control_profile: str = "build",
 ) -> dict[str, Any]:
-    """List VS Code tasks and whether each is runnable under a Docker control profile."""
+    """List VS Code tasks and whether each is runnable under the selected control profile."""
     tasks_file, tasks = _load_vscode_tasks(tasks_path)
     rows: list[dict[str, Any]] = []
     for task in tasks:
@@ -6101,7 +6216,8 @@ def tool_prompt_score(
             "memory_router",
             "code_index_router",
             "workspace_transaction",
-            "docker_task_router",
+            "docker_router",
+            "vscode_router",
             "command_runner",
             "self_test",
             "prompt_optimize",

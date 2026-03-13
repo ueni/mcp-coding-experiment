@@ -1328,7 +1328,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with self.assertRaises(ValueError):
             self.server.self_test(runner="unittest", target="repo:", timeout_seconds=10)
 
-    def test_docker_task_router_validation_paths(self):
+    def test_router_split_docker_and_vscode(self):
         vscode_dir = self.repo_path / ".vscode"
         vscode_dir.mkdir(parents=True, exist_ok=True)
         tasks_path = vscode_dir / "tasks.json"
@@ -1349,19 +1349,19 @@ class ServerToolsTest(ServerToolsTestBase):
         )
 
         with self.assertRaises(ValueError):
-            self.server.docker_task_router(mode="run")
+            self.server.docker_router(mode="run")
 
-        listed = self.server.docker_task_router(
+        listed = self.server.vscode_router(
             mode="list",
             tasks_path=".vscode/tasks.json",
             control_profile="build",
         )
-        self.assertEqual(listed["schema"], "docker_task_router.v1")
+        self.assertEqual(listed["schema"], "vscode_router.v1")
         self.assertEqual(listed["result"]["count"], 1)
         self.assertFalse(listed["result"]["tasks"][0]["ok"])
 
         with self.assertRaises(ValueError):
-            self.server.docker_task_router(
+            self.server.vscode_router(
                 mode="run",
                 label="Docker: blocked",
                 tasks_path=".vscode/tasks.json",
@@ -1408,7 +1408,7 @@ class ServerToolsTest(ServerToolsTestBase):
             tools = await self.server.mcp.list_tools()
             names = {item.model_dump().get("name") for item in tools}
             self.assertEqual(names, expected)
-            self.assertEqual(len(names), 20)
+            self.assertEqual(len(names), 22)
 
         asyncio.run(run_checks())
 

@@ -273,7 +273,9 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `code_index_router` (refresh, read, query, symbols, deps, calls, search, grep, tree, ast, impact_tests, doc_sync, api_surface)
 - `model_router`
 - `memory_router` (upsert, summary_upsert, decision_record, get, validate, auto_compact, failure_memory, root_cause, artifact_index)
-- `docker_task_router`
+- `docker_router`
+- `vscode_router`
+- `command_runner` (safe allowlisted command execution)
 - `tool_router` (route, record, inspect)
 - `quality_router` (self_test, self_check, release_readiness, flaky, change_impact, required_tool_chain, spec_to_tests, smart_fix)
 - `governance_router` (policy, license, runtime_contract, human_approval, commit_lint)
