@@ -14,6 +14,8 @@ ARG OLLAMA_VERSION=0.12.2
 ARG OLLAMA_SHA256_AMD64="abe5d1a64f813445a184bc44885bec08f8d6d8a95076ffb80ef96ed23124b64b"
 ARG OLLAMA_SHA256_ARM64="45e089fd5fb31fd08d2be151bb537d3047a2be1f3437b41f35372fc5a7e5981c"
 ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:7b"
+ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
+ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -58,7 +60,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         tini \
         tesseract-ocr \
     && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && curl -fL --progress-bar https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
     && . /etc/os-release \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
@@ -103,12 +105,13 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
     fi; \
     ollama_tgz="/var/cache/buildkit/ollama/ollama-${OLLAMA_VERSION}-linux-${ollama_arch}.tgz"; \
     if [ ! -f "${ollama_tgz}" ]; then \
-      curl -fsSL "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" -o "${ollama_tgz}"; \
+      curl -fL --progress-bar "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" -o "${ollama_tgz}"; \
     fi; \
     OLLAMA_SHA256="${ollama_sha256}" OLLAMA_TGZ="${ollama_tgz}" python -c 'import hashlib, os, pathlib, sys, tarfile; tgz_path = pathlib.Path(os.environ["OLLAMA_TGZ"]); expected = os.environ["OLLAMA_SHA256"]; data = tgz_path.read_bytes(); actual = hashlib.sha256(data).hexdigest(); actual == expected or sys.exit(f"sha256 mismatch: expected {expected}, got {actual}"); tarfile.open(tgz_path, mode="r:gz").extractall("/usr/local")'
 
-RUN mkdir -p /tmp/ollama-models \
-    && export OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS=/tmp/ollama-models \
+RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
+    mkdir -p /tmp/ollama-models /var/cache/buildkit/ollama-models \
+    && export OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS=/var/cache/buildkit/ollama-models \
     && ollama serve >/tmp/ollama-build.log 2>&1 & \
     pid=$! \
     && ready=0 \
@@ -122,6 +125,8 @@ RUN mkdir -p /tmp/ollama-models \
          model="$(echo "$model" | xargs)"; \
          if [ -n "$model" ]; then ollama pull "$model"; fi; \
        done \
+    && rm -rf /tmp/ollama-models/* \
+    && cp -a /var/cache/buildkit/ollama-models/. /tmp/ollama-models/ \
     && kill "$pid" \
     && wait "$pid" || true
 
@@ -134,9 +139,31 @@ RUN groupadd --gid "${APP_GID}" app \
 
 COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
 
-RUN mkdir -p /home/app/.vscode-server/extensions \
-    && ln -sfn /opt/codebase-tooling/defaults/extensions/local.mcp-inline-autocomplete-0.0.1 /home/app/.vscode-server/extensions/local.mcp-inline-autocomplete-0.0.1 \
-    && chown -R app:app /opt/codebase-tooling /home/app/.vscode-server
+RUN set -eux; \
+    mkdir -p /opt/codebase-tooling/defaults/extensions /tmp/vscode-vsix; \
+    for extension_id in ${VSCODE_PRELOAD_EXTENSIONS}; do \
+      publisher="${extension_id%%.*}"; \
+      extension_name="${extension_id#*.}"; \
+      vsix_path="/tmp/vscode-vsix/${publisher}.${extension_name}.vsix"; \
+      if ! curl -fL --progress-bar "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${vsix_path}"; then \
+        if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+        echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
+        rm -f "${vsix_path}"; \
+        continue; \
+      fi; \
+      if ! python -c "import json, shutil, sys, tempfile, zipfile; from pathlib import Path; vsix_path = Path(sys.argv[1]); extensions_root = Path(sys.argv[2]); tmp_dir = tempfile.mkdtemp(); tmp_path = Path(tmp_dir); assert zipfile.is_zipfile(vsix_path), 'downloaded file is not a zip archive'; zipfile.ZipFile(vsix_path).extractall(tmp_path); extension_dir = tmp_path / 'extension'; package = json.loads((extension_dir / 'package.json').read_text()); install_dir = extensions_root / (package['publisher'] + '.' + package['name'] + '-' + package['version']); shutil.rmtree(install_dir, ignore_errors=True); shutil.copytree(extension_dir, install_dir); shutil.rmtree(tmp_dir)" "${vsix_path}" /opt/codebase-tooling/defaults/extensions; then \
+        if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+        echo "Skipping VS Code extension ${extension_id}: marketplace payload was not a valid VSIX archive." >&2; \
+        rm -f "${vsix_path}"; \
+        continue; \
+      fi; \
+    done; \
+    rm -rf /tmp/vscode-vsix; \
+    for server_root in /home/app/.vscode-server /home/app/.vscode-server-insiders /home/app/.openvscode-server; do \
+      mkdir -p "${server_root}/extensions"; \
+      cp -a /opt/codebase-tooling/defaults/extensions/. "${server_root}/extensions/"; \
+    done; \
+    chown -R app:app /opt/codebase-tooling /home/app/.vscode-server /home/app/.vscode-server-insiders /home/app/.openvscode-server
 
 # Keep high-churn app files in the last layers to speed iterative rebuilds.
 COPY --chown=app:app server.py ./
