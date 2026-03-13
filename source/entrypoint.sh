@@ -225,8 +225,16 @@ apply_repo_defaults() {
   mkdir -p /home/app/.codex
   if [[ ! -f /home/app/.codex/config.toml ]]; then
     cp "${defaults_root}/codex/config.toml" /home/app/.codex/config.toml
-  elif ! grep -q '^\[mcp_servers.codebase_tooling_mcp\]$' /home/app/.codex/config.toml; then
-    printf '\n[mcp_servers.codebase_tooling_mcp]\nurl = "http://localhost:8000/mcp"\n' >> /home/app/.codex/config.toml
+  else
+    if grep -q '^\[mcp_servers.codebase_tooling_mcp\]$' /home/app/.codex/config.toml; then
+      sed -i 's/^\[mcp_servers\.codebase_tooling_mcp\]$/[mcp_servers."codebase-tooling-mcp"]/g' /home/app/.codex/config.toml
+    fi
+    if ! grep -q '^\[mcp_servers\."codebase-tooling-mcp"\]$' /home/app/.codex/config.toml; then
+      printf '
+[mcp_servers."codebase-tooling-mcp"]
+url = "http://localhost:8000/mcp"
+' >> /home/app/.codex/config.toml
+    fi
   fi
 
   mkdir -p /repo/.config/labs

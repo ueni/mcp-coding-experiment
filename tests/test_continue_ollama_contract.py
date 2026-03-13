@@ -33,6 +33,16 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         )
         self.assertNotIn("CONTINUE_OLLAMA_MODELS", config["containerEnv"])
 
+    def test_codex_config_uses_hyphenated_server_key(self):
+        config_toml = (REPO_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8")
+        default_config_toml = (
+            REPO_ROOT / "source" / "defaults" / "codex" / "config.toml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('[mcp_servers."codebase-tooling-mcp"]', config_toml)
+        self.assertNotIn("[mcp_servers.codebase_tooling_mcp]", config_toml)
+        self.assertIn('[mcp_servers."codebase-tooling-mcp"]', default_config_toml)
+        self.assertNotIn("[mcp_servers.codebase_tooling_mcp]", default_config_toml)
+
     def test_dockerfile_keeps_default_coding_model_and_preloads_it(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:7b", dockerfile)

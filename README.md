@@ -168,6 +168,13 @@ The image also ensures a default Codex MCP client entry exists at:
 
 - `~/.codex/config.toml`
 
+That generated Codex entry uses the server key `codebase-tooling-mcp`:
+
+```toml
+[mcp_servers."codebase-tooling-mcp"]
+url = "http://localhost:8000/mcp"
+```
+
 The `.gitignore` bootstrap is intentionally one-time. A marker file
 `.gitignore_codebase_tooling_mcp.touched` is created on first apply; after that,
 removed generated entries are not re-added automatically.
