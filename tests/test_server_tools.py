@@ -198,6 +198,19 @@ class ServerToolsTest(ServerToolsTestBase):
         out = self.server.tool_benchmark(tools=["find_paths", "grep"], iterations=1, warmup=0)
         self.assertEqual(out["schema"], "tool_benchmark.v1")
         self.assertEqual(len(out["results"]), 2)
+        self.assertTrue(all("latency_ms_median" in row for row in out["results"]))
+
+        report_path = self.repo_path / out["report_path"]
+        self.assertTrue(report_path.is_file())
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["schema"], "tool_benchmark.report.v1")
+        self.assertEqual(set(report["tools"].keys()), {"find_paths", "grep"})
+        self.assertIn("median_duration_ms", report["tools"]["find_paths"])
+
+        out2 = self.server.tool_benchmark(tools=["find_paths"], iterations=1, warmup=0)
+        report2 = json.loads((self.repo_path / out2["report_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(set(report2["tools"].keys()), {"find_paths", "grep"})
+        self.assertEqual(report2["tools"]["find_paths"]["tool"], "find_paths")
 
     def test_self_test_unittest(self):
         out = self.server.self_test(

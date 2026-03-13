@@ -129,6 +129,7 @@ STATE_SNAPSHOT_DIR = Path(".build/snapshots")
 EXECUTION_REPLAY_DIR = Path(".build/replays")
 ARTIFACT_INDEX_FILE = Path(".build/index/artifact_memory.json")
 TOOL_ROUTER_STATS_FILE = Path(".build/memory/tool_router_stats.json")
+TOOL_BENCHMARK_REPORT_FILE = Path(".build/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".build/memory/cost_budget.json")
 APPROVAL_POINTS_FILE = Path(".build/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".build/memory/root_cause_memory.json")
@@ -8153,8 +8154,9 @@ def tool_benchmark(
     tools: list[str] | None = None,
     iterations: int = 3,
     warmup: int = 1,
+    report_path: str = str(TOOL_BENCHMARK_REPORT_FILE),
 ) -> dict[str, Any]:
-    """Benchmark representative tool invocations for latency and payload size."""
+    """Benchmark representative tool invocations for latency and payload size and persist one median-duration entry per tool."""
     if iterations < 1:
         raise ValueError("iterations must be >= 1")
     if warmup < 0:
@@ -8187,18 +8189,55 @@ def tool_benchmark(
             t1 = time.perf_counter()
             latencies_ms.append((t1 - t0) * 1000.0)
             size_bytes.append(_payload_size_bytes(out))
+        latencies_sorted = sorted(latencies_ms)
+        median_index = len(latencies_sorted) // 2
+        if len(latencies_sorted) % 2 == 0:
+            latency_ms_median = (latencies_sorted[median_index - 1] + latencies_sorted[median_index]) / 2.0
+        else:
+            latency_ms_median = latencies_sorted[median_index]
         results.append(
             {
                 "tool": tool,
                 "iterations": iterations,
                 "latency_ms_avg": round(sum(latencies_ms) / len(latencies_ms), 2),
+                "latency_ms_median": round(latency_ms_median, 2),
                 "latency_ms_p95": round(sorted(latencies_ms)[int(max(0, len(latencies_ms) * 0.95 - 1))], 2),
                 "payload_bytes_avg": int(sum(size_bytes) / len(size_bytes)),
                 "payload_bytes_max": int(max(size_bytes)),
             }
         )
 
-    return {"schema": "tool_benchmark.v1", "results": results}
+    _require_mutations()
+    benchmark_file = _resolve_repo_path(report_path)
+    existing = _json_file_load(Path(report_path), {"schema": "tool_benchmark.report.v1", "tools": {}})
+    tools_payload = existing.get("tools", {}) if isinstance(existing, dict) else {}
+    if not isinstance(tools_payload, dict):
+        tools_payload = {}
+    generated_at = _now_iso()
+    for row in results:
+        tools_payload[str(row["tool"])] = {
+            "tool": row["tool"],
+            "iterations": row["iterations"],
+            "median_duration_ms": row["latency_ms_median"],
+            "latency_ms_avg": row["latency_ms_avg"],
+            "latency_ms_p95": row["latency_ms_p95"],
+            "payload_bytes_avg": row["payload_bytes_avg"],
+            "payload_bytes_max": row["payload_bytes_max"],
+            "updated_at": generated_at,
+        }
+    report = {
+        "schema": "tool_benchmark.report.v1",
+        "generated_at": generated_at,
+        "tools": dict(sorted(tools_payload.items())),
+    }
+    benchmark_file.parent.mkdir(parents=True, exist_ok=True)
+    benchmark_file.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    return {
+        "schema": "tool_benchmark.v1",
+        "report_path": report_path,
+        "results": results,
+    }
 
 
 @mcp.tool()
