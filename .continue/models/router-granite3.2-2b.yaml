@@ -5,6 +5,6 @@ models:
   - name: Router - Granite 3.2 2B
     provider: ollama
     model: granite3.2:2b
-    apiBase: http://127.0.0.1:11434
+    apiBase: http://127.0.0.1:2345
     roles:
       - chat

@@ -5,6 +5,6 @@ models:
   - name: Security - DeepSeek R1 1.5B
     provider: ollama
     model: deepseek-r1:1.5b
-    apiBase: http://127.0.0.1:11434
+    apiBase: http://127.0.0.1:2345
     roles:
       - chat
