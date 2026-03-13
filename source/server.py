@@ -1366,6 +1366,127 @@ def _json_file_save(path: Path, payload: Any) -> None:
     file_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+_TOOL_INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "find_paths": (
+        "find",
+        "file",
+        "files",
+        "path",
+        "paths",
+        "folder",
+        "folders",
+        "directory",
+        "directories",
+        "tree",
+        "list",
+    ),
+    "grep": ("grep", "search", "text", "pattern", "match", "matches", "contains"),
+    "read_file": ("read", "open", "show", "display", "view", "file", "contents"),
+    "read_snippet": ("snippet", "lines", "line", "section", "excerpt"),
+    "write_file": ("write", "create", "save", "file"),
+    "replace_in_files": ("replace", "rename", "substitute", "update", "text"),
+    "git_diff": ("diff", "patch", "changes", "compare"),
+    "git_status": ("status", "git", "modified", "staged"),
+    "self_test": ("test", "tests", "pytest", "unit", "coverage"),
+    "doc_summarizer_small": ("summary", "summarize", "document", "docs"),
+    "math_solver": ("math", "solve", "equation", "algebra"),
+    "browse_web": ("web", "browse", "http", "url", "site"),
+}
+
+
+def _tokenize_router_query(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _tool_intent_terms(tool: str) -> set[str]:
+    terms = set(_tokenize_router_query(tool.replace("_", " ")))
+    terms.update(_TOOL_INTENT_KEYWORDS.get(tool, ()))
+    return {term for term in terms if term}
+
+
+def _intent_rank_candidates(query: str, candidates: list[str]) -> list[dict[str, Any]]:
+    tokens = _tokenize_router_query(query)
+    token_set = set(tokens)
+    joined = " ".join(tokens)
+    ranked: list[dict[str, Any]] = []
+    for tool in candidates:
+        terms = _tool_intent_terms(tool)
+        exact_hits = sum(1 for term in terms if term in token_set)
+        phrase_hits = sum(1 for term in terms if len(term) > 3 and term in joined)
+        prefix_hits = sum(
+            1
+            for token in token_set
+            for term in terms
+            if len(token) > 2 and len(term) > 2 and (token.startswith(term) or term.startswith(token))
+        )
+        score = (exact_hits * 3.0) + (phrase_hits * 1.5) + (prefix_hits * 0.5)
+        ranked.append(
+            {
+                "tool": tool,
+                "score": round(score, 4),
+                "exact_hits": exact_hits,
+                "phrase_hits": phrase_hits,
+                "prefix_hits": prefix_hits,
+                "terms": sorted(terms),
+            }
+        )
+    ranked.sort(key=lambda row: (row["score"], row["exact_hits"], row["phrase_hits"], row["tool"]), reverse=True)
+    return ranked
+
+
+def _tool_router_confidence(
+    ranked: list[dict[str, Any]],
+    min_calls: int,
+    min_success_rate: float,
+    min_score_gap: float,
+) -> dict[str, Any]:
+    if not ranked:
+        return {
+            "confident": False,
+            "reason": "no_candidates",
+            "score_gap": 0.0,
+            "top_calls": 0,
+            "top_success_rate": 0.0,
+        }
+    top = ranked[0]
+    top_calls = int(top.get("calls", 0))
+    top_success_rate = float(top.get("success_rate", 0.0))
+    second_score = float(ranked[1].get("score", top.get("score", 0.0))) if len(ranked) > 1 else 0.0
+    top_score = float(top.get("score", 0.0))
+    score_gap = top_score - second_score if len(ranked) > 1 else top_score
+    if top_calls < min_calls:
+        return {
+            "confident": False,
+            "reason": "insufficient_calls",
+            "score_gap": round(score_gap, 4),
+            "top_calls": top_calls,
+            "top_success_rate": round(top_success_rate, 4),
+        }
+    if top_success_rate < min_success_rate:
+        return {
+            "confident": False,
+            "reason": "low_success_rate",
+            "score_gap": round(score_gap, 4),
+            "top_calls": top_calls,
+            "top_success_rate": round(top_success_rate, 4),
+        }
+    if len(ranked) > 1 and score_gap < min_score_gap:
+        return {
+            "confident": False,
+            "reason": "low_score_gap",
+            "score_gap": round(score_gap, 4),
+            "top_calls": top_calls,
+            "top_success_rate": round(top_success_rate, 4),
+        }
+    return {
+        "confident": True,
+        "reason": "learned",
+        "score_gap": round(score_gap, 4),
+        "top_calls": top_calls,
+        "top_success_rate": round(top_success_rate, 4),
+    }
+
+
 def _state_snapshot_index_load() -> dict[str, Any]:
     payload = _json_file_load(STATE_SNAPSHOT_INDEX_FILE, {"snapshots": {}})
     if not isinstance(payload, dict):
@@ -9300,6 +9421,32 @@ def policy_simulator(
 
 
 @mcp.tool()
+def intent_router(
+    query: str,
+    candidates: list[str],
+    top_k: int = 3,
+) -> dict[str, Any]:
+    """Pick a likely tool from candidate tools using lightweight keyword intent scoring."""
+    if not candidates:
+        raise ValueError("candidates must not be empty")
+    if top_k < 1:
+        raise ValueError("top_k must be >= 1")
+    ranked = _intent_rank_candidates(query, candidates)
+    top_score = float(ranked[0].get("score", 0.0))
+    second_score = float(ranked[1].get("score", 0.0)) if len(ranked) > 1 else 0.0
+    score_gap = top_score - second_score if len(ranked) > 1 else top_score
+    confidence = 0.0 if top_score <= 0 else min(1.0, round((top_score + max(0.0, score_gap)) / 10.0, 4))
+    return {
+        "schema": "intent_router.v1",
+        "query": query,
+        "selected_tool": ranked[0]["tool"],
+        "confidence": confidence,
+        "score_gap": round(score_gap, 4),
+        "ranked": ranked[:top_k],
+    }
+
+
+@mcp.tool()
 def tool_router_learned(
     query: str,
     candidates: list[str],
@@ -9307,12 +9454,22 @@ def tool_router_learned(
     selected_tool: str = "",
     success: bool = True,
     latency_ms: float = 0.0,
+    min_calls: int = 2,
+    min_success_rate: float = 0.6,
+    min_score_gap: float = 5.0,
+    fallback_to_intent: bool = True,
 ) -> dict[str, Any]:
-    """Learn simple routing preferences across tools and pick lowest-cost candidate."""
+    """Learn simple routing preferences across tools and fall back to intent scoring when confidence is low."""
     if not candidates:
         raise ValueError("candidates must not be empty")
     if mode not in {"route", "record"}:
         raise ValueError("mode must be one of: route, record")
+    if min_calls < 1:
+        raise ValueError("min_calls must be >= 1")
+    if not 0.0 <= min_success_rate <= 1.0:
+        raise ValueError("min_success_rate must be between 0 and 1")
+    if min_score_gap < 0.0:
+        raise ValueError("min_score_gap must be >= 0")
     payload = _json_file_load(TOOL_ROUTER_STATS_FILE, {"stats": {}})
     stats = payload.get("stats", {})
     if not isinstance(stats, dict):
@@ -9339,13 +9496,33 @@ def tool_router_learned(
         avg_lat = float(row.get("avg_latency_ms", 500.0 if calls == 0 else row.get("avg_latency_ms", 0.0)))
         success_rate = (succ / calls) if calls > 0 else 0.5
         score = (success_rate * 100.0) - min(100.0, avg_lat / 10.0)
-        ranked.append({"tool": tool, "score": round(score, 4), "success_rate": round(success_rate, 4), "avg_latency_ms": round(avg_lat, 4)})
-    ranked.sort(key=lambda x: x["score"], reverse=True)
+        ranked.append(
+            {
+                "tool": tool,
+                "score": round(score, 4),
+                "calls": calls,
+                "success_rate": round(success_rate, 4),
+                "avg_latency_ms": round(avg_lat, 4),
+            }
+        )
+    ranked.sort(key=lambda row: row["score"], reverse=True)
+    confidence = _tool_router_confidence(ranked, min_calls, min_success_rate, min_score_gap)
+    selected_by = "learned"
+    selected = ranked[0]["tool"]
+    fallback = None
+    if fallback_to_intent and not confidence["confident"]:
+        fallback = intent_router(query=query, candidates=candidates)
+        selected = str(fallback["selected_tool"])
+        selected_by = "intent_router"
+
     return {
         "schema": "tool_router_learned.v1",
         "mode": mode,
         "query": query,
-        "selected_tool": ranked[0]["tool"],
+        "selected_tool": selected,
+        "selected_by": selected_by,
+        "confidence": confidence,
+        "fallback": fallback,
         "ranked": ranked,
     }
 

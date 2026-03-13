@@ -1019,22 +1019,48 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(pol["schema"], "policy_simulator.v1")
         self.assertIn("blocking_policies", pol)
 
+        intent = self.server.intent_router(
+            query="find files in the repo",
+            candidates=["find_paths", "grep"],
+        )
+        self.assertEqual(intent["schema"], "intent_router.v1")
+        self.assertEqual(intent["selected_tool"], "find_paths")
+
         routed = self.server.tool_router_learned(
             query="find files",
             candidates=["find_paths", "grep"],
             mode="route",
         )
         self.assertEqual(routed["schema"], "tool_router_learned.v1")
-        self.assertIn(routed["selected_tool"], {"find_paths", "grep"})
+        self.assertEqual(routed["selected_by"], "intent_router")
+        self.assertEqual(routed["selected_tool"], "find_paths")
+        self.assertIsNotNone(routed["fallback"])
+
         rec = self.server.tool_router_learned(
             query="find files",
             candidates=["find_paths", "grep"],
             mode="record",
-            selected_tool="find_paths",
+            selected_tool="grep",
             success=True,
-            latency_ms=12.0,
+            latency_ms=10.0,
         )
         self.assertEqual(rec["mode"], "record")
+        self.server.tool_router_learned(
+            query="find files",
+            candidates=["find_paths", "grep"],
+            mode="record",
+            selected_tool="grep",
+            success=True,
+            latency_ms=10.0,
+        )
+        routed_learned = self.server.tool_router_learned(
+            query="find files",
+            candidates=["find_paths", "grep"],
+            mode="route",
+        )
+        self.assertEqual(routed_learned["selected_by"], "learned")
+        self.assertEqual(routed_learned["selected_tool"], "grep")
+        self.assertTrue(routed_learned["confidence"]["confident"])
 
         art = self.server.artifact_memory_index(mode="refresh", path="docs")
         self.assertEqual(art["schema"], "artifact_memory_index.v1")
