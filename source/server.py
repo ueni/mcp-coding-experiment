@@ -131,6 +131,28 @@ ARTIFACT_INDEX_FILE = Path(".build/index/artifact_memory.json")
 TOOL_ROUTER_STATS_FILE = Path(".build/memory/tool_router_stats.json")
 TOOL_BENCHMARK_REPORT_FILE = Path(".build/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".build/memory/cost_budget.json")
+PUBLIC_MCP_TOOL_NAMES = {
+    "autocomplete",
+    "repo_info",
+    "runtime_state",
+    "repo_router",
+    "workspace_transaction",
+    "git_router",
+    "code_index_router",
+    "model_router",
+    "memory_router",
+    "docker_task_router",
+    "tool_router",
+    "quality_router",
+    "governance_router",
+    "workflow_router",
+    "runtime_guard_router",
+    "math_router",
+    "document_router",
+    "diagram_router",
+    "sql_expert",
+    "browse_web",
+}
 APPROVAL_POINTS_FILE = Path(".build/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".build/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
@@ -2394,28 +2416,28 @@ def _run_lab_script(script_name: str, args: list[str]) -> dict[str, Any]:
     if not script_path.is_file():
         raise FileNotFoundError(script_rel)
 
-    observed = _run_observed_subprocess(
+    proc = subprocess.run(
         [sys.executable, str(script_path), *args],
         cwd=str(REPO_PATH),
-        event_source="lab_script",
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
-    stdout = _trim_text(observed["stdout"].strip())
-    stderr = _trim_text(observed["stderr"].strip())
+    stdout = _trim_text(proc.stdout.strip())
+    stderr = _trim_text(proc.stderr.strip())
     result: dict[str, Any] = {
         "script": script_rel,
         "args": args,
-        "exit_code": observed["exit_code"],
-        "ok": observed["exit_code"] == 0,
+        "exit_code": proc.returncode,
+        "ok": proc.returncode == 0,
         "stdout": stdout,
         "stderr": stderr,
         "reports": _list_report_files(),
     }
 
-    if observed["exit_code"] != 0:
-        msg = (
-            stderr or stdout or f"{script_name} failed with exit code {observed['exit_code']}"
-        )
+    if proc.returncode != 0:
+        msg = stderr or stdout or f"{script_name} failed with exit code {proc.returncode}"
         raise RuntimeError(msg)
 
     return result
@@ -2583,7 +2605,7 @@ def _readme_tool_names() -> set[str]:
     return names
 
 
-def _server_tool_names() -> set[str]:
+def _declared_tool_names() -> set[str]:
     server_file = _resolve_repo_path("source/server.py")
     if not server_file.is_file():
         server_file = Path(__file__).resolve()
@@ -2598,6 +2620,10 @@ def _server_tool_names() -> set[str]:
                 names.add(m.group(1))
                 break
     return names
+
+
+def _server_tool_names() -> set[str]:
+    return set(PUBLIC_MCP_TOOL_NAMES)
 
 
 def _lossless_blob_store_load(path: Path) -> dict[str, Any]:
@@ -5470,14 +5496,34 @@ def command_runner(
     _validate_safe_command(command)
 
     workdir = _resolve_repo_path(cwd)
+    run_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+    _sse_publish(
+        "tool.start",
+        source="command_runner",
+        run_id=run_id,
+        command=command,
+        cwd=str(workdir),
+        timeout_seconds=timeout_seconds,
+    )
     try:
-        observed = _run_observed_subprocess(
+        proc = subprocess.run(
             command,
             cwd=str(workdir),
-            event_source="command_runner",
-            timeout_seconds=timeout_seconds,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
         )
     except FileNotFoundError as exc:
+        _sse_publish(
+            "tool.error",
+            source="command_runner",
+            run_id=run_id,
+            command=command,
+            cwd=str(workdir),
+            error=str(exc),
+        )
         _failure_record(
             command=command,
             stderr=str(exc),
@@ -5493,11 +5539,26 @@ def command_runner(
             "stderr": str(exc),
             "timeout": False,
         }
-    if observed["timed_out"]:
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.output if isinstance(exc.output, str) else getattr(exc, "stdout", "") or ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        duration_ms = int((time.time() - started_at) * 1000)
+        _sse_publish(
+            "tool.finish",
+            source="command_runner",
+            run_id=run_id,
+            command=command,
+            cwd=str(workdir),
+            timed_out=True,
+            exit_code=None,
+            duration_ms=duration_ms,
+            stdout_chars=len(stdout),
+            stderr_chars=len(stderr),
+        )
         _failure_record(
             command=command,
             stderr="command timed out",
-            stdout=observed["stdout"],
+            stdout=stdout,
             category="command_runner",
             suggestion="Increase timeout_seconds or narrow command scope.",
         )
@@ -5506,25 +5567,58 @@ def command_runner(
             "exit_code": None,
             "command": command,
             "cwd": str(workdir.relative_to(REPO_PATH)),
-            "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
-            "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
+            "stdout": _trim_text(stdout, max_chars=out_cap),
+            "stderr": _trim_text(stderr, max_chars=out_cap),
             "timeout": True,
         }
-    if observed["exit_code"] != 0:
+    for part in _split_sse_chunks(proc.stdout):
+        _sse_publish(
+            "tool.output",
+            source="command_runner",
+            run_id=run_id,
+            command=command,
+            cwd=str(workdir),
+            stream="stdout",
+            chunk=part,
+        )
+    for part in _split_sse_chunks(proc.stderr):
+        _sse_publish(
+            "tool.output",
+            source="command_runner",
+            run_id=run_id,
+            command=command,
+            cwd=str(workdir),
+            stream="stderr",
+            chunk=part,
+        )
+    duration_ms = int((time.time() - started_at) * 1000)
+    _sse_publish(
+        "tool.finish",
+        source="command_runner",
+        run_id=run_id,
+        command=command,
+        cwd=str(workdir),
+        timed_out=False,
+        exit_code=proc.returncode,
+        duration_ms=duration_ms,
+        stdout_chars=len(proc.stdout),
+        stderr_chars=len(proc.stderr),
+    )
+    if proc.returncode != 0:
         _failure_record(
             command=command,
-            stderr=observed["stderr"],
-            stdout=observed["stdout"],
+            stderr=proc.stderr,
+            stdout=proc.stdout,
             category="command_runner",
             suggestion="Inspect stderr and retry with narrower scope or valid flags.",
         )
     return {
-        "ok": observed["exit_code"] == 0,
-        "exit_code": observed["exit_code"],
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
         "command": command,
         "cwd": str(workdir.relative_to(REPO_PATH)),
-        "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
-        "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
         "timeout": False,
     }
 
@@ -8263,9 +8357,7 @@ def self_test(
 
     internal_aliases = {"tests", "internal", "selftests", "container-selftests"}
     use_internal_tests = (
-        not force_repo_target
-        and target_value in internal_aliases
-        and INTERNAL_SELF_TESTS_DIR.is_dir()
+        not force_repo_target and target_value in internal_aliases and INTERNAL_SELF_TESTS_DIR.is_dir()
     )
     repo_target_path = None if use_internal_tests else _resolve_repo_path(target_value)
     resolved_target = str(INTERNAL_SELF_TESTS_DIR) if use_internal_tests else target_value
@@ -8285,28 +8377,14 @@ def self_test(
                 raise RuntimeError("repo target path resolution failed")
             if target_path.is_file() and target_path.suffix == ".py":
                 rel_parent = str(target_path.parent.relative_to(REPO_PATH))
-                cmd.extend(
-                    [
-                        "discover",
-                        "-s",
-                        rel_parent if rel_parent else ".",
-                        "-p",
-                        target_path.name,
-                    ]
-                )
+                cmd.extend(["discover", "-s", rel_parent if rel_parent else ".", "-p", target_path.name])
                 if verbose:
                     cmd.append("-v")
                 if fail_fast:
                     cmd.append("-f")
             elif target_path.is_dir():
                 rel_dir = str(target_path.relative_to(REPO_PATH))
-                cmd.extend(
-                    [
-                        "discover",
-                        "-s",
-                        rel_dir if rel_dir else ".",
-                    ]
-                )
+                cmd.extend(["discover", "-s", rel_dir if rel_dir else "."])
                 if verbose:
                     cmd.append("-v")
                 if fail_fast:
@@ -8319,20 +8397,19 @@ def self_test(
                 cmd.append(target_value)
     else:
         cmd = ["pytest"]
-        if verbose:
-            cmd.append("-v")
-        else:
-            cmd.append("-q")
+        cmd.append("-v" if verbose else "-q")
         if fail_fast:
             cmd.append("-x")
         cmd.append(resolved_target)
 
     try:
-        observed = _run_observed_subprocess(
+        proc = subprocess.run(
             cmd,
             cwd=execution_root,
-            event_source="self_test",
-            timeout_seconds=timeout_seconds,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
         )
     except FileNotFoundError as exc:
         _failure_record(
@@ -8354,12 +8431,13 @@ def self_test(
             "stdout": "",
             "stderr": str(exc),
         }
-
-    if observed["timed_out"]:
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.output if isinstance(exc.output, str) else getattr(exc, "stdout", "") or ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         _failure_record(
             command=cmd,
             stderr="self_test timed out",
-            stdout=observed["stdout"],
+            stdout=stdout,
             category="self_test",
             suggestion="Increase timeout_seconds or narrow the test target.",
         )
@@ -8373,15 +8451,15 @@ def self_test(
             "timeout": True,
             "exit_code": None,
             "command": cmd,
-            "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
-            "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
+            "stdout": _trim_text(stdout, max_chars=out_cap),
+            "stderr": _trim_text(stderr, max_chars=out_cap),
         }
 
-    if observed["exit_code"] != 0:
+    if proc.returncode != 0:
         _failure_record(
             command=cmd,
-            stderr=observed["stderr"],
-            stdout=observed["stdout"],
+            stderr=proc.stderr,
+            stdout=proc.stdout,
             category="self_test",
             suggestion="Inspect failures and rerun with fail_fast=true for faster iteration.",
         )
@@ -8391,12 +8469,12 @@ def self_test(
         "target": target,
         "resolved_target": resolved_target,
         "execution_root": execution_root,
-        "ok": observed["exit_code"] == 0,
+        "ok": proc.returncode == 0,
         "timeout": False,
-        "exit_code": observed["exit_code"],
+        "exit_code": proc.returncode,
         "command": cmd,
-        "stdout": _trim_text(observed["stdout"], max_chars=out_cap),
-        "stderr": _trim_text(observed["stderr"], max_chars=out_cap),
+        "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+        "stderr": _trim_text(proc.stderr, max_chars=out_cap),
     }
 
 
@@ -9381,8 +9459,27 @@ def workspace_transaction(
     delete_metadata: bool = False,
     snapshot_id: str = "",
     include_build_dir: bool = False,
+    path: str = "",
+    content: str = "",
+    overwrite: bool = True,
+    encoding: str = "utf-8",
+    pattern: str = "",
+    replacement: str = "",
+    regex: bool = False,
+    case_insensitive: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    max_file_bytes: int = 1048576,
+    max_files: int = 1000,
+    max_replacements: int = 1000,
+    source_path: str = "",
+    destination: str = "",
+    recursive: bool = False,
+    diff_text: str = "",
+    cached: bool = False,
 ) -> dict[str, Any]:
-    """Strict workspace mutation router: mode MUST be one of begin|apply|validate|rollback|commit|snapshot|restore; restore requires snapshot_id; returns `workspace_transaction.v1` with deterministic nested `result` or explicit validation error."""
+    """Strict workspace mutation router for transactional edits, snapshots, and direct file mutations."""
     allowed = {
         "begin",
         "apply",
@@ -9391,6 +9488,11 @@ def workspace_transaction(
         "commit",
         "snapshot",
         "restore",
+        "write",
+        "replace",
+        "move",
+        "delete",
+        "apply_diff",
     }
     if mode not in allowed:
         raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
@@ -9400,6 +9502,52 @@ def workspace_transaction(
         if not snapshot_id.strip():
             raise ValueError("snapshot_id is required for restore mode")
         result = state_restore(snapshot_id=snapshot_id)
+    elif mode == "write":
+        if not path.strip():
+            raise ValueError("path is required for write mode")
+        result = write_file(
+            path=path,
+            content=content,
+            overwrite=overwrite,
+            create_dirs=create_dirs,
+            encoding=encoding,
+        )
+    elif mode == "replace":
+        if not pattern:
+            raise ValueError("pattern is required for replace mode")
+        result = replace_in_files(
+            path=path or ".",
+            pattern=pattern,
+            replacement=replacement,
+            regex=regex,
+            case_insensitive=case_insensitive,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            include_hidden=include_hidden,
+            max_file_bytes=max_file_bytes,
+            max_files=max_files,
+            max_replacements=max_replacements,
+            recursive=recursive,
+            dry_run=False,
+        )
+    elif mode == "move":
+        if not source_path.strip() or not destination.strip():
+            raise ValueError("source_path and destination are required for move mode")
+        result = move_path(
+            source=source_path,
+            destination=destination,
+            create_dirs=create_dirs,
+            overwrite=overwrite,
+        )
+    elif mode == "delete":
+        target_path = path or source_path
+        if not target_path.strip():
+            raise ValueError("path is required for delete mode")
+        result = delete_path(path=target_path, recursive=recursive)
+    elif mode == "apply_diff":
+        if not diff_text.strip():
+            raise ValueError("diff_text is required for apply_diff mode")
+        result = apply_unified_diff(diff_text=diff_text, check_only=False, cached=cached)
     else:
         result = edit_transaction(
             mode=mode,
@@ -11026,8 +11174,35 @@ class CodeIndexRouterService:
         compress: bool = False,
         store_result: bool = False,
         incremental: bool = True,
+        action_mode: str = "",
+        pattern: str = "",
+        case_insensitive: bool = False,
+        include_globs: list[str] | None = None,
+        exclude_globs: list[str] | None = None,
+        include_hidden: bool = False,
+        max_matches: int = 500,
+        max_file_bytes: int = 1048576,
+        node_type: str = "Call",
+        name_pattern: str = "",
+        base_ref: str = "HEAD~1",
+        head_ref: str = "HEAD",
+        snapshot_path: str = str(API_SNAPSHOT_FILE),
     ) -> dict[str, Any]:
-        allowed = {"refresh", "read", "query", "symbols", "deps", "calls", "search"}
+        allowed = {
+            "refresh",
+            "read",
+            "query",
+            "symbols",
+            "deps",
+            "calls",
+            "search",
+            "grep",
+            "tree",
+            "ast",
+            "impact_tests",
+            "doc_sync",
+            "api_surface",
+        }
         if mode not in allowed:
             raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
 
@@ -11086,12 +11261,52 @@ class CodeIndexRouterService:
                 compress=compress,
                 store_result=store_result,
             )
-        else:
+        elif mode == "search":
             result = semantic_find(
                 query=query,
                 path=path,
-                use_local_rerank=use_local_rerank,
+                max_results=limit or 20,
                 local_rerank_top_k=local_rerank_top_k,
+                use_local_rerank=use_local_rerank,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        elif mode == "grep":
+            needle = pattern or query
+            if not needle:
+                raise ValueError("query or pattern is required for grep mode")
+            result = grep(
+                pattern=needle,
+                path=path,
+                recursive=recursive,
+                case_insensitive=case_insensitive,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
+                include_hidden=include_hidden,
+                max_matches=max_matches,
+                max_file_bytes=max_file_bytes,
+                output_profile=output_profile or "compact",
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                compress=compress,
+                summary_mode=summary_mode,
+                store_result=store_result,
+            )
+        elif mode == "tree":
+            tree_mode = action_mode or "parse"
+            result = tree_sitter_core(
+                path=path,
+                mode=tree_mode,
+                recursive=recursive,
+                node_types=[node_type] if node_type else None,
+                text_pattern=query or pattern or None,
+                max_files=max_files,
+                max_nodes=max_symbols,
                 output_profile=output_profile,
                 fields=fields,
                 offset=offset,
@@ -11099,6 +11314,30 @@ class CodeIndexRouterService:
                 summary_mode=summary_mode,
                 compress=compress,
                 store_result=store_result,
+            )
+        elif mode == "ast":
+            result = ast_search(
+                path=path,
+                node_type=node_type,
+                name_pattern=name_pattern or query or None,
+                recursive=recursive,
+                max_results=max_matches,
+            )
+        elif mode == "impact_tests":
+            result = impact_tests(
+                base_ref=base_ref,
+                head_ref=head_ref,
+                max_tests=limit or max_matches,
+                output_profile=output_profile or "normal",
+            )
+        elif mode == "doc_sync":
+            result = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+        else:
+            result = api_surface_snapshot(
+                path=path,
+                snapshot_path=snapshot_path,
+                mode=action_mode or "check",
+                include_private=include_private,
             )
         return {
             "schema": "code_index_router.v1",
@@ -11132,8 +11371,21 @@ def code_index_router(
     compress: bool = False,
     store_result: bool = False,
     incremental: bool = True,
+    action_mode: str = "",
+    pattern: str = "",
+    case_insensitive: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    max_matches: int = 500,
+    max_file_bytes: int = 1048576,
+    node_type: str = "Call",
+    name_pattern: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    snapshot_path: str = str(API_SNAPSHOT_FILE),
 ) -> dict[str, Any]:
-    """Strict code-intel router: mode MUST be one of refresh|read|query|symbols|deps|calls|search, requires mode-compatible params, and returns `code_index_router.v1` with deterministic nested `result` (reject invalid mode/args explicitly)."""
+    """Strict code-intel router for repository index, search, structural analysis, and test/doc impact modes."""
     return _CODE_INDEX_ROUTER_SERVICE.route(
         mode=mode,
         path=path,
@@ -11155,6 +11407,19 @@ def code_index_router(
         compress=compress,
         store_result=store_result,
         incremental=incremental,
+        action_mode=action_mode,
+        pattern=pattern,
+        case_insensitive=case_insensitive,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        include_hidden=include_hidden,
+        max_matches=max_matches,
+        max_file_bytes=max_file_bytes,
+        node_type=node_type,
+        name_pattern=name_pattern,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        snapshot_path=snapshot_path,
     )
 
 
@@ -11668,6 +11933,16 @@ class MemoryRouterService:
         compact_threshold_chars: int = 16000,
         compact_keep_entries: int = 40,
         compact_summary_max_chars: int = 1200,
+        contains: str = "",
+        category: str = "",
+        error_text: str = "",
+        max_suggestions: int = 5,
+        issue: str = "",
+        root_cause: str = "",
+        fix: str = "",
+        path: str = ".build/reports",
+        query: str = "",
+        artifact_mode: str = "refresh",
     ) -> dict[str, Any]:
         allowed = {
             "upsert",
@@ -11676,6 +11951,9 @@ class MemoryRouterService:
             "get",
             "validate",
             "auto_compact",
+            "failure_memory",
+            "root_cause",
+            "artifact_index",
         }
         if mode not in allowed:
             raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
@@ -11732,6 +12010,30 @@ class MemoryRouterService:
                 summary_max_chars=compact_summary_max_chars,
                 drop_expired=drop_expired,
             )
+        elif mode == "failure_memory":
+            result = failure_memory(
+                mode=query or "get",
+                category=category or None,
+                contains=contains or None,
+                max_entries=max_entries,
+                error_text=error_text,
+                max_suggestions=max_suggestions,
+            )
+        elif mode == "root_cause":
+            result = root_cause_memory(
+                mode=query or "list",
+                issue=issue,
+                root_cause=root_cause,
+                fix=fix,
+                max_entries=max_entries,
+            )
+        elif mode == "artifact_index":
+            result = artifact_memory_index(
+                mode=artifact_mode,
+                path=path,
+                query=query,
+                max_entries=max_entries,
+            )
         else:
             result = memory_get(
                 namespace=namespace,
@@ -11783,8 +12085,18 @@ def memory_router(
     compact_threshold_chars: int = 16000,
     compact_keep_entries: int = 40,
     compact_summary_max_chars: int = 1200,
+    contains: str = "",
+    category: str = "",
+    error_text: str = "",
+    max_suggestions: int = 5,
+    issue: str = "",
+    root_cause: str = "",
+    fix: str = "",
+    path: str = ".build/reports",
+    query: str = "",
+    artifact_mode: str = "refresh",
 ) -> dict[str, Any]:
-    """Strict memory router: mode MUST be one of upsert|summary_upsert|decision_record|get|validate|auto_compact; required fields are enforced per mode; returns `memory_router.v1` with deterministic nested `result` (reject invalid mode/args explicitly)."""
+    """Strict memory router for context memory, failure memory, root-cause memory, and artifact indexing."""
     return _MEMORY_ROUTER_SERVICE.route(
         mode=mode,
         namespace=namespace,
@@ -11811,7 +12123,653 @@ def memory_router(
         compact_threshold_chars=compact_threshold_chars,
         compact_keep_entries=compact_keep_entries,
         compact_summary_max_chars=compact_summary_max_chars,
+        contains=contains,
+        category=category,
+        error_text=error_text,
+        max_suggestions=max_suggestions,
+        issue=issue,
+        root_cause=root_cause,
+        fix=fix,
+        path=path,
+        query=query,
+        artifact_mode=artifact_mode,
     )
+
+
+@mcp.tool()
+def repo_router(
+    mode: str = "tree",
+    path: str = ".",
+    recursive: bool = True,
+    include_hidden: bool = False,
+    max_entries: int = 1000,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    file_type: str = "any",
+    max_depth: int | None = None,
+    output_profile: str | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+    adaptive_limits: bool = True,
+    encoding: str = "utf-8",
+    max_bytes: int = MAX_READ_BYTES,
+    max_chars: int = 20000,
+    max_pages: int = 20,
+    max_rows_per_sheet: int = 200,
+    start_line: int = 1,
+    end_line: int = 1,
+    context_before: int = 0,
+    context_after: int = 0,
+    requests: list[dict[str, Any]] | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Router for repository listing, reads, snippets, batches, and structured config queries."""
+    allowed = {"tree", "find", "read", "read_document", "read_snippet", "read_batch", "query_json"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "tree":
+        result = list_files(path=path, recursive=recursive, include_hidden=include_hidden, max_entries=max_entries)
+    elif mode == "find":
+        result = find_paths(
+            path=path,
+            recursive=recursive,
+            include_hidden=include_hidden,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            file_type=file_type,
+            max_depth=max_depth,
+            max_entries=max_entries,
+            output_profile=output_profile or "compact",
+            offset=offset,
+            limit=limit,
+            adaptive_limits=adaptive_limits,
+        )
+    elif mode == "read":
+        result = read_file(path=path, encoding=encoding, max_bytes=max_bytes)
+    elif mode == "read_document":
+        result = read_document(
+            path=path,
+            max_chars=max_chars,
+            max_pages=max_pages,
+            max_rows_per_sheet=max_rows_per_sheet,
+            output_profile=output_profile,
+        )
+    elif mode == "read_snippet":
+        result = read_snippet(
+            path=path,
+            start_line=start_line,
+            end_line=end_line,
+            context_before=context_before,
+            context_after=context_after,
+            encoding=encoding,
+            output_profile=output_profile,
+        )
+    elif mode == "read_batch":
+        result = read_batch(
+            requests=requests or [],
+            encoding=encoding,
+            output_profile=output_profile,
+        )
+    else:
+        result = json_query(path=path, query=query, file_type=file_type, output_profile=output_profile or "normal")
+    return {"schema": "repo_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def git_router(
+    mode: str = "status",
+    ref: str = "HEAD",
+    path: str = "",
+    pathspec: str = "",
+    staged: bool = False,
+    short: bool = True,
+    limit: int = 20,
+    paths: list[str] | None = None,
+    message: str = "",
+    allow_empty: bool = False,
+    remote: str = "origin",
+    branch: str = "",
+    rebase: bool = False,
+    set_upstream: bool = False,
+    create_branch: bool = False,
+    name: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    diff_text: str = "",
+    max_findings: int = 20,
+) -> dict[str, Any]:
+    """Router for Git operations, diff summaries, risk scoring, and security triage."""
+    allowed = {
+        "init",
+        "status",
+        "diff",
+        "log",
+        "show",
+        "add",
+        "restore",
+        "commit",
+        "checkout",
+        "create_branch",
+        "fetch",
+        "pull",
+        "push",
+        "summarize_diff",
+        "risk",
+        "security",
+    }
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "init":
+        result = git_init(initial_branch=branch or name or "main")
+    elif mode == "status":
+        result = git_status(short=short)
+    elif mode == "diff":
+        result = git_diff(ref=ref if ref else None, pathspec=pathspec or None, staged=staged)
+    elif mode == "log":
+        result = git_log(limit=limit, ref=ref or "HEAD")
+    elif mode == "show":
+        result = git_show(ref=ref or "HEAD", path=path or None)
+    elif mode == "add":
+        result = git_add(paths=paths or ([path] if path else []))
+    elif mode == "restore":
+        result = git_restore(paths=paths or ([path] if path else []), staged=staged)
+    elif mode == "commit":
+        result = git_commit(message=message, allow_empty=allow_empty)
+    elif mode == "checkout":
+        result = git_checkout(ref=branch or ref, create_branch=create_branch)
+    elif mode == "create_branch":
+        result = git_create_branch(name=name or branch, checkout=create_branch or True)
+    elif mode == "fetch":
+        result = git_fetch(remote=remote, prune=staged)
+    elif mode == "pull":
+        result = git_pull(remote=remote, branch=branch or None, rebase=rebase)
+    elif mode == "push":
+        result = git_push(remote=remote, branch=branch or None, set_upstream=set_upstream)
+    elif mode == "summarize_diff":
+        result = summarize_diff(ref=ref or None, pathspec=pathspec or None, staged=staged, output_profile="compact")
+    elif mode == "risk":
+        result = risk_scoring(ref=ref or head_ref, pathspec=pathspec or None, staged=staged)
+    else:
+        patch = diff_text or git_diff(ref=f"{base_ref}...{head_ref}")
+        result = security_triage(diff_text=patch, paths=paths or ([path] if path else None), max_findings=max_findings)
+    return {"schema": "git_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def tool_router(
+    mode: str = "route",
+    query: str = "",
+    candidates: list[str] | None = None,
+    selected_tool: str = "",
+    success: bool = True,
+    latency_ms: float = 0.0,
+    min_calls: int = 2,
+    min_success_rate: float = 0.6,
+    min_score_gap: float = 5.0,
+) -> dict[str, Any]:
+    """Router for tool selection with learned ranking and intent fallback."""
+    selected = candidates or []
+    if mode == "inspect":
+        ranked = _intent_rank_candidates(query=query, candidates=selected) if selected else []
+        stats_payload = _json_file_load(TOOL_ROUTER_STATS_FILE, {"stats": {}})
+        return {
+            "schema": "tool_router.v1",
+            "mode": mode,
+            "query": query,
+            "candidates": selected,
+            "stats": stats_payload.get("stats", {}),
+            "intent_ranked": ranked,
+        }
+    result = tool_router_learned(
+        query=query,
+        candidates=selected,
+        mode=mode,
+        selected_tool=selected_tool,
+        success=success,
+        latency_ms=latency_ms,
+        min_calls=min_calls,
+        min_success_rate=min_success_rate,
+        min_score_gap=min_score_gap,
+        fallback_to_intent=True,
+    )
+    return {
+        "schema": "tool_router.v1",
+        "mode": mode,
+        "result": result,
+    }
+
+
+@mcp.tool()
+def quality_router(
+    mode: str = "self_test",
+    runner: str = "pytest",
+    target: str = "tests",
+    verbose: bool = False,
+    timeout_seconds: int = 600,
+    fail_fast: bool = False,
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    run_test_execution: bool = True,
+    run_impact_tests: bool = True,
+    run_doc_check: bool = True,
+    run_api_check: bool = True,
+    run_risk_check: bool = True,
+    run_compile_check: bool = True,
+    snapshot_path: str = str(API_SNAPSHOT_FILE),
+    max_compile_files: int = 300,
+    summary_mode: str = "quick",
+    test_runner: str = "pytest",
+    test_target: str = "tests",
+    run_docs_check: bool = True,
+    run_license_check: bool = True,
+    run_security_check: bool = True,
+    run_tests: bool = True,
+    history_path: str = str(FLAKY_HISTORY_FILE),
+    runs: int = 5,
+    update_history: bool = True,
+    block_on_risk_level: str = "high",
+    critical_globs: list[str] | None = None,
+    require_docs_for_impl_diff: bool = True,
+    require_tests_for_critical: bool = True,
+    required_tools: list[str] | None = None,
+    required_artifacts: list[str] | None = None,
+    required_result_ids: list[str] | None = None,
+    max_age_minutes: int = 60,
+    require_order: bool = False,
+    spec_text: str = "",
+    framework: str = "pytest",
+    output_path: str = "",
+    findings: list[dict[str, Any]] | None = None,
+    replace_all: bool = False,
+    run_validation: bool = False,
+) -> dict[str, Any]:
+    """Router for testing, quality gates, spec-to-tests, and batch fixes."""
+    allowed = {"self_test", "self_check", "release_readiness", "flaky", "change_impact", "required_tool_chain", "spec_to_tests", "smart_fix"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "self_test":
+        result = self_test(runner=runner, target=target, verbose=verbose, timeout_seconds=timeout_seconds, fail_fast=fail_fast)
+    elif mode == "self_check":
+        result = self_check_pipeline(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            run_test_execution=run_test_execution,
+            run_impact_tests=run_impact_tests,
+            run_doc_check=run_doc_check,
+            run_api_check=run_api_check,
+            run_risk_check=run_risk_check,
+            run_compile_check=run_compile_check,
+            snapshot_path=snapshot_path,
+            max_compile_files=max_compile_files,
+            summary_mode=summary_mode,
+        )
+    elif mode == "release_readiness":
+        result = release_readiness(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            run_docs_check=run_docs_check,
+            run_impact_check=run_impact_tests,
+            run_license_check=run_license_check,
+            run_risk_check=run_risk_check,
+            run_security_check=run_security_check,
+            run_tests=run_tests,
+            summary_mode=summary_mode,
+            test_runner=test_runner,
+            test_target=test_target,
+        )
+    elif mode == "flaky":
+        result = flaky_test_detector(
+            runner=runner,
+            target=target,
+            runs=runs,
+            timeout_seconds=timeout_seconds,
+            fail_fast=fail_fast,
+            history_path=history_path,
+            update_history=update_history,
+        )
+    elif mode == "change_impact":
+        result = change_impact_gate(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            block_on_risk_level=block_on_risk_level,
+            critical_globs=critical_globs,
+            require_docs_for_impl_diff=require_docs_for_impl_diff,
+            require_tests_for_critical=require_tests_for_critical,
+        )
+    elif mode == "required_tool_chain":
+        result = required_tool_chain(
+            required_tools=required_tools or [],
+            required_artifacts=required_artifacts or [],
+            required_result_ids=required_result_ids or [],
+            max_age_minutes=max_age_minutes,
+            require_order=require_order,
+        )
+    elif mode == "spec_to_tests":
+        result = spec_to_tests(
+            spec_text=spec_text,
+            framework=framework,
+            mode="generate",
+            output_path=output_path or None,
+        )
+    else:
+        result = smart_fix_batch(
+            findings=findings or [],
+            mode="apply",
+            replace_all=replace_all,
+            run_validation=run_validation,
+        )
+    return {"schema": "quality_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def governance_router(
+    mode: str = "policy",
+    action_mode: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    diff_text: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    recursive: bool = True,
+    run_reuse_lint: bool = True,
+    generate_spdx: bool = False,
+    auto_fix_headers: bool = False,
+    download_missing_licenses: bool = False,
+    lint_report_path: str = str(REUSE_LINT_REPORT),
+    spdx_output_path: str = str(REUSE_SPDX_REPORT),
+    max_missing_files: int = 200,
+    action: str = "",
+    risk_level: str = "medium",
+    details: str = "",
+    approval_id: str = "",
+    approved: bool = False,
+    message: str = "",
+    ref: str = "HEAD",
+    include_diff_hints: bool = False,
+) -> dict[str, Any]:
+    """Router for policy, license, runtime contract, approval, and commit lint workflows."""
+    allowed = {"policy", "license", "runtime_contract", "human_approval", "commit_lint"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "policy":
+        result = policy_simulator(base_ref=base_ref, head_ref=head_ref, diff_text=diff_text)
+    elif mode == "license":
+        result = license_monitor(
+            path=".",
+            recursive=recursive,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            run_reuse_lint=run_reuse_lint,
+            generate_spdx=generate_spdx,
+            auto_fix_headers=auto_fix_headers,
+            download_missing_licenses=download_missing_licenses,
+            lint_report_path=lint_report_path,
+            spdx_output_path=spdx_output_path,
+            max_missing_files=max_missing_files,
+        )
+    elif mode == "runtime_contract":
+        result = runtime_contract_checker()
+    elif mode == "human_approval":
+        result = human_approval_points(
+            mode=action_mode or "list",
+            action=action,
+            risk_level=risk_level,
+            details=details,
+            approval_id=approval_id,
+            approved=approved,
+        )
+    else:
+        result = commit_lint_tag(message=message, ref=ref, include_diff_hints=include_diff_hints)
+    return {"schema": "governance_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def workflow_router(
+    mode: str = "fast_path",
+    action_mode: str = "",
+    task: str = "",
+    goal: str = "",
+    constraints: list[str] | None = None,
+    include_rollback: bool = True,
+    use_cache: bool = True,
+    refresh_cache: bool = False,
+    cache_ttl_minutes: int = 240,
+    lanes: list[str] | None = None,
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    actions: list[str] | None = None,
+    requirements: list[str] | None = None,
+    checks: list[dict[str, Any]] | None = None,
+    query: str = "",
+    path: str = ".build/reports",
+    max_entries: int = 100,
+    category: str = "",
+    contains: str = "",
+    error_text: str = "",
+    max_suggestions: int = 5,
+    issue: str = "",
+    root_cause: str = "",
+    fix: str = "",
+    replay_id: str = "",
+    event: dict[str, Any] | None = None,
+    max_events: int = 1000,
+    shard_size: int = 50,
+    refresh_index: bool = True,
+    run_readiness: bool = True,
+    enforce_tool_chain: bool = True,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Router for workflow orchestration, artifact memory, failure memory, and replay helpers."""
+    allowed = {"fast_path", "compile", "multi_agent", "constraint_check", "confidence", "artifact_index", "failure_memory", "root_cause", "execution_replay", "auto_shard"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "fast_path":
+        result = fast_path_dev(
+            task=task,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            refresh_index=refresh_index,
+            run_readiness=run_readiness,
+            enforce_tool_chain=enforce_tool_chain,
+            store_result=store_result,
+        )
+    elif mode == "compile":
+        result = workflow_compiler(
+            goal=goal,
+            constraints=constraints,
+            include_rollback=include_rollback,
+            use_cache=use_cache,
+            refresh_cache=refresh_cache,
+            cache_ttl_minutes=cache_ttl_minutes,
+        )
+    elif mode == "multi_agent":
+        result = multi_agent_lane(task=task, lanes=lanes, base_ref=base_ref, head_ref=head_ref)
+    elif mode == "constraint_check":
+        result = constraint_solver_for_tasks(actions=actions or [], requirements=requirements or [])
+    elif mode == "confidence":
+        result = confidence_scoring(checks=checks or [])
+    elif mode == "artifact_index":
+        result = artifact_memory_index(mode=action_mode or "refresh", path=path, query=query, max_entries=max_entries)
+    elif mode == "failure_memory":
+        result = failure_memory(
+            mode=action_mode or "get",
+            category=category or None,
+            contains=contains or None,
+            max_entries=max_entries,
+            error_text=error_text,
+            max_suggestions=max_suggestions,
+        )
+    elif mode == "root_cause":
+        result = root_cause_memory(
+            mode=action_mode or "list",
+            issue=issue,
+            root_cause=root_cause,
+            fix=fix,
+            max_entries=max_entries,
+        )
+    elif mode == "execution_replay":
+        result = execution_replay(mode=action_mode or "read", replay_id=replay_id, event=event, max_events=max_events)
+    else:
+        result = auto_sharding_for_analysis(path=path or ".", shard_size=shard_size)
+    return {"schema": "workflow_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def runtime_guard_router(
+    mode: str = "benchmark",
+    action_mode: str = "",
+    tools: list[str] | None = None,
+    iterations: int = 3,
+    warmup: int = 1,
+    baseline_path: str = str(OUTPUT_BASELINE_FILE),
+    tolerance_ratio: float = 1.2,
+    max_output_chars: int | None = None,
+    default_output_profile: str | None = None,
+    reset: bool = False,
+    max_tokens: int = 200000,
+    max_calls: int = 50,
+    max_seconds: int = 600,
+    used_tokens: int = 0,
+    used_calls: int = 0,
+    used_seconds: int = 0,
+    tool: str | None = None,
+    max_age_minutes: int = 1440,
+    limit: int = 50,
+    result_id: str = "",
+    value: Any = None,
+    offset: int = 0,
+    fields: list[str] | None = None,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    """Router for benchmarks, guards, caches, result handles, and workspace facts."""
+    allowed = {"benchmark", "output_size", "golden_output", "token_budget", "cost_budget", "cache", "result_handle", "workspace_facts"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "benchmark":
+        result = tool_benchmark(tools=tools, iterations=iterations, warmup=warmup)
+    elif mode == "output_size":
+        result = output_size_guard(mode=action_mode or "check", tools=tools, tolerance_ratio=tolerance_ratio, baseline_path=baseline_path)
+    elif mode == "golden_output":
+        result = golden_output_guard(mode=action_mode or "check", tools=tools, baseline_path=baseline_path)
+    elif mode == "token_budget":
+        result = token_budget_guard(max_output_chars=max_output_chars, default_output_profile=default_output_profile, reset=reset)
+    elif mode == "cost_budget":
+        result = cost_budget_enforcer(
+            mode=action_mode or "check",
+            max_tokens=max_tokens,
+            max_calls=max_calls,
+            max_seconds=max_seconds,
+            used_tokens=used_tokens,
+            used_calls=used_calls,
+            used_seconds=used_seconds,
+        )
+    elif mode == "cache":
+        result = cache_control(mode=action_mode or "stats", tool=tool, max_age_minutes=max_age_minutes, limit=limit)
+    elif mode == "result_handle":
+        result = result_handle(mode=action_mode or "fetch", result_id=result_id, tool=tool, value=value, offset=offset, limit=limit, fields=fields)
+    else:
+        result = workspace_facts(refresh=refresh)
+    return {"schema": "runtime_guard_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def math_router(
+    mode: str = "solve",
+    text: str = "",
+    symbols: str = "",
+    expression: str = "",
+    equations: list[str] | None = None,
+    variable: str = "",
+    assumptions: str = "",
+    include_steps: bool = False,
+    left: str = "",
+    right: str = "",
+    variables: str = "",
+    trials: int = 10,
+) -> dict[str, Any]:
+    """Router for math parsing, solving, and verification."""
+    if mode == "parse":
+        result = math_parser(text=text, symbols=symbols)
+    elif mode == "solve":
+        result = math_solver(expression=expression, equations=equations, variable=variable, assumptions=assumptions, include_steps=include_steps)
+    elif mode == "verify":
+        result = math_verify(left=left, right=right, variables=variables, trials=trials)
+    else:
+        raise ValueError("mode must be one of: parse, solve, verify")
+    return {"schema": "math_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def document_router(
+    mode: str = "ocr",
+    path: str = "",
+    image_path: str = "",
+    language: str = "",
+    max_chars: int = 20000,
+    max_slides: int = 50,
+    max_chars_per_slide: int = 1200,
+    use_local_model: bool = True,
+    output_profile: str | None = None,
+    text: str = "",
+    source_lang: str = "",
+    target_lang: str = "",
+) -> dict[str, Any]:
+    """Router for OCR, image interpretation, presentation parsing, and translation."""
+    if mode == "ocr":
+        result = vision_ocr_parser(image_path=image_path or path, language=language or "eng", max_chars=max_chars)
+    elif mode == "image":
+        result = image_interpret(image_path=image_path or path, language=language or "en", max_chars=max_chars, mode="caption", output_profile=output_profile, use_local_model=True)
+    elif mode == "presentation":
+        result = interpret_presentation(path=path, max_slides=max_slides, max_chars_per_slide=max_chars_per_slide, use_local_model=use_local_model, output_profile=output_profile)
+    elif mode == "translate":
+        result = translation_small(text=text, source_lang=source_lang, target_lang=target_lang, mode="lexical")
+    else:
+        raise ValueError("mode must be one of: ocr, image, presentation, translate")
+    return {"schema": "document_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def diagram_router(
+    mode: str = "from_code",
+    path: str = ".",
+    diagram_type: str = "flowchart",
+    include_call_edges: bool = False,
+    max_nodes: int = 100,
+    output_profile: str | None = None,
+    mermaid_text: str = "",
+    auto_fix: bool = False,
+    drawio_xml: str = "",
+    nodes: list[dict[str, Any]] | None = None,
+    edges: list[dict[str, Any]] | None = None,
+    diagram_path: str = "",
+    source_paths: list[str] | None = None,
+    marker: str = "",
+) -> dict[str, Any]:
+    """Router for code diagrams, Mermaid linting, draw.io generation, and diagram sync checks."""
+    if mode == "from_code":
+        result = diagram_from_code(path=path, diagram_type=diagram_type, include_call_edges=include_call_edges, max_nodes=max_nodes, output_profile=output_profile)
+    elif mode == "lint_mermaid":
+        result = mermaid_lint_fix(mermaid_text=mermaid_text, auto_fix=auto_fix)
+    elif mode == "drawio":
+        result = drawio_generator(mode="parse" if drawio_xml else "generate", drawio_xml=drawio_xml, nodes=nodes, edges=edges)
+    elif mode == "sync_check":
+        result = diagram_sync_check(diagram_path=diagram_path, source_paths=source_paths or [], marker=marker, mode="check")
+    else:
+        raise ValueError("mode must be one of: from_code, lint_mermaid, drawio, sync_check")
+    return {"schema": "diagram_router.v1", "mode": mode, "result": result}
+
+
+def _prune_public_mcp_surface() -> None:
+    for name in sorted(_declared_tool_names()):
+        if name in PUBLIC_MCP_TOOL_NAMES:
+            continue
+        try:
+            mcp.remove_tool(name)
+        except Exception:
+            continue
+
+
+_prune_public_mcp_surface()
 
 
 async def healthz(_request):

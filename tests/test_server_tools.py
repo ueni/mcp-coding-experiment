@@ -1401,6 +1401,95 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(len(replaced["files_changed"]), 1)
         self.assertEqual(replaced["total_replacements"], 1)
 
+    def test_public_mcp_tool_surface(self):
+        expected = set(self.server.PUBLIC_MCP_TOOL_NAMES)
+
+        async def run_checks():
+            tools = await self.server.mcp.list_tools()
+            names = {item.model_dump().get("name") for item in tools}
+            self.assertEqual(names, expected)
+            self.assertEqual(len(names), 20)
+
+        asyncio.run(run_checks())
+
+    def test_router_surface_modes(self):
+        self.write_repo_text("config.json", '{"outer": {"value": 7}}\n')
+
+        repo_out = self.server.repo_router(mode="query_json", path="config.json", query="outer.value", file_type="json")
+        self.assertEqual(repo_out["schema"], "repo_router.v1")
+        self.assertEqual(repo_out["result"]["value"], 7)
+
+        write_out = self.server.workspace_transaction(mode="write", path="notes.txt", content="hello\n")
+        self.assertEqual(write_out["schema"], "workspace_transaction.v1")
+        self.assertTrue((self.repo_path / "notes.txt").is_file())
+
+        git_out = self.server.git_router(mode="status")
+        self.assertEqual(git_out["schema"], "git_router.v1")
+
+        grep_out = self.server.code_index_router(mode="grep", query="alpha", path="src")
+        self.assertEqual(grep_out["schema"], "code_index_router.v1")
+        self.assertGreaterEqual(len(grep_out["result"]), 1)
+
+        mem_out = self.server.memory_router(mode="artifact_index", artifact_mode="refresh", path="docs")
+        self.assertEqual(mem_out["schema"], "memory_router.v1")
+        self.assertEqual(mem_out["mode"], "artifact_index")
+
+        tool_out = self.server.tool_router(mode="route", query="find files", candidates=["find_paths", "grep"])
+        self.assertEqual(tool_out["schema"], "tool_router.v1")
+        self.assertEqual(tool_out["mode"], "route")
+
+        quality_out = self.server.quality_router(
+            mode="spec_to_tests",
+            spec_text="- system should validate tokens",
+            framework="pytest",
+        )
+        self.assertEqual(quality_out["schema"], "quality_router.v1")
+
+        governance_out = self.server.governance_router(mode="runtime_contract")
+        self.assertEqual(governance_out["schema"], "governance_router.v1")
+
+        workflow_out = self.server.workflow_router(
+            mode="constraint_check",
+            actions=["run tests"],
+            requirements=["run tests"],
+        )
+        self.assertEqual(workflow_out["schema"], "workflow_router.v1")
+
+        guard_out = self.server.runtime_guard_router(mode="workspace_facts")
+        self.assertEqual(guard_out["schema"], "runtime_guard_router.v1")
+
+        math_out = self.server.math_router(mode="verify", left="x*(x+1)", right="x**2 + x")
+        self.assertEqual(math_out["schema"], "math_router.v1")
+        self.assertTrue(math_out["result"]["proven"])
+
+        doc_out = self.server.document_router(mode="translate", text="hello world", source_lang="en", target_lang="de")
+        self.assertEqual(doc_out["schema"], "document_router.v1")
+
+        diagram_out = self.server.diagram_router(mode="lint_mermaid", mermaid_text="A -> B", auto_fix=True)
+        self.assertEqual(diagram_out["schema"], "diagram_router.v1")
+
+    def test_router_invalid_modes(self):
+        with self.assertRaises(ValueError):
+            self.server.repo_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.git_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.code_index_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.quality_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.governance_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.workflow_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.runtime_guard_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.math_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.document_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.diagram_router(mode="bad")
+
 
 if __name__ == "__main__":
     unittest.main()

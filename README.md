@@ -262,135 +262,30 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 ## Tool Catalog by Category
 
-### Repository and File I/O
+### Public MCP v1 Surface
 
+- `autocomplete`
 - `repo_info`
 - `runtime_state`
-- `list_files`
-- `read_file`
-- `read_document`
-- `read_snippet`
-- `read_batch`
-- `write_file`
-- `delete_path`
-- `move_path`
-- `find_paths`
-- `replace_in_files`
-- `json_query`
-
-### Git and Change Management
-
-- `git_init`
-- `git_status`
-- `git_diff`
-- `git_log`
-- `git_show`
-- `git_add`
-- `git_restore`
-- `git_commit`
-- `git_checkout`
-- `git_create_branch`
-- `git_fetch`
-- `git_pull`
-- `git_push`
-- `apply_unified_diff`
-- `workspace_transaction` (preferred router for edit/snapshot/restore flows)
-- `summarize_diff`
-- `risk_scoring`
-- `security_triage`
-
-### Search, Indexing, and Structure
-
-- `grep`
-- `code_index_router` (preferred router for refresh/query/symbols/deps/calls/search)
-- `tree_sitter_core`
-- `ast_search`
-- `impact_tests`
-- `doc_sync_check`
-- `api_surface_snapshot`
-
-### Analysis and Productivity
-
-- `command_runner`
-- `terminal_support_session`
-- `prompt_optimize`
-- `tool_prompt_score`
-- `doc_summarizer_small`
-- `code_review_classifier`
-- `test_gen_small`
-- `self_test`
-- `self_check_pipeline`
-- `output_size_guard`
-- `token_budget_guard`
-- `cache_control`
-- `result_handle`
-- `tool_benchmark`
-- `workspace_facts`
-- `docker_task_router` (preferred router for docker task status/list/run)
-- `failure_memory`
-- `memory_router` (preferred router for memory upsert/get/validate/summary/decision)
-- `license_monitor`
-- `install_git_hooks`
-- `commit_lint_tag`
-- `golden_output_guard`
-- `flaky_test_detector`
-- `change_impact_gate`
-- `smart_fix_batch`
-- `release_readiness`
-- `required_tool_chain`
-- `fast_path_dev`
-- `workflow_compiler`
-- `policy_simulator`
-- `tool_router_learned`
-- `artifact_memory_index`
-- `constraint_solver_for_tasks`
-- `spec_to_tests`
-- `auto_sharding_for_analysis`
-- `confidence_scoring`
-- `runtime_contract_checker`
-- `cost_budget_enforcer`
-- `multi_agent_lane`
-- `human_approval_points`
-- `root_cause_memory`
-- `execution_replay`
-- `encode_lossless`
-- `decode_lossless`
-- `roundtrip_verify`
-- `delta_encode`
-- `delta_apply`
-
-### Math, Data, and Content
-
-- `math_parser`
-- `math_solver`
-- `math_verify`
+- `repo_router` (tree, find, read, read_document, read_snippet, read_batch, query_json)
+- `workspace_transaction` (begin, apply, validate, rollback, commit, snapshot, restore, write, replace, move, delete, apply_diff)
+- `git_router` (init, status, diff, log, show, add, restore, commit, checkout, create_branch, fetch, pull, push, summarize_diff, risk, security)
+- `code_index_router` (refresh, read, query, symbols, deps, calls, search, grep, tree, ast, impact_tests, doc_sync, api_surface)
+- `model_router`
+- `memory_router` (upsert, summary_upsert, decision_record, get, validate, auto_compact, failure_memory, root_cause, artifact_index)
+- `docker_task_router`
+- `tool_router` (route, record, inspect)
+- `quality_router` (self_test, self_check, release_readiness, flaky, change_impact, required_tool_chain, spec_to_tests, smart_fix)
+- `governance_router` (policy, license, runtime_contract, human_approval, commit_lint)
+- `workflow_router` (fast_path, compile, multi_agent, constraint_check, confidence, artifact_index, failure_memory, root_cause, execution_replay, auto_shard)
+- `runtime_guard_router` (benchmark, output_size, golden_output, token_budget, cost_budget, cache, result_handle, workspace_facts)
+- `math_router` (parse, solve, verify)
+- `document_router` (ocr, image, presentation, translate)
+- `diagram_router` (from_code, lint_mermaid, drawio, sync_check)
 - `sql_expert`
-- `vision_ocr_parser`
-- `image_interpret`
-- `translation_small`
-- `interpret_presentation`
 - `browse_web`
 
-### Diagramming and Architecture Docs
-
-- `diagram_from_code`
-- `mermaid_lint_fix`
-- `drawio_generator`
-- `diagram_sync_check`
-
-### Local Model and Retrieval
-
-- `model_router` (status, embed, infer [auto-upgrades to parallel_infer for detectable batches], parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox)
-- `autocomplete` (compatibility alias; prefer `model_router`)
-
-### Labs
-
-- `lab_release_rehearsal`
-- `lab_refactor_tournament`
-- `lab_policy_gatekeeper`
-- `lab_branch_swarm`
-- `lab_narrated_pr`
-- `lab_repo_digital_twin`
+Leaf implementations remain in `source/server.py` as internal helpers and compatibility-free call targets for the routers above. Only the tools listed here are exposed over MCP v1.
 
 ## Labs and Reports
 

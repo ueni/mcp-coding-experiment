@@ -116,90 +116,47 @@ The new git-backed snapshot restore flow intentionally performs rollback-style c
 
 ## 5. Tooling Taxonomy
 
-The platform currently exposes a broad catalog (documented in `README.md`). The categories below describe architecture-level roles.
+The platform now exposes a compact LLM-first MCP v1 surface. Capabilities remain broad, but the public contract is intentionally router-shaped so weaker models spend attention on fewer tool names.
 
-### 5.1 Repository and File I/O
+### 5.1 Public MCP v1 Surface
 
-Core primitives for file enumeration, focused reads, batched reads, structured config queries, and controlled writes/moves/deletes.
+Public tools:
 
-Representative tools:
+- `autocomplete`
+- `repo_info`, `runtime_state`
+- `repo_router`, `workspace_transaction`, `git_router`
+- `code_index_router`, `model_router`, `memory_router`, `docker_task_router`, `tool_router`
+- `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`
+- `math_router`, `document_router`, `diagram_router`
+- `sql_expert`, `browse_web`
 
-- `list_files`, `read_file`, `read_snippet`, `read_batch`, `find_paths`
-- `write_file`, `move_path`, `delete_path`, `replace_in_files`, `json_query`
+### 5.2 Router Design Principle
 
-### 5.2 Git and Change Management
+Each public router owns a task-shaped capability family and dispatches to internal leaf implementations:
 
-Version-control interaction, diff processing, and mutation workflows.
+- `repo_router`: repository listing, focused reads, snippets, batch reads, JSON/TOML/YAML queries
+- `workspace_transaction`: transaction lifecycle plus direct file mutations
+- `git_router`: Git operations, diff summarization, risk scoring, security triage
+- `code_index_router`: repository index, semantic search, grep, AST/tree-sitter, impact/doc/API checks
+- `memory_router`: context memory, failure memory, root-cause memory, artifact index access
+- `tool_router`: learned routing with intent fallback
+- `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`: higher-level operational flows
+- `math_router`, `document_router`, `diagram_router`: domain-specific utility families
 
-Representative tools:
+### 5.3 Internal Leaf Tools
 
-- `git_status`, `git_diff`, `git_show`, `git_add`, `git_commit`
-- `apply_unified_diff`, `edit_transaction`, `summarize_diff`
-- `risk_scoring`, `security_triage`
+Former leaf tools remain implemented in the server for reuse and testing, but they are not part of the public MCP v1 surface. This preserves feature breadth while materially reducing the exposed tool count.
 
-### 5.3 Search, Indexing, and Structure
+## 6. Advanced Workflow Layer
 
-Fast lexical/semantic discovery and structural program analysis.
+The workflow/governance/runtime layers are now expressed primarily through routers:
 
-Representative tools:
+- `quality_router`: tests, readiness, required-tool-chain, spec-to-tests, batch fixes
+- `governance_router`: policy simulation, license checks, runtime contract validation, approval checkpoints, commit linting
+- `workflow_router`: fast-path development, workflow compilation, multi-agent analysis, artifact/failure/root-cause memory, replay, sharding
+- `runtime_guard_router`: benchmarks, golden/output guards, token/cost budgets, cache inspection, result handles, workspace facts
 
-- `grep`, `semantic_find`, `repo_index_daemon`
-- `symbol_index`, `dependency_map`, `call_graph`, `ast_search`, `tree_sitter_core`
-- `doc_sync_check`, `api_surface_snapshot`, `impact_tests`
-
-### 5.4 Quality, Governance, and Productivity
-
-Orchestration tools that shift teams from ad-hoc prompts to repeatable pipelines.
-
-Representative tools:
-
-- `self_test`, `self_check_pipeline`, `release_readiness`
-- `license_monitor`, `install_git_hooks`, `commit_lint_tag`
-- `required_tool_chain`, `change_impact_gate`, `smart_fix_batch`
-- `tool_router_learned`, `policy_simulator`, `confidence_scoring`
-- `runtime_contract_checker`, `cost_budget_enforcer`, `human_approval_points`
-- `root_cause_memory`, `execution_replay`
-
-### 5.5 Lossless Prompt Compression and Transport Efficiency
-
-For token economy without semantic drift:
-
-- `encode_lossless`, `decode_lossless`, `roundtrip_verify`
-- `delta_encode`, `delta_apply`
-- `prompt_optimize`, `token_budget_guard`
-
-### 5.6 Local Model and Retrieval Adapters
-
-Offline/nearby model integration and vector-style reranking support:
-
-- `local_model_status`, `local_infer`, `local_embed`, `local_rerank`
-
-### 5.7 Domain Utilities
-
-Math, SQL, OCR, presentation parsing, and constrained web fetch:
-
-- `math_parser`, `math_solver`, `math_verify`, `sql_expert`
-- `vision_ocr_parser`, `image_interpret`, `interpret_presentation`, `browse_web`
-
-## 6. Advanced Workflow Layer (LLM+MCP Power Tools)
-
-Recent additions establish a higher-level orchestration layer:
-
-- `workflow_compiler`: Converts goal statements into executable tool plans with optional rollback policy.
-- `state_snapshot` / `state_restore`: Git-backed workspace rollback mechanism using stash commits + stable refs.
-- `tool_router_learned`: Lightweight learned routing from historical latency/success outcomes.
-- `artifact_memory_index`: Persistent artifact-level indexing for retrieval over generated outputs.
-- `constraint_solver_for_tasks`: Constraint feasibility and gap detection for action planning.
-- `spec_to_tests`: Derive test skeletons from natural-language spec fragments.
-- `auto_sharding_for_analysis`: Partition analysis jobs for scale-out parallelism.
-- `runtime_contract_checker`: Validate runtime/tooling contracts against expected interfaces.
-- `cost_budget_enforcer`: Apply runtime cost/size budgets to contain token and compute drift.
-- `multi_agent_lane`: Explicit lane semantics for concurrent agent roles.
-- `human_approval_points`: Codify checkpoints where automation must pause for human sign-off.
-- `root_cause_memory`: Durable defect/remediation memory for repeated failure classes.
-- `execution_replay`: Reconstruct and replay tool chains for incident/debug analysis.
-
-These tools shift usage from "single command execution" to "policy-aware autonomous workflow management."
+This shifts the public contract from a large collection of primitives to a smaller number of strict mode-based interfaces.
 
 ## 7. State Management and Rollback Strategy
 
