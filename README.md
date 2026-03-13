@@ -95,6 +95,10 @@ Inline devcontainer example (non-compose):
 }
 ```
 
+The Dockerfile uses BuildKit cache mounts for `apt` and `pip`, so repeated
+devcontainer rebuilds can reuse downloaded package metadata and wheels. Keep
+BuildKit enabled when building this image or those cache mounts will be ignored.
+
 If you still want compose for local runs outside VS Code, use this inline example:
 
 ```yaml
@@ -227,8 +231,8 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 | `CONTINUE_OLLAMA_MODELS` | `qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b` | No | Comma-separated model IDs (or empty) | Models ensured via `ollama pull` at startup; set to empty to skip pre-pull. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
 | `OLLAMA_STARTUP_TIMEOUT` | `30` | No | Integer seconds | Max wait time for Ollama readiness before fallback/failure logic. |
-| `OLLAMA_HOST` | `127.0.0.1:11434` | No | `host:port` | Primary bind target for `ollama serve`. |
-| `OLLAMA_FALLBACK_HOST` | `0.0.0.0:11434` | No | `host:port` | Secondary bind target used if primary Ollama host fails. |
+| `OLLAMA_HOST` | `127.0.0.1:11434` | No | `host:port` | Primary bind target for `ollama serve`. The devcontainer overrides this to `0.0.0.0:2345` so the bundled Ollama service is reachable from the host on port `2345`. |
+| `OLLAMA_FALLBACK_HOST` | `0.0.0.0:11434` | No | `host:port` | Secondary bind target used if primary Ollama host fails. The devcontainer keeps this aligned to `0.0.0.0:2345`. |
 | `ALLOW_ORIGINS` | `*` | No | CORS origin list | Controls browser/client origins for HTTP mode. |
 | `SSL_CERT_FILE` | `/etc/ssl/certs/ca-certificates.crt` | No | Path | CA bundle for outbound HTTPS. |
 | `HOST_CA_CERT_FILE` | empty | No | Path | Optional mounted host CA bundle path. |

@@ -2640,6 +2640,8 @@ def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
     listening_ports = _list_listening_ports()
     http_mode = MCP_TRANSPORT in {"http", "streamable-http", "streamable_http"}
     ollama_tags_url = _ollama_tags_url()
+    ollama_host_env = os.getenv("OLLAMA_HOST", "").strip()
+    configured_ollama_port = urllib.parse.urlparse(ollama_tags_url).port
     ollama_probe: dict[str, Any] = (
         _probe_http(ollama_tags_url, timeout=2.0) if include_ollama_probe else {}
     )
@@ -2658,10 +2660,16 @@ def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
             "python_server_processes": _count_processes_with_tokens("python", "server.py"),
         },
         "ollama": {
-            "host_env": os.getenv("OLLAMA_HOST", ""),
+            "host_env": ollama_host_env,
             "models_dir_env": os.getenv("OLLAMA_MODELS", ""),
             "serve_processes": ollama_processes,
             "running": ollama_processes > 0,
+            "configured_port": configured_ollama_port,
+            "configured_port_listening": (
+                configured_ollama_port in listening_ports
+                if configured_ollama_port is not None
+                else None
+            ),
             "port_11434_listening": 11434 in listening_ports,
             "tags_probe": ollama_probe,
         },
@@ -11258,6 +11266,8 @@ async def healthz(_request):
             "ollama": {
                 "running": ollama_state.get("running"),
                 "serve_processes": ollama_state.get("serve_processes"),
+                "configured_port": ollama_state.get("configured_port"),
+                "configured_port_listening": ollama_state.get("configured_port_listening"),
                 "port_11434_listening": ollama_state.get("port_11434_listening"),
             },
         }

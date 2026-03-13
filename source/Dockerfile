@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 #
 # SPDX-License-Identifier: MIT
@@ -16,6 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
+    PIP_CACHE_DIR=/var/cache/buildkit/pip \
     DEBIAN_FRONTEND=noninteractive \
     REPO_PATH=/repo \
     HOST=0.0.0.0 \
@@ -39,7 +42,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST_CA_CERT_FILE= \
     MCP_APPLY_REPO_DEFAULTS=false
 
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
         antiword \
         ca-certificates \
@@ -56,14 +61,17 @@ RUN apt-get update \
     && . /etc/os-release \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends \
+        docker-buildx-plugin \
+        docker-ce-cli
 
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
-RUN pip install --no-cache-dir \
+RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+    pip install --root-user-action=ignore -r requirements.txt
+RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+    pip install \
     --root-user-action=ignore \
     black==26.3.0 \
     isort==8.0.1 \
@@ -71,8 +79,9 @@ RUN pip install --no-cache-dir \
     pyupgrade==3.21.2 \
     ruff==0.15.5
 
-RUN python -m venv /opt/codebase-tooling/coding-venv \
-    && /opt/codebase-tooling/coding-venv/bin/pip install --no-cache-dir \
+RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+    python -m venv /opt/codebase-tooling/coding-venv \
+    && /opt/codebase-tooling/coding-venv/bin/pip install \
        --root-user-action=ignore \
        pytest==8.4.2 \
        mypy==1.18.2 \
@@ -110,7 +119,7 @@ RUN chmod 0755 /app/entrypoint.sh
 RUN ln -sf /usr/local/bin/python3 /usr/bin/python3
 
 EXPOSE 8000
-EXPOSE 11434
+EXPOSE 2345
 
 USER app
 

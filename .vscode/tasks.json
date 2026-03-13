@@ -16,7 +16,10 @@
         "isDefault": true
       },
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "DOCKER_BUILDKIT": "1"
+        }
       },
       "problemMatcher": []
     },
@@ -33,7 +36,10 @@
       ],
       "group": "build",
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "DOCKER_BUILDKIT": "1"
+        }
       },
       "problemMatcher": []
     },
