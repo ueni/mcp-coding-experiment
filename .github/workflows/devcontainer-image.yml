@@ -31,7 +31,20 @@ jobs:
             --workdir /work \
             --entrypoint /bin/bash \
             "${TEST_IMAGE}" \
-            -lc 'coverage run -m pytest && coverage report -m && coverage xml -o coverage.xml'
+            -lc 'coverage run -m pytest && coverage report -m && coverage xml -o coverage.xml && coverage json -o coverage.json'
+
+      - name: Warn on low coverage
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          total = json.loads(Path("coverage.json").read_text())["totals"]["percent_covered_display"]
+          percent = float(total)
+          target = 90.0
+          if percent < target:
+              print(f"::warning::Coverage warning: total of {percent:.0f} is less than target={target:.0f}")
+          PY
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
