@@ -658,8 +658,10 @@ def _iter_candidate_files(
 
     if recursive:
         for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
             if not include_hidden:
                 dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            filenames.sort()
             base = Path(dirpath)
             for name in filenames:
                 if not include_hidden and name.startswith("."):
@@ -675,7 +677,7 @@ def _iter_candidate_files(
                     yield p
         return
 
-    for p in root.glob("*"):
+    for p in sorted(root.glob("*")):
         if not p.is_file():
             continue
         if include_hidden:
