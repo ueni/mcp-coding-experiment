@@ -4850,14 +4850,16 @@ def replace_in_files(
         if root.is_file():
             yield root
             return
-        if recursive:
-            for p in root.rglob("*"):
-                if p.is_file():
-                    yield p
-            return
-        for p in root.glob("*"):
-            if p.is_file():
-                yield p
+        walker = root.rglob("*") if recursive else root.glob("*")
+        files = [p for p in walker if p.is_file()]
+        files.sort(
+            key=lambda p: (
+                _is_hidden_rel_path(p.relative_to(REPO_PATH)),
+                str(p.relative_to(REPO_PATH)).replace("\\", "/"),
+            )
+        )
+        for p in files:
+            yield p
 
     for candidate in iter_candidates():
         if len(files_changed) >= max_files:
