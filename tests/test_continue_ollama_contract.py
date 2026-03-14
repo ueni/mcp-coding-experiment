@@ -33,6 +33,16 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         )
         self.assertNotIn("CONTINUE_OLLAMA_MODELS", config["containerEnv"])
 
+    def test_devcontainer_mounts_host_docker_config_for_container_use(self):
+        config = json.loads(
+            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("/home/app/.docker", config["containerEnv"]["DOCKER_CONFIG"])
+        self.assertIn(
+            "source=${localEnv:HOME}/.docker,target=/host/.docker,type=bind,consistency=cached,readOnly=true",
+            config["mounts"],
+        )
+
     def test_codex_config_uses_hyphenated_server_key(self):
         config_toml = (REPO_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8")
         default_config_toml = (

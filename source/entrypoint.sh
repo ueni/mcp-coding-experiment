@@ -171,6 +171,62 @@ bootstrap_user_home_from_host_mounts() {
     cp /host/.gitconfig /home/app/.gitconfig
     chown app:app /home/app/.gitconfig
   fi
+
+  if [[ -d /host/.docker ]]; then
+    mkdir -p /home/app/.docker
+    if ! find /home/app/.docker -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      cp -a /host/.docker/. /home/app/.docker/
+    fi
+    if [[ -f /host/.docker/config.json ]]; then
+      python - <<'PY'
+import json
+import pathlib
+import shutil
+import sys
+
+source = pathlib.Path("/host/.docker/config.json")
+target = pathlib.Path("/home/app/.docker/config.json")
+
+try:
+    config = json.loads(source.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"warning: unable to load host Docker config: {exc}", file=sys.stderr)
+    raise SystemExit(0)
+
+changed = False
+
+creds_store = config.get("credsStore")
+if isinstance(creds_store, str) and creds_store:
+    if shutil.which(f"docker-credential-{creds_store}") is None:
+        config.pop("credsStore", None)
+        changed = True
+
+cred_helpers = config.get("credHelpers")
+if isinstance(cred_helpers, dict):
+    filtered = {
+        registry: helper
+        for registry, helper in cred_helpers.items()
+        if not isinstance(helper, str)
+        or not helper
+        or shutil.which(f"docker-credential-{helper}") is not None
+    }
+    if filtered != cred_helpers:
+        if filtered:
+            config["credHelpers"] = filtered
+        else:
+            config.pop("credHelpers", None)
+        changed = True
+
+target.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if changed:
+    print(
+        "sanitized Docker config for container use by removing unavailable credential helpers",
+        file=sys.stderr,
+    )
+PY
+    fi
+    chown -R app:app /home/app/.docker
+  fi
 }
 
 maybe_fix_docker_sock_group() {

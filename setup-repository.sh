@@ -77,6 +77,7 @@ cat > .devcontainer/devcontainer.json <<EOF
   "workspaceFolder": "/repo",
   "containerEnv": {
     "DOCKER_HOST": "unix:///var/run/docker.sock",
+    "DOCKER_CONFIG": "/home/app/.docker",
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
     "ALLOW_MUTATIONS": "true",
@@ -106,8 +107,8 @@ cat > .devcontainer/devcontainer.json <<EOF
     }
   },
   "mounts": [
-    "source=\${localEnv:HOME}/.codex,target=/host/.codex,type=bind,consistency=cached",readOnly=true,
     "source=\${localEnv:HOME}/.continue,target=/host/.continue,type=bind,consistency=cached,readOnly=true",
+    "source=\${localEnv:HOME}/.docker,target=/host/.docker,type=bind,consistency=cached,readOnly=true",
     "source=\${localEnv:HOME}/.gitconfig,target=/host/.gitconfig,type=bind,consistency=cached,readOnly=true",
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
     "source=\${localWorkspaceFolder},target=/repo,type=bind,consistency=cached",
