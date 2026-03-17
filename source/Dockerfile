@@ -57,6 +57,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gnupg \
         jq \
         ripgrep \
+        sudo \
         tini \
         tesseract-ocr \
     && install -m 0755 -d /etc/apt/keyrings \
@@ -132,6 +133,8 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
 
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
+    && printf 'app ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get' > /etc/sudoers.d/app-apt \
+    && chmod 0440 /etc/sudoers.d/app-apt \
     && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults /home/app/.ollama \
     && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
     && rm -rf /tmp/ollama-models \
