@@ -81,6 +81,74 @@ class ServerExecutionCoverageTest(ServerToolsTestBase):
         self.assertEqual(out["exit_code"], None)
         self.assertIn("missing executable", out["stderr"])
 
+    def test_command_runner_non_whitelisted_returns_manual_request(self):
+        with patch.object(self.server.subprocess, "run") as run_mock:
+            out = self.server.command_runner(command=["python", "script.py"], timeout_seconds=5)
+        run_mock.assert_not_called()
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["timeout"])
+        self.assertTrue(out["manual_execution_required"])
+        self.assertEqual(out["exit_code"], None)
+        self.assertEqual(out["suggested_command"], "python script.py")
+        self.assertEqual(out["approval_request"]["action"], "manual_command_execution")
+        self.assertEqual(out["approval_request"]["status"], "pending")
+        self.assertIn("approval requested", out["message"].lower())
+        self.assertIn("command not allowed: python", out["stderr"])
+
+        listed = self.server.human_approval_points(mode="list")
+        self.assertEqual(listed["count"], 1)
+        self.assertEqual(listed["items"][0]["approval_id"], out["approval_request"]["approval_id"])
+
+    def test_command_runner_env_wrapper_runs_safe_command(self):
+        proc = subprocess.CompletedProcess(
+            args=["env", "MODE=test", "git", "status"],
+            returncode=0,
+            stdout="wrapped ok\n",
+            stderr="",
+        )
+        with patch.object(self.server.subprocess, "run", return_value=proc) as run_mock:
+            out = self.server.command_runner(
+                command=["env", "MODE=test", "git", "status"],
+                timeout_seconds=5,
+            )
+        run_mock.assert_called_once()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["exit_code"], 0)
+        self.assertEqual(out["stdout"], "wrapped ok\n")
+
+    def test_command_runner_env_wrapper_preserves_manual_request_for_non_whitelisted_command(self):
+        with patch.object(self.server.subprocess, "run") as run_mock:
+            out = self.server.command_runner(
+                command=["env", "MODE=test", "python", "script.py"],
+                timeout_seconds=5,
+            )
+        run_mock.assert_not_called()
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["manual_execution_required"])
+        self.assertEqual(out["suggested_command"], "env MODE=test python script.py")
+        self.assertIn("command not allowed: python", out["stderr"])
+
+    def test_command_runner_runs_after_matching_manual_request_is_approved(self):
+        pending = self.server.command_runner(command=["python", "script.py"], timeout_seconds=5)
+        self.server.human_approval_points(
+            mode="resolve",
+            approval_id=pending["approval_request"]["approval_id"],
+            approved=True,
+        )
+        proc = subprocess.CompletedProcess(
+            args=["python", "script.py"],
+            returncode=0,
+            stdout="ran after approval\n",
+            stderr="",
+        )
+        with patch.object(self.server.subprocess, "run", return_value=proc) as run_mock:
+            out = self.server.command_runner(command=["python", "script.py"], timeout_seconds=5)
+        run_mock.assert_called_once()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["exit_code"], 0)
+        self.assertEqual(out["stdout"], "ran after approval\n")
+        self.assertNotIn("manual_execution_required", out)
+
     def test_self_test_pytest_runner_repo_target(self):
         proc = subprocess.CompletedProcess(
             args=["pytest", "-q", "-x", "tests/test_sample.py"],

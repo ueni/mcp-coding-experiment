@@ -1734,25 +1734,100 @@ def _cache_prune(max_age_minutes: int, tool: str | None = None) -> dict[str, Any
     return {"removed_entries": removed, "scanned_entries": scanned, "tool": tool or "*", "max_age_minutes": max_age_minutes}
 
 
-def _validate_safe_command(command: list[str]) -> None:
+def _resolve_safe_command_target(command: list[str]) -> tuple[str, list[str]]:
     if not command:
         raise ValueError("command must not be empty")
     binary = command[0]
+    if binary != "env":
+        return binary, command[1:]
+
+    idx = 1
+    while idx < len(command):
+        token = command[idx]
+        if token == "-i":
+            idx += 1
+            continue
+        if token == "-u":
+            if idx + 1 >= len(command):
+                raise ValueError("env -u must include a variable name")
+            idx += 2
+            continue
+        if token.startswith("-"):
+            raise ValueError(f"env flag not allowed: {token}")
+        if "=" in token:
+            idx += 1
+            continue
+        break
+    if idx >= len(command):
+        raise ValueError("env command must include a wrapped executable")
+    return command[idx], command[idx + 1 :]
+
+
+def _validate_safe_command(command: list[str]) -> None:
+    binary, args = _resolve_safe_command_target(command)
     if binary not in SAFE_COMMANDS:
         raise ValueError(f"command not allowed: {binary}")
     if binary == "git":
-        if len(command) < 2:
+        if not args:
             raise ValueError("git command must include a subcommand")
-        if command[1] not in SAFE_GIT_SUBCOMMANDS:
-            raise ValueError(f"git subcommand not allowed: {command[1]}")
-    if binary == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in command[1:]):
+        if args[0] not in SAFE_GIT_SUBCOMMANDS:
+            raise ValueError(f"git subcommand not allowed: {args[0]}")
+    if binary == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in args):
         raise ValueError("sed in-place edits are not allowed")
-    if binary == "find" and any(arg in {"-delete", "-exec", "-ok"} for arg in command[1:]):
+    if binary == "find" and any(arg in {"-delete", "-exec", "-ok"} for arg in args):
         raise ValueError("find destructive/exec flags are not allowed")
     if binary == "awk":
-        script = command[1] if len(command) > 1 else ""
+        script = args[0] if args else ""
         if "system(" in script:
             raise ValueError("awk system() is not allowed")
+
+
+def _approval_points_load() -> dict[str, Any]:
+    payload = _json_file_load(APPROVAL_POINTS_FILE, {"items": []})
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        items = []
+    payload["items"] = items
+    return payload
+
+
+def _approval_point_append(action: str, risk_level: str, details: str) -> dict[str, Any]:
+    if not action.strip():
+        raise ValueError("action is required for create mode")
+    payload = _approval_points_load()
+    row = {
+        "approval_id": uuid.uuid4().hex[:12],
+        "action": action,
+        "risk_level": risk_level,
+        "details": details,
+        "status": "pending",
+        "created_at": _now_iso(),
+    }
+    payload["items"].append(row)
+    _json_file_save(APPROVAL_POINTS_FILE, payload)
+    return row
+
+
+def _find_approved_manual_command_request(command: list[str], cwd: str) -> dict[str, Any] | None:
+    payload = _approval_points_load()
+    command_json = json.dumps(command)
+    cwd_marker = f"cwd={cwd};"
+    command_marker = f"command={command_json};"
+    for row in reversed(payload["items"]):
+        if row.get("action") != "manual_command_execution":
+            continue
+        if row.get("status") != "approved":
+            continue
+        details = str(row.get("details", ""))
+        if cwd_marker in details and command_marker in details:
+            return row
+    return None
+
+
+def _is_manual_command_request(reason: str) -> bool:
+    return reason.startswith("command not allowed:") or reason.startswith(
+        "git subcommand not allowed:"
+    )
 
 
 def _terminal_read_available(
@@ -3382,7 +3457,7 @@ def docker_cli_run(
             "schema": "docker_cli_run.v1",
             "ok": False,
             "command": command,
-            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "cwd": rel_cwd,
             "control_profile": control_profile,
             "exit_code": None,
             "timeout": True,
@@ -3629,7 +3704,7 @@ def vscode_task_run(
             "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
             "control_profile": control_profile,
             "command": command,
-            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "cwd": rel_cwd,
             "exit_code": None,
             "timeout": True,
             "stdout": _trim_text(timeout_stdout, max_chars=out_cap),
@@ -5612,10 +5687,58 @@ def command_runner(
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
     out_cap = _token_budget_apply_max(max_output_chars)
-    _validate_safe_command(command)
-
     workdir = _resolve_repo_path(cwd)
+    rel_cwd = str(workdir.relative_to(REPO_PATH))
     run_id = uuid.uuid4().hex[:12]
+    try:
+        _validate_safe_command(command)
+    except ValueError as exc:
+        reason = str(exc)
+        if not _is_manual_command_request(reason):
+            raise
+        approved_request = _find_approved_manual_command_request(command=command, cwd=rel_cwd)
+        if approved_request is not None:
+            _sse_publish(
+                "tool.approval_granted",
+                source="command_runner",
+                run_id=run_id,
+                command=command,
+                cwd=str(workdir),
+                approval_id=approved_request["approval_id"],
+            )
+        else:
+            approval = _approval_point_append(
+                action="manual_command_execution",
+                risk_level="medium",
+                details=(
+                    "User execution required for non-whitelisted command. "
+                    f"cwd={rel_cwd}; command={json.dumps(command)}; reason={reason}"
+                ),
+            )
+            _sse_publish(
+                "tool.approval_required",
+                source="command_runner",
+                run_id=run_id,
+                command=command,
+                cwd=str(workdir),
+                reason=reason,
+                manual_execution_required=True,
+                approval_id=approval["approval_id"],
+            )
+            return {
+                "ok": True,
+                "exit_code": None,
+                "command": command,
+                "cwd": rel_cwd,
+                "stdout": "",
+                "stderr": reason,
+                "timeout": False,
+                "manual_execution_required": True,
+                "message": "Command approval requested. The command was not executed.",
+                "suggested_command": shlex.join(command),
+                "approval_request": approval,
+            }
+
     started_at = time.time()
     _sse_publish(
         "tool.start",
@@ -5653,7 +5776,7 @@ def command_runner(
             "ok": False,
             "exit_code": None,
             "command": command,
-            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "cwd": rel_cwd,
             "stdout": "",
             "stderr": str(exc),
             "timeout": False,
@@ -5685,7 +5808,7 @@ def command_runner(
             "ok": False,
             "exit_code": None,
             "command": command,
-            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "cwd": rel_cwd,
             "stdout": _trim_text(stdout, max_chars=out_cap),
             "stderr": _trim_text(stderr, max_chars=out_cap),
             "timeout": True,
@@ -5830,7 +5953,7 @@ def terminal_support_session(
             "read_fd": read_fd,
             "log_path": str(log_path),
             "command": cmd,
-            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "cwd": rel_cwd,
             "input_chars": 0,
             "output_chars": 0,
             "started_at": _now_iso(),
@@ -5864,7 +5987,7 @@ def terminal_support_session(
             "running": proc.poll() is None,
             "exit_code": proc.poll(),
             "command": cmd,
-            "cwd": str(workdir.relative_to(REPO_PATH)),
+            "cwd": rel_cwd,
             "log_path": str(log_path.relative_to(REPO_PATH)),
             "backend": backend,
             "output": _trim_text(output, max_chars=out_cap) if include_output else "",
@@ -10159,27 +10282,13 @@ def human_approval_points(
     """Manage human approval checkpoints for risky operations."""
     if mode not in {"create", "list", "resolve"}:
         raise ValueError("mode must be one of: create, list, resolve")
-    payload = _json_file_load(APPROVAL_POINTS_FILE, {"items": []})
-    items = payload.get("items", [])
-    if not isinstance(items, list):
-        items = []
+    payload = _approval_points_load()
+    items = payload["items"]
     if mode == "list":
         return {"schema": "human_approval_points.v1", "mode": mode, "count": len(items), "items": items}
     if mode == "create":
         _require_mutations()
-        if not action.strip():
-            raise ValueError("action is required for create mode")
-        row = {
-            "approval_id": uuid.uuid4().hex[:12],
-            "action": action,
-            "risk_level": risk_level,
-            "details": details,
-            "status": "pending",
-            "created_at": _now_iso(),
-        }
-        items.append(row)
-        payload["items"] = items
-        _json_file_save(APPROVAL_POINTS_FILE, payload)
+        row = _approval_point_append(action=action, risk_level=risk_level, details=details)
         return {"schema": "human_approval_points.v1", "mode": mode, "item": row}
     # resolve
     _require_mutations()
