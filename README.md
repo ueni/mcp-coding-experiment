@@ -62,10 +62,28 @@ Added MCP server 'codebase-tooling-mcp'
 curl -sS http://localhost:8000/healthz
 ```
 
-Expected result:
+Expected result (example):
 
-```text
-ok
+```json
+{
+  "ok": true,
+  "repo_path": "/repo",
+  "is_git_repo": true,
+  "allow_mutations": true,
+  "transport": "http",
+  "server": {
+    "http_mode": true,
+    "port": 8000,
+    "port_listening": true
+  },
+  "ollama": {
+    "running": true,
+    "serve_processes": 1,
+    "configured_port": 11434,
+    "configured_port_listening": true,
+    "port_11434_listening": true
+  }
+}
 ```
 
 ## Use With VS Code Dev Containers
