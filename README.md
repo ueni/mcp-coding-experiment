@@ -121,8 +121,9 @@ BuildKit enabled when building this image or those cache mounts will be ignored.
 
 The checked-in devcontainer passes `/dev/dri` into the container and sets
 `OLLAMA_VULKAN=1` so the bundled Ollama service can use Vulkan-capable Linux
-GPUs. `source/entrypoint.sh` also maps the matching device groups onto the
-`app` user before Ollama starts.
+GPUs. The image now bundles a Vulkan-capable Ollama release, and
+`source/entrypoint.sh` maps the matching device groups onto the `app` user
+before Ollama starts.
 Hosts without `/dev/dri` should remove that `runArgs` entry or use the setup
 script with `--disable-vulkan-gpu` when bootstrapping another repository.
 
@@ -181,9 +182,10 @@ curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/set
 ```
 
 The setup script auto-enables Vulkan GPU passthrough for the bundled Ollama
-service when `/dev/dri` exists on the host, and writes `OLLAMA_VULKAN=1` into
-the generated devcontainer. Use `--enable-vulkan-gpu` or `--disable-vulkan-gpu`
-to override that detection:
+service when `/dev/dri` exists on the host, writes `OLLAMA_VULKAN=1` into the
+generated devcontainer, and also adds `/dev/kfd` when it is present on AMD
+hosts. Use `--enable-vulkan-gpu` or `--disable-vulkan-gpu` to override that
+detection:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh -s -- --enable-vulkan-gpu

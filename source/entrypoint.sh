@@ -254,19 +254,16 @@ maybe_fix_docker_sock_group() {
   fi
 }
 
-maybe_fix_dri_device_groups() {
+maybe_fix_gpu_device_groups() {
   if [[ "$(id -u)" -ne 0 ]]; then
-    return
-  fi
-  if [[ ! -d /dev/dri ]]; then
     return
   fi
   if ! command -v usermod >/dev/null 2>&1; then
     return
   fi
 
-  local device_path device_gid device_group
-  for device_path in /dev/dri/renderD* /dev/dri/card*; do
+  local device_path device_gid device_group fallback_group
+  for device_path in /dev/dri/renderD* /dev/dri/card* /dev/kfd; do
     if [[ ! -e "${device_path}" ]]; then
       continue
     fi
@@ -276,8 +273,12 @@ maybe_fix_dri_device_groups() {
     fi
     device_group="$(getent group "${device_gid}" | cut -d: -f1 || true)"
     if [[ -z "${device_group}" ]] && command -v groupadd >/dev/null 2>&1; then
-      device_group="dri-host-${device_gid}"
-      groupadd --gid "${device_gid}" "${device_group}" || true
+      case "${device_path}" in
+        /dev/kfd) fallback_group="kfd-host-${device_gid}" ;;
+        *) fallback_group="dri-host-${device_gid}" ;;
+      esac
+      groupadd --gid "${device_gid}" "${fallback_group}" || true
+      device_group="${fallback_group}"
     fi
     if [[ -n "${device_group}" ]]; then
       usermod -aG "${device_group}" app || true
@@ -351,7 +352,7 @@ url = "http://localhost:8000/mcp"
 
 if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then
   maybe_fix_docker_sock_group
-  maybe_fix_dri_device_groups
+  maybe_fix_gpu_device_groups
   bootstrap_user_home_from_host_mounts
   export HOME="/home/app"
   export USER="app"
@@ -366,6 +367,9 @@ fi
 
 export HOME="${HOME:-/home/app}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
+if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
+  export OLLAMA_VULKAN=1
+fi
 CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:3b}"
 OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
 OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"

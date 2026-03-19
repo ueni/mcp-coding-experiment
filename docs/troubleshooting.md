@@ -112,6 +112,9 @@ qwen2.5-coder:3b    ...             2.6 GB    100% CPU
 
 Checks:
 
+- Confirm the built image uses Ollama `0.12.11` or newer; older releases do not ship Vulkan support for Intel/AMD iGPU paths.
 - Confirm `.devcontainer/devcontainer.json` includes `--device=/dev/dri`.
+- On AMD hosts, also expose `/dev/kfd` when it exists.
 - Confirm `.devcontainer/devcontainer.json` sets `OLLAMA_VULKAN=1`.
+- Inspect `/tmp/ollama.log`; if it still says `no compatible GPUs were discovered`, run `vulkaninfo --summary` inside the container and verify a real Intel or AMD GPU is visible instead of only llvmpipe.
 - Rebuild or reopen the devcontainer after changing the config so Ollama restarts with the new environment.

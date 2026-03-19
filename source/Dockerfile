@@ -10,9 +10,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG APP_UID=1000
 ARG APP_GID=1000
-ARG OLLAMA_VERSION=0.12.2
-ARG OLLAMA_SHA256_AMD64="abe5d1a64f813445a184bc44885bec08f8d6d8a95076ffb80ef96ed23124b64b"
-ARG OLLAMA_SHA256_ARM64="45e089fd5fb31fd08d2be151bb537d3047a2be1f3437b41f35372fc5a7e5981c"
+ARG OLLAMA_VERSION=0.13.5
 ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b"
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
@@ -65,6 +63,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         htop \
         tree \
         vulkan-tools \
+        zstd \
     ); \
     apt-get install -y --no-install-recommends "${packages[@]}"; \
     install -m 0755 -d /etc/apt/keyrings \
@@ -98,21 +97,17 @@ RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
 
 RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
     set -eux; \
-    ollama_sha256=""; \
     case "$(dpkg --print-architecture)" in \
-      amd64) ollama_arch="amd64"; ollama_sha256="${OLLAMA_SHA256_AMD64}" ;; \
-      arm64) ollama_arch="arm64"; ollama_sha256="${OLLAMA_SHA256_ARM64}" ;; \
+      amd64) ollama_arch="amd64" ;; \
+      arm64) ollama_arch="arm64" ;; \
       *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
-    if [ -z "${ollama_sha256}" ]; then \
-      echo "Missing Ollama SHA256 for architecture ${ollama_arch}." >&2; \
-      exit 1; \
+    ollama_archive="/var/cache/buildkit/ollama/ollama-${OLLAMA_VERSION}-linux-${ollama_arch}.tar.zst"; \
+    if [ ! -f "${ollama_archive}" ]; then \
+      curl -fL --progress-bar "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst?version=${OLLAMA_VERSION}" -o "${ollama_archive}"; \
     fi; \
-    ollama_tgz="/var/cache/buildkit/ollama/ollama-${OLLAMA_VERSION}-linux-${ollama_arch}.tgz"; \
-    if [ ! -f "${ollama_tgz}" ]; then \
-      curl -fL --progress-bar "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz?version=${OLLAMA_VERSION}" -o "${ollama_tgz}"; \
-    fi; \
-    OLLAMA_SHA256="${ollama_sha256}" OLLAMA_TGZ="${ollama_tgz}" python -c 'import hashlib, os, pathlib, sys, tarfile; tgz_path = pathlib.Path(os.environ["OLLAMA_TGZ"]); expected = os.environ["OLLAMA_SHA256"]; data = tgz_path.read_bytes(); actual = hashlib.sha256(data).hexdigest(); actual == expected or sys.exit(f"sha256 mismatch: expected {expected}, got {actual}"); tarfile.open(tgz_path, mode="r:gz").extractall("/usr/local")'
+    rm -rf /usr/local/lib/ollama; \
+    zstd -dc "${ollama_archive}" | tar -xf - -C /usr/local
 
 RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
     mkdir -p /tmp/ollama-models /var/cache/buildkit/ollama-models \
@@ -147,13 +142,14 @@ RUN groupadd --gid "${APP_GID}" app \
 
 COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
 
-RUN set -eux; \
-    mkdir -p /opt/codebase-tooling/defaults/extensions /tmp/vscode-vsix; \
+RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
+    set -eux; \
+    mkdir -p /opt/codebase-tooling/defaults/extensions /var/cache/buildkit/vscode-vsix; \
     for extension_id in ${VSCODE_PRELOAD_EXTENSIONS}; do \
       publisher="${extension_id%%.*}"; \
       extension_name="${extension_id#*.}"; \
-      vsix_path="/tmp/vscode-vsix/${publisher}.${extension_name}.vsix"; \
-      if ! curl -fL --progress-bar "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${vsix_path}"; then \
+      vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"; \
+      if [ ! -f "${vsix_path}" ] && ! curl -fL --progress-bar "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${vsix_path}"; then \
         if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
         echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
         rm -f "${vsix_path}"; \
@@ -166,7 +162,6 @@ RUN set -eux; \
         continue; \
       fi; \
     done; \
-    rm -rf /tmp/vscode-vsix; \
     for server_root in /home/app/.vscode-server /home/app/.vscode-server-insiders /home/app/.openvscode-server; do \
       mkdir -p "${server_root}/extensions"; \
       cp -a /opt/codebase-tooling/defaults/extensions/. "${server_root}/extensions/"; \

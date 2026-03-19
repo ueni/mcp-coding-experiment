@@ -160,9 +160,25 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
 
     def test_dockerfile_installs_vulkan_runtime_for_ollama(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG OLLAMA_VERSION=0.13.5", dockerfile)
         self.assertIn("libvulkan1", dockerfile)
         self.assertIn("mesa-vulkan-drivers", dockerfile)
         self.assertIn("vulkan-tools", dockerfile)
+        self.assertIn("zstd", dockerfile)
+        self.assertIn('.tar.zst?version=${OLLAMA_VERSION}', dockerfile)
+        self.assertIn('zstd -dc "${ollama_archive}" | tar -xf - -C /usr/local', dockerfile)
+
+    def test_dockerfile_caches_vscode_vsix_downloads(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "--mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked",
+            dockerfile,
+        )
+        self.assertIn(
+            'vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"',
+            dockerfile,
+        )
+        self.assertIn('if [ ! -f "${vsix_path}" ] && ! curl -fL --progress-bar', dockerfile)
 
     def test_dockerfile_writes_app_sudoers_rule_with_single_shell_command(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -171,15 +187,17 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             dockerfile,
         )
 
-    def test_entrypoint_maps_dri_groups_before_dropping_to_app(self):
+    def test_entrypoint_maps_gpu_device_groups_before_dropping_to_app(self):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
-        self.assertIn("maybe_fix_dri_device_groups()", entrypoint)
+        self.assertIn("maybe_fix_gpu_device_groups()", entrypoint)
         self.assertIn("/dev/dri/renderD*", entrypoint)
         self.assertIn("/dev/dri/card*", entrypoint)
+        self.assertIn("/dev/kfd", entrypoint)
+        self.assertIn('export OLLAMA_VULKAN=1', entrypoint)
         before_drop = entrypoint.split(
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1
         )[0]
-        self.assertIn("maybe_fix_dri_device_groups", before_drop)
+        self.assertIn("maybe_fix_gpu_device_groups", before_drop)
 
 
 class ServerOllamaContractStatusTest(ServerToolsTestBase):

@@ -90,8 +90,13 @@ DEVCONTAINER_GPU_BLOCK=""
 DEVCONTAINER_GPU_ENV_BLOCK=""
 if [ "$ENABLE_VULKAN_GPU" = true ]; then
   DEVCONTAINER_GPU_BLOCK='  "runArgs": [
-    "--device=/dev/dri"
-  ],'
+    "--device=/dev/dri"'
+  if [ -e /dev/kfd ]; then
+    DEVCONTAINER_GPU_BLOCK="${DEVCONTAINER_GPU_BLOCK},
+    \"--device=/dev/kfd\""
+  fi
+  DEVCONTAINER_GPU_BLOCK="${DEVCONTAINER_GPU_BLOCK}
+  ],"
   DEVCONTAINER_GPU_ENV_BLOCK='    "OLLAMA_VULKAN": "1",'
   if [ ! -e /dev/dri ]; then
     log "Warning: Vulkan GPU passthrough was forced on, but /dev/dri is not present on this host."
