@@ -15,26 +15,26 @@
       "name": "Ruff Autofix + Format",
       "branch": "tournament/ruff-autofix-format",
       "mutate": [
-        "python -m ruff check --fix source",
-        "python -m ruff format source"
+        "ruff check --fix source",
+        "ruff format source"
       ],
       "checks": [
         "python -m compileall -q source",
-        "python -m ruff check source",
-        "python -m ruff format --check source"
+        "ruff check source",
+        "ruff format --check source"
       ]
     },
     {
       "name": "Black + Isort",
       "branch": "tournament/black-isort",
       "mutate": [
-        "python -m isort source",
-        "python -m black source"
+        "isort source",
+        "black source"
       ],
       "checks": [
         "python -m compileall -q source",
-        "python -m isort --check-only source",
-        "python -m black --check source"
+        "isort --check-only source",
+        "black --check source"
       ]
     },
     {
@@ -43,7 +43,7 @@
       "mutate": [],
       "checks": [
         "python -m compileall -q source",
-        "python -m mypy source --ignore-missing-imports"
+        "mypy source --ignore-missing-imports"
       ]
     },
     {
@@ -54,7 +54,7 @@
         123
       ],
       "mutate": [
-        "find source -type f -name '*.py' -print0 | xargs -0 python -m pyupgrade --py312-plus"
+        "find source -type f -name '*.py' -print0 | xargs -0 pyupgrade --py312-plus"
       ],
       "checks": [
         "python -m compileall -q source"
