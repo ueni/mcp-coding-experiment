@@ -143,6 +143,10 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
         self.assertIn('cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/', dockerfile)
 
+    def test_dockerfile_uses_python_313_trixie_base_image(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("FROM python:3.13-slim-trixie", dockerfile)
+
     def test_continue_model_routing_uses_small_default_profile(self):
         for routing_path in [
             REPO_ROOT / ".continue" / "model-routing.yaml",
