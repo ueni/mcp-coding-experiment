@@ -8,7 +8,7 @@ set -euo pipefail
 
 umask 027
 
-DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b"
+DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:3b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
 
 is_truthy() {
   case "${1:-}" in
@@ -366,7 +366,7 @@ fi
 
 export HOME="${HOME:-/home/app}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
-CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:7b}"
+CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:3b}"
 OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
 OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"

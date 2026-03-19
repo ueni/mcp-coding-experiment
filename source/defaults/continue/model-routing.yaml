@@ -1,11 +1,11 @@
 schema: v1
 router:
-  model: granite3.2:2b
-  file: .continue/models/router-granite3.2-2b.yaml
+  model: granite3.3:2b
+  file: .continue/models/router-granite3.3-2b.yaml
 routes:
   coding:
-    model: qwen2.5-coder:7b
-    file: .continue/models/coding-qwen2.5-coder-7b.yaml
+    model: qwen2.5-coder:3b
+    file: .continue/models/coding-qwen2.5-coder-3b.yaml
   refactor:
     model: phi4-mini:3.8b
     file: .continue/models/refactor-phi4-mini-3.8b.yaml
@@ -22,5 +22,5 @@ routes:
     model: granite3.2-vision:2b
     file: .continue/models/vision-granite3.2-vision-2b.yaml
   research:
-    model: llama3.2:3b
-    file: .continue/models/research-llama3.2-3b.yaml
+    model: llama3.2:1b
+    file: .continue/models/research-llama3.2-1b.yaml

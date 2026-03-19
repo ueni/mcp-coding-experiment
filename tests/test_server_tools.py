@@ -1156,7 +1156,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(
             self.server,
             "local_infer",
-            return_value={"schema": "local_infer.v1", "model": "qwen2.5-coder:7b", "ok": True},
+            return_value={"schema": "local_infer.v1", "model": "qwen2.5-coder:3b", "ok": True},
         ), patch.object(
             self.server,
             "_coding_checks",

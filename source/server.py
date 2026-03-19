@@ -175,7 +175,7 @@ INTERNAL_SELF_TESTS_DIR = Path(
 CODING_VENV_PYTHON = os.getenv(
     "CODING_VENV_PYTHON", "/opt/codebase-tooling/coding-venv/bin/python"
 ).strip()
-CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", "qwen2.5-coder:7b").strip()
+CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", "qwen2.5-coder:3b").strip()
 CODING_SANDBOX_ROOT = Path(
     os.getenv("CODING_SANDBOX_ROOT", ".build/sandboxes/coding")
 )
@@ -7139,7 +7139,7 @@ def local_model_status() -> dict[str, Any]:
     coding_python = Path(CODING_VENV_PYTHON)
     bootstrap_models_raw = os.getenv(
         "CONTINUE_OLLAMA_MODELS",
-        "qwen2.5-coder:7b,granite3.2:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:3b",
+        "qwen2.5-coder:3b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b",
     )
     bootstrap_models = _parse_model_csv(bootstrap_models_raw)
     native_api_base = _ollama_native_base_url()
