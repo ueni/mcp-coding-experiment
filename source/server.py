@@ -191,6 +191,126 @@ SAFE_GIT_SUBCOMMANDS = {
     "ls-files",
 }
 OUTPUT_PROFILES = {"compact", "normal", "verbose"}
+CONTINUE_MODEL_ROUTING_RELATIVE_PATH = Path(".continue/model-routing.yaml")
+MASTER_ROUTE_CODE_MAP = {
+    "general": "G",
+    "coding": "C",
+    "refactor": "RF",
+    "review": "RV",
+    "security": "SEC",
+    "math": "M",
+    "vision": "V",
+    "research": "RS",
+}
+MASTER_ROUTE_KEYWORDS = {
+    "coding": (
+        "code",
+        "coding",
+        "implement",
+        "implementation",
+        "function",
+        "class",
+        "method",
+        "bug",
+        "fix",
+        "test",
+        "pytest",
+        "stacktrace",
+        "traceback",
+    ),
+    "refactor": (
+        "refactor",
+        "restructure",
+        "cleanup",
+        "rename",
+        "simplify",
+        "reorganize",
+        "modularize",
+    ),
+    "review": (
+        "review",
+        "audit",
+        "regression",
+        "issue",
+        "risk",
+        "bug",
+        "findings",
+        "inspect",
+        "analyze",
+    ),
+    "security": (
+        "security",
+        "vulnerability",
+        "vulnerabilities",
+        "secure",
+        "exploit",
+        "cve",
+        "auth",
+        "authentication",
+        "authorization",
+        "xss",
+        "csrf",
+        "sqli",
+        "injection",
+        "secret",
+    ),
+    "math": (
+        "math",
+        "equation",
+        "equations",
+        "integral",
+        "differentiate",
+        "derivative",
+        "proof",
+        "matrix",
+        "algebra",
+        "solve",
+        "solver",
+    ),
+    "vision": (
+        "image",
+        "images",
+        "screenshot",
+        "diagram",
+        "figure",
+        "photo",
+        "vision",
+        "ocr",
+    ),
+    "research": (
+        "research",
+        "search",
+        "docs",
+        "documentation",
+        "explain",
+        "summary",
+        "summarize",
+        "compare",
+        "readme",
+    ),
+}
+MASTER_ROUTE_TASK_ALIASES = {
+    "general": "general",
+    "coding": "coding",
+    "code": "coding",
+    "refactor": "refactor",
+    "review": "review",
+    "security": "security",
+    "math": "math",
+    "vision": "vision",
+    "research": "research",
+    "search": "research",
+}
+MASTER_ROUTE_SYSTEM_PROMPTS = {
+    "general": "Interpret compact JSON input with keys r and q. q is the request. Answer directly and concisely.",
+    "coding": "Interpret compact JSON input with keys r and q. q is a coding task. Return implementation-focused output only.",
+    "refactor": "Interpret compact JSON input with keys r and q. q is a refactor task. Focus on cleaner structure with minimal churn.",
+    "review": "Interpret compact JSON input with keys r and q. q is a review task. Return concise findings first with file and line when possible.",
+    "security": "Interpret compact JSON input with keys r and q. q is a security task. Prioritize concrete vulnerabilities, exploitability, and fixes.",
+    "math": "Interpret compact JSON input with keys r and q. q is a math task. Return exact reasoning and the final result.",
+    "vision": "Interpret compact JSON input with keys r and q. q is a vision task. Focus on visible evidence only.",
+    "research": "Interpret compact JSON input with keys r and q. q is a research task. Return a concise factual synthesis.",
+}
 
 mcp = FastMCP(
     "git-repo-manager",
@@ -200,7 +320,8 @@ mcp = FastMCP(
         "`workspace_transaction`, `docker_router`, `vscode_router`) and call non-router tools only when "
         "router modes cannot satisfy the request. "
         "Execution policy (highest priority): if there are 2+ independent inference tasks, MUST call "
-        "`model_router(mode='parallel_infer')`; use `model_router(mode='infer')` only for a single dependent task. "
+        "`model_router(mode='parallel_infer')`; for a single prompt that still needs classification and model selection, use `model_router(mode='master')`; "
+        "use `model_router(mode='infer')` only when the caller already knows the target route/model. "
         "For parallel_infer, provide prompts as a list, set max_parallel=min(len(prompts),4) unless user overrides, "
         "preserve task order via row.index, and if a row fails retry failed rows once with infer or reduced max_parallel; "
         "return merged result plus per-row status. "
@@ -7625,7 +7746,10 @@ def local_infer(
             text = ""
             selected = "fallback"
     if selected in {"fallback", "rule", "hash"}:
-        optimized = prompt_optimize(prompt=prompt, mode="coding")
+        optimized = prompt_optimize(
+            prompt=prompt,
+            mode=_prompt_optimize_mode_for_task(task),
+        )
         text = optimized["optimized_prompt"][:max_tokens * 6]
     result = {
         "schema": "local_infer.v1",
@@ -7797,6 +7921,359 @@ def _extract_prompt_file_paths(prompt: str, max_paths: int = 4) -> list[str]:
                 if len(out) >= max_paths:
                     break
     return out
+
+
+def _prompt_optimize_mode_for_task(task: str) -> str:
+    route = MASTER_ROUTE_TASK_ALIASES.get(task.strip().lower(), task.strip().lower())
+    if route in {'review', 'security'}:
+        return 'review'
+    if route in {'research', 'math', 'vision'}:
+        return 'search'
+    if route == 'tooling_strict':
+        return 'tooling_strict'
+    return 'coding'
+
+
+def _default_continue_model_routing() -> dict[str, Any]:
+    return {
+        'source': None,
+        'loaded': False,
+        'router': {
+            'model': 'granite3.3:2b',
+            'file': '.continue/models/router-granite3.3-2b.yaml',
+        },
+        'routes': {
+            'coding': {
+                'model': CODING_DEFAULT_MODEL or 'qwen2.5-coder:3b',
+                'file': '.continue/models/coding-qwen2.5-coder-3b.yaml',
+            },
+            'refactor': {
+                'model': 'phi4-mini:3.8b',
+                'file': '.continue/models/refactor-phi4-mini-3.8b.yaml',
+            },
+            'review': {
+                'model': 'phi4-mini-reasoning:3.8b',
+                'file': '.continue/models/review-phi4-mini-reasoning-3.8b.yaml',
+            },
+            'security': {
+                'model': 'deepseek-r1:1.5b',
+                'file': '.continue/models/security-deepseek-r1-1.5b.yaml',
+            },
+            'math': {
+                'model': 'deepscaler:1.5b',
+                'file': '.continue/models/math-deepscaler-1.5b.yaml',
+            },
+            'vision': {
+                'model': 'granite3.2-vision:2b',
+                'file': '.continue/models/vision-granite3.2-vision-2b.yaml',
+            },
+            'research': {
+                'model': 'llama3.2:1b',
+                'file': '.continue/models/research-llama3.2-1b.yaml',
+            },
+        },
+    }
+
+
+def _continue_model_routing_candidates() -> list[Path]:
+    module_dir = Path(__file__).resolve().parent
+    candidates = [
+        REPO_PATH / CONTINUE_MODEL_ROUTING_RELATIVE_PATH,
+        module_dir / 'defaults' / 'continue' / 'model-routing.yaml',
+        Path('/opt/codebase-tooling/defaults/continue/model-routing.yaml'),
+    ]
+    out: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
+def _load_continue_model_routing() -> dict[str, Any]:
+    fallback = _default_continue_model_routing()
+    if yaml is None:
+        fallback['error'] = 'PyYAML is not installed in this runtime'
+        return fallback
+
+    last_error = ''
+    for candidate in _continue_model_routing_candidates():
+        if not candidate.is_file():
+            continue
+        try:
+            parsed = yaml.safe_load(candidate.read_text(encoding='utf-8')) or {}
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        if not isinstance(parsed, dict):
+            last_error = f'invalid routing config at {candidate}'
+            continue
+
+        loaded = _default_continue_model_routing()
+        loaded['loaded'] = True
+        loaded['source'] = str(candidate)
+
+        router_raw = parsed.get('router', {})
+        if isinstance(router_raw, dict):
+            loaded['router'] = {
+                'model': str(router_raw.get('model') or loaded['router']['model']).strip(),
+                'file': str(router_raw.get('file') or loaded['router']['file']).strip(),
+            }
+
+        routes_raw = parsed.get('routes', {})
+        if isinstance(routes_raw, dict):
+            for route_name, route_value in routes_raw.items():
+                if not isinstance(route_value, dict):
+                    continue
+                current = loaded['routes'].get(route_name, {'model': '', 'file': ''})
+                loaded['routes'][route_name] = {
+                    'model': str(route_value.get('model') or current.get('model') or '').strip(),
+                    'file': str(route_value.get('file') or current.get('file') or '').strip(),
+                }
+        return loaded
+
+    if last_error:
+        fallback['error'] = last_error
+    return fallback
+
+
+def _classify_master_prompt(prompt: str, task: str = 'general') -> dict[str, Any]:
+    text = prompt.strip()
+    lowered = text.lower()
+    tokens = _tokenize_router_query(text)
+    token_set = set(tokens)
+    joined = ' '.join(tokens)
+    routes = ['general', *MASTER_ROUTE_KEYWORDS.keys()]
+    scores = {route: 0.0 for route in routes}
+    reasons = {route: [] for route in routes}
+
+    def bump(route: str, weight: float, reason: str) -> None:
+        scores[route] += weight
+        reasons[route].append(reason)
+
+    task_norm = task.strip().lower()
+    task_route = MASTER_ROUTE_TASK_ALIASES.get(task_norm, '')
+    if task_route:
+        bump(task_route, 8.0, f'task:{task_norm}')
+
+    for route, terms in MASTER_ROUTE_KEYWORDS.items():
+        exact_hits = sum(1 for term in terms if term in token_set)
+        phrase_hits = sum(1 for term in terms if len(term) > 3 and term in joined)
+        if exact_hits or phrase_hits:
+            bump(route, (exact_hits * 3.0) + phrase_hits, f'keywords:{exact_hits}/{phrase_hits}')
+
+    if '```' in text:
+        bump('coding', 2.5, 'code_fence')
+    if re.search(r'\b(def|class|function|method|pytest|traceback|exception|stack)\b', lowered):
+        bump('coding', 2.0, 'code_terms')
+    if re.search(r'\b(review|audit|bug|issue|regression|risk)\b', lowered):
+        bump('review', 1.5, 'review_terms')
+    if re.search(r'\b(xss|csrf|cve|inject|secret|credential|auth)\b', lowered):
+        bump('security', 2.5, 'security_terms')
+    if re.search(r'\b(integral|derivative|equation|matrix|proof)\b', lowered):
+        bump('math', 2.5, 'math_terms')
+    if re.search(r'\b(image|screenshot|diagram|photo|figure|ocr)\b', lowered):
+        bump('vision', 2.5, 'vision_terms')
+    if re.search(r'\b(doc|docs|documentation|readme|explain|summarize|summary|compare)\b', lowered):
+        bump('research', 1.5, 'research_terms')
+
+    file_paths = _extract_prompt_file_paths(text, max_paths=6)
+    code_suffixes = {
+        '.c', '.cc', '.cpp', '.go', '.java', '.js', '.jsx', '.py', '.rb', '.rs', '.sh', '.ts', '.tsx'
+    }
+    image_suffixes = {'.gif', '.jpeg', '.jpg', '.png', '.svg', '.webp'}
+    doc_suffixes = {'.adoc', '.md', '.pdf', '.rst', '.txt'}
+    if any(Path(path).suffix.lower() in code_suffixes for path in file_paths):
+        bump('coding', 2.0, 'code_paths')
+    if any(Path(path).suffix.lower() in image_suffixes for path in file_paths):
+        bump('vision', 3.0, 'image_paths')
+    if any(Path(path).suffix.lower() in doc_suffixes for path in file_paths):
+        bump('research', 1.5, 'document_paths')
+
+    if max(scores[route] for route in routes if route != 'general') <= 0:
+        bump('general', 1.0, 'default')
+    else:
+        bump('general', 0.25, 'fallback')
+
+    ranked = [
+        {
+            'route': route,
+            'score': round(score, 4),
+            'reasons': reasons[route][:5],
+        }
+        for route, score in scores.items()
+    ]
+    ranked.sort(key=lambda row: (row['score'], row['route']), reverse=True)
+    top = ranked[0]
+    second_score = float(ranked[1]['score']) if len(ranked) > 1 else 0.0
+    score_gap = float(top['score']) - second_score
+    confidence_floor = 0.35 if top['route'] == 'general' else 0.45
+    confidence = min(
+        0.99,
+        round(
+            confidence_floor
+            + min(float(top['score']), 12.0) / 20.0
+            + min(max(score_gap, 0.0), 8.0) / 20.0,
+            4,
+        ),
+    )
+    return {
+        'schema': 'master_prompt_classification.v1',
+        'route': top['route'],
+        'confidence': confidence,
+        'score_gap': round(score_gap, 4),
+        'task_hint': task_route or None,
+        'file_hints': file_paths[:4],
+        'ranked': ranked[:4],
+    }
+
+
+def _encode_master_prompt_packet(
+    prompt: str,
+    route: str,
+    task: str = 'general',
+) -> dict[str, Any]:
+    normalized = re.sub(r'\s+', ' ', prompt.strip())
+    task_norm = task.strip().lower()
+    packet = {
+        'r': MASTER_ROUTE_CODE_MAP.get(route, 'G'),
+        'q': normalized,
+    }
+    if task_norm and task_norm not in {'general', route}:
+        packet['t'] = task_norm[:24]
+    encoded_prompt = json.dumps(packet, ensure_ascii=True, separators=(',', ':'))
+    return {
+        'schema': 'master_prompt_packet.v1',
+        'codec': 'compact_json_v1',
+        'route': route,
+        'route_code': packet['r'],
+        'original_chars': len(prompt),
+        'normalized_chars': len(normalized),
+        'encoded_chars': len(encoded_prompt),
+        'char_saving_vs_original': len(prompt) - len(encoded_prompt),
+        'char_saving_vs_normalized': len(normalized) - len(encoded_prompt),
+        'encoded_prompt': encoded_prompt,
+    }
+
+
+def _resolve_master_model_route(
+    route: str,
+    routing: dict[str, Any],
+    requested_model: str = '',
+) -> dict[str, Any]:
+    explicit_model = requested_model.strip()
+    if explicit_model:
+        return {
+            'route': route,
+            'model': explicit_model,
+            'file': '',
+            'source': 'explicit_model',
+        }
+
+    router_cfg = routing.get('router', {}) if isinstance(routing.get('router', {}), dict) else {}
+    router_model = str(router_cfg.get('model') or LOCAL_INFER_MODEL or CODING_DEFAULT_MODEL or 'local-default').strip()
+    router_file = str(router_cfg.get('file') or '').strip()
+    if route == 'general':
+        return {
+            'route': route,
+            'model': router_model,
+            'file': router_file,
+            'source': 'router_default',
+        }
+
+    routes_cfg = routing.get('routes', {}) if isinstance(routing.get('routes', {}), dict) else {}
+    selected = routes_cfg.get(route, {}) if isinstance(routes_cfg.get(route, {}), dict) else {}
+    selected_model = str(selected.get('model') or '').strip()
+    selected_file = str(selected.get('file') or '').strip()
+    if selected_model:
+        return {
+            'route': route,
+            'model': selected_model,
+            'file': selected_file,
+            'source': f'route:{route}',
+        }
+    return {
+        'route': route,
+        'model': router_model,
+        'file': router_file,
+        'source': 'router_fallback',
+    }
+
+
+def _master_infer(
+    prompt: str,
+    task: str = 'general',
+    backend: str = 'auto',
+    model: str = '',
+    max_tokens: int = 256,
+    temperature: float = 0.2,
+    system: str = '',
+    output_profile: str | None = None,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    if not prompt.strip():
+        raise ValueError('prompt must not be empty')
+    profile = _default_output_profile(output_profile)
+    classification = _classify_master_prompt(prompt=prompt, task=task)
+    routing = _load_continue_model_routing()
+    resolved = _resolve_master_model_route(
+        route=str(classification['route']),
+        routing=routing,
+        requested_model=model,
+    )
+    encoded = _encode_master_prompt_packet(
+        prompt=prompt,
+        route=str(classification['route']),
+        task=task,
+    )
+    effective_system = system or MASTER_ROUTE_SYSTEM_PROMPTS.get(
+        str(classification['route']),
+        MASTER_ROUTE_SYSTEM_PROMPTS['general'],
+    )
+    infer = local_infer(
+        prompt=str(encoded['encoded_prompt']),
+        task=str(classification['route']),
+        backend=backend,
+        model=str(resolved['model']),
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=effective_system,
+        output_profile=output_profile,
+        store_result=store_result,
+    )
+    result: dict[str, Any] = {
+        'schema': 'model_router.master.v1',
+        'classification': classification,
+        'encoding': encoded,
+        'routing': {
+            'selected_route': resolved['route'],
+            'selected_model': resolved['model'],
+            'selected_model_file': resolved['file'],
+            'selected_by': resolved['source'],
+            'routing_loaded': routing.get('loaded', False),
+            'routing_source': routing.get('source'),
+            'router_model': routing.get('router', {}).get('model'),
+        },
+        'infer': infer,
+    }
+    if profile == 'compact':
+        result = {
+            'schema': 'model_router.master.compact.v1',
+            'route': classification['route'],
+            'confidence': classification['confidence'],
+            'model': resolved['model'],
+            'backend': infer.get('backend'),
+            'encoded_chars': encoded['encoded_chars'],
+            'char_saving_vs_original': encoded['char_saving_vs_original'],
+            'ok': infer.get('ok', False),
+            'output': infer.get('output', ''),
+        }
+    if store_result:
+        result['result_id'] = _result_store_put('model_router_master', result)
+    return result
 
 
 def _extract_codebase_tooling_generated_ignores(text: str) -> list[str]:
@@ -8126,6 +8603,7 @@ class ModelRouterService:
     ) -> dict[str, Any]:
         if mode not in {
             "status",
+            "master",
             "embed",
             "infer",
             "parallel_infer",
@@ -8137,10 +8615,22 @@ class ModelRouterService:
             "coding_sandbox",
         }:
             raise ValueError(
-                "mode must be one of: status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
+                "mode must be one of: status, master, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
             )
         if mode == "status":
             return local_model_status()
+        if mode == "master":
+            return _master_infer(
+                prompt=prompt,
+                task=task,
+                backend=backend,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                output_profile=output_profile,
+                store_result=store_result,
+            )
         if mode == "embed":
             return local_embed(
                 texts=texts or [],
@@ -8339,7 +8829,7 @@ def model_router(
     max_parallel: int = 4,
     auto_parallel_when_possible: bool = True,
 ) -> dict[str, Any]:
-    """Strict model router: mode MUST be one of status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; required params are enforced per mode; returns deterministic schema payloads or explicit validation errors."""
+    """Strict model router: mode MUST be one of status|master|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; required params are enforced per mode; returns deterministic schema payloads or explicit validation errors."""
     return _MODEL_ROUTER_SERVICE.route(
         mode=mode,
         prompt=prompt,

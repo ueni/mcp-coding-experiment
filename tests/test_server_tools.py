@@ -281,6 +281,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(rerank["schema"], "local_rerank.v1")
         self.assertEqual(rerank["count"], 2)
 
+
     def test_local_infer_fallback(self):
         out = self.server.local_infer(
             prompt="explain alpha function quickly",
@@ -290,6 +291,17 @@ class ServerToolsTest(ServerToolsTestBase):
         )
         self.assertTrue(out["ok"])
         self.assertIn("output", out)
+
+    def test_local_infer_fallback_uses_task_aware_prompt_optimization(self):
+        out = self.server.local_infer(
+            prompt="review the patch for regressions",
+            backend="fallback",
+            task="review",
+            output_profile="compact",
+            max_tokens=64,
+        )
+        self.assertTrue(out["ok"])
+        self.assertIn("high-severity issues first", out["output"])
 
     def test_model_router_parallel_infer(self):
         out = self.server.model_router(
@@ -377,6 +389,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(pinf.call_count, 1)
         self.assertEqual(linf.call_count, 0)
 
+
     def test_model_router_infer_auto_parallel_can_be_disabled(self):
         with patch.object(self.server, "local_infer", return_value={"schema": "local_infer.v1", "ok": True}) as linf:
             out = self.server.model_router(
@@ -387,6 +400,52 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "local_infer.v1")
         self.assertEqual(linf.call_count, 1)
+
+    def test_model_router_master_classifies_encodes_and_routes(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "security findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
+            out = self.server.model_router(
+                mode="master",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+            )
+        self.assertEqual(out["schema"], "model_router.master.v1")
+        self.assertEqual(out["classification"]["route"], "security")
+        self.assertEqual(out["routing"]["selected_model"], "deepseek-r1:1.5b")
+        self.assertTrue(out["routing"]["routing_loaded"])
+        self.assertIn('"r":"SEC"', out["encoding"]["encoded_prompt"])
+        self.assertEqual(linf.call_args.kwargs["task"], "security")
+        self.assertEqual(linf.call_args.kwargs["model"], "deepseek-r1:1.5b")
+
+    def test_model_router_master_honors_task_override_in_compact_mode(self):
+        infer_payload = {
+            "schema": "local_infer.compact.v1",
+            "backend": "fallback",
+            "model": "phi4-mini-reasoning:3.8b",
+            "ok": True,
+            "output": "review findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
+            out = self.server.model_router(
+                mode="master",
+                prompt="Implement helper for parser cleanup.",
+                task="review",
+                backend="fallback",
+                output_profile="compact",
+            )
+        self.assertEqual(out["schema"], "model_router.master.compact.v1")
+        self.assertEqual(out["route"], "review")
+        self.assertEqual(out["model"], "phi4-mini-reasoning:3.8b")
+        self.assertTrue(out["ok"])
+        self.assertEqual(linf.call_args.kwargs["task"], "review")
+        self.assertEqual(linf.call_args.kwargs["model"], "phi4-mini-reasoning:3.8b")
 
     def test_autocomplete_fallback(self):
         out = self.server.autocomplete(
