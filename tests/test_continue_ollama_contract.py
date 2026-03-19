@@ -52,7 +52,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("--device=/dev/dri", config.get("runArgs", []))
         self.assertEqual("1", config["containerEnv"]["OLLAMA_VULKAN"])
 
-    def test_setup_script_generates_devcontainer_with_ollama_ports_and_codex_mount(self):
+    def test_setup_script_generates_devcontainer_with_ollama_ports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
             (repo_root / ".git").mkdir()
@@ -85,14 +85,6 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
         )
         self.assertEqual("Bundled LLM", config["portsAttributes"]["2345"]["label"])
-        self.assertIn(
-            "source=${localEnv:HOME}/.codex,target=/home/app/.codex,type=bind,consistency=cached,readOnly=false",
-            config["mounts"],
-        )
-        self.assertNotIn(
-            "source=/etc/ssl/certs,target=/etc/ssl/certs,type=bind,consistency=cached,readOnly=true",
-            config["mounts"],
-        )
 
     def test_setup_script_can_force_vulkan_gpu_passthrough(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -146,6 +138,13 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
     def test_dockerfile_uses_python_313_trixie_base_image(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("FROM python:3.13-slim-trixie", dockerfile)
+
+    def test_dockerfile_installs_app_requirements_into_coding_venv(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('python -m venv /opt/codebase-tooling/coding-venv', dockerfile)
+        self.assertIn('/opt/codebase-tooling/coding-venv/bin/pip install \\', dockerfile)
+        self.assertIn('--root-user-action=ignore \\', dockerfile)
+        self.assertIn('-r requirements.txt \\', dockerfile)
 
     def test_continue_model_routing_uses_small_default_profile(self):
         for routing_path in [

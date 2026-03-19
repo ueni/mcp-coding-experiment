@@ -85,6 +85,9 @@ RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
        --root-user-action=ignore \
+       -r requirements.txt \
+    && /opt/codebase-tooling/coding-venv/bin/pip install \
+       --root-user-action=ignore \
        black==26.3.0 \
        isort==8.0.1 \
        mypy==1.18.2 \

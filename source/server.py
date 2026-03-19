@@ -3682,6 +3682,7 @@ def vscode_task_run(
         suffix = task_cwd[len("${workspaceFolder}") :].lstrip("/\\")
         task_cwd = suffix or "."
     workdir = _resolve_repo_path(task_cwd)
+    rel_cwd = str(workdir.relative_to(REPO_PATH))
 
     try:
         proc = subprocess.run(
@@ -5903,6 +5904,7 @@ def terminal_support_session(
         cmd = command or []
         _validate_safe_command(cmd)
         workdir = _resolve_repo_path(cwd)
+        rel_cwd = str(workdir.relative_to(REPO_PATH))
         capture_dir = _resolve_repo_path(str(TERMINAL_CAPTURE_DIR))
         capture_dir.mkdir(parents=True, exist_ok=True)
         sid = uuid.uuid4().hex[:12]
