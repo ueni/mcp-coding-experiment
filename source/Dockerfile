@@ -48,19 +48,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
-    && apt-get install -y --no-install-recommends \
+    set -eux; \
+    apt-get update; \
+    packages=( \
         antiword \
         ca-certificates \
         curl \
         git \
-        gnupg \
         jq \
         ripgrep \
         sudo \
         tini \
         tesseract-ocr \
-    && install -m 0755 -d /etc/apt/keyrings \
+        htop \
+        tree \
+    ); \
+    apt-get install -y --no-install-recommends "${packages[@]}"; \
+    install -m 0755 -d /etc/apt/keyrings \
     && curl -fL --progress-bar https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
     && . /etc/os-release \
@@ -76,21 +80,18 @@ COPY requirements.txt ./
 RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
     pip install --root-user-action=ignore -r requirements.txt
 RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
-    pip install \
-    --root-user-action=ignore \
-    black==26.3.0 \
-    isort==8.0.1 \
-    mypy==1.18.2 \
-    pyupgrade==3.21.2 \
-    ruff==0.15.5
-
-RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
        --root-user-action=ignore \
-       pytest==8.4.2 \
+       black==26.3.0 \
+       isort==8.0.1 \
        mypy==1.18.2 \
-       ruff==0.15.5
+       pyupgrade==3.21.2 \
+       pytest==8.4.2 \
+       ruff==0.15.5 \
+    && for tool in black isort mypy pyupgrade pytest ruff; do \
+         ln -sf "/opt/codebase-tooling/coding-venv/bin/${tool}" "/usr/local/bin/${tool}"; \
+       done
 
 RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
     set -eux; \
@@ -133,8 +134,10 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
 
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /bin/bash app \
-    && printf 'app ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get' > /etc/sudoers.d/app-apt \
-    && chmod 0440 /etc/sudoers.d/app-apt \
+    && printf '%s
+' 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app \
+    && chmod 0440 /etc/sudoers.d/app \
+    && visudo -cf /etc/sudoers.d/app \
     && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults /home/app/.ollama \
     && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
     && rm -rf /tmp/ollama-models \

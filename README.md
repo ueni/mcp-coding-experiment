@@ -99,6 +99,8 @@ The Dockerfile uses BuildKit cache mounts for `apt` and `pip`, so repeated
 devcontainer rebuilds can reuse downloaded package metadata and wheels. Keep
 BuildKit enabled when building this image or those cache mounts will be ignored.
 
+Inside the container, the `app` user can run `sudo` without a password.
+
 If you still want compose for local runs outside VS Code, use this inline example:
 
 ```yaml
@@ -184,8 +186,8 @@ For home-config portability, the generated devcontainer mounts host paths under
 `/home/app/.codex`. Startup bootstrap copies from `/host` mounts only when the
 `$HOME` targets are missing or empty.
 
-The inline autocomplete extension is bundled into the image, so the target
-repository does not need a local `vscode/mcp-inline-autocomplete/` copy.
+The inline autocomplete extension and the Marketplace extensions declared in the devcontainer are preloaded into the image during `docker build` for the common VS Code server extension directories, so the target
+repository does not need a local `vscode/mcp-inline-autocomplete/` copy and VS Code should not need to fetch those extensions again on container start.
 
 ## Endpoints (HTTP mode)
 
@@ -275,7 +277,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `memory_router` (upsert, summary_upsert, decision_record, get, validate, auto_compact, failure_memory, root_cause, artifact_index)
 - `docker_router`
 - `vscode_router`
-- `command_runner` (safe allowlisted command execution)
+- `command_runner` (safe allowlisted command execution; non-allowlisted commands return a pending approval request instead of a failed execution)
 - `tool_router` (route, record, inspect)
 - `quality_router` (self_test, self_check, release_readiness, flaky, change_impact, required_tool_chain, spec_to_tests, smart_fix)
 - `governance_router` (policy, license, runtime_contract, human_approval, commit_lint)
