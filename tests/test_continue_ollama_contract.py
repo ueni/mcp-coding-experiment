@@ -140,6 +140,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("CONTINUE_OLLAMA_MODELS=qwen2.5-coder:3b,granite3.3:2b", dockerfile)
         self.assertIn('ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b"', dockerfile)
         self.assertIn('ollama pull "$model"', dockerfile)
+        self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
+        self.assertIn('cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/', dockerfile)
 
     def test_continue_model_routing_uses_small_default_profile(self):
         for routing_path in [
@@ -160,13 +162,16 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
 
     def test_dockerfile_installs_vulkan_runtime_for_ollama(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("ARG OLLAMA_VERSION=0.13.5", dockerfile)
+        self.assertIn("ARG OLLAMA_VERSION=0.18.2", dockerfile)
         self.assertIn("libvulkan1", dockerfile)
         self.assertIn("mesa-vulkan-drivers", dockerfile)
         self.assertIn("vulkan-tools", dockerfile)
         self.assertIn("zstd", dockerfile)
-        self.assertIn('.tar.zst?version=${OLLAMA_VERSION}', dockerfile)
+        self.assertIn('ver_param="${OLLAMA_VERSION:+?version=${OLLAMA_VERSION}}"', dockerfile)
+        self.assertIn('https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}', dockerfile)
+        self.assertIn('https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}', dockerfile)
         self.assertIn('zstd -dc "${ollama_archive}" | tar -xf - -C /usr/local', dockerfile)
+        self.assertIn('tgz) tar -xzf "${ollama_archive}" -C /usr/local', dockerfile)
 
     def test_dockerfile_caches_vscode_vsix_downloads(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -187,12 +192,16 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             dockerfile,
         )
 
-    def test_entrypoint_maps_gpu_device_groups_before_dropping_to_app(self):
+    def test_entrypoint_seeds_preloaded_models_and_maps_gpu_device_groups(self):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn("seed_ollama_models_from_image_preload()", entrypoint)
+        self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', entrypoint)
+        self.assertIn('cp -an "${image_models_dir}/." "${OLLAMA_MODELS}/"', entrypoint)
         self.assertIn("maybe_fix_gpu_device_groups()", entrypoint)
         self.assertIn("/dev/dri/renderD*", entrypoint)
         self.assertIn("/dev/dri/card*", entrypoint)
         self.assertIn("/dev/kfd", entrypoint)
+        self.assertIn('seed_ollama_models_from_image_preload', entrypoint)
         self.assertIn('export OLLAMA_VULKAN=1', entrypoint)
         before_drop = entrypoint.split(
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1

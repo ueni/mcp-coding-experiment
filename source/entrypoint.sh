@@ -146,6 +146,21 @@ ensure_ollama_model_installed() {
   ollama show "${model_name}" >/dev/null 2>&1
 }
 
+seed_ollama_models_from_image_preload() {
+  local image_models_dir="${OLLAMA_IMAGE_MODELS:-/opt/codebase-tooling/preloaded-ollama-models}"
+  if [[ ! -d "${image_models_dir}" ]]; then
+    return
+  fi
+
+  mkdir -p "${OLLAMA_MODELS}"
+  if cp -an "${image_models_dir}/." "${OLLAMA_MODELS}/" 2>/dev/null; then
+    return
+  fi
+
+  # Fallback for cp variants that do not accept -n with -a.
+  cp -a "${image_models_dir}/." "${OLLAMA_MODELS}/"
+}
+
 bootstrap_user_home_from_host_mounts() {
   if [[ "$(id -u)" -ne 0 ]]; then
     return
@@ -367,6 +382,7 @@ fi
 
 export HOME="${HOME:-/home/app}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
+seed_ollama_models_from_image_preload
 if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
   export OLLAMA_VULKAN=1
 fi

@@ -10,7 +10,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG APP_UID=1000
 ARG APP_GID=1000
-ARG OLLAMA_VERSION=0.13.5
+ARG OLLAMA_VERSION=0.18.2
 ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b"
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
@@ -102,12 +102,34 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
       arm64) ollama_arch="arm64" ;; \
       *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
-    ollama_archive="/var/cache/buildkit/ollama/ollama-${OLLAMA_VERSION}-linux-${ollama_arch}.tar.zst"; \
+    ver_param="${OLLAMA_VERSION:+?version=${OLLAMA_VERSION}}"; \
+    archive_ext=""; \
+    download_url=""; \
+    if curl --fail --silent --head --location "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}" >/dev/null 2>&1; then \
+      archive_ext="tar.zst"; \
+      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}"; \
+    elif curl --fail --silent --head --location "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}" >/dev/null 2>&1; then \
+      archive_ext="tgz"; \
+      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}"; \
+    elif curl --fail --silent --head --location "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst" >/dev/null 2>&1; then \
+      echo "Requested Ollama version ${OLLAMA_VERSION} is unavailable from ollama.com/download; falling back to the latest tar.zst package." >&2; \
+      archive_ext="tar.zst"; \
+      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst"; \
+    else \
+      echo "Requested Ollama version ${OLLAMA_VERSION} is unavailable from ollama.com/download; falling back to the latest tgz package." >&2; \
+      archive_ext="tgz"; \
+      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz"; \
+    fi; \
+    ollama_version_label="${OLLAMA_VERSION:-latest}"; \
+    ollama_archive="/var/cache/buildkit/ollama/ollama-${ollama_version_label}-linux-${ollama_arch}.${archive_ext}"; \
     if [ ! -f "${ollama_archive}" ]; then \
-      curl -fL --progress-bar "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst?version=${OLLAMA_VERSION}" -o "${ollama_archive}"; \
+      curl -fL --progress-bar "${download_url}" -o "${ollama_archive}"; \
     fi; \
     rm -rf /usr/local/lib/ollama; \
-    zstd -dc "${ollama_archive}" | tar -xf - -C /usr/local
+    case "${archive_ext}" in \
+      tar.zst) zstd -dc "${ollama_archive}" | tar -xf - -C /usr/local ;; \
+      tgz) tar -xzf "${ollama_archive}" -C /usr/local ;; \
+    esac
 
 RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
     mkdir -p /tmp/ollama-models /var/cache/buildkit/ollama-models \
@@ -135,7 +157,8 @@ RUN groupadd --gid "${APP_GID}" app \
     && echo 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app \
     && chmod 0440 /etc/sudoers.d/app \
     && visudo -cf /etc/sudoers.d/app \
-    && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults /home/app/.ollama \
+    && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
+    && cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/ \
     && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
     && rm -rf /tmp/ollama-models \
     && chown -R app:app /app /models /home/app /opt/codebase-tooling
