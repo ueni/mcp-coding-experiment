@@ -8,6 +8,9 @@
   "remoteUser": "app",
   "containerUser": "root",
   "workspaceFolder": "/repo",
+  "runArgs": [
+    "--device=/dev/dri"
+  ],
   "containerEnv": {
     "DOCKER_HOST": "unix:///var/run/docker.sock",
     "DOCKER_CONFIG": "/home/app/.docker",

@@ -6,9 +6,14 @@
 set -eu
 
 IMAGE_REF="ueniueni/codebase-tooling-mcp:latest"
+ENABLE_VULKAN_GPU=auto
 
 log() {
   printf '%s\n' "$*" >&2
+}
+
+usage() {
+  log "Usage: $0 [--enable-vulkan-gpu|--disable-vulkan-gpu]"
 }
 
 require_cmd() {
@@ -38,6 +43,27 @@ fail_if_exists() {
   fi
 }
 
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --enable-vulkan-gpu)
+      ENABLE_VULKAN_GPU=true
+      ;;
+    --disable-vulkan-gpu)
+      ENABLE_VULKAN_GPU=false
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      log "Unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+  shift
+done
+
 require_cmd mkdir
 require_cmd cp
 require_cmd grep
@@ -51,6 +77,24 @@ fi
 cd "$REPO_ROOT"
 
 REPO_NAME=$(basename "$REPO_ROOT")
+
+if [ "$ENABLE_VULKAN_GPU" = auto ]; then
+  if [ -e /dev/dri ]; then
+    ENABLE_VULKAN_GPU=true
+  else
+    ENABLE_VULKAN_GPU=false
+  fi
+fi
+
+DEVCONTAINER_GPU_BLOCK=""
+if [ "$ENABLE_VULKAN_GPU" = true ]; then
+  DEVCONTAINER_GPU_BLOCK='  "runArgs": [
+    "--device=/dev/dri"
+  ],'
+  if [ ! -e /dev/dri ]; then
+    log "Warning: Vulkan GPU passthrough was forced on, but /dev/dri is not present on this host."
+  fi
+fi
 
 ensure_gitignore_entry() {
   entry=$1
@@ -75,6 +119,7 @@ cat > .devcontainer/devcontainer.json <<EOF
   "remoteUser": "app",
   "containerUser": "root",
   "workspaceFolder": "/repo",
+${DEVCONTAINER_GPU_BLOCK}
   "containerEnv": {
     "DOCKER_HOST": "unix:///var/run/docker.sock",
     "DOCKER_CONFIG": "/home/app/.docker",
@@ -140,6 +185,9 @@ ensure_gitignore_entry '/.gitignore_codebase_tooling_mcp.touched'
 
 log "Created:"
 log "  .devcontainer/devcontainer.json"
+if [ "$ENABLE_VULKAN_GPU" = true ]; then
+  log "  Vulkan GPU passthrough for Ollama enabled via /dev/dri"
+fi
 log "  .gitignore entries for generated hidden folders (one-time bootstrap)"
 log ""
 log "The container image provides the inline autocomplete extension and repo defaults."

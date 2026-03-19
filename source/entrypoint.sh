@@ -254,6 +254,37 @@ maybe_fix_docker_sock_group() {
   fi
 }
 
+maybe_fix_dri_device_groups() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    return
+  fi
+  if [[ ! -d /dev/dri ]]; then
+    return
+  fi
+  if ! command -v usermod >/dev/null 2>&1; then
+    return
+  fi
+
+  local device_path device_gid device_group
+  for device_path in /dev/dri/renderD* /dev/dri/card*; do
+    if [[ ! -e "${device_path}" ]]; then
+      continue
+    fi
+    device_gid="$(stat -c '%g' "${device_path}" 2>/dev/null || true)"
+    if [[ -z "${device_gid}" ]] || [[ "${device_gid}" == "0" ]]; then
+      continue
+    fi
+    device_group="$(getent group "${device_gid}" | cut -d: -f1 || true)"
+    if [[ -z "${device_group}" ]] && command -v groupadd >/dev/null 2>&1; then
+      device_group="dri-host-${device_gid}"
+      groupadd --gid "${device_gid}" "${device_group}" || true
+    fi
+    if [[ -n "${device_group}" ]]; then
+      usermod -aG "${device_group}" app || true
+    fi
+  done
+}
+
 apply_repo_defaults() {
   local defaults_root="/opt/codebase-tooling/defaults"
   if [[ "${MCP_APPLY_REPO_DEFAULTS:-false}" != "true" ]]; then
@@ -320,6 +351,7 @@ url = "http://localhost:8000/mcp"
 
 if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--as-app" ]]; then
   maybe_fix_docker_sock_group
+  maybe_fix_dri_device_groups
   bootstrap_user_home_from_host_mounts
   export HOME="/home/app"
   export USER="app"

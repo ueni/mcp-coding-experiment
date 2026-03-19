@@ -45,6 +45,12 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             config["mounts"],
         )
 
+    def test_devcontainer_exposes_dri_device_for_vulkan_ollama(self):
+        config = json.loads(
+            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("--device=/dev/dri", config.get("runArgs", []))
+
     def test_setup_script_generates_devcontainer_with_ollama_ports_and_codex_mount(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -87,6 +93,35 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             config["mounts"],
         )
 
+    def test_setup_script_can_force_vulkan_gpu_passthrough(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / ".git").mkdir()
+            result = subprocess.run(
+                [
+                    "/bin/sh",
+                    str(REPO_ROOT / "setup-repository.sh"),
+                    "--enable-vulkan-gpu",
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr.strip() or result.stdout.strip(),
+            )
+
+            config = json.loads(
+                (repo_root / ".devcontainer" / "devcontainer.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertIn("--device=/dev/dri", config.get("runArgs", []))
+
     def test_codex_config_uses_hyphenated_server_key(self):
         config_toml = (REPO_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8")
         default_config_toml = (
@@ -103,6 +138,29 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("CONTINUE_OLLAMA_MODELS=qwen2.5-coder:7b", dockerfile)
         self.assertIn('ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:7b"', dockerfile)
         self.assertIn('ollama pull "$model"', dockerfile)
+
+    def test_dockerfile_installs_vulkan_runtime_for_ollama(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("libvulkan1", dockerfile)
+        self.assertIn("mesa-vulkan-drivers", dockerfile)
+        self.assertIn("vulkan-tools", dockerfile)
+
+    def test_dockerfile_writes_app_sudoers_rule_with_single_shell_command(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "echo 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app",
+            dockerfile,
+        )
+
+    def test_entrypoint_maps_dri_groups_before_dropping_to_app(self):
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn("maybe_fix_dri_device_groups()", entrypoint)
+        self.assertIn("/dev/dri/renderD*", entrypoint)
+        self.assertIn("/dev/dri/card*", entrypoint)
+        before_drop = entrypoint.split(
+            'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1
+        )[0]
+        self.assertIn("maybe_fix_dri_device_groups", before_drop)
 
 
 class ServerOllamaContractStatusTest(ServerToolsTestBase):

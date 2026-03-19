@@ -105,17 +105,24 @@ Inline devcontainer example (non-compose):
     "dockerfile": "../source/Dockerfile"
   },
   "workspaceFolder": "/repo",
+  "runArgs": ["--device=/dev/dri"],
   "containerEnv": {
     "MCP_TRANSPORT": "http",
     "ALLOW_MUTATIONS": "true"
   },
-  "forwardPorts": [8000]
+  "forwardPorts": [8000, 2345]
 }
 ```
 
 The Dockerfile uses BuildKit cache mounts for `apt` and `pip`, so repeated
 devcontainer rebuilds can reuse downloaded package metadata and wheels. Keep
 BuildKit enabled when building this image or those cache mounts will be ignored.
+
+The checked-in devcontainer passes `/dev/dri` into the container so the bundled
+Ollama service can use Vulkan-capable Linux GPUs. `source/entrypoint.sh` also
+maps the matching device groups onto the `app` user before Ollama starts.
+Hosts without `/dev/dri` should remove that `runArgs` entry or use the setup
+script with `--disable-vulkan-gpu` when bootstrapping another repository.
 
 Inside the container, the `app` user can run `sudo` without a password.
 
@@ -169,6 +176,14 @@ To add this MCP setup to another repository using the published image
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh
+```
+
+The setup script auto-enables Vulkan GPU passthrough for the bundled Ollama
+service when `/dev/dri` exists on the host. Use `--enable-vulkan-gpu` or
+`--disable-vulkan-gpu` to override that detection:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh -s -- --enable-vulkan-gpu
 ```
 
 The script finds the repository root by locating `.git` and creates only:
@@ -268,6 +283,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
+- `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
 - `source/entrypoint.sh` is responsible for pre-pulling the models listed in `CONTINUE_OLLAMA_MODELS`, but it now does that in the background after Ollama is reachable so the MCP server can start immediately; `source/server.py` only reports endpoint and model state.
 - Setting `CONTINUE_OLLAMA_MODELS` to an empty value is an explicit opt-out of model pre-pull. In that mode, Continue may report `model not found` until models are installed manually.
 - A `404` on `http://127.0.0.1:2345/v1/` does not invalidate the native Ollama integration in this repo; the native base and `/api/tags` are the relevant health checks.

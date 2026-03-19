@@ -26,6 +26,9 @@ class ContainerSmokeTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr.strip() or result.stdout.strip())
 
+    def test_vulkaninfo_is_available_for_gpu_diagnostics(self) -> None:
+        self.assertIsNotNone(shutil.which("vulkaninfo"))
+
 
 if __name__ == "__main__":
     unittest.main()
