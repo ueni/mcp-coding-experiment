@@ -50,6 +50,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
         )
         self.assertIn("--device=/dev/dri", config.get("runArgs", []))
+        self.assertEqual("1", config["containerEnv"]["OLLAMA_VULKAN"])
 
     def test_setup_script_generates_devcontainer_with_ollama_ports_and_codex_mount(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -121,6 +122,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             )
 
         self.assertIn("--device=/dev/dri", config.get("runArgs", []))
+        self.assertEqual("1", config["containerEnv"]["OLLAMA_VULKAN"])
 
     def test_codex_config_uses_hyphenated_server_key(self):
         config_toml = (REPO_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8")

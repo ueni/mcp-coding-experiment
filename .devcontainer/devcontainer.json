@@ -17,6 +17,7 @@
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
     "ALLOW_MUTATIONS": "true",
+    "OLLAMA_VULKAN": "1",
     "OLLAMA_HOST": "0.0.0.0:2345",
     "OLLAMA_FALLBACK_HOST": "0.0.0.0:2345",
     "LOCAL_INFER_ENDPOINT": "http://127.0.0.1:2345/api/generate"

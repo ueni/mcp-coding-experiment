@@ -99,3 +99,19 @@ Checks:
 - Confirm the repository was opened with the generated `.devcontainer/devcontainer.json`.
 - Confirm the container environment includes `MCP_APPLY_REPO_DEFAULTS=true`.
 - Rebuild or reopen the devcontainer so the image entrypoint runs again.
+
+## Ollama stays on CPU in the devcontainer
+
+Symptom:
+
+```text
+ollama ps
+NAME                ID              SIZE      PROCESSOR
+qwen2.5-coder:3b    ...             2.6 GB    100% CPU
+```
+
+Checks:
+
+- Confirm `.devcontainer/devcontainer.json` includes `--device=/dev/dri`.
+- Confirm `.devcontainer/devcontainer.json` sets `OLLAMA_VULKAN=1`.
+- Rebuild or reopen the devcontainer after changing the config so Ollama restarts with the new environment.

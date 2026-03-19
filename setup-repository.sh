@@ -87,10 +87,12 @@ if [ "$ENABLE_VULKAN_GPU" = auto ]; then
 fi
 
 DEVCONTAINER_GPU_BLOCK=""
+DEVCONTAINER_GPU_ENV_BLOCK=""
 if [ "$ENABLE_VULKAN_GPU" = true ]; then
   DEVCONTAINER_GPU_BLOCK='  "runArgs": [
     "--device=/dev/dri"
   ],'
+  DEVCONTAINER_GPU_ENV_BLOCK='    "OLLAMA_VULKAN": "1",'
   if [ ! -e /dev/dri ]; then
     log "Warning: Vulkan GPU passthrough was forced on, but /dev/dri is not present on this host."
   fi
@@ -126,6 +128,7 @@ ${DEVCONTAINER_GPU_BLOCK}
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
     "ALLOW_MUTATIONS": "true",
+${DEVCONTAINER_GPU_ENV_BLOCK}
     "OLLAMA_HOST": "0.0.0.0:2345",
     "OLLAMA_FALLBACK_HOST": "0.0.0.0:2345",
     "LOCAL_INFER_ENDPOINT": "http://127.0.0.1:2345/api/generate"
