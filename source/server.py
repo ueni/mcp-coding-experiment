@@ -131,29 +131,9 @@ ARTIFACT_INDEX_FILE = Path(".build/index/artifact_memory.json")
 TOOL_ROUTER_STATS_FILE = Path(".build/memory/tool_router_stats.json")
 TOOL_BENCHMARK_REPORT_FILE = Path(".build/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".build/memory/cost_budget.json")
+# Keep the external MCP contract to a single entrypoint; the rest remain internal call targets.
 PUBLIC_MCP_TOOL_NAMES = {
-    "autocomplete",
-    "repo_info",
-    "runtime_state",
-    "repo_router",
-    "workspace_transaction",
-    "git_router",
-    "code_index_router",
     "model_router",
-    "memory_router",
-    "docker_router",
-    "vscode_router",
-    "command_runner",
-    "tool_router",
-    "quality_router",
-    "governance_router",
-    "workflow_router",
-    "runtime_guard_router",
-    "math_router",
-    "document_router",
-    "diagram_router",
-    "sql_expert",
-    "browse_web",
 }
 APPROVAL_POINTS_FILE = Path(".build/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".build/memory/root_cause_memory.json")
@@ -315,20 +295,11 @@ MASTER_ROUTE_SYSTEM_PROMPTS = {
 mcp = FastMCP(
     "git-repo-manager",
     instructions=(
-        "Manage exactly one mounted Git repository and its files with minimal output. "
-        "Must use router tools first (`model_router`, `code_index_router`, `memory_router`, "
-        "`workspace_transaction`, `docker_router`, `vscode_router`) and call non-router tools only when "
-        "router modes cannot satisfy the request. "
-        "Execution policy (highest priority): if there are 2+ independent inference tasks, MUST call "
-        "`model_router(mode='parallel_infer')`; for a single prompt that still needs classification and model selection, use `model_router(mode='master')`; "
-        "use `model_router(mode='infer')` only when the caller already knows the target route/model. "
-        "For parallel_infer, provide prompts as a list, set max_parallel=min(len(prompts),4) unless user overrides, "
-        "preserve task order via row.index, and if a row fails retry failed rows once with infer or reduced max_parallel; "
-        "return merged result plus per-row status. "
-        "Always validate mode values and required parameters before executing actions. "
-        "Prefer compact schemas, selective fields, pagination, and indexed workflows; "
-        "use summary_mode=quick before full payloads where possible. "
-        "All paths are repository-relative; reject path escapes and return explicit errors."
+        "Expose exactly one public MCP tool: `model_router`. "
+        "All other server functions remain internal call targets and are not part of the external MCP contract. "
+        "Use `model_router(mode='master')` for classified, encoded, memory-backed routing and inference, "
+        "`model_router(mode='parallel_infer')` for independent batches, and `memory_session` when ephemeral "
+        "master-memory context must be isolated."
     ),
 )
 
@@ -8135,15 +8106,22 @@ def _encode_master_prompt_packet(
     prompt: str,
     route: str,
     task: str = 'general',
+    memory_session: str = '',
+    memory_context: str = '',
 ) -> dict[str, Any]:
     normalized = re.sub(r'\s+', ' ', prompt.strip())
     task_norm = task.strip().lower()
+    session_norm = _normalize_master_memory_session(memory_session)
+    memory_text = _trim_master_inline_text(memory_context, max_chars=900)
     packet = {
         'r': MASTER_ROUTE_CODE_MAP.get(route, 'G'),
         'q': normalized,
+        's': session_norm,
     }
     if task_norm and task_norm not in {'general', route}:
         packet['t'] = task_norm[:24]
+    if memory_text:
+        packet['m'] = memory_text
     encoded_prompt = json.dumps(packet, ensure_ascii=True, separators=(',', ':'))
     return {
         'schema': 'master_prompt_packet.v1',
@@ -8203,6 +8181,317 @@ def _resolve_master_model_route(
     }
 
 
+def _trim_master_inline_text(text: Any, max_chars: int) -> str:
+    if max_chars < 1:
+        return ''
+    normalized = ' '.join(str(text or '').split())
+    if len(normalized) <= max_chars:
+        return normalized
+    if max_chars <= 3:
+        return normalized[:max_chars]
+    return normalized[: max_chars - 3].rstrip() + '...'
+
+
+def _append_master_context_piece(parts: list[str], piece: str, max_chars: int) -> None:
+    normalized = _trim_master_inline_text(piece, max_chars=max_chars)
+    if not normalized:
+        return
+    current = ' | '.join(parts)
+    remaining = max_chars - len(current)
+    if parts:
+        remaining -= 3
+    if remaining < 8:
+        return
+    parts.append(_trim_master_inline_text(normalized, max_chars=remaining))
+
+
+def _normalize_master_memory_session(memory_session: str) -> str:
+    normalized = str(memory_session or '').strip().replace('\\', '/')
+    normalized = re.sub(r'\s+', '-', normalized).strip('/')
+    return normalized[:64] or 'default'
+
+
+def _master_route_namespace(route: str) -> str:
+    route_norm = route.strip().lower() or 'general'
+    if route_norm not in {'general', *MASTER_ROUTE_KEYWORDS.keys()}:
+        route_norm = 'general'
+    return f'master/route/{route_norm}'
+
+
+def _master_session_namespace(memory_session: str) -> str:
+    return f'master/session/{_normalize_master_memory_session(memory_session)}'
+
+
+def _master_memory_updated_epoch(row: dict[str, Any]) -> float:
+    ts = _parse_iso_timestamp(str(row.get('updated_at', ''))) or _parse_iso_timestamp(
+        str(row.get('created_at', ''))
+    )
+    return ts.timestamp() if ts else 0.0
+
+
+def _summarize_master_workspace_facts(facts: dict[str, Any], max_chars: int = 220) -> str:
+    if not isinstance(facts, dict) or not facts:
+        return ''
+    ext_rows = facts.get('top_extensions', [])
+    ext_summary = []
+    if isinstance(ext_rows, list):
+        for row in ext_rows[:3]:
+            if not isinstance(row, dict):
+                continue
+            ext = str(row.get('extension', '')).strip()
+            count = row.get('count')
+            if not ext:
+                continue
+            ext_summary.append(f'{ext}:{count}')
+    parts = []
+    if isinstance(facts.get('file_count'), int):
+        parts.append(f"files={facts['file_count']}")
+    if ext_summary:
+        parts.append(f"ext={','.join(ext_summary)}")
+    parts.append(f"tests={'yes' if facts.get('has_tests_dir') else 'no'}")
+    parts.append(f"readme={'yes' if facts.get('has_readme') else 'no'}")
+    parts.append(f"git={'yes' if facts.get('is_git_repo') else 'no'}")
+    profile = str(facts.get('default_output_profile', '')).strip()
+    if profile:
+        parts.append(f'profile={profile}')
+    return _trim_master_inline_text(' '.join(parts), max_chars=max_chars)
+
+
+def _master_memory_value_text(value: Any, max_chars: int) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+        except TypeError:
+            text = str(value)
+    return _trim_master_inline_text(text, max_chars=max_chars)
+
+
+def _master_namespace_memory_context(
+    namespace: str,
+    max_chars: int,
+    payload: dict[str, Any] | None = None,
+) -> str:
+    payload = payload or _memory_load()
+    now = datetime.now(timezone.utc)
+    summaries = []
+    for row in payload.get('summaries', []):
+        if row.get('namespace') != namespace:
+            continue
+        if _is_expired(row.get('expires_at'), now):
+            continue
+        summaries.append(dict(row))
+    summaries.sort(
+        key=lambda row: (
+            float(row.get('confidence', 0.0) or 0.0),
+            _master_memory_updated_epoch(row),
+            str(row.get('focus', '')),
+        ),
+        reverse=True,
+    )
+
+    decisions = _effective_decisions(
+        decisions=payload.get('decisions', []),
+        now=now,
+        namespace=namespace,
+        include_expired=False,
+    )
+    decisions.sort(
+        key=lambda row: (
+            _decision_priority(str(row.get('decided_by', ''))),
+            float(row.get('confidence', 0.0) or 0.0),
+            _master_memory_updated_epoch(row),
+            str(row.get('topic', '')),
+        ),
+        reverse=True,
+    )
+
+    entries = []
+    for row in payload.get('entries', []):
+        if row.get('namespace') != namespace:
+            continue
+        if _is_expired(row.get('expires_at'), now):
+            continue
+        entries.append(dict(row))
+    entries.sort(key=_memory_entry_rank, reverse=True)
+
+    pieces: list[str] = []
+    for row in summaries[:2]:
+        focus = _trim_master_inline_text(row.get('focus', 'summary'), max_chars=24)
+        summary_text = _trim_master_inline_text(row.get('summary', ''), max_chars=160)
+        _append_master_context_piece(pieces, f'{focus}={summary_text}', max_chars=max_chars)
+    for row in decisions[:2]:
+        topic = _trim_master_inline_text(row.get('topic', 'decision'), max_chars=24)
+        decision_text = _master_memory_value_text(row.get('decision'), max_chars=140)
+        _append_master_context_piece(pieces, f'{topic}={decision_text}', max_chars=max_chars)
+    if not summaries:
+        for row in entries[:2]:
+            key = _trim_master_inline_text(row.get('key', 'entry'), max_chars=24)
+            value_text = _master_memory_value_text(row.get('value'), max_chars=140)
+            _append_master_context_piece(pieces, f'{key}={value_text}', max_chars=max_chars)
+    return ' | '.join(pieces)
+
+
+def _master_workspace_facts_payload() -> dict[str, Any]:
+    facts_path = _resolve_repo_path('.build/memory/workspace_facts.json')
+    facts = workspace_facts(refresh=False) if facts_path.is_file() else workspace_facts(refresh=True)
+    return facts if isinstance(facts, dict) else {}
+
+
+def _build_master_memory_context(route: str, memory_session: str) -> dict[str, Any]:
+    normalized_session = _normalize_master_memory_session(memory_session)
+    route_namespace = _master_route_namespace(route)
+    session_namespace = _master_session_namespace(normalized_session)
+    payload = _memory_load()
+    workspace_text = _summarize_master_workspace_facts(
+        _master_workspace_facts_payload(),
+        max_chars=220,
+    )
+    route_text = _master_namespace_memory_context(
+        namespace=route_namespace,
+        max_chars=340,
+        payload=payload,
+    )
+    session_text = _master_namespace_memory_context(
+        namespace=session_namespace,
+        max_chars=340,
+        payload=payload,
+    )
+    segments: list[str] = []
+    if workspace_text:
+        _append_master_context_piece(segments, f'wf:{workspace_text}', max_chars=900)
+    if route_text:
+        _append_master_context_piece(segments, f'rt:{route_text}', max_chars=900)
+    if session_text:
+        _append_master_context_piece(segments, f'ss:{session_text}', max_chars=900)
+    context = ' | '.join(segments)
+    return {
+        'memory_session': normalized_session,
+        'route_namespace': route_namespace,
+        'session_namespace': session_namespace,
+        'workspace_chars': len(workspace_text),
+        'route_chars': len(route_text),
+        'session_chars': len(session_text),
+        'context_chars': len(context),
+        'context': context,
+    }
+
+
+def _summarize_master_request(prompt: str, max_chars: int = 220) -> str:
+    return _trim_master_inline_text(prompt, max_chars=max_chars)
+
+
+def _summarize_master_response(infer: dict[str, Any], max_chars: int = 260) -> str:
+    output = _trim_master_inline_text(str(infer.get('output', '') or ''), max_chars=max_chars)
+    if output:
+        return output
+    if infer.get('ok', False):
+        return 'empty output'
+    return 'inference reported no output'
+
+
+def _persist_master_memory(
+    *,
+    prompt: str,
+    classification: dict[str, Any],
+    resolved: dict[str, Any],
+    encoded: dict[str, Any],
+    infer: dict[str, Any],
+    memory_info: dict[str, Any],
+    result_id: str = '',
+) -> dict[str, Any]:
+    route = str(classification.get('route') or resolved.get('route') or 'general')
+    master_ok = bool(infer.get('ok', False)) and bool(str(infer.get('output', '') or '').strip())
+    request_summary = _summarize_master_request(prompt)
+    response_summary = _summarize_master_response(infer)
+    session_namespace = str(memory_info.get('session_namespace') or _master_session_namespace('default'))
+    route_namespace = str(memory_info.get('route_namespace') or _master_route_namespace(route))
+    state: dict[str, Any] = {
+        'session_write': {'written': False},
+        'route_summary_write': {'written': False},
+        'session_compaction': {'compacted': False},
+        'failure_recorded': False,
+    }
+    session_value = {
+        'route': route,
+        'model': str(resolved.get('model') or ''),
+        'backend': str(infer.get('backend') or ''),
+        'ok': master_ok,
+        'confidence': float(classification.get('confidence', 0.0) or 0.0),
+        'request_summary': request_summary,
+        'response_summary': response_summary,
+        'char_saving': int(encoded.get('char_saving_vs_original', 0) or 0),
+    }
+    if result_id:
+        session_value['result_id'] = result_id
+
+    if ALLOW_MUTATIONS:
+        try:
+            session_write = memory_upsert(
+                namespace=session_namespace,
+                key=f"call:{_now_iso()}",
+                value=session_value,
+                ttl_days=7,
+                confidence=float(classification.get('confidence', 0.0) or 0.0),
+                source='model_router.master.auto',
+                tags=['master', 'session', route],
+            )
+            state['session_write'] = {**session_write, 'written': True}
+        except Exception as exc:
+            state['session_write'] = {'written': False, 'error': str(exc)}
+
+        route_summary = _trim_master_inline_text(
+            f"model={resolved.get('model', '')} ok={master_ok} req={request_summary} resp={response_summary}",
+            max_chars=600,
+        )
+        try:
+            route_write = memory_summary_upsert(
+                namespace=route_namespace,
+                focus='recent_activity',
+                summary=route_summary,
+                ttl_days=30,
+                confidence=float(classification.get('confidence', 0.0) or 0.0),
+                source='model_router.master.auto',
+                tags=['master', 'route', route],
+            )
+            state['route_summary_write'] = {**route_write, 'written': True}
+        except Exception as exc:
+            state['route_summary_write'] = {'written': False, 'error': str(exc)}
+
+        try:
+            state['session_compaction'] = memory_auto_compact(
+                namespace=session_namespace,
+                threshold_entries=12,
+                threshold_chars=4000,
+                keep_entries=6,
+                summary_max_chars=600,
+                drop_expired=False,
+            )
+        except Exception as exc:
+            state['session_compaction'] = {'compacted': False, 'error': str(exc)}
+    else:
+        state['session_write'] = {'written': False, 'reason': 'mutations_disabled'}
+        state['route_summary_write'] = {'written': False, 'reason': 'mutations_disabled'}
+        state['session_compaction'] = {'compacted': False, 'reason': 'mutations_disabled'}
+
+    if not master_ok:
+        failure_reason = (
+            f"master route={route} model={resolved.get('model', '')} returned empty output"
+            if not str(infer.get('output', '') or '').strip()
+            else f"master route={route} model={resolved.get('model', '')} returned ok=false"
+        )
+        _failure_record(
+            command=['model_router', 'master'],
+            stderr=failure_reason,
+            stdout=response_summary,
+            category='model_router.master',
+            suggestion='Inspect route selection, memory context, and routed model availability.',
+        )
+        state['failure_recorded'] = True
+    return state
+
+
 def _master_infer(
     prompt: str,
     task: str = 'general',
@@ -8213,6 +8502,7 @@ def _master_infer(
     system: str = '',
     output_profile: str | None = None,
     store_result: bool = False,
+    memory_session: str = '',
 ) -> dict[str, Any]:
     if not prompt.strip():
         raise ValueError('prompt must not be empty')
@@ -8224,10 +8514,16 @@ def _master_infer(
         routing=routing,
         requested_model=model,
     )
+    memory_info = _build_master_memory_context(
+        route=str(classification['route']),
+        memory_session=memory_session,
+    )
     encoded = _encode_master_prompt_packet(
         prompt=prompt,
         route=str(classification['route']),
         task=task,
+        memory_session=str(memory_info['memory_session']),
+        memory_context=str(memory_info['context']),
     )
     effective_system = system or MASTER_ROUTE_SYSTEM_PROMPTS.get(
         str(classification['route']),
@@ -8244,6 +8540,7 @@ def _master_infer(
         output_profile=output_profile,
         store_result=store_result,
     )
+    master_ok = bool(infer.get('ok', False)) and bool(str(infer.get('output', '') or '').strip())
     result: dict[str, Any] = {
         'schema': 'model_router.master.v1',
         'classification': classification,
@@ -8257,6 +8554,10 @@ def _master_infer(
             'routing_source': routing.get('source'),
             'router_model': routing.get('router', {}).get('model'),
         },
+        'memory': {
+            **memory_info,
+            'forced': True,
+        },
         'infer': infer,
     }
     if profile == 'compact':
@@ -8268,11 +8569,28 @@ def _master_infer(
             'backend': infer.get('backend'),
             'encoded_chars': encoded['encoded_chars'],
             'char_saving_vs_original': encoded['char_saving_vs_original'],
-            'ok': infer.get('ok', False),
+            'memory_session': memory_info['memory_session'],
+            'memory_chars': memory_info['context_chars'],
+            'ok': master_ok,
             'output': infer.get('output', ''),
         }
+    master_result_id = ''
     if store_result:
-        result['result_id'] = _result_store_put('model_router_master', result)
+        master_result_id = _result_store_put('model_router_master', result)
+        result['result_id'] = master_result_id
+    persisted = _persist_master_memory(
+        prompt=prompt,
+        classification=classification,
+        resolved=resolved,
+        encoded=encoded,
+        infer=infer,
+        memory_info=memory_info,
+        result_id=master_result_id or str(infer.get('result_id') or ''),
+    )
+    if 'memory' in result and isinstance(result['memory'], dict):
+        result['memory'].update(persisted)
+    else:
+        result['memory_write'] = persisted
     return result
 
 
@@ -8588,6 +8906,7 @@ class ModelRouterService:
         limit: int | None = None,
         compress: bool = False,
         store_result: bool = False,
+        memory_session: str = "",
         check_profile: str = "quick",
         check_target: str = ".",
         check_timeout_seconds: int = 600,
@@ -8630,6 +8949,7 @@ class ModelRouterService:
                 system=system,
                 output_profile=output_profile,
                 store_result=store_result,
+                memory_session=memory_session,
             )
         if mode == "embed":
             return local_embed(
@@ -8816,6 +9136,7 @@ def model_router(
     limit: int | None = None,
     compress: bool = False,
     store_result: bool = False,
+    memory_session: str = "",
     check_profile: str = "quick",
     check_target: str = ".",
     check_timeout_seconds: int = 600,
@@ -8829,7 +9150,7 @@ def model_router(
     max_parallel: int = 4,
     auto_parallel_when_possible: bool = True,
 ) -> dict[str, Any]:
-    """Strict model router: mode MUST be one of status|master|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; required params are enforced per mode; returns deterministic schema payloads or explicit validation errors."""
+    """Strict model router: mode MUST be one of status|master|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; `master` is memory-backed orchestration, `memory_session` isolates ephemeral master memory, and required params are enforced per mode."""
     return _MODEL_ROUTER_SERVICE.route(
         mode=mode,
         prompt=prompt,
@@ -8853,6 +9174,7 @@ def model_router(
         limit=limit,
         compress=compress,
         store_result=store_result,
+        memory_session=memory_session,
         check_profile=check_profile,
         check_target=check_target,
         check_timeout_seconds=check_timeout_seconds,

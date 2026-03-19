@@ -305,30 +305,11 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 ### Public MCP v1 Surface
 
-- `autocomplete`
-- `repo_info`
-- `runtime_state`
-- `repo_router` (tree, find, read, read_document, read_snippet, read_batch, query_json)
-- `workspace_transaction` (begin, apply, validate, rollback, commit, snapshot, restore, write, replace, move, delete, apply_diff)
-- `git_router` (init, status, diff, log, show, add, restore, commit, checkout, create_branch, fetch, pull, push, summarize_diff, risk, security)
-- `code_index_router` (refresh, read, query, symbols, deps, calls, search, grep, tree, ast, impact_tests, doc_sync, api_surface)
 - `model_router`
-- `memory_router` (upsert, summary_upsert, decision_record, get, validate, auto_compact, failure_memory, root_cause, artifact_index)
-- `docker_router`
-- `vscode_router`
-- `command_runner` (safe allowlisted command execution; non-allowlisted commands return a pending approval request instead of a failed execution)
-- `tool_router` (route, record, inspect)
-- `quality_router` (self_test, self_check, release_readiness, flaky, change_impact, required_tool_chain, spec_to_tests, smart_fix)
-- `governance_router` (policy, license, runtime_contract, human_approval, commit_lint)
-- `workflow_router` (fast_path, compile, multi_agent, constraint_check, confidence, artifact_index, failure_memory, root_cause, execution_replay, auto_shard)
-- `runtime_guard_router` (benchmark, output_size, golden_output, token_budget, cost_budget, cache, result_handle, workspace_facts)
-- `math_router` (parse, solve, verify)
-- `document_router` (ocr, image, presentation, translate)
-- `diagram_router` (from_code, lint_mermaid, drawio, sync_check)
-- `sql_expert`
-- `browse_web`
 
-Leaf implementations remain in `source/server.py` as internal helpers and compatibility-free call targets for the routers above. Only the tools listed here are exposed over MCP v1.
+`model_router(mode="master")` is the single public MCP entrypoint. It classifies the prompt, encodes the routing packet, reads and writes compact route/session memory automatically, and dispatches to the selected model. Use `memory_session` to isolate ephemeral master-memory context when needed.
+
+Leaf implementations remain in `source/server.py` as internal helpers and call targets for `model_router` orchestration. Only the tools listed here are exposed over MCP v1.
 
 ## Labs and Reports
 

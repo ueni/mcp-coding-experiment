@@ -447,6 +447,177 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["task"], "review")
         self.assertEqual(linf.call_args.kwargs["model"], "phi4-mini-reasoning:3.8b")
 
+
+    def test_model_router_master_reads_memory_and_encodes_session_and_memory(self):
+        self.server.memory_router(
+            mode="summary_upsert",
+            namespace="master/route/security",
+            focus="recent_activity",
+            summary="prior route summary",
+        )
+        self.server.memory_router(
+            mode="decision_record",
+            namespace="master/session/abc",
+            topic="response_style",
+            decision="be terse",
+            decided_by="human",
+        )
+        facts_path = self.repo_path / ".build" / "memory" / "workspace_facts.json"
+        facts_path.parent.mkdir(parents=True, exist_ok=True)
+        facts_path.write_text(
+            json.dumps(
+                {
+                    "generated_at": "cached",
+                    "is_git_repo": True,
+                    "file_count": 11,
+                    "top_extensions": [{"extension": ".py", "count": 3}],
+                    "has_tests_dir": True,
+                    "has_readme": True,
+                    "default_output_profile": "compact",
+                }
+            ),
+            encoding="utf-8",
+        )
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "security findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.model_router(
+                mode="master",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+                memory_session="abc",
+            )
+        packet = json.loads(out["encoding"]["encoded_prompt"])
+        self.assertEqual(packet["s"], "abc")
+        self.assertIn("m", packet)
+        self.assertLessEqual(len(packet["m"]), 900)
+        self.assertIn("prior route summary", packet["m"])
+        self.assertIn("response_style=be terse", packet["m"])
+        self.assertIn("files=11", packet["m"])
+        self.assertEqual(out["memory"]["session_namespace"], "master/session/abc")
+        self.assertEqual(out["memory"]["route_namespace"], "master/route/security")
+
+    def test_model_router_master_success_persists_session_entry_and_route_summary(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "security findings",
+            "result_id": "infer-123",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.model_router(
+                mode="master",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+                memory_session="persist",
+            )
+        payload = self.server._memory_load()
+        session_entries = [
+            row for row in payload["entries"] if row.get("namespace") == "master/session/persist"
+        ]
+        self.assertEqual(len(session_entries), 1)
+        value = session_entries[0]["value"]
+        self.assertEqual(value["route"], "security")
+        self.assertEqual(value["model"], "deepseek-r1:1.5b")
+        self.assertEqual(value["backend"], "fallback")
+        self.assertTrue(value["ok"])
+        self.assertEqual(value["result_id"], "infer-123")
+        route_summaries = [
+            row
+            for row in payload["summaries"]
+            if row.get("namespace") == "master/route/security"
+            and row.get("focus") == "recent_activity"
+        ]
+        self.assertEqual(len(route_summaries), 1)
+        self.assertIn("security findings", route_summaries[0]["summary"])
+        self.assertTrue(out["memory"]["session_write"]["written"])
+        self.assertTrue(out["memory"]["route_summary_write"]["written"])
+
+    def test_model_router_master_failure_records_master_failure_and_session_context(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.model_router(
+                mode="master",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+                memory_session="failure",
+            )
+        payload = self.server._memory_load()
+        session_entries = [
+            row for row in payload["entries"] if row.get("namespace") == "master/session/failure"
+        ]
+        self.assertEqual(len(session_entries), 1)
+        self.assertFalse(session_entries[0]["value"]["ok"])
+        self.assertEqual(session_entries[0]["value"]["response_summary"], "empty output")
+        failures = self.server._failure_memory_load()["entries"]
+        master_failures = [row for row in failures if row.get("category") == "model_router.master"]
+        self.assertEqual(len(master_failures), 1)
+        self.assertIn("empty output", master_failures[0]["stderr"])
+        self.assertTrue(out["memory"]["failure_recorded"])
+
+    def test_model_router_master_memory_context_is_summary_first_and_capped(self):
+        self.server.memory_router(
+            mode="summary_upsert",
+            namespace="master/route/security",
+            focus="recent_activity",
+            summary=("route-summary " * 80).strip(),
+        )
+        self.server.memory_router(
+            mode="upsert",
+            namespace="master/route/security",
+            key="raw-route",
+            value={"detail": "raw route fallback should not appear"},
+        )
+        self.server.memory_router(
+            mode="summary_upsert",
+            namespace="master/session/abc",
+            focus="session",
+            summary=("session-summary " * 80).strip(),
+        )
+        self.server.memory_router(
+            mode="upsert",
+            namespace="master/session/abc",
+            key="raw-session",
+            value={"detail": "raw session fallback should not appear"},
+        )
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "security findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.model_router(
+                mode="master",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+                memory_session="abc",
+            )
+        packet = json.loads(out["encoding"]["encoded_prompt"])
+        self.assertLessEqual(len(packet["m"]), 900)
+        self.assertIn("recent_activity=route-summary", packet["m"])
+        self.assertIn("session=session-summary", packet["m"])
+        self.assertNotIn("raw route fallback should not appear", packet["m"])
+        self.assertNotIn("raw session fallback should not appear", packet["m"])
+
     def test_autocomplete_fallback(self):
         out = self.server.autocomplete(
             prefix="def handler():",
@@ -1467,7 +1638,8 @@ class ServerToolsTest(ServerToolsTestBase):
             tools = await self.server.mcp.list_tools()
             names = {item.model_dump().get("name") for item in tools}
             self.assertEqual(names, expected)
-            self.assertEqual(len(names), 22)
+            self.assertEqual(names, {"model_router"})
+            self.assertEqual(len(names), 1)
 
         asyncio.run(run_checks())
 

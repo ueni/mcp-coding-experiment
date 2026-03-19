@@ -316,6 +316,139 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         self.assertEqual(value["success_count"], 2)
         self.assertEqual(value["last_success_profile"], "full")
 
+
+    def test_master_memory_route_and_session_namespace_isolation(self):
+        self.server.memory_router(
+            mode="summary_upsert",
+            namespace="master/route/security",
+            focus="recent_activity",
+            summary="route-security",
+        )
+        self.server.memory_router(
+            mode="summary_upsert",
+            namespace="master/route/review",
+            focus="recent_activity",
+            summary="route-review",
+        )
+        self.server.memory_router(
+            mode="summary_upsert",
+            namespace="master/session/default",
+            focus="session",
+            summary="default-session",
+        )
+        self.server.memory_router(
+            mode="summary_upsert",
+            namespace="master/session/other",
+            focus="session",
+            summary="other-session",
+        )
+
+        default_ctx = self.server._build_master_memory_context(route="security", memory_session="")
+        other_ctx = self.server._build_master_memory_context(route="security", memory_session="other")
+
+        self.assertIn("route-security", default_ctx["context"])
+        self.assertNotIn("route-review", default_ctx["context"])
+        self.assertIn("default-session", default_ctx["context"])
+        self.assertNotIn("other-session", default_ctx["context"])
+        self.assertIn("other-session", other_ctx["context"])
+        self.assertNotIn("default-session", other_ctx["context"])
+
+    def test_master_memory_blank_session_normalizes_to_default(self):
+        self.assertEqual(self.server._normalize_master_memory_session(""), "default")
+        info = self.server._build_master_memory_context(route="security", memory_session="")
+        self.assertEqual(info["memory_session"], "default")
+        self.assertEqual(info["session_namespace"], "master/session/default")
+
+    def test_master_memory_session_auto_compact_creates_summary(self):
+        for idx in range(12):
+            self.server.memory_router(
+                mode="upsert",
+                namespace="master/session/default",
+                key=f"seed-{idx}",
+                value={"text": "x" * 400},
+                ttl_days=7,
+            )
+
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "security findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.model_router(
+                mode="master",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+                memory_session="",
+            )
+
+        payload = self.server._memory_load()
+        summaries = [
+            row
+            for row in payload["summaries"]
+            if row.get("namespace") == "master/session/default"
+            and row.get("focus") == "auto_compact"
+        ]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn("Auto-compact summary", summaries[0]["summary"])
+        self.assertTrue(out["memory"]["session_compaction"]["compacted"])
+
+    def test_memory_compatibility_wrappers_remain_usable(self):
+        self.server._failure_record(
+            command=["pytest", "-q"],
+            stderr="command timed out while running pytest",
+            category="command_runner",
+            suggestion="Increase timeout_seconds.",
+        )
+        direct_failure = self.server.failure_memory(
+            mode="get",
+            category="command_runner",
+            max_entries=5,
+        )
+        routed_failure = self.server.memory_router(
+            mode="failure_memory",
+            query="get",
+            category="command_runner",
+            max_entries=5,
+        )
+        self.assertEqual(direct_failure["count"], routed_failure["result"]["count"])
+
+        self.server.root_cause_memory(
+            mode="add",
+            issue="build fails",
+            root_cause="bad config",
+            fix="update config",
+        )
+        direct_root = self.server.root_cause_memory(
+            mode="suggest",
+            issue="build config",
+            max_entries=5,
+        )
+        routed_root = self.server.memory_router(
+            mode="root_cause",
+            query="suggest",
+            issue="build config",
+            max_entries=5,
+        )
+        self.assertEqual(direct_root["count"], routed_root["result"]["count"])
+
+        report = self.repo_path / ".build" / "reports" / "sample.txt"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("ok\n", encoding="utf-8")
+        self.server.artifact_memory_index(mode="refresh", path=".build/reports")
+        direct_artifact = self.server.artifact_memory_index(mode="query", query="sample", max_entries=5)
+        routed_artifact = self.server.memory_router(
+            mode="artifact_index",
+            artifact_mode="query",
+            path=".build/reports",
+            query="sample",
+            max_entries=5,
+        )
+        self.assertEqual(direct_artifact["count"], routed_artifact["result"]["count"])
+
     def test_effective_decisions_prefers_human_and_newer_timestamp(self):
         now = datetime.now(timezone.utc)
         rows = [
