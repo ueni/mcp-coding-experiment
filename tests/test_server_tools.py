@@ -1643,6 +1643,21 @@ class ServerToolsTest(ServerToolsTestBase):
 
         asyncio.run(run_checks())
 
+    def test_public_model_router_argument_descriptions(self):
+        async def run_checks():
+            tools = await self.server.mcp.list_tools()
+            tool = next(item for item in tools if item.model_dump().get("name") == "model_router")
+            schema = tool.model_dump().get("inputSchema", {})
+            props = schema.get("properties", {})
+            self.assertGreaterEqual(len(props), 10)
+            missing = sorted(name for name, spec in props.items() if not spec.get("description"))
+            self.assertEqual(missing, [])
+            self.assertIn("memory-backed orchestration", props["mode"]["description"])
+            self.assertIn("Ephemeral memory-session key", props["memory_session"]["description"])
+            self.assertIn("Prompt batch", props["prompts"]["description"])
+
+        asyncio.run(run_checks())
+
     def test_router_surface_modes(self):
         self.write_repo_text("config.json", '{"outer": {"value": 7}}\n')
 

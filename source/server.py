@@ -31,7 +31,7 @@ import select
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 try:
     import tomllib
@@ -89,6 +89,7 @@ except ModuleNotFoundError:  # pragma: no cover
     _ts_get_parser = None
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -9114,41 +9115,148 @@ _MODEL_ROUTER_SERVICE = ModelRouterService()
 
 @mcp.tool()
 def model_router(
-    mode: str = "status",
-    prompt: str = "",
-    task: str = "general",
-    prefix: str = "",
-    suffix: str = "",
-    language: str = "",
-    texts: list[str] | None = None,
-    query: str = "",
-    candidates: list[dict[str, Any]] | None = None,
-    backend: str = "auto",
-    model: str = "",
-    max_tokens: int = 256,
-    temperature: float = 0.2,
-    system: str = "",
-    stop: list[str] | None = None,
-    normalize: bool = True,
-    top_k: int = 20,
-    output_profile: str | None = None,
-    offset: int = 0,
-    limit: int | None = None,
-    compress: bool = False,
-    store_result: bool = False,
-    memory_session: str = "",
-    check_profile: str = "quick",
-    check_target: str = ".",
-    check_timeout_seconds: int = 600,
-    run_checks: bool = False,
-    packages: list[str] | None = None,
-    pip_upgrade: bool = False,
-    sandbox_mode: str = "shared",
-    sandbox_id: str = "",
-    sandbox_action: str = "list",
-    prompts: list[str] | None = None,
-    max_parallel: int = 4,
-    auto_parallel_when_possible: bool = True,
+    mode: Annotated[
+        str,
+        Field(
+            description="Router mode. Use `master` for classified, memory-backed orchestration; other modes expose explicit inference, embedding, reranking, and coding operations."
+        ),
+    ] = "status",
+    prompt: Annotated[
+        str,
+        Field(description="Primary text prompt for `master`, `infer`, and `coding_infer` modes."),
+    ] = "",
+    task: Annotated[
+        str,
+        Field(description="Task hint such as `general`, `coding`, `review`, or `security`; used for routing and fallback prompt shaping."),
+    ] = "general",
+    prefix: Annotated[
+        str,
+        Field(description="Autocomplete prefix text when `mode='autocomplete'`."),
+    ] = "",
+    suffix: Annotated[
+        str,
+        Field(description="Autocomplete suffix text after the cursor when `mode='autocomplete'`."),
+    ] = "",
+    language: Annotated[
+        str,
+        Field(description="Language hint for autocomplete requests."),
+    ] = "",
+    texts: Annotated[
+        list[str] | None,
+        Field(description="Input texts for `mode='embed'`."),
+    ] = None,
+    query: Annotated[
+        str,
+        Field(description="Query text for reranking and other mode-specific router operations."),
+    ] = "",
+    candidates: Annotated[
+        list[dict[str, Any]] | None,
+        Field(description="Candidate objects to rerank when `mode='rerank'`."),
+    ] = None,
+    backend: Annotated[
+        str,
+        Field(description="Execution backend. Common values include `auto`, `endpoint`, `fallback`, `hash`, and `rule`, depending on the selected mode."),
+    ] = "auto",
+    model: Annotated[
+        str,
+        Field(description="Explicit model override. Leave empty to use router-selected or default models."),
+    ] = "",
+    max_tokens: Annotated[
+        int,
+        Field(description="Maximum generated tokens for inference-style modes."),
+    ] = 256,
+    temperature: Annotated[
+        float,
+        Field(description="Sampling temperature for inference-style modes."),
+    ] = 0.2,
+    system: Annotated[
+        str,
+        Field(description="Optional system prompt override for inference-style modes."),
+    ] = "",
+    stop: Annotated[
+        list[str] | None,
+        Field(description="Optional stop sequences for `mode='autocomplete'`."),
+    ] = None,
+    normalize: Annotated[
+        bool,
+        Field(description="Whether embeddings should be L2-normalized in `mode='embed'`."),
+    ] = True,
+    top_k: Annotated[
+        int,
+        Field(description="Maximum rerank results to return in `mode='rerank'`."),
+    ] = 20,
+    output_profile: Annotated[
+        str | None,
+        Field(description="Output verbosity/profile. Common values are `compact`, `normal`, and `verbose`."),
+    ] = None,
+    offset: Annotated[
+        int,
+        Field(description="Pagination offset for pageable modes."),
+    ] = 0,
+    limit: Annotated[
+        int | None,
+        Field(description="Pagination limit for pageable modes."),
+    ] = None,
+    compress: Annotated[
+        bool,
+        Field(description="Whether to compress large tabular or list results in supported modes."),
+    ] = False,
+    store_result: Annotated[
+        bool,
+        Field(description="Whether to store the result in the server-side result handle cache."),
+    ] = False,
+    memory_session: Annotated[
+        str,
+        Field(description="Ephemeral memory-session key for `mode='master'`. Empty resolves to `default`."),
+    ] = "",
+    check_profile: Annotated[
+        str,
+        Field(description="Coding check profile for `coding_check` or `coding_infer` with `run_checks=true`."),
+    ] = "quick",
+    check_target: Annotated[
+        str,
+        Field(description="File or directory target for coding checks."),
+    ] = ".",
+    check_timeout_seconds: Annotated[
+        int,
+        Field(description="Timeout in seconds for coding checks and package installs."),
+    ] = 600,
+    run_checks: Annotated[
+        bool,
+        Field(description="Whether `coding_infer` should run post-infer checks."),
+    ] = False,
+    packages: Annotated[
+        list[str] | None,
+        Field(description="Package specs to install when `mode='coding_pip'`."),
+    ] = None,
+    pip_upgrade: Annotated[
+        bool,
+        Field(description="Whether `coding_pip` should install with upgrade semantics."),
+    ] = False,
+    sandbox_mode: Annotated[
+        str,
+        Field(description="Coding sandbox mode. Use `shared` to reuse the shared sandbox or another supported mode for isolation."),
+    ] = "shared",
+    sandbox_id: Annotated[
+        str,
+        Field(description="Existing sandbox identifier for coding sandbox reuse or management."),
+    ] = "",
+    sandbox_action: Annotated[
+        str,
+        Field(description="Sandbox management action when `mode='coding_sandbox'`."),
+    ] = "list",
+    prompts: Annotated[
+        list[str] | None,
+        Field(description="Prompt batch for `mode='parallel_infer'` or explicit auto-parallel input."),
+    ] = None,
+    max_parallel: Annotated[
+        int,
+        Field(description="Maximum concurrent workers for `parallel_infer` or inferred auto-parallel batches."),
+    ] = 4,
+    auto_parallel_when_possible: Annotated[
+        bool,
+        Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
+    ] = True,
 ) -> dict[str, Any]:
     """Strict model router: mode MUST be one of status|master|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; `master` is memory-backed orchestration, `memory_session` isolates ephemeral master memory, and required params are enforced per mode."""
     return _MODEL_ROUTER_SERVICE.route(
