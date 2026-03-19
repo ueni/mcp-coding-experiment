@@ -81,13 +81,21 @@ cat > .devcontainer/devcontainer.json <<EOF
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
     "ALLOW_MUTATIONS": "true",
+    "OLLAMA_HOST": "0.0.0.0:2345",
+    "OLLAMA_FALLBACK_HOST": "0.0.0.0:2345",
+    "LOCAL_INFER_ENDPOINT": "http://127.0.0.1:2345/api/generate"
   },
   "forwardPorts": [
-    8000
+    8000,
+    2345
   ],
   "portsAttributes": {
     "8000": {
       "label": "MCP Server",
+      "onAutoForward": "notify"
+    },
+    "2345": {
+      "label": "Bundled LLM",
       "onAutoForward": "notify"
     }
   },

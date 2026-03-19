@@ -4,6 +4,8 @@
 
 import json
 import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +42,48 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual("/home/app/.docker", config["containerEnv"]["DOCKER_CONFIG"])
         self.assertIn(
             "source=${localEnv:HOME}/.docker,target=/host/.docker,type=bind,consistency=cached,readOnly=true",
+            config["mounts"],
+        )
+
+    def test_setup_script_generates_devcontainer_with_ollama_ports_and_codex_mount(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / ".git").mkdir()
+            result = subprocess.run(
+                ["/bin/sh", str(REPO_ROOT / "setup-repository.sh")],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr.strip() or result.stdout.strip(),
+            )
+
+            config = json.loads(
+                (repo_root / ".devcontainer" / "devcontainer.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual([8000, 2345], config["forwardPorts"])
+        self.assertEqual("0.0.0.0:2345", config["containerEnv"]["OLLAMA_HOST"])
+        self.assertEqual(
+            "0.0.0.0:2345", config["containerEnv"]["OLLAMA_FALLBACK_HOST"]
+        )
+        self.assertEqual(
+            "http://127.0.0.1:2345/api/generate",
+            config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
+        )
+        self.assertEqual("Bundled LLM", config["portsAttributes"]["2345"]["label"])
+        self.assertIn(
+            "source=${localEnv:HOME}/.codex,target=/home/app/.codex,type=bind,consistency=cached,readOnly=false",
+            config["mounts"],
+        )
+        self.assertNotIn(
+            "source=/etc/ssl/certs,target=/etc/ssl/certs,type=bind,consistency=cached,readOnly=true",
             config["mounts"],
         )
 
