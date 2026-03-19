@@ -142,15 +142,21 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('ollama pull "$model"', dockerfile)
 
     def test_continue_model_routing_uses_small_default_profile(self):
-        routing = (
-            REPO_ROOT / "source" / "defaults" / "continue" / "model-routing.yaml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("model: granite3.3:2b", routing)
-        self.assertIn("file: .continue/models/router-granite3.3-2b.yaml", routing)
-        self.assertIn("model: qwen2.5-coder:3b", routing)
-        self.assertIn("file: .continue/models/coding-qwen2.5-coder-3b.yaml", routing)
-        self.assertIn("model: llama3.2:1b", routing)
-        self.assertIn("file: .continue/models/research-llama3.2-1b.yaml", routing)
+        for routing_path in [
+            REPO_ROOT / ".continue" / "model-routing.yaml",
+            REPO_ROOT / "source" / "defaults" / "continue" / "model-routing.yaml",
+        ]:
+            routing = routing_path.read_text(encoding="utf-8")
+            self.assertIn("model: granite3.3:2b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/router-granite3.3-2b.yaml", routing, str(routing_path))
+            self.assertIn("model: qwen2.5-coder:3b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/coding-qwen2.5-coder-3b.yaml", routing, str(routing_path))
+            self.assertIn("model: llama3.2:1b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/research-llama3.2-1b.yaml", routing, str(routing_path))
+
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "router-granite3.2-2b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "coding-qwen2.5-coder-7b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "research-llama3.2-3b.yaml").exists())
 
     def test_dockerfile_installs_vulkan_runtime_for_ollama(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
