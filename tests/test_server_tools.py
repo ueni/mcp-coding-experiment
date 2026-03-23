@@ -226,7 +226,7 @@ class ServerToolsTest(ServerToolsTestBase):
     def test_output_size_guard_write_and_check(self):
         write = self.server.output_size_guard(mode="write")
         self.assertEqual(write["mode"], "write")
-        self.assertTrue((self.repo_path / ".build" / "reports" / "TOOL_OUTPUT_BASELINE.json").is_file())
+        self.assertTrue((self.repo_path / ".codebase-tooling-mcp" / "reports" / "TOOL_OUTPUT_BASELINE.json").is_file())
 
         check = self.server.output_size_guard(mode="check")
         self.assertIn("ok", check)
@@ -303,8 +303,8 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["ok"])
         self.assertIn("high-severity issues first", out["output"])
 
-    def test_model_router_parallel_infer(self):
-        out = self.server.model_router(
+    def test_task_router_parallel_infer(self):
+        out = self.server.task_router(
             mode="parallel_infer",
             prompts=["alpha", "beta", "gamma"],
             backend="fallback",
@@ -318,14 +318,14 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["max_parallel"], 2)
 
         with self.assertRaises(ValueError):
-            self.server.model_router(mode="parallel_infer", prompts=[], max_parallel=2)
+            self.server.task_router(mode="parallel_infer", prompts=[], max_parallel=2)
 
-    def test_model_router_parallel_infer_tool_backed_fallback(self):
+    def test_task_router_parallel_infer_tool_backed_fallback(self):
         (self.repo_path / ".gitignore").write_text(
-            "# codebase-tooling-mcp generated\n/.build/\n/.continue/\n",
+            "# codebase-tooling-mcp generated\n/.codebase-tooling-mcp/\n/.continue/\n",
             encoding="utf-8",
         )
-        out = self.server.model_router(
+        out = self.server.task_router(
             mode="parallel_infer",
             prompts=[
                 "From .gitignore, list the codebase-tooling generated ignore entries.",
@@ -341,11 +341,11 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(row["ok"])
         result = row["result"]
         self.assertEqual(result["backend"], "tool_fallback")
-        self.assertIn("/.build/", result["output"])
+        self.assertIn("/.codebase-tooling-mcp/", result["output"])
         self.assertIn("/.continue/", result["output"])
 
-    def test_model_router_parallel_infer_tool_backed_summary_is_concise(self):
-        out = self.server.model_router(
+    def test_task_router_parallel_infer_tool_backed_summary_is_concise(self):
+        out = self.server.task_router(
             mode="parallel_infer",
             prompts=[
                 "Summarize src/sample.py in 2 concise sentences focused on behavior.",
@@ -364,7 +364,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertNotIn("[truncated:", text)
         self.assertLessEqual(len(text), 420)
 
-    def test_model_router_infer_auto_parallel_upgrade(self):
+    def test_task_router_infer_auto_parallel_upgrade(self):
         parallel_payload = {
             "schema": "parallel_infer.v1",
             "count": 2,
@@ -376,13 +376,13 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(self.server, "_parallel_infer", return_value=parallel_payload) as pinf, patch.object(
             self.server, "local_infer", return_value={"schema": "local_infer.v1", "ok": True}
         ) as linf:
-            out = self.server.model_router(
+            out = self.server.task_router(
                 mode="infer",
                 prompt="- summarize docs\n- review changed files",
                 backend="fallback",
                 max_parallel=2,
             )
-        self.assertEqual(out["schema"], "model_router.infer_auto_parallel.v1")
+        self.assertEqual(out["schema"], "task_router.infer_auto_parallel.v1")
         self.assertTrue(out["upgraded"])
         self.assertEqual(out["count"], 2)
         self.assertEqual(out["result"]["schema"], "parallel_infer.v1")
@@ -390,9 +390,9 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_count, 0)
 
 
-    def test_model_router_infer_auto_parallel_can_be_disabled(self):
+    def test_task_router_infer_auto_parallel_can_be_disabled(self):
         with patch.object(self.server, "local_infer", return_value={"schema": "local_infer.v1", "ok": True}) as linf:
-            out = self.server.model_router(
+            out = self.server.task_router(
                 mode="infer",
                 prompt="- summarize docs\n- review changed files",
                 backend="fallback",
@@ -401,7 +401,19 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["schema"], "local_infer.v1")
         self.assertEqual(linf.call_count, 1)
 
-    def test_model_router_master_classifies_encodes_and_routes(self):
+    def test_task_router_infer_uses_single_explicit_prompt(self):
+        with patch.object(self.server, "local_infer", return_value={"schema": "local_infer.v1", "ok": True}) as linf:
+            out = self.server.task_router(
+                mode="infer",
+                prompt="ignored prompt",
+                prompts=["single explicit prompt"],
+                backend="fallback",
+            )
+        self.assertEqual(out["schema"], "local_infer.v1")
+        self.assertEqual(linf.call_count, 1)
+        self.assertEqual(linf.call_args.kwargs["prompt"], "single explicit prompt")
+
+    def test_task_router_task_classifies_encodes_and_routes(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
@@ -410,13 +422,13 @@ class ServerToolsTest(ServerToolsTestBase):
             "output": "security findings",
         }
         with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
-            out = self.server.model_router(
-                mode="master",
+            out = self.server.task_router(
+                mode="task",
                 prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
             )
-        self.assertEqual(out["schema"], "model_router.master.v1")
+        self.assertEqual(out["schema"], "task_router.task.v1")
         self.assertEqual(out["classification"]["route"], "security")
         self.assertEqual(out["routing"]["selected_model"], "deepseek-r1:1.5b")
         self.assertTrue(out["routing"]["routing_loaded"])
@@ -424,7 +436,25 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["task"], "security")
         self.assertEqual(linf.call_args.kwargs["model"], "deepseek-r1:1.5b")
 
-    def test_model_router_master_honors_task_override_in_compact_mode(self):
+    def test_task_router_defaults_to_task_mode(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "security findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
+            out = self.server.task_router(
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+            )
+        self.assertEqual(out["schema"], "task_router.task.v1")
+        self.assertEqual(out["classification"]["route"], "security")
+        self.assertEqual(linf.call_args.kwargs["task"], "security")
+
+    def test_task_router_task_honors_task_override_in_compact_mode(self):
         infer_payload = {
             "schema": "local_infer.compact.v1",
             "backend": "fallback",
@@ -433,14 +463,14 @@ class ServerToolsTest(ServerToolsTestBase):
             "output": "review findings",
         }
         with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
-            out = self.server.model_router(
-                mode="master",
+            out = self.server.task_router(
+                mode="task",
                 prompt="Implement helper for parser cleanup.",
                 task="review",
                 backend="fallback",
                 output_profile="compact",
             )
-        self.assertEqual(out["schema"], "model_router.master.compact.v1")
+        self.assertEqual(out["schema"], "task_router.task.compact.v1")
         self.assertEqual(out["route"], "review")
         self.assertEqual(out["model"], "phi4-mini-reasoning:3.8b")
         self.assertTrue(out["ok"])
@@ -448,21 +478,21 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["model"], "phi4-mini-reasoning:3.8b")
 
 
-    def test_model_router_master_reads_memory_and_encodes_session_and_memory(self):
+    def test_task_router_task_reads_memory_and_encodes_session_and_memory(self):
         self.server.memory_router(
             mode="summary_upsert",
-            namespace="master/route/security",
+            namespace="task/route/security",
             focus="recent_activity",
             summary="prior route summary",
         )
         self.server.memory_router(
             mode="decision_record",
-            namespace="master/session/abc",
+            namespace="task/session/abc",
             topic="response_style",
             decision="be terse",
             decided_by="human",
         )
-        facts_path = self.repo_path / ".build" / "memory" / "workspace_facts.json"
+        facts_path = self.repo_path / ".codebase-tooling-mcp" / "memory" / "workspace_facts.json"
         facts_path.parent.mkdir(parents=True, exist_ok=True)
         facts_path.write_text(
             json.dumps(
@@ -486,8 +516,8 @@ class ServerToolsTest(ServerToolsTestBase):
             "output": "security findings",
         }
         with patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.model_router(
-                mode="master",
+            out = self.server.task_router(
+                mode="task",
                 prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
@@ -500,10 +530,10 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("prior route summary", packet["m"])
         self.assertIn("response_style=be terse", packet["m"])
         self.assertIn("files=11", packet["m"])
-        self.assertEqual(out["memory"]["session_namespace"], "master/session/abc")
-        self.assertEqual(out["memory"]["route_namespace"], "master/route/security")
+        self.assertEqual(out["memory"]["session_namespace"], "task/session/abc")
+        self.assertEqual(out["memory"]["route_namespace"], "task/route/security")
 
-    def test_model_router_master_success_persists_session_entry_and_route_summary(self):
+    def test_task_router_task_success_persists_session_entry_and_route_summary(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
@@ -513,8 +543,8 @@ class ServerToolsTest(ServerToolsTestBase):
             "result_id": "infer-123",
         }
         with patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.model_router(
-                mode="master",
+            out = self.server.task_router(
+                mode="task",
                 prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
@@ -522,7 +552,7 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         payload = self.server._memory_load()
         session_entries = [
-            row for row in payload["entries"] if row.get("namespace") == "master/session/persist"
+            row for row in payload["entries"] if row.get("namespace") == "task/session/persist"
         ]
         self.assertEqual(len(session_entries), 1)
         value = session_entries[0]["value"]
@@ -534,7 +564,7 @@ class ServerToolsTest(ServerToolsTestBase):
         route_summaries = [
             row
             for row in payload["summaries"]
-            if row.get("namespace") == "master/route/security"
+            if row.get("namespace") == "task/route/security"
             and row.get("focus") == "recent_activity"
         ]
         self.assertEqual(len(route_summaries), 1)
@@ -542,7 +572,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["memory"]["session_write"]["written"])
         self.assertTrue(out["memory"]["route_summary_write"]["written"])
 
-    def test_model_router_master_failure_records_master_failure_and_session_context(self):
+    def test_task_router_task_failure_records_failure_and_session_context(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
@@ -551,8 +581,8 @@ class ServerToolsTest(ServerToolsTestBase):
             "output": "",
         }
         with patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.model_router(
-                mode="master",
+            out = self.server.task_router(
+                mode="task",
                 prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
@@ -560,39 +590,39 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         payload = self.server._memory_load()
         session_entries = [
-            row for row in payload["entries"] if row.get("namespace") == "master/session/failure"
+            row for row in payload["entries"] if row.get("namespace") == "task/session/failure"
         ]
         self.assertEqual(len(session_entries), 1)
         self.assertFalse(session_entries[0]["value"]["ok"])
         self.assertEqual(session_entries[0]["value"]["response_summary"], "empty output")
         failures = self.server._failure_memory_load()["entries"]
-        master_failures = [row for row in failures if row.get("category") == "model_router.master"]
-        self.assertEqual(len(master_failures), 1)
-        self.assertIn("empty output", master_failures[0]["stderr"])
+        task_failures = [row for row in failures if row.get("category") == "task_router.task"]
+        self.assertEqual(len(task_failures), 1)
+        self.assertIn("empty output", task_failures[0]["stderr"])
         self.assertTrue(out["memory"]["failure_recorded"])
 
-    def test_model_router_master_memory_context_is_summary_first_and_capped(self):
+    def test_task_router_task_memory_context_is_summary_first_and_capped(self):
         self.server.memory_router(
             mode="summary_upsert",
-            namespace="master/route/security",
+            namespace="task/route/security",
             focus="recent_activity",
             summary=("route-summary " * 80).strip(),
         )
         self.server.memory_router(
             mode="upsert",
-            namespace="master/route/security",
+            namespace="task/route/security",
             key="raw-route",
             value={"detail": "raw route fallback should not appear"},
         )
         self.server.memory_router(
             mode="summary_upsert",
-            namespace="master/session/abc",
+            namespace="task/session/abc",
             focus="session",
             summary=("session-summary " * 80).strip(),
         )
         self.server.memory_router(
             mode="upsert",
-            namespace="master/session/abc",
+            namespace="task/session/abc",
             key="raw-session",
             value={"detail": "raw session fallback should not appear"},
         )
@@ -604,8 +634,8 @@ class ServerToolsTest(ServerToolsTestBase):
             "output": "security findings",
         }
         with patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.model_router(
-                mode="master",
+            out = self.server.task_router(
+                mode="task",
                 prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
@@ -1211,13 +1241,13 @@ class ServerToolsTest(ServerToolsTestBase):
     def test_required_tool_chain(self):
         a = self.server.result_handle(mode="store", tool="tool_a", value={"ok": 1})
         b = self.server.result_handle(mode="store", tool="tool_b", value={"ok": 1})
-        report = self.repo_path / ".build" / "reports" / "SAMPLE.txt"
+        report = self.repo_path / ".codebase-tooling-mcp" / "reports" / "SAMPLE.txt"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text("ok\n", encoding="utf-8")
 
         out = self.server.required_tool_chain(
             required_tools=["tool_a", "tool_b"],
-            required_artifacts=[".build/reports/SAMPLE.txt"],
+            required_artifacts=[".codebase-tooling-mcp/reports/SAMPLE.txt"],
             required_result_ids=[a["result_id"], b["result_id"]],
             require_order=True,
             max_age_minutes=60,
@@ -1379,9 +1409,9 @@ class ServerToolsTest(ServerToolsTestBase):
         done = self.server.execution_replay(mode="finish", replay_id=rid)
         self.assertEqual(done["status"], "closed")
 
-    def test_model_router_coding_modes_and_validation(self):
+    def test_task_router_coding_modes_and_validation(self):
         with self.assertRaises(ValueError):
-            self.server.model_router(mode="not_a_mode")
+            self.server.task_router(mode="not_a_mode")
 
         with patch.object(
             self.server,
@@ -1396,13 +1426,13 @@ class ServerToolsTest(ServerToolsTestBase):
             "CODING_VENV_PYTHON",
             sys.executable,
         ):
-            out = self.server.model_router(
+            out = self.server.task_router(
                 mode="coding_infer",
                 prompt="write function",
                 run_checks=True,
                 sandbox_mode="shared",
             )
-        self.assertEqual(out["schema"], "model_router.coding_infer.v1")
+        self.assertEqual(out["schema"], "task_router.coding_infer.v1")
         self.assertTrue(out["check_requested"])
         self.assertIn("checks", out)
         self.assertIn("sandbox", out)
@@ -1415,13 +1445,13 @@ class ServerToolsTest(ServerToolsTestBase):
             str(self.repo_path / "does-not-exist" / "python"),
         ):
             with self.assertRaises(FileNotFoundError):
-                self.server.model_router(
+                self.server.task_router(
                     mode="coding_check",
                     check_profile="lint",
                     check_target="src/sample.py",
                 )
 
-    def test_model_router_coding_check_and_pip_include_stream_fields(self):
+    def test_task_router_coding_check_and_pip_include_stream_fields(self):
         checks_payload = {
             "schema": "coding_checks.v1",
             "ok": False,
@@ -1436,7 +1466,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(self.server, "_coding_checks", return_value=checks_payload), patch.object(
             self.server, "_coding_sandbox_prepare", return_value={"venv_python": sys.executable}
         ):
-            out = self.server.model_router(
+            out = self.server.task_router(
                 mode="coding_check",
                 check_profile="quick",
                 check_target="src/sample.py",
@@ -1456,7 +1486,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(self.server, "_coding_pip_install", return_value=pip_payload), patch.object(
             self.server, "_coding_sandbox_prepare", return_value={"venv_python": sys.executable}
         ):
-            out_pip = self.server.model_router(
+            out_pip = self.server.task_router(
                 mode="coding_pip",
                 packages=["pytest"],
             )
@@ -1464,13 +1494,13 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("stderr_stream", out_pip)
         self.assertGreaterEqual(len(out_pip["stdout_stream"]), 1)
 
-    def test_model_router_coding_sandbox_lifecycle(self):
-        base_venv = self.repo_path / ".build" / "base-venv"
+    def test_task_router_coding_sandbox_lifecycle(self):
+        base_venv = self.repo_path / ".codebase-tooling-mcp" / "base-venv"
         subprocess.run(["python", "-m", "venv", str(base_venv)], check=True)
         python_bin = base_venv / "bin" / "python"
 
         with patch.object(self.server, "CODING_VENV_PYTHON", str(python_bin)):
-            created = self.server.model_router(
+            created = self.server.task_router(
                 mode="coding_sandbox",
                 sandbox_action="create",
                 sandbox_id="sbox-test",
@@ -1479,11 +1509,11 @@ class ServerToolsTest(ServerToolsTestBase):
             self.assertEqual(created["action"], "create")
             self.assertEqual(created["sandbox_id"], "sbox-test")
 
-            listed = self.server.model_router(mode="coding_sandbox", sandbox_action="list")
+            listed = self.server.task_router(mode="coding_sandbox", sandbox_action="list")
             ids = {row["sandbox_id"] for row in listed["items"]}
             self.assertIn("sbox-test", ids)
 
-            deleted = self.server.model_router(
+            deleted = self.server.task_router(
                 mode="coding_sandbox",
                 sandbox_action="delete",
                 sandbox_id="sbox-test",
@@ -1638,23 +1668,23 @@ class ServerToolsTest(ServerToolsTestBase):
             tools = await self.server.mcp.list_tools()
             names = {item.model_dump().get("name") for item in tools}
             self.assertEqual(names, expected)
-            self.assertEqual(names, {"model_router"})
+            self.assertEqual(names, {"task_router"})
             self.assertEqual(len(names), 1)
 
         asyncio.run(run_checks())
 
-    def test_public_model_router_argument_descriptions(self):
+    def test_public_task_router_argument_descriptions(self):
         async def run_checks():
             tools = await self.server.mcp.list_tools()
-            tool = next(item for item in tools if item.model_dump().get("name") == "model_router")
+            tool = next(item for item in tools if item.model_dump().get("name") == "task_router")
             schema = tool.model_dump().get("inputSchema", {})
             props = schema.get("properties", {})
             self.assertGreaterEqual(len(props), 10)
             missing = sorted(name for name, spec in props.items() if not spec.get("description"))
             self.assertEqual(missing, [])
-            self.assertIn("memory-backed orchestration", props["mode"]["description"])
-            self.assertIn("Ephemeral memory-session key", props["memory_session"]["description"])
-            self.assertIn("Prompt batch", props["prompts"]["description"])
+            self.assertIn("Start with `task`", props["mode"]["description"])
+            self.assertIn("Reuse the same value across related requests", props["memory_session"]["description"])
+            self.assertIn("single-prompt override", props["prompts"]["description"])
 
         asyncio.run(run_checks())
 

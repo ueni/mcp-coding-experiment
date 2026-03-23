@@ -170,7 +170,7 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
     def test_tool_assisted_infer_helpers_and_parallel_fallback(self):
         self.write_repo_text(
             ".gitignore",
-            "# codebase-tooling-mcp generated\n/.build/\n/.continue/\n# stop\nignored\n",
+            "# codebase-tooling-mcp generated\n/.codebase-tooling-mcp/\n/.continue/\n# stop\nignored\n",
         )
         self.write_repo_text(
             ".devcontainer/devcontainer.json",
@@ -198,7 +198,7 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
             max_tokens=96,
         )
 
-        self.assertIn("/.build/", ignore_text)
+        self.assertIn("/.codebase-tooling-mcp/", ignore_text)
         self.assertIn("OLLAMA_HOST", env_text)
         self.assertIn("/workspace/.codex", mount_text)
         self.assertLessEqual(len(summary_text), 420)
@@ -311,7 +311,7 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
             max_paths=3,
         )
         ignores = self.server._extract_codebase_tooling_generated_ignores(
-            "# codebase-tooling-mcp generated\n/.build/\n/.continue/\n# next section\nignored\n"
+            "# codebase-tooling-mcp generated\n/.codebase-tooling-mcp/\n/.continue/\n# next section\nignored\n"
         )
         env_keys = self.server._extract_env_keys(
             "OLLAMA_HOST: http://127.0.0.1\nCONTINUE_OLLAMA_MODEL: qwen\nDEBUG: 1\n",
@@ -328,7 +328,7 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
         count_python = self.server._count_processes_with_tokens("python")
 
         self.assertIn("README.md", prompt_paths)
-        self.assertEqual(ignores, ["/.build/", "/.continue/"])
+        self.assertEqual(ignores, ["/.codebase-tooling-mcp/", "/.continue/"])
         self.assertEqual(env_keys, ["OLLAMA_HOST", "CONTINUE_OLLAMA_MODEL"])
         self.assertIn("One sentence.", compacted)
         self.assertEqual(snippet["start_line"], 1)
@@ -387,14 +387,14 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
             full_pipeline = self.server.self_check_pipeline(
                 base_ref="HEAD~1",
                 head_ref="HEAD",
-                snapshot_path=".build/missing-snapshot.json",
+                snapshot_path=".codebase-tooling-mcp/missing-snapshot.json",
                 summary_mode="full",
             )
         self.assertFalse(full_pipeline["ok"])
         self.assertEqual(full_pipeline["checks"]["compile"]["error_count"], 1)
         self.assertTrue(full_pipeline["checks"]["api"]["skipped"])
 
-        self.write_repo_text(".build/api_snapshot.json", json.dumps({"symbols": []}))
+        self.write_repo_text(".codebase-tooling-mcp/api_snapshot.json", json.dumps({"symbols": []}))
         with patch.object(self.server, "_require_git_repo", return_value=None), patch.object(
             self.server,
             "_git",
@@ -424,7 +424,7 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
                 base_ref="HEAD~1",
                 head_ref="HEAD",
                 run_compile_check=False,
-                snapshot_path=".build/api_snapshot.json",
+                snapshot_path=".codebase-tooling-mcp/api_snapshot.json",
                 summary_mode="quick",
             )
         self.assertEqual(quick_pipeline["schema"], "self_check_pipeline.quick.v1")

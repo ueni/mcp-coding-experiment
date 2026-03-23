@@ -16,7 +16,7 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.build/
+.codebase-tooling-mcp/
 
 # Local environment files
 .env
@@ -30,11 +30,12 @@ env/
 !.vscode/launch.json
 
 # codebase-tooling-mcp
-/.build/
+/.codebase-tooling-mcp/
 
 
 # codebase-tooling-mcp generated
 #/.continue/
 #/.config/
 #/.devcontainer/
+/.docker-build/
 /.gitignore_codebase_tooling_mcp.touched

@@ -91,7 +91,7 @@ Symptom:
 - `.continue/model-routing.yaml` is missing.
 - `.continue/mcpServers/codebase-tooling-mcp.yaml` is missing.
 - `.config/labs/` is missing.
-- `/.build/` was not added to `.gitignore`.
+- `/.codebase-tooling-mcp/` was not added to `.gitignore`.
 - `~/.codex/config.toml` does not contain the MCP server entry.
 
 Checks:

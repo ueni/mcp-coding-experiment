@@ -27,11 +27,11 @@ Expected result (example):
 
 ```text
 Policy checks completed
-Report written: .build/reports/POLICY_GATEKEEPER.md
+Report written: .codebase-tooling-mcp/reports/POLICY_GATEKEEPER.md
 ```
 
 Config: `.config/labs/policy_gatekeeper.json`
-Output: `.build/reports/POLICY_GATEKEEPER.md`
+Output: `.codebase-tooling-mcp/reports/POLICY_GATEKEEPER.md`
 
 Docs sync policy is config-driven via `docs_policy`:
 - docs roots (for this repo: `docs/` and `README.md`)
@@ -50,11 +50,11 @@ Expected result (example):
 
 ```text
 Benchmark complete
-Report written: .build/reports/BRANCH_SWARM_REPORT.md
+Report written: .codebase-tooling-mcp/reports/BRANCH_SWARM_REPORT.md
 ```
 
 Config: `.config/labs/branch_swarm_lab.json`
-Output: `.build/reports/BRANCH_SWARM_REPORT.md`
+Output: `.codebase-tooling-mcp/reports/BRANCH_SWARM_REPORT.md`
 
 ## 7) Narrated PR Generator
 
@@ -68,10 +68,10 @@ Expected result (example):
 
 ```text
 PR packet generated
-Report written: .build/reports/PR_PACKET.md
+Report written: .codebase-tooling-mcp/reports/PR_PACKET.md
 ```
 
-Output: `.build/reports/PR_PACKET.md`
+Output: `.codebase-tooling-mcp/reports/PR_PACKET.md`
 
 ## 3) Repo Digital Twin
 
@@ -85,12 +85,12 @@ Expected result (example):
 
 ```text
 Digital twin generated
-Reports written under .build/reports/
+Reports written under .codebase-tooling-mcp/reports/
 ```
 
 Outputs:
-- `.build/reports/REPO_DIGITAL_TWIN.json`
-- `.build/reports/REPO_DIGITAL_TWIN.md`
+- `.codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.json`
+- `.codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.md`
 
 ## Existing Workflows
 
@@ -103,7 +103,7 @@ Expected result (example):
 
 ```text
 Release/refactor workflow complete
-Report written under .build/reports/
+Report written under .codebase-tooling-mcp/reports/
 ```
 
 Configs:

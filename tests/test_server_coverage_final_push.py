@@ -163,7 +163,7 @@ class ServerCoverageFinalPushTest(ServerToolsTestBase):
         with self.assertRaises(ValueError):
             self.server.memory_auto_compact(summary_max_chars=127)
 
-        mem_file = self.repo_path / ".build" / "memory" / "context_memory.json"
+        mem_file = self.repo_path / ".codebase-tooling-mcp" / "memory" / "context_memory.json"
         mem_file.parent.mkdir(parents=True, exist_ok=True)
         mem_file.write_text(
             json.dumps(
@@ -284,7 +284,7 @@ class ServerCoverageFinalPushTest(ServerToolsTestBase):
 
         with self.assertRaises(ValueError):
             self.server._cache_prune(max_age_minutes=0)
-        cache_file = self.repo_path / ".build" / "cache" / "tool_cache.json"
+        cache_file = self.repo_path / ".codebase-tooling-mcp" / "cache" / "tool_cache.json"
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(
             json.dumps(
@@ -309,7 +309,7 @@ class ServerCoverageFinalPushTest(ServerToolsTestBase):
         )
         self.write_repo_text("src/no_spdx.py", "print('plain')\n")
         self.write_repo_text("LICENSES/ref.txt", "skip\n")
-        self.write_repo_text(".build/generated.py", "# SPDX-License-Identifier: GPL-3.0-only\n")
+        self.write_repo_text(".codebase-tooling-mcp/generated.py", "# SPDX-License-Identifier: GPL-3.0-only\n")
         ids = self.server._collect_spdx_license_ids(path="src")
         self.assertIn("MIT", ids)
         self.assertIn("Apache-2.0", ids)
@@ -875,7 +875,7 @@ class ServerCoverageFinalPushTest(ServerToolsTestBase):
         with self.assertRaises(ValueError):
             self.server.flaky_test_detector(timeout_seconds=0)
 
-        history_path = self.repo_path / ".build" / "memory" / "flaky.json"
+        history_path = self.repo_path / ".codebase-tooling-mcp" / "memory" / "flaky.json"
         history_path.parent.mkdir(parents=True, exist_ok=True)
         history_path.write_text("{bad", encoding="utf-8")
         seen_cmds = []

@@ -57,7 +57,7 @@ The system emphasizes composable tools over monolithic agents. Capabilities are 
 
 ### 2.4 Auditable Artifacts
 
-Many tools write durable outputs to `.build/` (reports, memory, baselines, snapshots, replay logs). These artifacts create an audit trail for why actions were taken and how outcomes were validated.
+Many tools write durable outputs to `.codebase-tooling-mcp/` (reports, memory, baselines, snapshots, replay logs). These artifacts create an audit trail for why actions were taken and how outcomes were validated.
 
 ### 2.5 Operational Pragmatism
 
@@ -80,7 +80,7 @@ Mutation guardrails, path resolution, output budgeting, and result caching.
 Single Git repository mounted into container; local files are source of truth.
 
 5. Artifact Plane  
-`.build/` stores reports, memory, caches, snapshots, policy traces, and replay data.
+`.codebase-tooling-mcp/` stores reports, memory, caches, snapshots, policy traces, and replay data.
 
 ### 3.2 Execution Model
 
@@ -125,7 +125,7 @@ Public tools:
 - `autocomplete`
 - `repo_info`, `runtime_state`
 - `repo_router`, `workspace_transaction`, `git_router`
-- `code_index_router`, `model_router`, `memory_router`, `docker_router`, `vscode_router`, `tool_router`
+- `code_index_router`, `task_router`, `memory_router`, `docker_router`, `vscode_router`, `tool_router`
 - `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`
 - `math_router`, `document_router`, `diagram_router`
 - `sql_expert`, `browse_web`
@@ -171,10 +171,10 @@ Git-backed snapshots use stash commits and refs:
 ### 7.2 Snapshot Lifecycle (Current)
 
 1. Capture current `HEAD` as baseline.
-2. Stash working changes (optionally excluding `.build`).
+2. Stash working changes (optionally excluding `.codebase-tooling-mcp`).
 3. Persist a stable ref for the stash commit (`refs/mcp-snapshots/<id>`).
 4. Drop transient stash entry and reapply state so user workspace remains unchanged.
-5. Save metadata to snapshot index in `.build/snapshots/git_snapshots.json`.
+5. Save metadata to snapshot index in `.codebase-tooling-mcp/snapshots/git_snapshots.json`.
 
 Restore:
 
@@ -212,7 +212,7 @@ Restore:
 ### 9.1 Result Handles and Persistent Reports
 
 - `result_handle` enables referential linking of prior tool outputs.
-- `.build/reports` stores generated artifacts for later review/comparison.
+- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison.
 
 ### 9.2 Replay and Memory
 
@@ -291,7 +291,7 @@ Use workflow tools, replay, route learning, and approval points to automate larg
 - First-class multi-repo orchestration with explicit trust boundaries.
 - Stronger policy-as-code DSL for richer gate expressions.
 - Provenance signing for generated artifacts/reports.
-- Time-series telemetry dashboards over `.build` artifacts.
+- Time-series telemetry dashboards over `.codebase-tooling-mcp` artifacts.
 - Deterministic plan IDs and replay signatures for compliance-grade traceability.
 
 ## 15. Conclusion

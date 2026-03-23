@@ -34,7 +34,7 @@ class ServerCoverageLastMileTest(ServerToolsTestBase):
             self.assertEqual(self.server._ssl_context_for_url("https://example.com"), "with-ca")
         create_ctx.assert_called_once_with(cafile=str(cert_path))
 
-        cache_file = self.repo_path / ".build" / "cache" / "tool_cache.json"
+        cache_file = self.repo_path / ".codebase-tooling-mcp" / "cache" / "tool_cache.json"
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(json.dumps({"entries": ["bad"]}), encoding="utf-8")
         self.assertEqual(self.server._cache_clear()["removed_entries"], 0)

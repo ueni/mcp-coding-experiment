@@ -1,6 +1,6 @@
 {
   "base_ref": "HEAD",
-  "report_path": ".build/reports/REFACTOR_TOURNAMENT.md",
+  "report_path": ".codebase-tooling-mcp/reports/REFACTOR_TOURNAMENT.md",
   "strategies": [
     {
       "name": "Python Baseline",

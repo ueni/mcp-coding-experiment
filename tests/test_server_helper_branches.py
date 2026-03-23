@@ -132,20 +132,20 @@ class ServerHelperCoverageTest(ServerToolsTestBase):
             self.server._query_value([], "name")
 
         self.assertEqual(self.server._memory_load(), {"entries": [], "summaries": [], "decisions": []})
-        mem_file = self.repo_path / ".build" / "memory" / "context_memory.json"
+        mem_file = self.repo_path / ".codebase-tooling-mcp" / "memory" / "context_memory.json"
         mem_file.parent.mkdir(parents=True, exist_ok=True)
         mem_file.write_text("{bad json", encoding="utf-8")
         self.assertEqual(self.server._memory_load(), {"entries": [], "summaries": [], "decisions": []})
         mem_file.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
         self.assertEqual(self.server._memory_load(), {"entries": [], "summaries": [], "decisions": []})
 
-        reports = self.repo_path / ".build" / "reports"
+        reports = self.repo_path / ".codebase-tooling-mcp" / "reports"
         reports.mkdir(parents=True, exist_ok=True)
         (reports / "A.txt").write_text("a\n", encoding="utf-8")
         (reports / "B.txt").write_text("b\n", encoding="utf-8")
         listed_reports = self.server._list_report_files(max_entries=1)
         self.assertEqual(len(listed_reports), 1)
-        self.assertIn(listed_reports[0], {".build/reports/A.txt", ".build/reports/B.txt"})
+        self.assertIn(listed_reports[0], {".codebase-tooling-mcp/reports/A.txt", ".codebase-tooling-mcp/reports/B.txt"})
 
         self.server._cache_set("tool", "k1", {"schema": "one"})
         self.server._cache_set("tool", "k2", [{"a": 1}])
@@ -339,7 +339,7 @@ class ServerHelperCoverageTest(ServerToolsTestBase):
             "backend": "pipe",
             "master_fd": -1,
             "read_fd": 0,
-            "log_path": str(self.repo_path / ".build" / "terminal-captures" / "pipe1.log"),
+            "log_path": str(self.repo_path / ".codebase-tooling-mcp" / "terminal-captures" / "pipe1.log"),
             "command": ["cat"],
             "cwd": ".",
             "input_chars": 0,

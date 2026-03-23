@@ -1,7 +1,7 @@
 {
   "target_branch": "main",
   "changelog_from": "HEAD~10",
-  "report_path": ".build/reports/RELEASE_REHEARSAL_MCU_GCC.md",
+  "report_path": ".codebase-tooling-mcp/reports/RELEASE_REHEARSAL_MCU_GCC.md",
   "artifacts": [
     "build/",
     "build/lab-size-report.txt"

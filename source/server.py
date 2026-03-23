@@ -111,35 +111,35 @@ ALLOW_ORIGINS = [
     x.strip() for x in os.getenv("ALLOW_ORIGINS", "*").split(",") if x.strip()
 ]
 LABS_DIR = Path("source/labs")
-REPORTS_DIR = Path(".build/reports")
-MEMORY_FILE = Path(".build/memory/context_memory.json")
-MEMORY_STATS_FILE = Path(".build/memory/memory_stats.json")
-FAILURE_MEMORY_FILE = Path(".build/memory/failure_memory.json")
-TOKEN_BUDGET_FILE = Path(".build/memory/token_budget.json")
-EDIT_TXN_DIR = Path(".build/transactions")
-API_SNAPSHOT_FILE = Path(".build/reports/API_SURFACE.json")
-REPO_INDEX_FILE = Path(".build/index/repo_index.json")
-TOOL_CACHE_FILE = Path(".build/cache/tool_cache.json")
-RESULT_STORE_FILE = Path(".build/cache/result_store.json")
-OUTPUT_BASELINE_FILE = Path(".build/reports/TOOL_OUTPUT_BASELINE.json")
-REUSE_SPDX_REPORT = Path(".build/reports/REUSE.spdx")
-REUSE_LINT_REPORT = Path(".build/reports/REUSE_LINT.txt")
-GOLDEN_BASELINE_FILE = Path(".build/reports/TOOL_GOLDEN_BASELINE.json")
-FLAKY_HISTORY_FILE = Path(".build/reports/FLAKY_TEST_HISTORY.json")
-STATE_SNAPSHOT_DIR = Path(".build/snapshots")
-EXECUTION_REPLAY_DIR = Path(".build/replays")
-ARTIFACT_INDEX_FILE = Path(".build/index/artifact_memory.json")
-TOOL_ROUTER_STATS_FILE = Path(".build/memory/tool_router_stats.json")
-TOOL_BENCHMARK_REPORT_FILE = Path(".build/reports/TOOL_BENCHMARK.json")
-COST_BUDGET_FILE = Path(".build/memory/cost_budget.json")
+REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
+MEMORY_FILE = Path(".codebase-tooling-mcp/memory/context_memory.json")
+MEMORY_STATS_FILE = Path(".codebase-tooling-mcp/memory/memory_stats.json")
+FAILURE_MEMORY_FILE = Path(".codebase-tooling-mcp/memory/failure_memory.json")
+TOKEN_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/token_budget.json")
+EDIT_TXN_DIR = Path(".codebase-tooling-mcp/transactions")
+API_SNAPSHOT_FILE = Path(".codebase-tooling-mcp/reports/API_SURFACE.json")
+REPO_INDEX_FILE = Path(".codebase-tooling-mcp/index/repo_index.json")
+TOOL_CACHE_FILE = Path(".codebase-tooling-mcp/cache/tool_cache.json")
+RESULT_STORE_FILE = Path(".codebase-tooling-mcp/cache/result_store.json")
+OUTPUT_BASELINE_FILE = Path(".codebase-tooling-mcp/reports/TOOL_OUTPUT_BASELINE.json")
+REUSE_SPDX_REPORT = Path(".codebase-tooling-mcp/reports/REUSE.spdx")
+REUSE_LINT_REPORT = Path(".codebase-tooling-mcp/reports/REUSE_LINT.txt")
+GOLDEN_BASELINE_FILE = Path(".codebase-tooling-mcp/reports/TOOL_GOLDEN_BASELINE.json")
+FLAKY_HISTORY_FILE = Path(".codebase-tooling-mcp/reports/FLAKY_TEST_HISTORY.json")
+STATE_SNAPSHOT_DIR = Path(".codebase-tooling-mcp/snapshots")
+EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
+ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
+TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.json")
+TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
+COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 # Keep the external MCP contract to a single entrypoint; the rest remain internal call targets.
 PUBLIC_MCP_TOOL_NAMES = {
-    "model_router",
+    "task_router",
 }
-APPROVAL_POINTS_FILE = Path(".build/memory/approval_points.json")
-ROOT_CAUSE_FILE = Path(".build/memory/root_cause_memory.json")
+APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
+ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
-TERMINAL_CAPTURE_DIR = Path(".build/reports/terminal")
+TERMINAL_CAPTURE_DIR = Path(".codebase-tooling-mcp/reports/terminal")
 LOCAL_MODELS_DIR = Path(os.getenv("LOCAL_MODELS_DIR", "/models"))
 LOCAL_EMBED_BACKEND = os.getenv("LOCAL_EMBED_BACKEND", "hash").strip().lower()
 LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "").strip()
@@ -158,7 +158,7 @@ CODING_VENV_PYTHON = os.getenv(
 ).strip()
 CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", "qwen2.5-coder:3b").strip()
 CODING_SANDBOX_ROOT = Path(
-    os.getenv("CODING_SANDBOX_ROOT", ".build/sandboxes/coding")
+    os.getenv("CODING_SANDBOX_ROOT", ".codebase-tooling-mcp/sandboxes/coding")
 )
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse", "cat"}
 SAFE_GIT_SUBCOMMANDS = {
@@ -173,7 +173,7 @@ SAFE_GIT_SUBCOMMANDS = {
 }
 OUTPUT_PROFILES = {"compact", "normal", "verbose"}
 CONTINUE_MODEL_ROUTING_RELATIVE_PATH = Path(".continue/model-routing.yaml")
-MASTER_ROUTE_CODE_MAP = {
+TASK_ROUTE_CODE_MAP = {
     "general": "G",
     "coding": "C",
     "refactor": "RF",
@@ -183,7 +183,7 @@ MASTER_ROUTE_CODE_MAP = {
     "vision": "V",
     "research": "RS",
 }
-MASTER_ROUTE_KEYWORDS = {
+TASK_ROUTE_KEYWORDS = {
     "coding": (
         "code",
         "coding",
@@ -270,7 +270,7 @@ MASTER_ROUTE_KEYWORDS = {
         "readme",
     ),
 }
-MASTER_ROUTE_TASK_ALIASES = {
+TASK_ROUTE_ALIASES = {
     "general": "general",
     "coding": "coding",
     "code": "coding",
@@ -282,7 +282,7 @@ MASTER_ROUTE_TASK_ALIASES = {
     "research": "research",
     "search": "research",
 }
-MASTER_ROUTE_SYSTEM_PROMPTS = {
+TASK_ROUTE_SYSTEM_PROMPTS = {
     "general": "Interpret compact JSON input with keys r and q. q is the request. Answer directly and concisely.",
     "coding": "Interpret compact JSON input with keys r and q. q is a coding task. Return implementation-focused output only.",
     "refactor": "Interpret compact JSON input with keys r and q. q is a refactor task. Focus on cleaner structure with minimal churn.",
@@ -296,11 +296,12 @@ MASTER_ROUTE_SYSTEM_PROMPTS = {
 mcp = FastMCP(
     "git-repo-manager",
     instructions=(
-        "Expose exactly one public MCP tool: `model_router`. "
+        "Expose exactly one public MCP tool: `task_router`. "
         "All other server functions remain internal call targets and are not part of the external MCP contract. "
-        "Use `model_router(mode='master')` for classified, encoded, memory-backed routing and inference, "
-        "`model_router(mode='parallel_infer')` for independent batches, and `memory_session` when ephemeral "
-        "master-memory context must be isolated."
+        "LLM agents should start with `task_router()` for almost every natural-language request because its default "
+        "`mode='task'` classifies the request, injects compact task/session memory, and dispatches to the right "
+        "specialist flow. Use explicit modes only when you intentionally need raw status, embed, rerank, "
+        "autocomplete, direct infer or batch infer, or coding sandbox/check/package operations."
     ),
 )
 
@@ -1386,7 +1387,7 @@ def _memory_trace_reusable_script_success(
             }
         )
         entry["value"] = value
-        entry["source"] = "model_router.coding_check.auto"
+        entry["source"] = "task_router.coding_check.auto"
         entry["confidence"] = 1.0
         entry["tags"] = ["script", "reusable", "success", "coding-check"]
         entry["updated_at"] = now_iso
@@ -1407,7 +1408,7 @@ def _memory_trace_reusable_script_success(
                 "check_recipe": command_recipes,
             },
             "confidence": 1.0,
-            "source": "model_router.coding_check.auto",
+            "source": "task_router.coding_check.auto",
             "tags": ["script", "reusable", "success", "coding-check"],
             "created_at": now_iso,
             "updated_at": now_iso,
@@ -2657,7 +2658,7 @@ def _collect_spdx_license_ids(path: str = ".", recursive: bool = True) -> list[s
     for candidate in _iter_candidate_files(root, recursive=recursive):
         rel = candidate.relative_to(REPO_PATH)
         rel_str = str(rel).replace("\\", "/")
-        if rel_str.startswith(".git/") or rel_str.startswith(".build/"):
+        if rel_str.startswith(".git/") or rel_str.startswith(".codebase-tooling-mcp/"):
             continue
         if _is_likely_binary(candidate):
             continue
@@ -2690,7 +2691,7 @@ def _collect_missing_spdx_headers(
     for candidate in _iter_candidate_files(root, recursive=recursive):
         rel = candidate.relative_to(REPO_PATH)
         rel_str = str(rel).replace("\\", "/")
-        if rel_str.startswith(".git/") or rel_str.startswith(".build/") or rel_str.startswith("LICENSES/"):
+        if rel_str.startswith(".git/") or rel_str.startswith(".codebase-tooling-mcp/") or rel_str.startswith("LICENSES/"):
             continue
         if not _allowed_by_globs(rel_str, include_globs=include_globs, exclude_globs=exclude_globs):
             continue
@@ -4417,7 +4418,7 @@ def lab_release_rehearsal(
     allow_dirty: bool = False,
     keep_branch: bool = False,
 ) -> dict[str, Any]:
-    """Run release rehearsal lab and write report(s) under .build/reports."""
+    """Run release rehearsal lab and write report(s) under .codebase-tooling-mcp/reports."""
     _resolve_repo_path(config_path)
     args = ["--config", config_path]
     if allow_dirty:
@@ -4433,7 +4434,7 @@ def lab_refactor_tournament(
     allow_dirty: bool = False,
     keep_branches: bool = False,
 ) -> dict[str, Any]:
-    """Run refactor tournament lab and write report(s) under .build/reports."""
+    """Run refactor tournament lab and write report(s) under .codebase-tooling-mcp/reports."""
     _resolve_repo_path(config_path)
     args = ["--config", config_path]
     if allow_dirty:
@@ -4447,7 +4448,7 @@ def lab_refactor_tournament(
 def lab_policy_gatekeeper(
     config_path: str = ".config/labs/policy_gatekeeper.json",
     changed_ref: str = "HEAD",
-    report_path: str = ".build/reports/POLICY_GATEKEEPER.md",
+    report_path: str = ".codebase-tooling-mcp/reports/POLICY_GATEKEEPER.md",
 ) -> dict[str, Any]:
     """Run policy-as-code gatekeeper checks."""
     _resolve_repo_path(config_path)
@@ -4483,7 +4484,7 @@ def lab_branch_swarm(
 def lab_narrated_pr(
     base: str = "HEAD~1",
     head: str = "HEAD",
-    output_path: str = ".build/reports/PR_PACKET.md",
+    output_path: str = ".codebase-tooling-mcp/reports/PR_PACKET.md",
 ) -> dict[str, Any]:
     """Generate a narrated PR packet for a commit range."""
     _resolve_repo_path(output_path)
@@ -4493,8 +4494,8 @@ def lab_narrated_pr(
 
 @mcp.tool()
 def lab_repo_digital_twin(
-    json_path: str = ".build/reports/REPO_DIGITAL_TWIN.json",
-    markdown_path: str = ".build/reports/REPO_DIGITAL_TWIN.md",
+    json_path: str = ".codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.json",
+    markdown_path: str = ".codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.md",
     max_files: int = 1000,
     hotspot_limit: int = 20,
 ) -> dict[str, Any]:
@@ -4678,7 +4679,7 @@ def install_git_hooks(
         "",
         'repo_root="$(git rev-parse --show-toplevel)"',
         'cd "$repo_root"',
-        "mkdir -p .build/reports",
+        "mkdir -p .codebase-tooling-mcp/reports",
         "",
     ]
     if include_foss_reports:
@@ -4688,8 +4689,8 @@ def install_git_hooks(
                 '  echo "reuse CLI not found. Install \\"reuse\\" before committing/pushing." >&2',
                 "  exit 1",
                 "fi",
-                "reuse lint > .build/reports/REUSE_LINT.txt",
-                "reuse spdx -o .build/reports/REUSE.spdx",
+                "reuse lint > .codebase-tooling-mcp/reports/REUSE_LINT.txt",
+                "reuse spdx -o .codebase-tooling-mcp/reports/REUSE.spdx",
                 "",
             ]
         )
@@ -4711,19 +4712,19 @@ def install_git_hooks(
     if include_lab_reports:
         pre_commit_lines.append(
             '"$PYTHON_BIN" source/labs/policy_gatekeeper.py --changed-ref HEAD '
-            '--report-path .build/reports/POLICY_GATEKEEPER.md'
+            '--report-path .codebase-tooling-mcp/reports/POLICY_GATEKEEPER.md'
         )
 
     pre_push_lines = list(script_lines)
     if include_lab_reports:
         pre_push_lines.append(
             '"$PYTHON_BIN" source/labs/policy_gatekeeper.py --changed-ref HEAD '
-            '--report-path .build/reports/POLICY_GATEKEEPER.md'
+            '--report-path .codebase-tooling-mcp/reports/POLICY_GATEKEEPER.md'
         )
         pre_push_lines.append(
             '"$PYTHON_BIN" source/labs/repo_digital_twin.py '
-            '--json .build/reports/REPO_DIGITAL_TWIN.json '
-            '--md .build/reports/REPO_DIGITAL_TWIN.md'
+            '--json .codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.json '
+            '--md .codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.md'
         )
 
     installed: list[str] = []
@@ -6434,7 +6435,7 @@ def tool_prompt_score(
         if scope == "routers" and not name.endswith("_router"):
             continue
         if scope == "core" and name not in {
-            "model_router",
+            "task_router",
             "memory_router",
             "code_index_router",
             "workspace_transaction",
@@ -7757,7 +7758,7 @@ def autocomplete(
     output_profile: str | None = None,
     store_result: bool = False,
 ) -> dict[str, Any]:
-    """Compatibility autocomplete endpoint. Prefer model_router(mode='autocomplete') for new integrations."""
+    """Compatibility autocomplete endpoint. Prefer task_router(mode='autocomplete') for new integrations."""
     if not prefix:
         raise ValueError("prefix must not be empty")
     if max_tokens < 1:
@@ -7896,7 +7897,7 @@ def _extract_prompt_file_paths(prompt: str, max_paths: int = 4) -> list[str]:
 
 
 def _prompt_optimize_mode_for_task(task: str) -> str:
-    route = MASTER_ROUTE_TASK_ALIASES.get(task.strip().lower(), task.strip().lower())
+    route = TASK_ROUTE_ALIASES.get(task.strip().lower(), task.strip().lower())
     if route in {'review', 'security'}:
         return 'review'
     if route in {'research', 'math', 'vision'}:
@@ -8012,13 +8013,13 @@ def _load_continue_model_routing() -> dict[str, Any]:
     return fallback
 
 
-def _classify_master_prompt(prompt: str, task: str = 'general') -> dict[str, Any]:
+def _classify_task_prompt(prompt: str, task: str = 'general') -> dict[str, Any]:
     text = prompt.strip()
     lowered = text.lower()
     tokens = _tokenize_router_query(text)
     token_set = set(tokens)
     joined = ' '.join(tokens)
-    routes = ['general', *MASTER_ROUTE_KEYWORDS.keys()]
+    routes = ['general', *TASK_ROUTE_KEYWORDS.keys()]
     scores = {route: 0.0 for route in routes}
     reasons = {route: [] for route in routes}
 
@@ -8027,11 +8028,11 @@ def _classify_master_prompt(prompt: str, task: str = 'general') -> dict[str, Any
         reasons[route].append(reason)
 
     task_norm = task.strip().lower()
-    task_route = MASTER_ROUTE_TASK_ALIASES.get(task_norm, '')
+    task_route = TASK_ROUTE_ALIASES.get(task_norm, '')
     if task_route:
         bump(task_route, 8.0, f'task:{task_norm}')
 
-    for route, terms in MASTER_ROUTE_KEYWORDS.items():
+    for route, terms in TASK_ROUTE_KEYWORDS.items():
         exact_hits = sum(1 for term in terms if term in token_set)
         phrase_hits = sum(1 for term in terms if len(term) > 3 and term in joined)
         if exact_hits or phrase_hits:
@@ -8093,7 +8094,7 @@ def _classify_master_prompt(prompt: str, task: str = 'general') -> dict[str, Any
         ),
     )
     return {
-        'schema': 'master_prompt_classification.v1',
+        'schema': 'task_prompt_classification.v1',
         'route': top['route'],
         'confidence': confidence,
         'score_gap': round(score_gap, 4),
@@ -8103,7 +8104,7 @@ def _classify_master_prompt(prompt: str, task: str = 'general') -> dict[str, Any
     }
 
 
-def _encode_master_prompt_packet(
+def _encode_task_prompt_packet(
     prompt: str,
     route: str,
     task: str = 'general',
@@ -8112,10 +8113,10 @@ def _encode_master_prompt_packet(
 ) -> dict[str, Any]:
     normalized = re.sub(r'\s+', ' ', prompt.strip())
     task_norm = task.strip().lower()
-    session_norm = _normalize_master_memory_session(memory_session)
-    memory_text = _trim_master_inline_text(memory_context, max_chars=900)
+    session_norm = _normalize_task_memory_session(memory_session)
+    memory_text = _trim_task_inline_text(memory_context, max_chars=900)
     packet = {
-        'r': MASTER_ROUTE_CODE_MAP.get(route, 'G'),
+        'r': TASK_ROUTE_CODE_MAP.get(route, 'G'),
         'q': normalized,
         's': session_norm,
     }
@@ -8125,7 +8126,7 @@ def _encode_master_prompt_packet(
         packet['m'] = memory_text
     encoded_prompt = json.dumps(packet, ensure_ascii=True, separators=(',', ':'))
     return {
-        'schema': 'master_prompt_packet.v1',
+        'schema': 'task_prompt_packet.v1',
         'codec': 'compact_json_v1',
         'route': route,
         'route_code': packet['r'],
@@ -8138,7 +8139,7 @@ def _encode_master_prompt_packet(
     }
 
 
-def _resolve_master_model_route(
+def _resolve_task_model_route(
     route: str,
     routing: dict[str, Any],
     requested_model: str = '',
@@ -8182,7 +8183,7 @@ def _resolve_master_model_route(
     }
 
 
-def _trim_master_inline_text(text: Any, max_chars: int) -> str:
+def _trim_task_inline_text(text: Any, max_chars: int) -> str:
     if max_chars < 1:
         return ''
     normalized = ' '.join(str(text or '').split())
@@ -8193,8 +8194,8 @@ def _trim_master_inline_text(text: Any, max_chars: int) -> str:
     return normalized[: max_chars - 3].rstrip() + '...'
 
 
-def _append_master_context_piece(parts: list[str], piece: str, max_chars: int) -> None:
-    normalized = _trim_master_inline_text(piece, max_chars=max_chars)
+def _append_task_context_piece(parts: list[str], piece: str, max_chars: int) -> None:
+    normalized = _trim_task_inline_text(piece, max_chars=max_chars)
     if not normalized:
         return
     current = ' | '.join(parts)
@@ -8203,34 +8204,34 @@ def _append_master_context_piece(parts: list[str], piece: str, max_chars: int) -
         remaining -= 3
     if remaining < 8:
         return
-    parts.append(_trim_master_inline_text(normalized, max_chars=remaining))
+    parts.append(_trim_task_inline_text(normalized, max_chars=remaining))
 
 
-def _normalize_master_memory_session(memory_session: str) -> str:
+def _normalize_task_memory_session(memory_session: str) -> str:
     normalized = str(memory_session or '').strip().replace('\\', '/')
     normalized = re.sub(r'\s+', '-', normalized).strip('/')
     return normalized[:64] or 'default'
 
 
-def _master_route_namespace(route: str) -> str:
+def _task_route_namespace(route: str) -> str:
     route_norm = route.strip().lower() or 'general'
-    if route_norm not in {'general', *MASTER_ROUTE_KEYWORDS.keys()}:
+    if route_norm not in {'general', *TASK_ROUTE_KEYWORDS.keys()}:
         route_norm = 'general'
-    return f'master/route/{route_norm}'
+    return f'task/route/{route_norm}'
 
 
-def _master_session_namespace(memory_session: str) -> str:
-    return f'master/session/{_normalize_master_memory_session(memory_session)}'
+def _task_session_namespace(memory_session: str) -> str:
+    return f'task/session/{_normalize_task_memory_session(memory_session)}'
 
 
-def _master_memory_updated_epoch(row: dict[str, Any]) -> float:
+def _task_memory_updated_epoch(row: dict[str, Any]) -> float:
     ts = _parse_iso_timestamp(str(row.get('updated_at', ''))) or _parse_iso_timestamp(
         str(row.get('created_at', ''))
     )
     return ts.timestamp() if ts else 0.0
 
 
-def _summarize_master_workspace_facts(facts: dict[str, Any], max_chars: int = 220) -> str:
+def _summarize_task_workspace_facts(facts: dict[str, Any], max_chars: int = 220) -> str:
     if not isinstance(facts, dict) or not facts:
         return ''
     ext_rows = facts.get('top_extensions', [])
@@ -8255,10 +8256,10 @@ def _summarize_master_workspace_facts(facts: dict[str, Any], max_chars: int = 22
     profile = str(facts.get('default_output_profile', '')).strip()
     if profile:
         parts.append(f'profile={profile}')
-    return _trim_master_inline_text(' '.join(parts), max_chars=max_chars)
+    return _trim_task_inline_text(' '.join(parts), max_chars=max_chars)
 
 
-def _master_memory_value_text(value: Any, max_chars: int) -> str:
+def _task_memory_value_text(value: Any, max_chars: int) -> str:
     if isinstance(value, str):
         text = value
     else:
@@ -8266,10 +8267,10 @@ def _master_memory_value_text(value: Any, max_chars: int) -> str:
             text = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
         except TypeError:
             text = str(value)
-    return _trim_master_inline_text(text, max_chars=max_chars)
+    return _trim_task_inline_text(text, max_chars=max_chars)
 
 
-def _master_namespace_memory_context(
+def _task_namespace_memory_context(
     namespace: str,
     max_chars: int,
     payload: dict[str, Any] | None = None,
@@ -8286,7 +8287,7 @@ def _master_namespace_memory_context(
     summaries.sort(
         key=lambda row: (
             float(row.get('confidence', 0.0) or 0.0),
-            _master_memory_updated_epoch(row),
+            _task_memory_updated_epoch(row),
             str(row.get('focus', '')),
         ),
         reverse=True,
@@ -8302,7 +8303,7 @@ def _master_namespace_memory_context(
         key=lambda row: (
             _decision_priority(str(row.get('decided_by', ''))),
             float(row.get('confidence', 0.0) or 0.0),
-            _master_memory_updated_epoch(row),
+            _task_memory_updated_epoch(row),
             str(row.get('topic', '')),
         ),
         reverse=True,
@@ -8319,53 +8320,53 @@ def _master_namespace_memory_context(
 
     pieces: list[str] = []
     for row in summaries[:2]:
-        focus = _trim_master_inline_text(row.get('focus', 'summary'), max_chars=24)
-        summary_text = _trim_master_inline_text(row.get('summary', ''), max_chars=160)
-        _append_master_context_piece(pieces, f'{focus}={summary_text}', max_chars=max_chars)
+        focus = _trim_task_inline_text(row.get('focus', 'summary'), max_chars=24)
+        summary_text = _trim_task_inline_text(row.get('summary', ''), max_chars=160)
+        _append_task_context_piece(pieces, f'{focus}={summary_text}', max_chars=max_chars)
     for row in decisions[:2]:
-        topic = _trim_master_inline_text(row.get('topic', 'decision'), max_chars=24)
-        decision_text = _master_memory_value_text(row.get('decision'), max_chars=140)
-        _append_master_context_piece(pieces, f'{topic}={decision_text}', max_chars=max_chars)
+        topic = _trim_task_inline_text(row.get('topic', 'decision'), max_chars=24)
+        decision_text = _task_memory_value_text(row.get('decision'), max_chars=140)
+        _append_task_context_piece(pieces, f'{topic}={decision_text}', max_chars=max_chars)
     if not summaries:
         for row in entries[:2]:
-            key = _trim_master_inline_text(row.get('key', 'entry'), max_chars=24)
-            value_text = _master_memory_value_text(row.get('value'), max_chars=140)
-            _append_master_context_piece(pieces, f'{key}={value_text}', max_chars=max_chars)
+            key = _trim_task_inline_text(row.get('key', 'entry'), max_chars=24)
+            value_text = _task_memory_value_text(row.get('value'), max_chars=140)
+            _append_task_context_piece(pieces, f'{key}={value_text}', max_chars=max_chars)
     return ' | '.join(pieces)
 
 
-def _master_workspace_facts_payload() -> dict[str, Any]:
-    facts_path = _resolve_repo_path('.build/memory/workspace_facts.json')
+def _task_workspace_facts_payload() -> dict[str, Any]:
+    facts_path = _resolve_repo_path('.codebase-tooling-mcp/memory/workspace_facts.json')
     facts = workspace_facts(refresh=False) if facts_path.is_file() else workspace_facts(refresh=True)
     return facts if isinstance(facts, dict) else {}
 
 
-def _build_master_memory_context(route: str, memory_session: str) -> dict[str, Any]:
-    normalized_session = _normalize_master_memory_session(memory_session)
-    route_namespace = _master_route_namespace(route)
-    session_namespace = _master_session_namespace(normalized_session)
+def _build_task_memory_context(route: str, memory_session: str) -> dict[str, Any]:
+    normalized_session = _normalize_task_memory_session(memory_session)
+    route_namespace = _task_route_namespace(route)
+    session_namespace = _task_session_namespace(normalized_session)
     payload = _memory_load()
-    workspace_text = _summarize_master_workspace_facts(
-        _master_workspace_facts_payload(),
+    workspace_text = _summarize_task_workspace_facts(
+        _task_workspace_facts_payload(),
         max_chars=220,
     )
-    route_text = _master_namespace_memory_context(
+    route_text = _task_namespace_memory_context(
         namespace=route_namespace,
         max_chars=340,
         payload=payload,
     )
-    session_text = _master_namespace_memory_context(
+    session_text = _task_namespace_memory_context(
         namespace=session_namespace,
         max_chars=340,
         payload=payload,
     )
     segments: list[str] = []
     if workspace_text:
-        _append_master_context_piece(segments, f'wf:{workspace_text}', max_chars=900)
+        _append_task_context_piece(segments, f'wf:{workspace_text}', max_chars=900)
     if route_text:
-        _append_master_context_piece(segments, f'rt:{route_text}', max_chars=900)
+        _append_task_context_piece(segments, f'rt:{route_text}', max_chars=900)
     if session_text:
-        _append_master_context_piece(segments, f'ss:{session_text}', max_chars=900)
+        _append_task_context_piece(segments, f'ss:{session_text}', max_chars=900)
     context = ' | '.join(segments)
     return {
         'memory_session': normalized_session,
@@ -8379,12 +8380,12 @@ def _build_master_memory_context(route: str, memory_session: str) -> dict[str, A
     }
 
 
-def _summarize_master_request(prompt: str, max_chars: int = 220) -> str:
-    return _trim_master_inline_text(prompt, max_chars=max_chars)
+def _summarize_task_request(prompt: str, max_chars: int = 220) -> str:
+    return _trim_task_inline_text(prompt, max_chars=max_chars)
 
 
-def _summarize_master_response(infer: dict[str, Any], max_chars: int = 260) -> str:
-    output = _trim_master_inline_text(str(infer.get('output', '') or ''), max_chars=max_chars)
+def _summarize_task_response(infer: dict[str, Any], max_chars: int = 260) -> str:
+    output = _trim_task_inline_text(str(infer.get('output', '') or ''), max_chars=max_chars)
     if output:
         return output
     if infer.get('ok', False):
@@ -8392,7 +8393,7 @@ def _summarize_master_response(infer: dict[str, Any], max_chars: int = 260) -> s
     return 'inference reported no output'
 
 
-def _persist_master_memory(
+def _persist_task_memory(
     *,
     prompt: str,
     classification: dict[str, Any],
@@ -8403,11 +8404,11 @@ def _persist_master_memory(
     result_id: str = '',
 ) -> dict[str, Any]:
     route = str(classification.get('route') or resolved.get('route') or 'general')
-    master_ok = bool(infer.get('ok', False)) and bool(str(infer.get('output', '') or '').strip())
-    request_summary = _summarize_master_request(prompt)
-    response_summary = _summarize_master_response(infer)
-    session_namespace = str(memory_info.get('session_namespace') or _master_session_namespace('default'))
-    route_namespace = str(memory_info.get('route_namespace') or _master_route_namespace(route))
+    task_ok = bool(infer.get('ok', False)) and bool(str(infer.get('output', '') or '').strip())
+    request_summary = _summarize_task_request(prompt)
+    response_summary = _summarize_task_response(infer)
+    session_namespace = str(memory_info.get('session_namespace') or _task_session_namespace('default'))
+    route_namespace = str(memory_info.get('route_namespace') or _task_route_namespace(route))
     state: dict[str, Any] = {
         'session_write': {'written': False},
         'route_summary_write': {'written': False},
@@ -8418,7 +8419,7 @@ def _persist_master_memory(
         'route': route,
         'model': str(resolved.get('model') or ''),
         'backend': str(infer.get('backend') or ''),
-        'ok': master_ok,
+        'ok': task_ok,
         'confidence': float(classification.get('confidence', 0.0) or 0.0),
         'request_summary': request_summary,
         'response_summary': response_summary,
@@ -8435,15 +8436,15 @@ def _persist_master_memory(
                 value=session_value,
                 ttl_days=7,
                 confidence=float(classification.get('confidence', 0.0) or 0.0),
-                source='model_router.master.auto',
-                tags=['master', 'session', route],
+                source='task_router.task.auto',
+                tags=['task', 'session', route],
             )
             state['session_write'] = {**session_write, 'written': True}
         except Exception as exc:
             state['session_write'] = {'written': False, 'error': str(exc)}
 
-        route_summary = _trim_master_inline_text(
-            f"model={resolved.get('model', '')} ok={master_ok} req={request_summary} resp={response_summary}",
+        route_summary = _trim_task_inline_text(
+            f"model={resolved.get('model', '')} ok={task_ok} req={request_summary} resp={response_summary}",
             max_chars=600,
         )
         try:
@@ -8453,8 +8454,8 @@ def _persist_master_memory(
                 summary=route_summary,
                 ttl_days=30,
                 confidence=float(classification.get('confidence', 0.0) or 0.0),
-                source='model_router.master.auto',
-                tags=['master', 'route', route],
+                source='task_router.task.auto',
+                tags=['task', 'route', route],
             )
             state['route_summary_write'] = {**route_write, 'written': True}
         except Exception as exc:
@@ -8476,24 +8477,24 @@ def _persist_master_memory(
         state['route_summary_write'] = {'written': False, 'reason': 'mutations_disabled'}
         state['session_compaction'] = {'compacted': False, 'reason': 'mutations_disabled'}
 
-    if not master_ok:
+    if not task_ok:
         failure_reason = (
-            f"master route={route} model={resolved.get('model', '')} returned empty output"
+            f"task route={route} model={resolved.get('model', '')} returned empty output"
             if not str(infer.get('output', '') or '').strip()
-            else f"master route={route} model={resolved.get('model', '')} returned ok=false"
+            else f"task route={route} model={resolved.get('model', '')} returned ok=false"
         )
         _failure_record(
-            command=['model_router', 'master'],
+            command=['task_router', 'task'],
             stderr=failure_reason,
             stdout=response_summary,
-            category='model_router.master',
+            category='task_router.task',
             suggestion='Inspect route selection, memory context, and routed model availability.',
         )
         state['failure_recorded'] = True
     return state
 
 
-def _master_infer(
+def _task_infer(
     prompt: str,
     task: str = 'general',
     backend: str = 'auto',
@@ -8508,27 +8509,27 @@ def _master_infer(
     if not prompt.strip():
         raise ValueError('prompt must not be empty')
     profile = _default_output_profile(output_profile)
-    classification = _classify_master_prompt(prompt=prompt, task=task)
+    classification = _classify_task_prompt(prompt=prompt, task=task)
     routing = _load_continue_model_routing()
-    resolved = _resolve_master_model_route(
+    resolved = _resolve_task_model_route(
         route=str(classification['route']),
         routing=routing,
         requested_model=model,
     )
-    memory_info = _build_master_memory_context(
+    memory_info = _build_task_memory_context(
         route=str(classification['route']),
         memory_session=memory_session,
     )
-    encoded = _encode_master_prompt_packet(
+    encoded = _encode_task_prompt_packet(
         prompt=prompt,
         route=str(classification['route']),
         task=task,
         memory_session=str(memory_info['memory_session']),
         memory_context=str(memory_info['context']),
     )
-    effective_system = system or MASTER_ROUTE_SYSTEM_PROMPTS.get(
+    effective_system = system or TASK_ROUTE_SYSTEM_PROMPTS.get(
         str(classification['route']),
-        MASTER_ROUTE_SYSTEM_PROMPTS['general'],
+        TASK_ROUTE_SYSTEM_PROMPTS['general'],
     )
     infer = local_infer(
         prompt=str(encoded['encoded_prompt']),
@@ -8541,9 +8542,9 @@ def _master_infer(
         output_profile=output_profile,
         store_result=store_result,
     )
-    master_ok = bool(infer.get('ok', False)) and bool(str(infer.get('output', '') or '').strip())
+    task_ok = bool(infer.get('ok', False)) and bool(str(infer.get('output', '') or '').strip())
     result: dict[str, Any] = {
-        'schema': 'model_router.master.v1',
+        'schema': 'task_router.task.v1',
         'classification': classification,
         'encoding': encoded,
         'routing': {
@@ -8563,7 +8564,7 @@ def _master_infer(
     }
     if profile == 'compact':
         result = {
-            'schema': 'model_router.master.compact.v1',
+            'schema': 'task_router.task.compact.v1',
             'route': classification['route'],
             'confidence': classification['confidence'],
             'model': resolved['model'],
@@ -8572,21 +8573,21 @@ def _master_infer(
             'char_saving_vs_original': encoded['char_saving_vs_original'],
             'memory_session': memory_info['memory_session'],
             'memory_chars': memory_info['context_chars'],
-            'ok': master_ok,
+            'ok': task_ok,
             'output': infer.get('output', ''),
         }
-    master_result_id = ''
+    task_result_id = ''
     if store_result:
-        master_result_id = _result_store_put('model_router_master', result)
-        result['result_id'] = master_result_id
-    persisted = _persist_master_memory(
+        task_result_id = _result_store_put('task_router_task', result)
+        result['result_id'] = task_result_id
+    persisted = _persist_task_memory(
         prompt=prompt,
         classification=classification,
         resolved=resolved,
         encoded=encoded,
         infer=infer,
         memory_info=memory_info,
-        result_id=master_result_id or str(infer.get('result_id') or ''),
+        result_id=task_result_id or str(infer.get('result_id') or ''),
     )
     if 'memory' in result and isinstance(result['memory'], dict):
         result['memory'].update(persisted)
@@ -8880,12 +8881,12 @@ def _infer_batch_from_prompt(prompt: str) -> list[str]:
     return []
 
 
-class ModelRouterService:
-    """Application service for local model and coding router orchestration."""
+class TaskRouterService:
+    """Application service for the single public task router and explicit model utilities."""
 
     def route(
         self,
-        mode: str = "status",
+        mode: str = "task",
         prompt: str = "",
         task: str = "general",
         prefix: str = "",
@@ -8921,9 +8922,10 @@ class ModelRouterService:
         max_parallel: int = 4,
         auto_parallel_when_possible: bool = True,
     ) -> dict[str, Any]:
+        mode = str(mode or "task").strip().lower() or "task"
         if mode not in {
+            "task",
             "status",
-            "master",
             "embed",
             "infer",
             "parallel_infer",
@@ -8935,12 +8937,12 @@ class ModelRouterService:
             "coding_sandbox",
         }:
             raise ValueError(
-                "mode must be one of: status, master, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
+                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
             )
         if mode == "status":
             return local_model_status()
-        if mode == "master":
-            return _master_infer(
+        if mode == "task":
+            return _task_infer(
                 prompt=prompt,
                 task=task,
                 backend=backend,
@@ -8981,14 +8983,15 @@ class ModelRouterService:
                     max_parallel=max_parallel,
                 )
                 return {
-                    "schema": "model_router.infer_auto_parallel.v1",
+                    "schema": "task_router.infer_auto_parallel.v1",
                     "upgraded": True,
                     "reason": "detected_independent_batch",
                     "count": len(inferred_batch),
                     "result": parallel,
                 }
+            single_prompt = inferred_batch[0] if len(inferred_batch) == 1 else prompt
             return local_infer(
-                prompt=prompt,
+                prompt=single_prompt,
                 task=task,
                 backend=backend,
                 model=model,
@@ -9027,7 +9030,7 @@ class ModelRouterService:
                 store_result=store_result,
             )
             payload: dict[str, Any] = {
-                "schema": "model_router.coding_infer.v1",
+                "schema": "task_router.coding_infer.v1",
                 "infer": infer_result,
                 "check_requested": run_checks,
                 "sandbox": sandbox,
@@ -9110,20 +9113,20 @@ class ModelRouterService:
         )
 
 
-_MODEL_ROUTER_SERVICE = ModelRouterService()
+_TASK_ROUTER_SERVICE = TaskRouterService()
 
 
 @mcp.tool()
-def model_router(
+def task_router(
     mode: Annotated[
         str,
         Field(
-            description="Router mode. Use `master` for classified, memory-backed orchestration; other modes expose explicit inference, embedding, reranking, and coding operations."
+            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
         ),
-    ] = "status",
+    ] = "task",
     prompt: Annotated[
         str,
-        Field(description="Primary text prompt for `master`, `infer`, and `coding_infer` modes."),
+        Field(description="Primary request text for the default `task` flow, `infer`, and `coding_infer`."),
     ] = "",
     task: Annotated[
         str,
@@ -9207,7 +9210,7 @@ def model_router(
     ] = False,
     memory_session: Annotated[
         str,
-        Field(description="Ephemeral memory-session key for `mode='master'`. Empty resolves to `default`."),
+        Field(description="Optional session key for `mode='task'`. Reuse the same value across related requests to carry compact task/session memory; empty becomes `default`."),
     ] = "",
     check_profile: Annotated[
         str,
@@ -9247,7 +9250,7 @@ def model_router(
     ] = "list",
     prompts: Annotated[
         list[str] | None,
-        Field(description="Prompt batch for `mode='parallel_infer'` or explicit auto-parallel input."),
+        Field(description="Independent request batch for `parallel_infer`, or an explicit batch or single-prompt override for `infer`."),
     ] = None,
     max_parallel: Annotated[
         int,
@@ -9258,8 +9261,8 @@ def model_router(
         Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
     ] = True,
 ) -> dict[str, Any]:
-    """Strict model router: mode MUST be one of status|master|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox; `master` is memory-backed orchestration, `memory_session` isolates ephemeral master memory, and required params are enforced per mode."""
-    return _MODEL_ROUTER_SERVICE.route(
+    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
+    return _TASK_ROUTER_SERVICE.route(
         mode=mode,
         prompt=prompt,
         task=task,
@@ -10541,7 +10544,7 @@ def state_snapshot(
 
     args = ["stash", "push", "--include-untracked", "--message", stash_label]
     if not include_build_dir:
-        args.extend(["--", ".", ":(exclude).build/**"])
+        args.extend(["--", ".", ":(exclude).codebase-tooling-mcp/**"])
     stash_result = _git(*args, check=False)
     output = (stash_result.stdout + "\n" + stash_result.stderr).strip()
 
@@ -10882,7 +10885,7 @@ def tool_router_learned(
 @mcp.tool()
 def artifact_memory_index(
     mode: str = "refresh",
-    path: str = ".build/reports",
+    path: str = ".codebase-tooling-mcp/reports",
     query: str = "",
     max_entries: int = 1000,
 ) -> dict[str, Any]:
@@ -11037,7 +11040,7 @@ def auto_sharding_for_analysis(
         rel = str(p.relative_to(REPO_PATH)).replace("\\", "/")
         if not _allowed_by_globs(rel, include_globs=include_globs, exclude_globs=exclude_globs):
             continue
-        if rel.startswith(".git/") or rel.startswith(".build/"):
+        if rel.startswith(".git/") or rel.startswith(".codebase-tooling-mcp/"):
             continue
         files.append(rel)
     files.sort()
@@ -11331,7 +11334,7 @@ def encode_lossless(
     min_symbol_reuse: int = 2,
     use_blob_refs: bool = True,
     min_blob_chars: int = 400,
-    blob_store_path: str = ".build/cache/lossless_blobs.json",
+    blob_store_path: str = ".codebase-tooling-mcp/cache/lossless_blobs.json",
     store_blobs: bool = True,
     store_result: bool = False,
 ) -> dict[str, Any]:
@@ -11396,7 +11399,7 @@ def encode_lossless(
 def decode_lossless(
     encoded: Any,
     symbol_table: dict[str, str] | None = None,
-    blob_store_path: str = ".build/cache/lossless_blobs.json",
+    blob_store_path: str = ".codebase-tooling-mcp/cache/lossless_blobs.json",
     blobs_inline: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Decode payload produced by encode_lossless."""
@@ -11817,7 +11820,7 @@ def api_surface_snapshot(
 @mcp.tool()
 def workspace_facts(refresh: bool = True) -> dict[str, Any]:
     """Get or refresh lightweight workspace facts."""
-    facts_path = Path(".build/memory/workspace_facts.json")
+    facts_path = Path(".codebase-tooling-mcp/memory/workspace_facts.json")
     if not refresh:
         payload = _json_file_load(facts_path, {})
         if payload:
@@ -13091,7 +13094,7 @@ class MemoryRouterService:
         issue: str = "",
         root_cause: str = "",
         fix: str = "",
-        path: str = ".build/reports",
+        path: str = ".codebase-tooling-mcp/reports",
         query: str = "",
         artifact_mode: str = "refresh",
     ) -> dict[str, Any]:
@@ -13243,7 +13246,7 @@ def memory_router(
     issue: str = "",
     root_cause: str = "",
     fix: str = "",
-    path: str = ".build/reports",
+    path: str = ".codebase-tooling-mcp/reports",
     query: str = "",
     artifact_mode: str = "refresh",
 ) -> dict[str, Any]:
@@ -13692,7 +13695,7 @@ def workflow_router(
     requirements: list[str] | None = None,
     checks: list[dict[str, Any]] | None = None,
     query: str = "",
-    path: str = ".build/reports",
+    path: str = ".codebase-tooling-mcp/reports",
     max_entries: int = 100,
     category: str = "",
     contains: str = "",

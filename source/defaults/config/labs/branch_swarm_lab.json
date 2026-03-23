@@ -1,12 +1,12 @@
 {
   "base_ref": "HEAD",
-  "report_path": ".build/reports/BRANCH_SWARM_REPORT.md",
+  "report_path": ".codebase-tooling-mcp/reports/BRANCH_SWARM_REPORT.md",
   "strategies": [
     {
       "name": "Python Baseline",
       "branch": "swarm/py-baseline",
       "setup": [
-        "mkdir -p .build/tmp"
+        "mkdir -p .codebase-tooling-mcp/tmp"
       ],
       "quality": [
         "python -m compileall -q source",
@@ -20,7 +20,7 @@
       "name": "Precompiled Bytecode",
       "branch": "swarm/precompiled-bytecode",
       "setup": [
-        "mkdir -p .build/tmp",
+        "mkdir -p .codebase-tooling-mcp/tmp",
         "python -m compileall -q source"
       ],
       "quality": [
@@ -35,7 +35,7 @@
       "name": "Optimized Mode (-O)",
       "branch": "swarm/optimized-o",
       "setup": [
-        "mkdir -p .build/tmp"
+        "mkdir -p .codebase-tooling-mcp/tmp"
       ],
       "quality": [
         "python -O -m compileall -q source",
@@ -49,7 +49,7 @@
       "name": "Aggressive Optimized Mode (-OO)",
       "branch": "swarm/optimized-oo",
       "setup": [
-        "mkdir -p .build/tmp"
+        "mkdir -p .codebase-tooling-mcp/tmp"
       ],
       "quality": [
         "python -OO -m compileall -q source",
@@ -63,7 +63,7 @@
       "name": "No Site Imports (-S)",
       "branch": "swarm/no-site-imports",
       "setup": [
-        "mkdir -p .build/tmp"
+        "mkdir -p .codebase-tooling-mcp/tmp"
       ],
       "quality": [
         "python -S -m compileall -q source",

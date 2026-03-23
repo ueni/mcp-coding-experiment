@@ -18,7 +18,9 @@
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
-          "DOCKER_BUILDKIT": "1"
+          "DOCKER_CONFIG": "${workspaceFolder}/.docker-build",
+          "DOCKER_BUILDKIT": "1",
+          "DOCKER_API_VERSION": "1.42"
         }
       },
       "problemMatcher": []
@@ -38,7 +40,9 @@
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
-          "DOCKER_BUILDKIT": "1"
+          "DOCKER_CONFIG": "${workspaceFolder}/.docker-build",
+          "DOCKER_BUILDKIT": "1",
+          "DOCKER_API_VERSION": "1.42"
         }
       },
       "problemMatcher": []

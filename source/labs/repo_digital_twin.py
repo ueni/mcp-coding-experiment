@@ -64,8 +64,8 @@ def dependency_hints(files: list[str]) -> dict[str, list[str]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate repo digital twin")
-    parser.add_argument("--json", default=".build/reports/REPO_DIGITAL_TWIN.json")
-    parser.add_argument("--md", default=".build/reports/REPO_DIGITAL_TWIN.md")
+    parser.add_argument("--json", default=".codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.json")
+    parser.add_argument("--md", default=".codebase-tooling-mcp/reports/REPO_DIGITAL_TWIN.md")
     parser.add_argument("--max-files", type=int, default=1000)
     parser.add_argument("--hotspot-limit", type=int, default=20)
     args = parser.parse_args()
@@ -96,7 +96,7 @@ def main() -> int:
             "has_xray": Path("MCP_XRAY.md").exists(),
             "has_drift": Path("MCP_DRIFT.md").exists(),
             "has_gatekeeper_report": Path(
-                ".build/reports/POLICY_GATEKEEPER.md"
+                ".codebase-tooling-mcp/reports/POLICY_GATEKEEPER.md"
             ).exists(),
         },
     }

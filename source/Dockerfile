@@ -160,7 +160,7 @@ RUN groupadd --gid "${APP_GID}" app \
     && echo 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app \
     && chmod 0440 /etc/sudoers.d/app \
     && visudo -cf /etc/sudoers.d/app \
-    && mkdir -p /models /repo/.build/cache /repo/.build/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
+    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
     && cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/ \
     && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
     && rm -rf /tmp/ollama-models \

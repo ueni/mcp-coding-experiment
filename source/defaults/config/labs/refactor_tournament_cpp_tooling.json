@@ -1,6 +1,6 @@
 {
   "base_ref": "HEAD",
-  "report_path": ".build/reports/REFACTOR_TOURNAMENT_CPP_TOOLING.md",
+  "report_path": ".codebase-tooling-mcp/reports/REFACTOR_TOURNAMENT_CPP_TOOLING.md",
   "strategies": [
     {
       "name": "C/C++ Baseline",

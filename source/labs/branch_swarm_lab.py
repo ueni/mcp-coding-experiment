@@ -83,7 +83,7 @@ def main() -> int:
     cfg = load_config(Path(args.config))
     base_ref = str(cfg.get("base_ref", "HEAD"))
     report_path = Path(
-        str(cfg.get("report_path", ".build/reports/BRANCH_SWARM_REPORT.md"))
+        str(cfg.get("report_path", ".codebase-tooling-mcp/reports/BRANCH_SWARM_REPORT.md"))
     )
     strategies = cfg.get("strategies", [])
 

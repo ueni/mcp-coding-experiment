@@ -184,7 +184,7 @@ fi
 if ! grep -qxF '# codebase-tooling-mcp generated' .gitignore; then
   printf '\n# codebase-tooling-mcp generated\n' >> .gitignore
 fi
-ensure_gitignore_entry '/.build/'
+ensure_gitignore_entry '/.codebase-tooling-mcp/'
 ensure_gitignore_entry '/.continue/'
 ensure_gitignore_entry '/.config/'
 ensure_gitignore_entry '/.devcontainer/'

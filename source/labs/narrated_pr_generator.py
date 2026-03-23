@@ -49,7 +49,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate narrated PR packet")
     parser.add_argument("--base", default="HEAD~1")
     parser.add_argument("--head", default="HEAD")
-    parser.add_argument("--output", default=".build/reports/PR_PACKET.md")
+    parser.add_argument("--output", default=".codebase-tooling-mcp/reports/PR_PACKET.md")
     args = parser.parse_args()
 
     base = args.base

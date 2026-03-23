@@ -162,7 +162,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--report-path",
-        default=".build/reports/POLICY_GATEKEEPER.md",
+        default=".codebase-tooling-mcp/reports/POLICY_GATEKEEPER.md",
         help="Output markdown report",
     )
     args = parser.parse_args()

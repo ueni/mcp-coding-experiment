@@ -87,7 +87,7 @@ def main() -> int:
     target_branch = str(cfg.get("target_branch", "master"))
     changelog_from = str(cfg.get("changelog_from", "HEAD~5"))
     report_path = Path(
-        str(cfg.get("report_path", ".build/reports/RELEASE_REHEARSAL.md"))
+        str(cfg.get("report_path", ".codebase-tooling-mcp/reports/RELEASE_REHEARSAL.md"))
     )
 
     if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):

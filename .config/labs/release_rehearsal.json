@@ -1,7 +1,7 @@
 {
   "target_branch": "master",
   "changelog_from": "HEAD~5",
-  "report_path": ".build/reports/RELEASE_REHEARSAL.md",
+  "report_path": ".codebase-tooling-mcp/reports/RELEASE_REHEARSAL.md",
   "artifacts": [
     "MCP_XRAY.md",
     "MCP_DRIFT.md"

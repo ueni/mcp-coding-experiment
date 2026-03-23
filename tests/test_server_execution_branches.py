@@ -349,13 +349,13 @@ class ServerExecutionCoverageTest(ServerToolsTestBase):
         with patch.object(self.server, "symbol_index", return_value=first_symbols):
             written = self.server.api_surface_snapshot(
                 path="src",
-                snapshot_path=".build/api_snapshot.json",
+                snapshot_path=".codebase-tooling-mcp/api_snapshot.json",
                 mode="write",
                 include_private=False,
             )
         self.assertEqual(written["mode"], "write")
         self.assertEqual(written["symbol_count"], 1)
-        self.assertTrue((self.repo_path / ".build" / "api_snapshot.json").is_file())
+        self.assertTrue((self.repo_path / ".codebase-tooling-mcp" / "api_snapshot.json").is_file())
 
         second_symbols = [
             {"path": "src/sample.py", "name": "beta", "kind": "function"},
@@ -363,7 +363,7 @@ class ServerExecutionCoverageTest(ServerToolsTestBase):
         with patch.object(self.server, "symbol_index", return_value=second_symbols):
             checked = self.server.api_surface_snapshot(
                 path="src",
-                snapshot_path=".build/api_snapshot.json",
+                snapshot_path=".codebase-tooling-mcp/api_snapshot.json",
                 mode="check",
                 include_private=False,
             )
@@ -373,7 +373,7 @@ class ServerExecutionCoverageTest(ServerToolsTestBase):
         self.assertEqual(checked["added"][0]["name"], "beta")
 
         with self.assertRaises(FileNotFoundError):
-            self.server.api_surface_snapshot(snapshot_path=".build/missing.json", mode="check")
+            self.server.api_surface_snapshot(snapshot_path=".codebase-tooling-mcp/missing.json", mode="check")
 
     def test_apply_unified_diff_check_and_apply(self):
         sample_path = self.repo_path / "src" / "sample.py"

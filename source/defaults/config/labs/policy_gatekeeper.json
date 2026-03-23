@@ -8,7 +8,7 @@
     "(?i)password\\s*=\\s*['\"][^'\"]+['\"]"
   ],
   "forbidden_pattern_excluded_paths": [
-    ".build/",
+    ".codebase-tooling-mcp/",
     ".config/labs/policy_gatekeeper.json"
   ],
   "required_paths": [

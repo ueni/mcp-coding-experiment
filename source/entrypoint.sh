@@ -356,7 +356,7 @@ url = "http://localhost:8000/mcp"
     if ! grep -qxF '# codebase-tooling-mcp generated' /repo/.gitignore; then
       printf '\n# codebase-tooling-mcp generated\n' >> /repo/.gitignore
     fi
-    for entry in '/.build/' '/.continue/' '/.config/' '/.devcontainer/' '/.gitignore_codebase_tooling_mcp.touched'; do
+    for entry in '/.codebase-tooling-mcp/' '/.continue/' '/.config/' '/.devcontainer/' '/.gitignore_codebase_tooling_mcp.touched'; do
       if ! grep -qxF "${entry}" /repo/.gitignore; then
         printf '%s\n' "${entry}" >> /repo/.gitignore
       fi

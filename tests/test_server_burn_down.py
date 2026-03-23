@@ -388,7 +388,7 @@ class ServerCoverageBurnDownTest(ServerToolsTestBase):
         self.assertTrue(license_out["ok"])
         self.assertIn("annotated_missing_headers:1", license_out["actions"])
         self.assertIn("downloaded_license_texts:1", license_out["actions"])
-        self.assertTrue((self.repo_path / ".build" / "reports" / "REUSE_LINT.txt").is_file())
+        self.assertTrue((self.repo_path / ".codebase-tooling-mcp" / "reports" / "REUSE_LINT.txt").is_file())
         with self.assertRaises(ValueError):
             self.server.license_monitor(max_missing_files=0)
 
@@ -465,7 +465,7 @@ class ServerCoverageBurnDownTest(ServerToolsTestBase):
         ), patch.object(
             self.server,
             "_list_report_files",
-            return_value=[".build/reports/ONE.txt"],
+            return_value=[".codebase-tooling-mcp/reports/ONE.txt"],
         ), patch.object(
             self.server.subprocess,
             "run",
@@ -473,7 +473,7 @@ class ServerCoverageBurnDownTest(ServerToolsTestBase):
         ):
             lab = self.server._run_lab_script("fake.py", ["--flag"])
         self.assertTrue(lab["ok"])
-        self.assertEqual(lab["reports"], [".build/reports/ONE.txt"])
+        self.assertEqual(lab["reports"], [".codebase-tooling-mcp/reports/ONE.txt"])
 
         with patch.object(self.server, "_require_git_repo", return_value=None), patch.object(
             self.server,
@@ -498,7 +498,7 @@ class ServerCoverageBurnDownTest(ServerToolsTestBase):
         with patch.object(self.server, "_run_lab_script", return_value={"ok": True, "args": []}) as run_lab:
             self.server.lab_release_rehearsal(allow_dirty=True, keep_branch=True)
             self.server.lab_refactor_tournament(allow_dirty=True, keep_branches=True)
-            self.server.lab_policy_gatekeeper(changed_ref="HEAD", report_path=".build/reports/POLICY.md")
+            self.server.lab_policy_gatekeeper(changed_ref="HEAD", report_path=".codebase-tooling-mcp/reports/POLICY.md")
             self.server.lab_branch_swarm(allow_dirty=True, keep_branches=True)
         self.assertEqual(run_lab.call_count, 4)
 

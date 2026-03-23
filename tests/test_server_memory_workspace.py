@@ -154,7 +154,7 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
 
     def test_workspace_facts_refresh_and_cached_read(self):
         refreshed = self.server.workspace_facts(refresh=True)
-        facts_path = self.repo_path / ".build" / "memory" / "workspace_facts.json"
+        facts_path = self.repo_path / ".codebase-tooling-mcp" / "memory" / "workspace_facts.json"
         self.assertTrue(facts_path.is_file())
         self.assertTrue(refreshed["has_tests_dir"])
         self.assertTrue(refreshed["has_readme"])
@@ -247,26 +247,26 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         result = self.server.result_handle(mode="store", tool="tool_a", value={"ok": True})
         out = self.server.required_tool_chain(
             required_tools=["tool_a", "tool_missing"],
-            required_artifacts=[".build/reports/missing.txt"],
+            required_artifacts=[".codebase-tooling-mcp/reports/missing.txt"],
             required_result_ids=[result["result_id"], "missing-result-id"],
             require_order=True,
             max_age_minutes=60,
         )
         self.assertFalse(out["ok"])
         self.assertIn("tool_missing", out["missing_tools"])
-        self.assertIn(".build/reports/missing.txt", out["missing_artifacts"])
+        self.assertIn(".codebase-tooling-mcp/reports/missing.txt", out["missing_artifacts"])
         self.assertIn("missing-result-id", out["missing_result_ids"])
 
     def test_required_tool_chain_without_order_can_match_latest(self):
         first = self.server.result_handle(mode="store", tool="tool_a", value={"ok": 1})
         second = self.server.result_handle(mode="store", tool="tool_b", value={"ok": 2})
-        report = self.repo_path / ".build" / "reports" / "READY.txt"
+        report = self.repo_path / ".codebase-tooling-mcp" / "reports" / "READY.txt"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text("ok\n", encoding="utf-8")
 
         out = self.server.required_tool_chain(
             required_tools=["tool_b", "tool_a"],
-            required_artifacts=[".build/reports/READY.txt"],
+            required_artifacts=[".codebase-tooling-mcp/reports/READY.txt"],
             required_result_ids=[first["result_id"], second["result_id"]],
             require_order=False,
             max_age_minutes=60,
@@ -317,34 +317,34 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         self.assertEqual(value["last_success_profile"], "full")
 
 
-    def test_master_memory_route_and_session_namespace_isolation(self):
+    def test_task_memory_route_and_session_namespace_isolation(self):
         self.server.memory_router(
             mode="summary_upsert",
-            namespace="master/route/security",
+            namespace="task/route/security",
             focus="recent_activity",
             summary="route-security",
         )
         self.server.memory_router(
             mode="summary_upsert",
-            namespace="master/route/review",
+            namespace="task/route/review",
             focus="recent_activity",
             summary="route-review",
         )
         self.server.memory_router(
             mode="summary_upsert",
-            namespace="master/session/default",
+            namespace="task/session/default",
             focus="session",
             summary="default-session",
         )
         self.server.memory_router(
             mode="summary_upsert",
-            namespace="master/session/other",
+            namespace="task/session/other",
             focus="session",
             summary="other-session",
         )
 
-        default_ctx = self.server._build_master_memory_context(route="security", memory_session="")
-        other_ctx = self.server._build_master_memory_context(route="security", memory_session="other")
+        default_ctx = self.server._build_task_memory_context(route="security", memory_session="")
+        other_ctx = self.server._build_task_memory_context(route="security", memory_session="other")
 
         self.assertIn("route-security", default_ctx["context"])
         self.assertNotIn("route-review", default_ctx["context"])
@@ -353,17 +353,17 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         self.assertIn("other-session", other_ctx["context"])
         self.assertNotIn("default-session", other_ctx["context"])
 
-    def test_master_memory_blank_session_normalizes_to_default(self):
-        self.assertEqual(self.server._normalize_master_memory_session(""), "default")
-        info = self.server._build_master_memory_context(route="security", memory_session="")
+    def test_task_memory_blank_session_normalizes_to_default(self):
+        self.assertEqual(self.server._normalize_task_memory_session(""), "default")
+        info = self.server._build_task_memory_context(route="security", memory_session="")
         self.assertEqual(info["memory_session"], "default")
-        self.assertEqual(info["session_namespace"], "master/session/default")
+        self.assertEqual(info["session_namespace"], "task/session/default")
 
-    def test_master_memory_session_auto_compact_creates_summary(self):
+    def test_task_memory_session_auto_compact_creates_summary(self):
         for idx in range(12):
             self.server.memory_router(
                 mode="upsert",
-                namespace="master/session/default",
+                namespace="task/session/default",
                 key=f"seed-{idx}",
                 value={"text": "x" * 400},
                 ttl_days=7,
@@ -377,8 +377,8 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
             "output": "security findings",
         }
         with patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.model_router(
-                mode="master",
+            out = self.server.task_router(
+                mode="task",
                 prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
@@ -389,7 +389,7 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         summaries = [
             row
             for row in payload["summaries"]
-            if row.get("namespace") == "master/session/default"
+            if row.get("namespace") == "task/session/default"
             and row.get("focus") == "auto_compact"
         ]
         self.assertEqual(len(summaries), 1)
@@ -435,15 +435,15 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         )
         self.assertEqual(direct_root["count"], routed_root["result"]["count"])
 
-        report = self.repo_path / ".build" / "reports" / "sample.txt"
+        report = self.repo_path / ".codebase-tooling-mcp" / "reports" / "sample.txt"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text("ok\n", encoding="utf-8")
-        self.server.artifact_memory_index(mode="refresh", path=".build/reports")
+        self.server.artifact_memory_index(mode="refresh", path=".codebase-tooling-mcp/reports")
         direct_artifact = self.server.artifact_memory_index(mode="query", query="sample", max_entries=5)
         routed_artifact = self.server.memory_router(
             mode="artifact_index",
             artifact_mode="query",
-            path=".build/reports",
+            path=".codebase-tooling-mcp/reports",
             query="sample",
             max_entries=5,
         )

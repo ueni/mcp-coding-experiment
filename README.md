@@ -202,7 +202,7 @@ are missing:
 - `.continue/model-routing.yaml` (routing map for router/specialists)
 - `.continue/mcpServers/codebase-tooling-mcp.yaml`
 - `.config/labs/*.json`
-- `/.build/`, `/.continue/`, `/.config/`, `/.devcontainer/`, `/.gitignore_codebase_tooling_mcp.touched` entries in `.gitignore` (one-time bootstrap)
+- `/.codebase-tooling-mcp/`, `/.continue/`, `/.config/`, `/.devcontainer/`, `/.gitignore_codebase_tooling_mcp.touched` entries in `.gitignore` (one-time bootstrap)
 
 The image also ensures a default Codex MCP client entry exists at:
 
@@ -305,11 +305,11 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 ### Public MCP v1 Surface
 
-- `model_router`
+- `task_router`
 
-`model_router(mode="master")` is the single public MCP entrypoint. It classifies the prompt, encodes the routing packet, reads and writes compact route/session memory automatically, and dispatches to the selected model. Use `memory_session` to isolate ephemeral master-memory context when needed.
+`task_router()` is the single public MCP entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
-Leaf implementations remain in `source/server.py` as internal helpers and call targets for `model_router` orchestration. Only the tools listed here are exposed over MCP v1.
+Leaf implementations remain in `source/server.py` as internal helpers and call targets for `task_router` orchestration. Only the tools listed here are exposed over MCP v1.
 
 ## Labs and Reports
 
