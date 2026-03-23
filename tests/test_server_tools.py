@@ -523,6 +523,27 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["task"], "review")
         self.assertEqual(linf.call_args.kwargs["model"], "phi4-mini-reasoning:3.8b")
 
+    def test_task_router_task_auto_selects_micro_coding_model_for_short_prompt(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "qwen2.5-coder:1.5b",
+            "ok": True,
+            "output": "slugify helper",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
+            out = self.server.task_router(
+                mode="task",
+                prompt="Implement a small Python function that slugifies text.",
+                backend="fallback",
+                output_profile="normal",
+            )
+        self.assertEqual(out["classification"]["route"], "coding")
+        self.assertEqual(out["routing"]["selected_model"], "qwen2.5-coder:1.5b")
+        self.assertEqual(out["routing"]["selected_by"], "auto:short_coding_prompt")
+        self.assertEqual(linf.call_args.kwargs["task"], "coding")
+        self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
+
 
     def test_task_router_task_reads_memory_and_encodes_session_and_memory(self):
         self.server.memory_router(
@@ -1481,6 +1502,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["schema"], "task_router.coding_infer.v1")
         self.assertTrue(out["check_requested"])
         self.assertIn("checks", out)
+        self.assertIn("routing", out)
         self.assertIn("sandbox", out)
         self.assertIn("stdout_stream", out)
         self.assertIn("stderr_stream", out)
@@ -1496,6 +1518,28 @@ class ServerToolsTest(ServerToolsTestBase):
                     check_profile="lint",
                     check_target="src/sample.py",
                 )
+
+    def test_task_router_coding_infer_supports_micro_coding_task_hint(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "qwen2.5-coder:1.5b",
+            "ok": True,
+            "output": "helper",
+        }
+        sandbox_payload = {"venv_python": sys.executable, "sandbox_id": "shared"}
+        with patch.object(self.server, "local_infer", return_value=infer_payload) as linf, patch.object(
+            self.server, "_coding_sandbox_prepare", return_value=sandbox_payload
+        ):
+            out = self.server.task_router(
+                mode="coding_infer",
+                task="micro_coding",
+                prompt="Implement helper",
+                backend="fallback",
+            )
+        self.assertEqual(out["routing"]["selected_model"], "qwen2.5-coder:1.5b")
+        self.assertEqual(out["routing"]["selected_by"], "task_hint:micro_coding")
+        self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
 
     def test_task_router_coding_check_and_pip_include_stream_fields(self):
         checks_payload = {

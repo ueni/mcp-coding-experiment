@@ -140,6 +140,30 @@ APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
 TERMINAL_CAPTURE_DIR = Path(".codebase-tooling-mcp/reports/terminal")
+DEFAULT_CODING_MODEL = "qwen2.5-coder:3b"
+DEFAULT_CODING_MICRO_MODEL = "qwen2.5-coder:1.5b"
+DEFAULT_CONTINUE_OLLAMA_MODELS = ",".join(
+    (
+        DEFAULT_CODING_MODEL,
+        DEFAULT_CODING_MICRO_MODEL,
+        "granite3.3:2b",
+        "phi4-mini:3.8b",
+        "phi4-mini-reasoning:3.8b",
+        "deepseek-r1:1.5b",
+        "deepscaler:1.5b",
+        "granite3.2-vision:2b",
+        "llama3.2:1b",
+    )
+)
+CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-3b.yaml"
+CODING_MICRO_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
+CODING_MICRO_ROUTE = "coding_micro"
+MICRO_CODING_TASK_HINTS = {
+    "coding_micro",
+    "micro coding",
+    "micro-coding",
+    "micro_coding",
+}
 LOCAL_MODELS_DIR = Path(os.getenv("LOCAL_MODELS_DIR", "/models"))
 LOCAL_EMBED_BACKEND = os.getenv("LOCAL_EMBED_BACKEND", "hash").strip().lower()
 LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "").strip()
@@ -156,7 +180,12 @@ INTERNAL_SELF_TESTS_DIR = Path(
 CODING_VENV_PYTHON = os.getenv(
     "CODING_VENV_PYTHON", "/opt/codebase-tooling/coding-venv/bin/python"
 ).strip()
-CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", "qwen2.5-coder:3b").strip()
+CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", DEFAULT_CODING_MODEL).strip()
+CODING_MICRO_MODEL = os.getenv("CODING_MICRO_MODEL", DEFAULT_CODING_MICRO_MODEL).strip()
+CODING_MICRO_MAX_PROMPT_CHARS = max(
+    120,
+    int(os.getenv("CODING_MICRO_MAX_PROMPT_CHARS", "600")),
+)
 CODING_SANDBOX_ROOT = Path(
     os.getenv("CODING_SANDBOX_ROOT", ".codebase-tooling-mcp/sandboxes/coding")
 )
@@ -274,6 +303,10 @@ TASK_ROUTE_ALIASES = {
     "general": "general",
     "coding": "coding",
     "code": "coding",
+    "coding_micro": "coding",
+    "micro coding": "coding",
+    "micro-coding": "coding",
+    "micro_coding": "coding",
     "refactor": "refactor",
     "review": "review",
     "security": "security",
@@ -7281,7 +7314,7 @@ def local_model_status() -> dict[str, Any]:
     coding_python = Path(CODING_VENV_PYTHON)
     bootstrap_models_raw = os.getenv(
         "CONTINUE_OLLAMA_MODELS",
-        "qwen2.5-coder:3b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b",
+        DEFAULT_CONTINUE_OLLAMA_MODELS,
     )
     bootstrap_models = _parse_model_csv(bootstrap_models_raw)
     native_api_base = _ollama_native_base_url()
@@ -7305,10 +7338,14 @@ def local_model_status() -> dict[str, Any]:
         },
         "coding": {
             "default_model": CODING_DEFAULT_MODEL,
+            "micro_model": CODING_MICRO_MODEL,
+            "micro_auto_prompt_chars": CODING_MICRO_MAX_PROMPT_CHARS,
             "venv_python": str(coding_python),
             "venv_python_exists": coding_python.is_file(),
             "default_model_installed": None,
             "default_model_in_bootstrap_list": CODING_DEFAULT_MODEL in bootstrap_models,
+            "micro_model_installed": None,
+            "micro_model_in_bootstrap_list": CODING_MICRO_MODEL in bootstrap_models,
         },
         "ollama": {
             "api_contract": "native_ollama",
@@ -7344,6 +7381,9 @@ def local_model_status() -> dict[str, Any]:
         status["ollama"]["installed_models_count"] = len(installed_models)
         status["coding"]["default_model_installed"] = (
             CODING_DEFAULT_MODEL in installed_models if CODING_DEFAULT_MODEL else None
+        )
+        status["coding"]["micro_model_installed"] = (
+            CODING_MICRO_MODEL in installed_models if CODING_MICRO_MODEL else None
         )
 
         if not status["infer"]["endpoint_reachable"]:
@@ -7964,7 +8004,11 @@ def _default_continue_model_routing() -> dict[str, Any]:
         'routes': {
             'coding': {
                 'model': CODING_DEFAULT_MODEL or 'qwen2.5-coder:3b',
-                'file': '.continue/models/coding-qwen2.5-coder-3b.yaml',
+                'file': CODING_MODEL_CONFIG_FILE,
+            },
+            CODING_MICRO_ROUTE: {
+                'model': CODING_MICRO_MODEL or DEFAULT_CODING_MICRO_MODEL,
+                'file': CODING_MICRO_MODEL_CONFIG_FILE,
             },
             'refactor': {
                 'model': 'phi4-mini:3.8b',
@@ -8218,6 +8262,8 @@ def _resolve_task_model_route(
     route: str,
     routing: dict[str, Any],
     requested_model: str = '',
+    prompt: str = '',
+    task_hint: str = '',
 ) -> dict[str, Any]:
     explicit_model = requested_model.strip()
     if explicit_model:
@@ -8227,6 +8273,33 @@ def _resolve_task_model_route(
             'file': '',
             'source': 'explicit_model',
         }
+
+    if route == 'coding':
+        hint_norm = str(task_hint or '').strip().lower()
+        selected_micro = hint_norm in MICRO_CODING_TASK_HINTS
+        selected_source = 'task_hint:micro_coding'
+        if not selected_micro:
+            normalized_prompt = re.sub(r'\s+', ' ', str(prompt or '').strip())
+            selected_micro = (
+                bool(normalized_prompt)
+                and len(normalized_prompt) <= CODING_MICRO_MAX_PROMPT_CHARS
+                and len(_extract_prompt_file_paths(str(prompt or ''), max_paths=3)) <= 1
+                and len(_infer_batch_from_prompt(str(prompt or ''))) < 2
+            )
+            if selected_micro:
+                selected_source = 'auto:short_coding_prompt'
+        if selected_micro:
+            routes_cfg = routing.get('routes', {}) if isinstance(routing.get('routes', {}), dict) else {}
+            selected = routes_cfg.get(CODING_MICRO_ROUTE, {}) if isinstance(routes_cfg.get(CODING_MICRO_ROUTE, {}), dict) else {}
+            selected_model = str(selected.get('model') or CODING_MICRO_MODEL or '').strip()
+            selected_file = str(selected.get('file') or CODING_MICRO_MODEL_CONFIG_FILE).strip()
+            if selected_model:
+                return {
+                    'route': route,
+                    'model': selected_model,
+                    'file': selected_file,
+                    'source': selected_source,
+                }
 
     router_cfg = routing.get('router', {}) if isinstance(routing.get('router', {}), dict) else {}
     router_model = str(router_cfg.get('model') or LOCAL_INFER_MODEL or CODING_DEFAULT_MODEL or 'local-default').strip()
@@ -8847,6 +8920,8 @@ def _task_infer(
         route=str(classification['route']),
         routing=routing,
         requested_model=model,
+        prompt=prompt,
+        task_hint=task,
     )
     memory_info = _build_task_memory_context(
         route=str(classification['route']),
@@ -9358,11 +9433,19 @@ class TaskRouterService:
             sandbox = _coding_sandbox_prepare(
                 sandbox_mode=sandbox_mode, sandbox_id=sandbox_id
             )
+            routing = _load_continue_model_routing()
+            resolved = _resolve_task_model_route(
+                route="coding",
+                routing=routing,
+                requested_model=model,
+                prompt=prompt,
+                task_hint=task,
+            )
             infer_result = local_infer(
                 prompt=prompt,
                 task="coding",
                 backend=backend,
-                model=model or CODING_DEFAULT_MODEL,
+                model=resolved["model"],
                 max_tokens=max_tokens,
                 temperature=temperature,
                 system=system,
@@ -9373,6 +9456,14 @@ class TaskRouterService:
                 "schema": "task_router.coding_infer.v1",
                 "infer": infer_result,
                 "check_requested": run_checks,
+                "routing": {
+                    "selected_route": resolved["route"],
+                    "selected_model": resolved["model"],
+                    "selected_model_file": resolved["file"],
+                    "selected_by": resolved["source"],
+                    "routing_loaded": routing.get("loaded", False),
+                    "routing_source": routing.get("source"),
+                },
                 "sandbox": sandbox,
                 "stdout": "",
                 "stderr": "",
@@ -9470,7 +9561,7 @@ def task_router(
     ] = "",
     task: Annotated[
         str,
-        Field(description="Task hint such as `general`, `coding`, `review`, or `security`; used for routing and fallback prompt shaping."),
+        Field(description="Task hint such as `general`, `coding`, `micro_coding`, `review`, or `security`; used for routing and fallback prompt shaping."),
     ] = "general",
     prefix: Annotated[
         str,

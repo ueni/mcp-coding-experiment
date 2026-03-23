@@ -145,8 +145,9 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
     def test_dockerfile_keeps_default_coding_model_and_preloads_it(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:3b", dockerfile)
-        self.assertIn("CONTINUE_OLLAMA_MODELS=qwen2.5-coder:3b,granite3.3:2b", dockerfile)
-        self.assertIn('ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b"', dockerfile)
+        self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
+        self.assertIn("CONTINUE_OLLAMA_MODELS=qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b", dockerfile)
+        self.assertIn('ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b"', dockerfile)
         self.assertIn('ollama pull "$model"', dockerfile)
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
         self.assertIn('cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/', dockerfile)
@@ -172,6 +173,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertIn("file: .continue/models/router-granite3.3-2b.yaml", routing, str(routing_path))
             self.assertIn("model: qwen2.5-coder:3b", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen2.5-coder-3b.yaml", routing, str(routing_path))
+            self.assertIn("model: qwen2.5-coder:1.5b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/coding-qwen2.5-coder-1.5b.yaml", routing, str(routing_path))
             self.assertIn("model: llama3.2:1b", routing, str(routing_path))
             self.assertIn("file: .continue/models/research-llama3.2-1b.yaml", routing, str(routing_path))
 
@@ -262,6 +265,8 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertEqual(out["ollama"]["installed_models_count"], 0)
         self.assertFalse(out["coding"]["default_model_installed"])
         self.assertFalse(out["coding"]["default_model_in_bootstrap_list"])
+        self.assertFalse(out["coding"]["micro_model_installed"])
+        self.assertFalse(out["coding"]["micro_model_in_bootstrap_list"])
         self.assertTrue(
             any("startup pre-pull is intentionally disabled" in msg for msg in out["diagnostics"])
         )
@@ -270,7 +275,7 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
     def test_local_model_status_reports_native_contract_and_installed_default(self):
         with patch.dict(
             os.environ,
-            {"CONTINUE_OLLAMA_MODELS": "qwen2.5-coder:3b,granite3.3:2b"},
+            {"CONTINUE_OLLAMA_MODELS": "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b"},
             clear=False,
         ), patch.object(self.server, "LOCAL_INFER_BACKEND", "endpoint"), patch.object(
             self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
@@ -302,4 +307,6 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertEqual(out["ollama"]["installed_models"], ["qwen2.5-coder:3b"])
         self.assertTrue(out["coding"]["default_model_installed"])
         self.assertTrue(out["coding"]["default_model_in_bootstrap_list"])
+        self.assertFalse(out["coding"]["micro_model_installed"])
+        self.assertTrue(out["coding"]["micro_model_in_bootstrap_list"])
         self.assertTrue(any("without /v1" in msg for msg in out["diagnostics"]))

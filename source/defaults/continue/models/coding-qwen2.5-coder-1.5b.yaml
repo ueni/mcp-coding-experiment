@@ -1,0 +1,13 @@
+name: coding-qwen2.5-coder-1.5b
+version: 0.0.1
+schema: v1
+models:
+  - name: Coding Micro - Qwen2.5 Coder 1.5B
+    provider: ollama
+    model: qwen2.5-coder:1.5b
+    apiBase: http://127.0.0.1:2345
+    roles:
+      - chat
+      - edit
+      - apply
+      - autocomplete

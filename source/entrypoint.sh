@@ -8,7 +8,7 @@ set -euo pipefail
 
 umask 027
 
-DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:3b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
+DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
 
 is_truthy() {
   case "${1:-}" in
@@ -101,11 +101,17 @@ ensure_ollama_models_installed() {
     if [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
       echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' will not be pulled automatically while CONTINUE_OLLAMA_MODELS is empty." >&2
     fi
+    if [[ -n "${CODING_MICRO_MODEL:-}" ]]; then
+      echo "CODING_MICRO_MODEL='${CODING_MICRO_MODEL}' will not be pulled automatically while CONTINUE_OLLAMA_MODELS is empty." >&2
+    fi
     return 0
   fi
 
   if [[ -n "${CODING_DEFAULT_MODEL:-}" ]] && ! csv_has_model "${models_csv}" "${CODING_DEFAULT_MODEL}"; then
     echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' is not included in CONTINUE_OLLAMA_MODELS. Bootstrap will not guarantee the coding model is present." >&2
+  fi
+  if [[ -n "${CODING_MICRO_MODEL:-}" ]] && ! csv_has_model "${models_csv}" "${CODING_MICRO_MODEL}"; then
+    echo "CODING_MICRO_MODEL='${CODING_MICRO_MODEL}' is not included in CONTINUE_OLLAMA_MODELS. Auto-selected micro coding requests may need manual installation." >&2
   fi
 
   while IFS= read -r model_name; do
@@ -388,6 +394,7 @@ if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
   export OLLAMA_VULKAN=1
 fi
 CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:3b}"
+CODING_MICRO_MODEL="${CODING_MICRO_MODEL:-qwen2.5-coder:1.5b}"
 OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
 OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
