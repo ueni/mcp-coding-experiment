@@ -283,15 +283,61 @@ TASK_ROUTE_ALIASES = {
     "search": "research",
 }
 TASK_ROUTE_SYSTEM_PROMPTS = {
-    "general": "Interpret compact JSON input with keys r and q. q is the request. Answer directly and concisely.",
-    "coding": "Interpret compact JSON input with keys r and q. q is a coding task. Return implementation-focused output only.",
-    "refactor": "Interpret compact JSON input with keys r and q. q is a refactor task. Focus on cleaner structure with minimal churn.",
-    "review": "Interpret compact JSON input with keys r and q. q is a review task. Return concise findings first with file and line when possible.",
-    "security": "Interpret compact JSON input with keys r and q. q is a security task. Prioritize concrete vulnerabilities, exploitability, and fixes.",
-    "math": "Interpret compact JSON input with keys r and q. q is a math task. Return exact reasoning and the final result.",
-    "vision": "Interpret compact JSON input with keys r and q. q is a vision task. Focus on visible evidence only.",
-    "research": "Interpret compact JSON input with keys r and q. q is a research task. Return a concise factual synthesis.",
+    "general": "Interpret compact JSON input. q is the request, m is compact task memory when present, and k is retrieved repository context when present. Answer directly and concisely.",
+    "coding": "Interpret compact JSON input. q is a coding task, m is compact task memory when present, and k is retrieved repository context when present. Return implementation-focused output only.",
+    "refactor": "Interpret compact JSON input. q is a refactor task, m is compact task memory when present, and k is retrieved repository context when present. Focus on cleaner structure with minimal churn.",
+    "review": "Interpret compact JSON input. q is a review task, m is compact task memory when present, and k is retrieved repository context when present. Return concise findings first with file and line when possible.",
+    "security": "Interpret compact JSON input. q is a security task, m is compact task memory when present, and k is retrieved repository context when present. Prioritize concrete vulnerabilities, exploitability, and fixes.",
+    "math": "Interpret compact JSON input. q is a math task, m is compact task memory when present, and k is retrieved repository context when present. Return exact reasoning and the final result.",
+    "vision": "Interpret compact JSON input. q is a vision task, m is compact task memory when present, and k is retrieved repository context when present. Focus on visible evidence only.",
+    "research": "Interpret compact JSON input. q is a research task, m is compact task memory when present, and k is retrieved repository context when present. Return a concise factual synthesis.",
 }
+TASK_RETRIEVAL_STOPWORDS = {
+    "a",
+    "about",
+    "after",
+    "all",
+    "an",
+    "and",
+    "are",
+    "be",
+    "by",
+    "check",
+    "describe",
+    "explain",
+    "file",
+    "files",
+    "for",
+    "from",
+    "function",
+    "help",
+    "how",
+    "implement",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "please",
+    "repo",
+    "repository",
+    "show",
+    "summarize",
+    "task",
+    "that",
+    "the",
+    "this",
+    "to",
+    "what",
+    "with",
+}
+TASK_RETRIEVAL_CODE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".go", ".java", ".js", ".jsx", ".py", ".rb", ".rs", ".sh", ".ts", ".tsx"
+}
+TASK_RETRIEVAL_DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".odt", ".ods", ".odp"}
 
 mcp = FastMCP(
     "git-repo-manager",
@@ -8029,7 +8075,7 @@ def _classify_task_prompt(prompt: str, task: str = 'general') -> dict[str, Any]:
 
     task_norm = task.strip().lower()
     task_route = TASK_ROUTE_ALIASES.get(task_norm, '')
-    if task_route:
+    if task_route and task_route != 'general':
         bump(task_route, 8.0, f'task:{task_norm}')
 
     for route, terms in TASK_ROUTE_KEYWORDS.items():
@@ -8104,17 +8150,42 @@ def _classify_task_prompt(prompt: str, task: str = 'general') -> dict[str, Any]:
     }
 
 
+def _trim_task_context_block(text: Any, max_chars: int) -> str:
+    if max_chars < 1:
+        return ''
+    normalized = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+    normalized = '\n'.join(line.rstrip() for line in normalized.splitlines())
+    normalized = re.sub(r'\n{3,}', '\n\n', normalized).strip()
+    truncated, _ = _truncate_with_flag(normalized, max_chars=max_chars)
+    return truncated.strip()
+
+
+def _append_task_context_block(parts: list[str], piece: str, max_chars: int) -> None:
+    normalized = _trim_task_context_block(piece, max_chars=max_chars)
+    if not normalized:
+        return
+    current = '\n\n'.join(parts)
+    remaining = max_chars - len(current)
+    if parts:
+        remaining -= 2
+    if remaining < 32:
+        return
+    parts.append(_trim_task_context_block(normalized, max_chars=remaining))
+
+
 def _encode_task_prompt_packet(
     prompt: str,
     route: str,
     task: str = 'general',
     memory_session: str = '',
     memory_context: str = '',
+    retrieval_context: str = '',
 ) -> dict[str, Any]:
     normalized = re.sub(r'\s+', ' ', prompt.strip())
     task_norm = task.strip().lower()
     session_norm = _normalize_task_memory_session(memory_session)
     memory_text = _trim_task_inline_text(memory_context, max_chars=900)
+    retrieval_text = _trim_task_context_block(retrieval_context, max_chars=1400)
     packet = {
         'r': TASK_ROUTE_CODE_MAP.get(route, 'G'),
         'q': normalized,
@@ -8124,6 +8195,8 @@ def _encode_task_prompt_packet(
         packet['t'] = task_norm[:24]
     if memory_text:
         packet['m'] = memory_text
+    if retrieval_text:
+        packet['k'] = retrieval_text
     encoded_prompt = json.dumps(packet, ensure_ascii=True, separators=(',', ':'))
     return {
         'schema': 'task_prompt_packet.v1',
@@ -8132,6 +8205,8 @@ def _encode_task_prompt_packet(
         'route_code': packet['r'],
         'original_chars': len(prompt),
         'normalized_chars': len(normalized),
+        'memory_chars': len(memory_text),
+        'retrieval_chars': len(retrieval_text),
         'encoded_chars': len(encoded_prompt),
         'char_saving_vs_original': len(prompt) - len(encoded_prompt),
         'char_saving_vs_normalized': len(normalized) - len(encoded_prompt),
@@ -8494,6 +8569,263 @@ def _persist_task_memory(
     return state
 
 
+def _task_retrieval_terms(prompt: str, max_terms: int = 8) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in _extract_prompt_file_paths(prompt, max_paths=3):
+        for part in re.split(r'[^a-z0-9]+', Path(path).stem.lower()):
+            if len(part) < 3 or part in TASK_RETRIEVAL_STOPWORDS or part in seen:
+                continue
+            seen.add(part)
+            out.append(part)
+            if len(out) >= max_terms:
+                return out
+    for token in _tokenize_router_query(prompt):
+        if len(token) < 3 or token in TASK_RETRIEVAL_STOPWORDS or token.isdigit() or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+        if len(out) >= max_terms:
+            break
+    return out
+
+
+def _task_should_retrieve(prompt: str, route: str) -> bool:
+    if _extract_prompt_file_paths(prompt, max_paths=1):
+        return True
+    if route not in {'coding', 'refactor', 'review', 'security', 'research'}:
+        return False
+    return len(_task_retrieval_terms(prompt, max_terms=4)) >= 2
+
+
+def _task_retrieval_preview_from_path(
+    path: str,
+    source: str,
+    max_chars: int = 420,
+) -> dict[str, Any] | None:
+    file_path = _resolve_repo_path(path)
+    ext = file_path.suffix.lower()
+    try:
+        if ext in TASK_RETRIEVAL_DOCUMENT_SUFFIXES:
+            doc = read_document(path=path, max_chars=max_chars, output_profile='compact')
+            content = str(doc.get('text', '') or '')
+            return {
+                'source': source,
+                'kind': 'document',
+                'path': path,
+                'content': _trim_task_context_block(content, max_chars=max_chars),
+            }
+        if ext in TASK_RETRIEVAL_CODE_SUFFIXES:
+            snippet = read_snippet(path=path, start_line=1, end_line=60, output_profile='compact')
+            return {
+                'source': source,
+                'kind': 'path',
+                'path': path,
+                'start_line': snippet.get('start_line'),
+                'end_line': snippet.get('end_line'),
+                'content': _trim_task_context_block(snippet.get('content', ''), max_chars=max_chars),
+            }
+        if _is_likely_binary(file_path):
+            return None
+        text = read_file(path=path, max_bytes=min(MAX_READ_BYTES, max(4096, max_chars * 8)))
+        return {
+            'source': source,
+            'kind': 'path',
+            'path': path,
+            'content': _trim_task_context_block(text, max_chars=max_chars),
+        }
+    except Exception:
+        return None
+
+
+def _task_retrieval_preview_from_search_row(
+    row: dict[str, Any],
+    max_chars: int = 420,
+) -> dict[str, Any] | None:
+    kind = str(row.get('kind', '') or '').strip()
+    path = str(row.get('path', '') or '').strip()
+    if not kind or not path:
+        return None
+    score = float(row.get('local_score', row.get('score', 0.0)) or 0.0)
+    try:
+        if kind == 'symbol':
+            start_line = int(row.get('line_start') or 1)
+            end_line = int(row.get('line_end') or start_line)
+            snippet = read_snippet(
+                path=path,
+                start_line=start_line,
+                end_line=end_line,
+                context_before=2,
+                context_after=6,
+                output_profile='compact',
+            )
+            return {
+                'source': 'code_search',
+                'kind': kind,
+                'path': path,
+                'name': row.get('name'),
+                'score': score,
+                'start_line': snippet.get('start_line'),
+                'end_line': snippet.get('end_line'),
+                'content': _trim_task_context_block(snippet.get('content', ''), max_chars=max_chars),
+            }
+        if kind == 'text_match':
+            line = int(row.get('line') or 1)
+            snippet = read_snippet(
+                path=path,
+                start_line=line,
+                end_line=line,
+                context_before=2,
+                context_after=4,
+                output_profile='compact',
+            )
+            return {
+                'source': 'code_search',
+                'kind': kind,
+                'path': path,
+                'score': score,
+                'start_line': snippet.get('start_line'),
+                'end_line': snippet.get('end_line'),
+                'content': _trim_task_context_block(snippet.get('content', ''), max_chars=max_chars),
+            }
+        item = _task_retrieval_preview_from_path(path=path, source='code_search', max_chars=max_chars)
+        if item is None:
+            return None
+        item['score'] = score
+        item['kind'] = kind
+        return item
+    except Exception:
+        return None
+
+
+def _task_artifact_candidates(terms: list[str], max_items: int = 3) -> list[dict[str, Any]]:
+    if not terms:
+        return []
+    index_path = _resolve_repo_path(str(ARTIFACT_INDEX_FILE))
+    if not index_path.is_file():
+        return []
+    try:
+        payload = json.loads(index_path.read_text(encoding='utf-8'))
+    except Exception:
+        return []
+    rows = payload.get('artifacts', [])
+    if not isinstance(rows, list):
+        return []
+    scored: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get('path', '') or '').replace('\\', '/')
+        if not path:
+            continue
+        low = path.lower()
+        score = 0.0
+        for term in terms:
+            if term in low:
+                score += 2.0
+        if score <= 0:
+            continue
+        scored.append({'path': path, 'score': score})
+    scored.sort(key=lambda item: (item['score'], item['path']), reverse=True)
+    return scored[:max_items]
+
+
+def _build_task_retrieval_context(
+    prompt: str,
+    route: str,
+    max_items: int = 4,
+    max_chars: int = 1400,
+) -> dict[str, Any]:
+    if not _task_should_retrieve(prompt, route):
+        return {
+            'enabled': False,
+            'route': route,
+            'query': '',
+            'item_count': 0,
+            'context_chars': 0,
+            'context': '',
+            'sources': {},
+            'items': [],
+            'errors': [],
+        }
+
+    terms = _task_retrieval_terms(prompt, max_terms=8)
+    query = ' '.join(terms)[:120] or prompt.strip()[:120]
+    items: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    seen: set[tuple[str, Any, Any]] = set()
+
+    def add_item(item: dict[str, Any] | None) -> None:
+        if not item or len(items) >= max_items:
+            return
+        key = (str(item.get('path', '')), item.get('start_line'), item.get('end_line'))
+        if key in seen:
+            return
+        seen.add(key)
+        items.append(item)
+
+    for path in _extract_prompt_file_paths(prompt, max_paths=2):
+        add_item(_task_retrieval_preview_from_path(path=path, source='explicit_path', max_chars=420))
+
+    if len(items) < max_items and query:
+        try:
+            search = semantic_find(
+                query=query,
+                path='.',
+                max_results=max(max_items * 2, 6),
+                output_profile='normal',
+                summary_mode='quick',
+                use_local_rerank=True,
+                local_rerank_top_k=max(8, max_items * 3),
+            )
+            for row in search.get('results', []) if isinstance(search, dict) else []:
+                if not isinstance(row, dict):
+                    continue
+                add_item(_task_retrieval_preview_from_search_row(row=row, max_chars=420))
+                if len(items) >= max_items:
+                    break
+        except Exception as exc:
+            errors.append({'source': 'semantic_find', 'error': str(exc)})
+
+    wants_artifacts = route == 'research' or any(
+        needle in prompt.lower() for needle in ('report', 'artifact', 'baseline', 'snapshot', '.codebase-tooling-mcp')
+    )
+    if wants_artifacts and len(items) < max_items:
+        for row in _task_artifact_candidates(terms, max_items=max_items * 2):
+            item = _task_retrieval_preview_from_path(path=row['path'], source='artifact_index', max_chars=360)
+            if item is None:
+                continue
+            item['score'] = row['score']
+            add_item(item)
+            if len(items) >= max_items:
+                break
+
+    parts: list[str] = []
+    source_counts: dict[str, int] = {}
+    for item in items:
+        source = str(item.get('source', 'unknown') or 'unknown')
+        source_counts[source] = source_counts.get(source, 0) + 1
+        header = f'[{source}] {item.get("path", "")}'
+        if item.get('name'):
+            header += f'::{item["name"]}'
+        if item.get('start_line') and item.get('end_line'):
+            header += f':{item["start_line"]}-{item["end_line"]}'
+        block = f'{header}\n{item.get("content", "")}'.strip()
+        _append_task_context_block(parts, block, max_chars=max_chars)
+    context = '\n\n'.join(parts)
+    return {
+        'enabled': True,
+        'route': route,
+        'query': query,
+        'item_count': len(items),
+        'context_chars': len(context),
+        'context': context,
+        'sources': source_counts,
+        'items': items,
+        'errors': errors[:4],
+    }
+
+
 def _task_infer(
     prompt: str,
     task: str = 'general',
@@ -8520,12 +8852,17 @@ def _task_infer(
         route=str(classification['route']),
         memory_session=memory_session,
     )
+    retrieval_info = _build_task_retrieval_context(
+        prompt=prompt,
+        route=str(classification['route']),
+    )
     encoded = _encode_task_prompt_packet(
         prompt=prompt,
         route=str(classification['route']),
         task=task,
         memory_session=str(memory_info['memory_session']),
         memory_context=str(memory_info['context']),
+        retrieval_context=str(retrieval_info['context']),
     )
     effective_system = system or TASK_ROUTE_SYSTEM_PROMPTS.get(
         str(classification['route']),
@@ -8560,6 +8897,7 @@ def _task_infer(
             **memory_info,
             'forced': True,
         },
+        'retrieval': retrieval_info,
         'infer': infer,
     }
     if profile == 'compact':
@@ -8573,6 +8911,8 @@ def _task_infer(
             'char_saving_vs_original': encoded['char_saving_vs_original'],
             'memory_session': memory_info['memory_session'],
             'memory_chars': memory_info['context_chars'],
+            'retrieval_count': retrieval_info['item_count'],
+            'retrieval_chars': retrieval_info['context_chars'],
             'ok': task_ok,
             'output': infer.get('output', ''),
         }

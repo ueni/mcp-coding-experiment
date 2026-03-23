@@ -436,6 +436,52 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["task"], "security")
         self.assertEqual(linf.call_args.kwargs["model"], "deepseek-r1:1.5b")
 
+    def test_task_router_task_includes_retrieval_context(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "phi4-mini-reasoning:3.8b",
+            "ok": True,
+            "output": "review findings",
+        }
+        search_payload = {
+            "schema": "semantic_find.quick.v1",
+            "query": "sample alpha behavior regressions",
+            "count": 1,
+            "results": [
+                {
+                    "kind": "symbol",
+                    "path": "src/sample.py",
+                    "name": "alpha",
+                    "line_start": 4,
+                    "line_end": 6,
+                    "score": 7.0,
+                }
+            ],
+        }
+        snippet_payload = {
+            "path": "src/sample.py",
+            "start_line": 2,
+            "end_line": 10,
+            "content": "def alpha():\n    return 'alpha'\n",
+        }
+        with patch.object(self.server, "semantic_find", return_value=search_payload), patch.object(
+            self.server, "read_snippet", return_value=snippet_payload
+        ), patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.task_router(
+                mode="task",
+                prompt="Review sample alpha behavior for regressions.",
+                backend="fallback",
+                output_profile="normal",
+            )
+        packet = json.loads(out["encoding"]["encoded_prompt"])
+        self.assertIn("k", packet)
+        self.assertIn("src/sample.py", packet["k"])
+        self.assertIn("def alpha()", packet["k"])
+        self.assertEqual(out["retrieval"]["item_count"], 1)
+        self.assertEqual(out["retrieval"]["sources"]["code_search"], 1)
+        self.assertEqual(out["retrieval"]["items"][0]["path"], "src/sample.py")
+
     def test_task_router_defaults_to_task_mode(self):
         infer_payload = {
             "schema": "local_infer.v1",
