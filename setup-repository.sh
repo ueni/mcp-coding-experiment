@@ -86,22 +86,24 @@ if [ "$ENABLE_VULKAN_GPU" = auto ]; then
   fi
 fi
 
-DEVCONTAINER_GPU_BLOCK=""
+DEVCONTAINER_RUNARGS_BLOCK='  "runArgs": [
+    "--security-opt=seccomp=unconfined",
+    "--security-opt=apparmor=unconfined"'
 DEVCONTAINER_GPU_ENV_BLOCK=""
 if [ "$ENABLE_VULKAN_GPU" = true ]; then
-  DEVCONTAINER_GPU_BLOCK='  "runArgs": [
-    "--device=/dev/dri"'
+  DEVCONTAINER_RUNARGS_BLOCK="${DEVCONTAINER_RUNARGS_BLOCK},
+    \"--device=/dev/dri\""
   if [ -e /dev/kfd ]; then
-    DEVCONTAINER_GPU_BLOCK="${DEVCONTAINER_GPU_BLOCK},
+    DEVCONTAINER_RUNARGS_BLOCK="${DEVCONTAINER_RUNARGS_BLOCK},
     \"--device=/dev/kfd\""
   fi
-  DEVCONTAINER_GPU_BLOCK="${DEVCONTAINER_GPU_BLOCK}
-  ],"
   DEVCONTAINER_GPU_ENV_BLOCK='    "OLLAMA_VULKAN": "1",'
   if [ ! -e /dev/dri ]; then
     log "Warning: Vulkan GPU passthrough was forced on, but /dev/dri is not present on this host."
   fi
 fi
+DEVCONTAINER_RUNARGS_BLOCK="${DEVCONTAINER_RUNARGS_BLOCK}
+  ],"
 
 ensure_gitignore_entry() {
   entry=$1
@@ -126,7 +128,7 @@ cat > .devcontainer/devcontainer.json <<EOF
   "remoteUser": "app",
   "containerUser": "root",
   "workspaceFolder": "/repo",
-${DEVCONTAINER_GPU_BLOCK}
+${DEVCONTAINER_RUNARGS_BLOCK}
   "containerEnv": {
     "DOCKER_HOST": "unix:///var/run/docker.sock",
     "DOCKER_CONFIG": "/home/app/.docker",

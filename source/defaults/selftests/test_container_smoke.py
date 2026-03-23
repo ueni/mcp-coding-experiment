@@ -30,5 +30,17 @@ class ContainerSmokeTests(unittest.TestCase):
         self.assertIsNotNone(shutil.which("vulkaninfo"))
 
 
+    def test_unprivileged_user_namespaces_work_for_nested_sandboxes(self) -> None:
+        unshare = shutil.which("unshare")
+        self.assertIsNotNone(unshare)
+        result = subprocess.run(
+            [unshare, "-Ur", "true"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr.strip() or result.stdout.strip())
+
+
 if __name__ == "__main__":
     unittest.main()

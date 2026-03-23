@@ -76,6 +76,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             )
 
         self.assertEqual([8000, 2345], config["forwardPorts"])
+        self.assertIn("--security-opt=seccomp=unconfined", config.get("runArgs", []))
+        self.assertIn("--security-opt=apparmor=unconfined", config.get("runArgs", []))
         self.assertEqual("0.0.0.0:2345", config["containerEnv"]["OLLAMA_HOST"])
         self.assertEqual(
             "0.0.0.0:2345", config["containerEnv"]["OLLAMA_FALLBACK_HOST"]
@@ -125,6 +127,20 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertNotIn("[mcp_servers.codebase_tooling_mcp]", config_toml)
         self.assertIn('[mcp_servers."codebase-tooling-mcp"]', default_config_toml)
         self.assertNotIn("[mcp_servers.codebase_tooling_mcp]", default_config_toml)
+        self.assertNotIn('sandbox_mode = "danger-full-access"', config_toml)
+        self.assertNotIn('sandbox_mode = "danger-full-access"', default_config_toml)
+
+    def test_devcontainer_relaxes_security_profile_for_nested_client_sandboxes(self):
+        config = json.loads(
+            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("--security-opt=seccomp=unconfined", config.get("runArgs", []))
+        self.assertIn("--security-opt=apparmor=unconfined", config.get("runArgs", []))
+
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertNotIn("configure_codex_inner_sandbox", entrypoint)
+        self.assertNotIn("CODEX_DISABLE_INNER_SANDBOX", entrypoint)
+        self.assertNotIn('sandbox_mode = "danger-full-access"', entrypoint)
 
     def test_dockerfile_keeps_default_coding_model_and_preloads_it(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")

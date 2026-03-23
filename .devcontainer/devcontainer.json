@@ -9,6 +9,8 @@
   "containerUser": "root",
   "workspaceFolder": "/repo",
   "runArgs": [
+    "--security-opt=seccomp=unconfined",
+    "--security-opt=apparmor=unconfined",
     "--device=/dev/dri"
   ],
   "containerEnv": {

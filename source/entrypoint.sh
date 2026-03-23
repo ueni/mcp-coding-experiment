@@ -340,6 +340,7 @@ url = "http://localhost:8000/mcp"
     fi
   fi
 
+
   mkdir -p /repo/.config/labs
   while IFS= read -r config_path; do
     config_name=$(basename "${config_path}")
