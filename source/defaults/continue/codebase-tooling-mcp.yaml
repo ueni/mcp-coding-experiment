@@ -5,3 +5,5 @@ mcpServers:
   - name: codebase-tooling-mcp
     type: streamable-http
     url: http://localhost:8000/mcp
+    requestOptions:
+      timeout: 300000
