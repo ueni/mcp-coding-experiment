@@ -29,11 +29,12 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertIn(f"apiBase: {NATIVE_OLLAMA_BASE}", text, str(path))
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
 
-    def test_devcontainer_does_not_disable_ollama_bootstrap(self):
+    def test_devcontainer_does_not_override_default_ollama_model_policy(self):
         config = json.loads(
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
         )
         self.assertNotIn("CONTINUE_OLLAMA_MODELS", config["containerEnv"])
+        self.assertNotIn("OLLAMA_ALLOW_PULL", config["containerEnv"])
 
     def test_devcontainer_mounts_host_docker_config_for_container_use(self):
         config = json.loads(
@@ -146,8 +147,14 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:3b", dockerfile)
         self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
-        self.assertIn("CONTINUE_OLLAMA_MODELS=qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b", dockerfile)
-        self.assertIn('ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b"', dockerfile)
+        full_default_models = (
+            "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,"
+            "phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,"
+            "granite3.2-vision:2b,llama3.2:1b"
+        )
+        self.assertIn(f"CONTINUE_OLLAMA_MODELS={full_default_models}", dockerfile)
+        self.assertIn(f'ARG OLLAMA_PRELOAD_MODELS="{full_default_models}"', dockerfile)
+        self.assertIn("OLLAMA_ALLOW_PULL=false", dockerfile)
         self.assertIn('ollama pull "$model"', dockerfile)
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
         self.assertIn('cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/', dockerfile)
@@ -219,6 +226,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("seed_ollama_models_from_image_preload()", entrypoint)
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', entrypoint)
         self.assertIn('cp -an "${image_models_dir}/." "${OLLAMA_MODELS}/"', entrypoint)
+        self.assertIn('OLLAMA_ALLOW_PULL="${OLLAMA_ALLOW_PULL:-false}"', entrypoint)
+        self.assertIn("OLLAMA_ALLOW_PULL=false; refusing runtime download", entrypoint)
         self.assertIn("maybe_fix_gpu_device_groups()", entrypoint)
         self.assertIn("/dev/dri/renderD*", entrypoint)
         self.assertIn("/dev/dri/card*", entrypoint)
@@ -262,20 +271,24 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertTrue(out["infer"]["endpoint_reachable"])
         self.assertFalse(out["infer"]["openai_compat_base_reachable"])
         self.assertFalse(out["ollama"]["bootstrap_enabled"])
+        self.assertFalse(out["ollama"]["runtime_pull_enabled"])
         self.assertEqual(out["ollama"]["installed_models_count"], 0)
         self.assertFalse(out["coding"]["default_model_installed"])
         self.assertFalse(out["coding"]["default_model_in_bootstrap_list"])
         self.assertFalse(out["coding"]["micro_model_installed"])
         self.assertFalse(out["coding"]["micro_model_in_bootstrap_list"])
         self.assertTrue(
-            any("startup pre-pull is intentionally disabled" in msg for msg in out["diagnostics"])
+            any("no default bundled model set is declared" in msg for msg in out["diagnostics"])
         )
         self.assertTrue(any("without /v1" in msg for msg in out["diagnostics"]))
 
     def test_local_model_status_reports_native_contract_and_installed_default(self):
         with patch.dict(
             os.environ,
-            {"CONTINUE_OLLAMA_MODELS": "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b"},
+            {
+                "CONTINUE_OLLAMA_MODELS": "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b",
+                "OLLAMA_ALLOW_PULL": "false",
+            },
             clear=False,
         ), patch.object(self.server, "LOCAL_INFER_BACKEND", "endpoint"), patch.object(
             self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
@@ -304,6 +317,7 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertEqual(out["infer"]["native_api_base"], NATIVE_OLLAMA_BASE)
         self.assertEqual(out["infer"]["openai_compat_base"], f"{NATIVE_OLLAMA_BASE}/v1/")
         self.assertTrue(out["ollama"]["bootstrap_enabled"])
+        self.assertFalse(out["ollama"]["runtime_pull_enabled"])
         self.assertEqual(out["ollama"]["installed_models"], ["qwen2.5-coder:3b"])
         self.assertTrue(out["coding"]["default_model_installed"])
         self.assertTrue(out["coding"]["default_model_in_bootstrap_list"])

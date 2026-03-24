@@ -93,47 +93,55 @@ start_ollama_with_host() {
 
 ensure_ollama_models_installed() {
   local models_csv="${CONTINUE_OLLAMA_MODELS-${DEFAULT_CONTINUE_OLLAMA_MODELS}}"
+  local allow_pull="${OLLAMA_ALLOW_PULL:-false}"
   local model_name=""
   local missing_models=()
 
   if [[ -z "${models_csv// }" ]]; then
-    echo "CONTINUE_OLLAMA_MODELS is empty; skipping Ollama model pre-pull. This is an explicit opt-out, so Continue may report 'model not found' until models are installed manually." >&2
+    echo "CONTINUE_OLLAMA_MODELS is empty; no default bundled Ollama model set is declared." >&2
+    if ! is_truthy "${allow_pull}"; then
+      echo "OLLAMA_ALLOW_PULL=false; runtime model downloads remain disabled." >&2
+    fi
     if [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
-      echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' will not be pulled automatically while CONTINUE_OLLAMA_MODELS is empty." >&2
+      echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' will not be guaranteed while CONTINUE_OLLAMA_MODELS is empty." >&2
     fi
     if [[ -n "${CODING_MICRO_MODEL:-}" ]]; then
-      echo "CODING_MICRO_MODEL='${CODING_MICRO_MODEL}' will not be pulled automatically while CONTINUE_OLLAMA_MODELS is empty." >&2
+      echo "CODING_MICRO_MODEL='${CODING_MICRO_MODEL}' will not be guaranteed while CONTINUE_OLLAMA_MODELS is empty." >&2
     fi
     return 0
   fi
 
   if [[ -n "${CODING_DEFAULT_MODEL:-}" ]] && ! csv_has_model "${models_csv}" "${CODING_DEFAULT_MODEL}"; then
-    echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' is not included in CONTINUE_OLLAMA_MODELS. Bootstrap will not guarantee the coding model is present." >&2
+    echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' is not included in CONTINUE_OLLAMA_MODELS. The image will not guarantee the coding model is present." >&2
   fi
   if [[ -n "${CODING_MICRO_MODEL:-}" ]] && ! csv_has_model "${models_csv}" "${CODING_MICRO_MODEL}"; then
-    echo "CODING_MICRO_MODEL='${CODING_MICRO_MODEL}' is not included in CONTINUE_OLLAMA_MODELS. Auto-selected micro coding requests may need manual installation." >&2
+    echo "CODING_MICRO_MODEL='${CODING_MICRO_MODEL}' is not included in CONTINUE_OLLAMA_MODELS. The image will not guarantee the micro coding model is present." >&2
   fi
 
   while IFS= read -r model_name; do
     if ollama show "${model_name}" >/dev/null 2>&1; then
       continue
     fi
-    ollama pull "${model_name}"
-  done < <(iter_ollama_models "${models_csv}")
-
-  while IFS= read -r model_name; do
+    if is_truthy "${allow_pull}"; then
+      echo "pulling missing Ollama model '${model_name}' because OLLAMA_ALLOW_PULL=${allow_pull}" >&2
+      ollama pull "${model_name}"
+    fi
     if ! ollama show "${model_name}" >/dev/null 2>&1; then
       missing_models+=("${model_name}")
     fi
   done < <(iter_ollama_models "${models_csv}")
 
   if [[ ${#missing_models[@]} -gt 0 ]]; then
-    echo "Missing Ollama models after bootstrap: ${missing_models[*]}" >&2
+    if is_truthy "${allow_pull}"; then
+      echo "Missing Ollama models after runtime pull attempt: ${missing_models[*]}" >&2
+    else
+      echo "Missing bundled Ollama models with OLLAMA_ALLOW_PULL=false: ${missing_models[*]}" >&2
+    fi
     return 1
   fi
 
   if [[ -n "${CODING_DEFAULT_MODEL:-}" ]] && ! ollama show "${CODING_DEFAULT_MODEL}" >/dev/null 2>&1; then
-    echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' is unavailable after Ollama bootstrap." >&2
+    echo "CODING_DEFAULT_MODEL='${CODING_DEFAULT_MODEL}' is unavailable after Ollama model verification." >&2
     return 1
   fi
 
@@ -147,6 +155,10 @@ ensure_ollama_model_installed() {
   fi
   if ollama show "${model_name}" >/dev/null 2>&1; then
     return 0
+  fi
+  if ! is_truthy "${OLLAMA_ALLOW_PULL:-false}"; then
+    echo "OLLAMA_ALLOW_PULL=false; refusing runtime download of missing Ollama model '${model_name}'." >&2
+    return 1
   fi
   ollama pull "${model_name}"
   ollama show "${model_name}" >/dev/null 2>&1
@@ -400,6 +412,7 @@ OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
 OLLAMA_FALLBACK_HOST="${OLLAMA_FALLBACK_HOST:-0.0.0.0:11434}"
 OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-true}"
+OLLAMA_ALLOW_PULL="${OLLAMA_ALLOW_PULL:-false}"
 OLLAMA_STARTUP_TIMEOUT="$(sanitize_positive_int "${OLLAMA_STARTUP_TIMEOUT}" 30 "OLLAMA_STARTUP_TIMEOUT")"
 
 apply_repo_defaults
@@ -424,9 +437,9 @@ if is_truthy "${OLLAMA_ENABLED}"; then
     echo "continuing without Ollama" >&2
   else
     if is_truthy "${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL}" && [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
-      echo "ensuring default Ollama model '${CODING_DEFAULT_MODEL}' before server startup" >&2
+      echo "ensuring default Ollama model '${CODING_DEFAULT_MODEL}' is available before server startup" >&2
       if ! ensure_ollama_model_installed "${CODING_DEFAULT_MODEL}"; then
-        echo "failed to install default Ollama model '${CODING_DEFAULT_MODEL}' before server startup" >&2
+        echo "failed to ensure default Ollama model '${CODING_DEFAULT_MODEL}' is available before server startup" >&2
         echo "continuing with running Ollama and current model set" >&2
       fi
     fi
@@ -436,7 +449,7 @@ if is_truthy "${OLLAMA_ENABLED}"; then
         echo "continuing with running Ollama and current model set" >&2
       fi
     ) &
-    echo "ollama model ensure running in background" >&2
+    echo "ollama model availability check running in background (OLLAMA_ALLOW_PULL=${OLLAMA_ALLOW_PULL})" >&2
   fi
 else
   echo "OLLAMA_ENABLED=false; skipping Ollama startup" >&2

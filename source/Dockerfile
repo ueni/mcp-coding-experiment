@@ -11,7 +11,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG APP_UID=1000
 ARG APP_GID=1000
 ARG OLLAMA_VERSION=0.18.2
-ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b"
+ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
 
@@ -41,6 +41,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CODING_MICRO_MODEL=qwen2.5-coder:1.5b \
     CODING_MICRO_MAX_PROMPT_CHARS=600 \
     CONTINUE_OLLAMA_MODELS=qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b \
+    OLLAMA_ALLOW_PULL=false \
     OLLAMA_PRELOAD_MODELS=${OLLAMA_PRELOAD_MODELS} \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOST_CA_CERT_FILE= \

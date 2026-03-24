@@ -7449,13 +7449,19 @@ def diagram_sync_check(
 
 
 def local_model_status() -> dict[str, Any]:
-    """Report local model configuration, bootstrap contract, and endpoint availability."""
+    """Report local model configuration, bundled-model contract, and endpoint availability."""
     coding_python = Path(CODING_VENV_PYTHON)
     bootstrap_models_raw = os.getenv(
         "CONTINUE_OLLAMA_MODELS",
         DEFAULT_CONTINUE_OLLAMA_MODELS,
     )
     bootstrap_models = _parse_model_csv(bootstrap_models_raw)
+    runtime_pull_enabled = os.getenv("OLLAMA_ALLOW_PULL", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     native_api_base = _ollama_native_base_url()
     openai_compat_base = _ollama_openai_base_url()
     status: dict[str, Any] = {
@@ -7490,6 +7496,7 @@ def local_model_status() -> dict[str, Any]:
             "api_contract": "native_ollama",
             "bootstrap_enabled": bool(bootstrap_models),
             "bootstrap_models": bootstrap_models,
+            "runtime_pull_enabled": runtime_pull_enabled,
             "installed_models": [],
             "installed_models_count": 0,
         },
@@ -7532,12 +7539,17 @@ def local_model_status() -> dict[str, Any]:
         else:
             if not installed_models:
                 if status["ollama"]["bootstrap_enabled"]:
-                    diagnostics.append(
-                        "Ollama is reachable but no models are installed. Startup pre-pull did not produce any available models."
-                    )
+                    if runtime_pull_enabled:
+                        diagnostics.append(
+                            "Ollama is reachable but no models are installed. The default model set declared by CONTINUE_OLLAMA_MODELS is missing and runtime pulls are enabled."
+                        )
+                    else:
+                        diagnostics.append(
+                            "Ollama is reachable but no models are installed. The default model set declared by CONTINUE_OLLAMA_MODELS is missing, and OLLAMA_ALLOW_PULL=false prevents runtime downloads."
+                        )
                 else:
                     diagnostics.append(
-                        "Ollama is reachable but no models are installed. CONTINUE_OLLAMA_MODELS is empty, so startup pre-pull is intentionally disabled."
+                        "Ollama is reachable but no models are installed. CONTINUE_OLLAMA_MODELS is empty, so no default bundled model set is declared."
                     )
             if CODING_DEFAULT_MODEL and CODING_DEFAULT_MODEL not in installed_models:
                 diagnostics.append(
@@ -9228,7 +9240,7 @@ def _summarize_file_two_sentences(rel_path: str, text: str, max_chars: int) -> s
     if low_path.endswith("source/entrypoint.sh"):
         return _compact_sentences(
             "source/entrypoint.sh bootstraps runtime defaults, user environment setup, and repository config initialization before launching the server. "
-            "It manages Ollama startup with host fallback, optional model pre-pull, and validated startup timeout settings.",
+            "It manages Ollama startup with host fallback, image-seeded default models, optional runtime pulls only when explicitly enabled, and validated startup timeout settings.",
             max_sentences=2,
             max_chars=max_chars,
         )
