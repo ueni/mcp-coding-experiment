@@ -25,13 +25,27 @@ jobs:
 
       - name: Run tests with coverage in container
         run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            --volume "${GITHUB_WORKSPACE}:/work" \
-            --workdir /work \
+          CONTAINER_NAME="codebase-tooling-mcp-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true' EXIT
+
+          docker create \
+            --name "${CONTAINER_NAME}" \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --env HOME=/home/app \
+            --env USER=app \
+            --env LOGNAME=app \
+            --env REPO_PATH=/tmp/work \
+            --env COVERAGE_FILE=/tmp/.coverage \
+            --volume "${GITHUB_WORKSPACE}:/src:ro" \
+            --workdir /tmp/work \
             --entrypoint /bin/bash \
             "${TEST_IMAGE}" \
-            -lc 'coverage run -m pytest && coverage report -m && coverage xml -o coverage.xml && coverage json -o coverage.json'
+            -lc 'mkdir -p /tmp/work && cp -R /src/. /tmp/work/ && cd /tmp/work && coverage run -m pytest -p no:cacheprovider && coverage report -m && coverage xml -o /tmp/coverage.xml && coverage json -o /tmp/coverage.json'
+
+          docker start -a "${CONTAINER_NAME}"
+          docker cp "${CONTAINER_NAME}:/tmp/coverage.xml" "${GITHUB_WORKSPACE}/coverage.xml"
+          docker cp "${CONTAINER_NAME}:/tmp/coverage.json" "${GITHUB_WORKSPACE}/coverage.json"
 
       - name: Warn on low coverage
         run: |
