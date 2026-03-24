@@ -190,6 +190,86 @@ CODING_SANDBOX_ROOT = Path(
     os.getenv("CODING_SANDBOX_ROOT", ".codebase-tooling-mcp/sandboxes/coding")
 )
 SAFE_COMMANDS = {"rg", "find", "sed", "awk", "jq", "git", "pytest", "reuse", "cat"}
+SAFE_INLINE_PYTHON_BINARIES = {"python", "python3"}
+SAFE_INLINE_PYTHON_ALLOWED_MODULES = {
+    "base64",
+    "collections",
+    "datetime",
+    "decimal",
+    "fractions",
+    "functools",
+    "hashlib",
+    "itertools",
+    "json",
+    "math",
+    "re",
+    "statistics",
+    "string",
+    "textwrap",
+}
+SAFE_INLINE_PYTHON_BLOCKED_NAMES = {
+    "__import__",
+    "breakpoint",
+    "builtins",
+    "compile",
+    "ctypes",
+    "eval",
+    "exec",
+    "help",
+    "importlib",
+    "input",
+    "marshal",
+    "multiprocessing",
+    "open",
+    "os",
+    "pathlib",
+    "pickle",
+    "resource",
+    "shutil",
+    "signal",
+    "socket",
+    "subprocess",
+    "sys",
+    "tempfile",
+    "threading",
+}
+SAFE_INLINE_PYTHON_BLOCKED_ATTRS = {
+    "Popen",
+    "call",
+    "check_call",
+    "check_output",
+    "chmod",
+    "chown",
+    "execv",
+    "execve",
+    "fork",
+    "forkpty",
+    "kill",
+    "link_to",
+    "makedirs",
+    "mkdir",
+    "open",
+    "popen",
+    "putenv",
+    "remove",
+    "rename",
+    "replace",
+    "rmdir",
+    "run",
+    "spawnl",
+    "spawnlp",
+    "spawnv",
+    "spawnvp",
+    "symlink_to",
+    "system",
+    "touch",
+    "truncate",
+    "unlink",
+    "write",
+    "write_bytes",
+    "write_text",
+}
+SAFE_INLINE_PYTHON_MAX_CHARS = 800
 SAFE_GIT_SUBCOMMANDS = {
     "status",
     "diff",
@@ -1938,6 +2018,9 @@ def _resolve_safe_command_target(command: list[str]) -> tuple[str, list[str]]:
 
 def _validate_safe_command(command: list[str]) -> None:
     binary, args = _resolve_safe_command_target(command)
+    if binary in SAFE_INLINE_PYTHON_BINARIES:
+        _validate_safe_inline_python(binary, args)
+        return
     if binary not in SAFE_COMMANDS:
         raise ValueError(f"command not allowed: {binary}")
     if binary == "git":
@@ -1953,6 +2036,62 @@ def _validate_safe_command(command: list[str]) -> None:
         script = args[0] if args else ""
         if "system(" in script:
             raise ValueError("awk system() is not allowed")
+
+
+def _safe_inline_python_error(binary: str, reason: str) -> ValueError:
+    return ValueError(f"command not allowed: {binary} ({reason})")
+
+
+def _ast_dotted_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _ast_dotted_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _validate_safe_inline_python(binary: str, args: list[str]) -> None:
+    if len(args) != 2 or args[0] != "-c":
+        raise _safe_inline_python_error(binary, "only inline -c code is allowlisted")
+    code = str(args[1]).strip()
+    if not code:
+        raise _safe_inline_python_error(binary, "inline code must not be empty")
+    if len(code) > SAFE_INLINE_PYTHON_MAX_CHARS:
+        raise _safe_inline_python_error(
+            binary,
+            f"inline code exceeds {SAFE_INLINE_PYTHON_MAX_CHARS} characters",
+        )
+    try:
+        tree = ast.parse(code, mode="exec")
+    except SyntaxError as exc:
+        raise _safe_inline_python_error(binary, f"invalid inline code: {exc.msg}") from exc
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root not in SAFE_INLINE_PYTHON_ALLOWED_MODULES:
+                    raise _safe_inline_python_error(binary, f"module not allowed: {root}")
+            continue
+        if isinstance(node, ast.ImportFrom):
+            if node.level != 0 or not node.module:
+                raise _safe_inline_python_error(binary, "relative imports are not allowed")
+            root = node.module.split(".", 1)[0]
+            if root not in SAFE_INLINE_PYTHON_ALLOWED_MODULES:
+                raise _safe_inline_python_error(binary, f"module not allowed: {root}")
+            continue
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("__") or node.attr in SAFE_INLINE_PYTHON_BLOCKED_ATTRS:
+                raise _safe_inline_python_error(binary, f"attribute not allowed: {node.attr}")
+            continue
+        if isinstance(node, ast.Name) and node.id in SAFE_INLINE_PYTHON_BLOCKED_NAMES:
+            raise _safe_inline_python_error(binary, f"name not allowed: {node.id}")
+        if isinstance(node, ast.Call):
+            call_name = _ast_dotted_name(node.func)
+            leaf = call_name.rsplit(".", 1)[-1] if call_name else ""
+            if leaf in SAFE_INLINE_PYTHON_BLOCKED_NAMES or leaf in SAFE_INLINE_PYTHON_BLOCKED_ATTRS:
+                raise _safe_inline_python_error(binary, f"call not allowed: {call_name or leaf}")
 
 
 def _approval_points_load() -> dict[str, Any]:

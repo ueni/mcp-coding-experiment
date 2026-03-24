@@ -128,6 +128,34 @@ class ServerExecutionCoverageTest(ServerToolsTestBase):
         self.assertEqual(out["suggested_command"], "env MODE=test python script.py")
         self.assertIn("command not allowed: python", out["stderr"])
 
+    def test_command_runner_allows_safe_inline_python(self):
+        proc = subprocess.CompletedProcess(
+            args=["python3", "-c", "import json; print(json.dumps({'ok': True}, sort_keys=True))"],
+            returncode=0,
+            stdout='{"ok": true}\n',
+            stderr="",
+        )
+        with patch.object(self.server.subprocess, "run", return_value=proc) as run_mock:
+            out = self.server.command_runner(
+                command=["python3", "-c", "import json; print(json.dumps({'ok': True}, sort_keys=True))"],
+                timeout_seconds=5,
+            )
+        run_mock.assert_called_once()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["exit_code"], 0)
+        self.assertEqual(out["stdout"], '{"ok": true}\n')
+
+    def test_command_runner_unsafe_inline_python_requires_manual_request(self):
+        with patch.object(self.server.subprocess, "run") as run_mock:
+            out = self.server.command_runner(
+                command=["python3", "-c", "import os; print(os.getcwd())"],
+                timeout_seconds=5,
+            )
+        run_mock.assert_not_called()
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["manual_execution_required"])
+        self.assertIn("module not allowed: os", out["stderr"])
+
     def test_command_runner_runs_after_matching_manual_request_is_approved(self):
         pending = self.server.command_runner(command=["python", "script.py"], timeout_seconds=5)
         self.server.human_approval_points(

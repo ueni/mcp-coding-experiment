@@ -75,6 +75,23 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertFalse(stopped["running"])
         self.assertTrue((self.repo_path / stopped["log_path"]).is_file())
 
+    def test_terminal_support_session_safe_inline_python(self):
+        started = self.server.terminal_support_session(
+            mode="start",
+            command=["python3", "-c", "print('hello-inline')"],
+            cwd=".",
+            read_timeout_ms=100,
+        )
+        self.assertEqual(started["schema"], "terminal_support_session.v1")
+        stopped = self.server.terminal_support_session(
+            mode="stop",
+            session_id=started["session_id"],
+            read_timeout_ms=20,
+        )
+        self.assertIn("hello-inline", started["output"] + stopped["output"])
+        self.assertFalse(stopped["running"])
+        self.assertTrue((self.repo_path / stopped["log_path"]).is_file())
+
     def test_cache_control_and_symbol_cache(self):
         _ = self.server.symbol_index(path="src", output_profile="compact")
         stats = self.server.cache_control(mode="stats")
@@ -1775,6 +1792,16 @@ class ServerToolsTest(ServerToolsTestBase):
             self.assertIn("Start with `task`", props["mode"]["description"])
             self.assertIn("Reuse the same value across related requests", props["memory_session"]["description"])
             self.assertIn("single-prompt override", props["prompts"]["description"])
+
+            def assert_array_property(name):
+                spec = props[name]
+                options = spec.get("anyOf", [])
+                array_spec = next((row for row in options if row.get("type") == "array"), None)
+                self.assertIsNotNone(array_spec, name)
+                self.assertIn("items", array_spec, name)
+
+            for name in ("texts", "stop", "packages", "prompts", "candidates"):
+                assert_array_property(name)
 
         asyncio.run(run_checks())
 

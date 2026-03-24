@@ -305,6 +305,13 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - Git commits still require Git user identity in repo config or environment.
 - In stdio mode, avoid writing logs to stdout to preserve protocol framing.
 
+### Inline Python Convenience
+
+- Internal execution helpers can allow narrowly scoped inline Python via `python -c ...` or `python3 -c ...`.
+- The allowlisted path is intended for small transforms and calculations, such as `python3 -c "import json; print(json.dumps({'ok': True}, sort_keys=True))"`.
+- Inline Python remains constrained: only `-c` form is allowlisted, code length is capped, and imports/names/attributes tied to filesystem, process, or network access are blocked.
+- Examples that remain outside the allowlist and fall back to manual approval include `python script.py`, `python3 -c "import os; print(os.getcwd())"`, and code that calls `open(...)`, `subprocess.run(...)`, or path write helpers.
+
 ## Tool Catalog by Category
 
 ### Public MCP v1 Surface
