@@ -20,6 +20,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_CACHE_DIR=/var/cache/buildkit/pip \
+    VIRTUAL_ENV=/opt/codebase-tooling/coding-venv \
+    PATH=/opt/codebase-tooling/coding-venv/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     DEBIAN_FRONTEND=noninteractive \
     REPO_PATH=/repo \
     HOST=0.0.0.0 \
@@ -82,8 +84,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
-    pip install --root-user-action=ignore -r requirements.txt
 RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
@@ -163,9 +163,8 @@ RUN groupadd --gid "${APP_GID}" app \
     && echo 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app \
     && chmod 0440 /etc/sudoers.d/app \
     && visudo -cf /etc/sudoers.d/app \
-    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
+    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models \
     && cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/ \
-    && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
     && rm -rf /tmp/ollama-models \
     && chown -R app:app /app /models /home/app /opt/codebase-tooling
 

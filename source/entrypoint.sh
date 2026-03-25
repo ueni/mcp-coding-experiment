@@ -456,4 +456,4 @@ else
 fi
 
 
-exec python /app/server.py
+exec "${CODING_VENV_PYTHON:-/opt/codebase-tooling/coding-venv/bin/python}" /app/server.py

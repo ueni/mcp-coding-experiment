@@ -147,6 +147,11 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:3b", dockerfile)
         self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
+        self.assertIn("VIRTUAL_ENV=/opt/codebase-tooling/coding-venv", dockerfile)
+        self.assertIn(
+            "PATH=/opt/codebase-tooling/coding-venv/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            dockerfile,
+        )
         full_default_models = (
             "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,"
             "phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,"
@@ -158,6 +163,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('ollama pull "$model"', dockerfile)
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
         self.assertIn('cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/', dockerfile)
+        self.assertNotIn('/home/app/.ollama/models', dockerfile)
 
     def test_dockerfile_uses_python_313_trixie_base_image(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -169,6 +175,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('/opt/codebase-tooling/coding-venv/bin/pip install \\', dockerfile)
         self.assertIn('--root-user-action=ignore \\', dockerfile)
         self.assertIn('-r requirements.txt \\', dockerfile)
+        self.assertEqual(dockerfile.count('-r requirements.txt \\'), 1)
 
     def test_continue_model_routing_uses_small_default_profile(self):
         for routing_path in [
@@ -234,6 +241,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("/dev/kfd", entrypoint)
         self.assertIn('seed_ollama_models_from_image_preload', entrypoint)
         self.assertIn('export OLLAMA_VULKAN=1', entrypoint)
+        self.assertIn('exec "${CODING_VENV_PYTHON:-/opt/codebase-tooling/coding-venv/bin/python}" /app/server.py', entrypoint)
         before_drop = entrypoint.split(
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1
         )[0]
