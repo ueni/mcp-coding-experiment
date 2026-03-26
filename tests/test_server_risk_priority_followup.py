@@ -188,67 +188,45 @@ class ServerRiskPriorityFollowupTest(ServerToolsTestBase):
                     timeout_seconds=5,
                 )
 
-    def test_code_index_router_risk_modes(self):
-        with self.assertRaises(ValueError):
-            self.server.code_index_router(mode="bad")
+    def test_analysis_leaf_modes_cover_dependency_call_and_search_paths(self):
+        deps = self.server.dependency_map(
+            path="src",
+            include_stdlib=True,
+            output_profile="verbose",
+            fields=["from", "to"],
+            offset=0,
+            limit=2,
+            summary_mode="full",
+            compress=True,
+            store_result=True,
+        )
+        calls = self.server.call_graph(
+            path="src",
+            output_profile="normal",
+            fields=["caller", "callee"],
+            offset=0,
+            limit=3,
+            summary_mode="full",
+            compress=True,
+            store_result=True,
+        )
+        search = self.server.semantic_find(
+            path="src",
+            query="alpha",
+            output_profile="normal",
+            fields=["path"],
+            offset=0,
+            limit=4,
+            summary_mode="full",
+            compress=True,
+            store_result=True,
+            use_local_rerank=False,
+            local_rerank_top_k=7,
+        )
 
-        dep_payload = {"schema": "dependency_map.v1", "ok": True}
-        call_payload = {"schema": "call_graph.v1", "ok": True}
-        search_payload = {"schema": "semantic_find.v1", "ok": True}
-
-        with patch.object(self.server, "dependency_map", return_value=dep_payload) as dep_map, patch.object(
-            self.server,
-            "call_graph",
-            return_value=call_payload,
-        ) as call_graph, patch.object(
-            self.server,
-            "semantic_find",
-            return_value=search_payload,
-        ) as semantic_find:
-            deps = self.server.code_index_router(
-                mode="deps",
-                path="src",
-                include_stdlib=True,
-                output_profile="normal",
-                fields=["from", "to"],
-                offset=1,
-                limit=2,
-                summary_mode="quick",
-                compress=True,
-                store_result=True,
-            )
-            calls = self.server.code_index_router(
-                mode="calls",
-                path="src",
-                output_profile="normal",
-                fields=["caller", "callee"],
-                offset=2,
-                limit=3,
-                summary_mode="quick",
-                compress=True,
-                store_result=True,
-            )
-            search = self.server.code_index_router(
-                mode="search",
-                path="src",
-                query="alpha",
-                output_profile="normal",
-                fields=["path"],
-                offset=3,
-                limit=4,
-                summary_mode="quick",
-                compress=True,
-                store_result=True,
-                use_local_rerank=False,
-                local_rerank_top_k=7,
-            )
-
-        self.assertEqual(deps["result"], dep_payload)
-        self.assertEqual(calls["result"], call_payload)
-        self.assertEqual(search["result"], search_payload)
-        self.assertTrue(dep_map.call_args.kwargs["include_stdlib"])
-        self.assertTrue(dep_map.call_args.kwargs["compress"])
-        self.assertTrue(call_graph.call_args.kwargs["compress"])
-        self.assertEqual(semantic_find.call_args.kwargs["query"], "alpha")
-        self.assertFalse(semantic_find.call_args.kwargs["use_local_rerank"])
-        self.assertEqual(semantic_find.call_args.kwargs["local_rerank_top_k"], 7)
+        self.assertIn("result_id", deps)
+        self.assertIn("edges_compressed", deps)
+        self.assertIn("result_id", calls)
+        self.assertIn("edges_compressed", calls)
+        self.assertIn("result_id", search)
+        self.assertIn("results_compressed", search)

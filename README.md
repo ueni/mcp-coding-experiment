@@ -163,7 +163,7 @@ Run it in VS Code:
 1. Open [`vscode/mcp-inline-autocomplete/package.json`](./vscode/mcp-inline-autocomplete/package.json).
 2. Press `F5` (Run Extension) to start an Extension Development Host.
 3. In the dev host, open Command Palette and run `MCP Inline Autocomplete: Show Status`.
-4. Start typing in a file; inline suggestions come from MCP tool `autocomplete` at `http://localhost:8000/mcp`.
+4. Start typing in a file; inline suggestions come from `task_router(mode="autocomplete")` at `http://localhost:8000/mcp`.
 
 Key settings (in VS Code Settings):
 
@@ -321,6 +321,8 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `task_router`
 
 `task_router()` is the single public MCP entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
+
+No public MCP resources or resource templates are exposed by default.
 
 Leaf implementations remain in `source/server.py` as internal helpers and call targets for `task_router` orchestration. Only the tools listed here are exposed over MCP v1.
 

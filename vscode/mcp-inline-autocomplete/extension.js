@@ -158,8 +158,11 @@ class McpHttpClient {
   async autocomplete(args) {
     await this.ensureInitialized();
     const result = await this.call("tools/call", {
-      name: "autocomplete",
-      arguments: args,
+      name: "task_router",
+      arguments: {
+        mode: "autocomplete",
+        ...args,
+      },
     });
     return parseToolResult(result);
   }

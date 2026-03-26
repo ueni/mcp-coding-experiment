@@ -157,6 +157,11 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
         self.assertEqual(quick["schema"], "repo_index_daemon.quick.v1")
         self.assertIn("files_compressed", verbose)
         self.assertIn("value_json", queried)
+        index_payload = json.loads(
+            (self.repo_path / ".codebase-tooling-mcp" / "index" / "repo_index.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(index_payload["schema"], "repo_index_daemon.v2")
+        self.assertIn("records", index_payload)
 
         self.write_repo_text("docs/a.md", "updated docs\n")
         incremented = self.server.repo_index_daemon(
@@ -166,6 +171,7 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
             incremental=True,
         )
         self.assertGreaterEqual(incremented["changed_paths_count"], 1)
+        self.assertGreaterEqual(incremented["reused_paths_count"], 1)
 
     def test_tool_assisted_infer_helpers_and_parallel_fallback(self):
         self.write_repo_text(
@@ -234,12 +240,13 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
     def test_local_infer_autocomplete_and_translation_modes(self):
         with patch.object(self.server, "_local_infer_via_endpoint", side_effect=RuntimeError("offline")):
             infer = self.server.local_infer(
-                prompt="explain sample.py",
+                prompt="Summarize src/sample.py in 2 concise sentences focused on behavior.",
                 backend="endpoint",
                 output_profile="compact",
                 store_result=True,
             )
-        self.assertEqual(infer["backend"], "fallback")
+        self.assertEqual(infer["backend"], "tool_fallback")
+        self.assertTrue(infer["degraded"])
         self.assertIn("result_id", infer)
 
         with patch.object(self.server, "_local_infer_via_endpoint", side_effect=RuntimeError("offline")):
@@ -250,7 +257,8 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
                 output_profile="compact",
                 store_result=True,
             )
-        self.assertEqual(completion["backend"], "fallback")
+        self.assertEqual(completion["backend"], "heuristic_fallback")
+        self.assertTrue(completion["degraded"])
         self.assertIn("result_id", completion)
         self.assertTrue(completion["ok"])
 

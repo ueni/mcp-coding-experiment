@@ -31,7 +31,7 @@ import select
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 
 try:
     import tomllib
@@ -136,6 +136,11 @@ COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
 }
+ENABLE_PUBLIC_MCP_RESOURCES = os.getenv(
+    "ENABLE_PUBLIC_MCP_RESOURCES", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+PUBLIC_MCP_RESOURCE_URIS: set[str] = set()
+PUBLIC_MCP_RESOURCE_TEMPLATES: set[str] = set()
 APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
@@ -456,6 +461,7 @@ mcp = FastMCP(
     "git-repo-manager",
     instructions=(
         "Expose exactly one public MCP tool: `task_router`. "
+        "Do not expose public MCP resources or templates unless explicitly enabled by runtime configuration. "
         "All other server functions remain internal call targets and are not part of the external MCP contract. "
         "LLM agents should start with `task_router()` for almost every natural-language request because its default "
         "`mode='task'` classifies the request, injects compact task/session memory, and dispatches to the right "
@@ -727,13 +733,17 @@ def _decode_resource_path(path: str) -> str:
     return urllib.parse.unquote(path)
 
 
-@mcp.resource(
-    "repo://summary",
-    name="repo_summary_resource",
-    description="Repository summary and basic server capability flags.",
-    mime_type="application/json",
-)
-def repo_summary_resource() -> str:
+def _normalize_public_resource_path(path: str) -> str:
+    decoded_path = _decode_resource_path(path).strip()
+    normalized = decoded_path or "."
+    resolved = _resolve_repo_path(normalized)
+    rel = resolved.relative_to(REPO_PATH)
+    if _is_hidden_rel_path(rel):
+        raise ValueError("path is not exposed via public MCP resources")
+    return str(rel).replace("\\", "/") or "."
+
+
+def _repo_summary_resource_contents() -> str:
     _ensure_repo_path_exists()
     branch = ""
     head = ""
@@ -754,24 +764,12 @@ def repo_summary_resource() -> str:
     return _mcp_resource_json(payload)
 
 
-@mcp.resource(
-    "repo://file/{path}",
-    name="repo_file_resource",
-    description="Read a UTF-8 file from the repository by relative path.",
-    mime_type="text/plain",
-)
-def repo_file_resource(path: str) -> str:
-    return read_file(path=_decode_resource_path(path))
+def _repo_file_resource_contents(path: str) -> str:
+    return read_file(path=_normalize_public_resource_path(path))
 
 
-@mcp.resource(
-    "repo://tree/{path}",
-    name="repo_tree_resource",
-    description="List repository entries under a relative path.",
-    mime_type="application/json",
-)
-def repo_tree_resource(path: str) -> str:
-    decoded_path = _decode_resource_path(path)
+def _repo_tree_resource_contents(path: str) -> str:
+    decoded_path = _normalize_public_resource_path(path)
     entries = list_files(path=decoded_path, recursive=True, include_hidden=False, max_entries=1000)
     payload = {
         "schema": "resource.repo_tree.v1",
@@ -780,6 +778,40 @@ def repo_tree_resource(path: str) -> str:
         "count": len(entries),
     }
     return _mcp_resource_json(payload)
+
+
+if ENABLE_PUBLIC_MCP_RESOURCES:
+    PUBLIC_MCP_RESOURCE_URIS.add("repo://summary")
+    PUBLIC_MCP_RESOURCE_TEMPLATES.update({"repo://file/{path}", "repo://tree/{path}"})
+
+    @mcp.resource(
+        "repo://summary",
+        name="repo_summary_resource",
+        description="Repository summary and basic server capability flags.",
+        mime_type="application/json",
+    )
+    def repo_summary_resource() -> str:
+        return _repo_summary_resource_contents()
+
+
+    @mcp.resource(
+        "repo://file/{path}",
+        name="repo_file_resource",
+        description="Read a UTF-8 file from the repository by relative path.",
+        mime_type="text/plain",
+    )
+    def repo_file_resource(path: str) -> str:
+        return _repo_file_resource_contents(path)
+
+
+    @mcp.resource(
+        "repo://tree/{path}",
+        name="repo_tree_resource",
+        description="List repository entries under a relative path.",
+        mime_type="application/json",
+    )
+    def repo_tree_resource(path: str) -> str:
+        return _repo_tree_resource_contents(path)
 
 
 def _is_git_repo() -> bool:
@@ -1416,6 +1448,47 @@ def _memory_entry_rank(entry: dict[str, Any]) -> tuple[float, float]:
     return confidence, epoch
 
 
+def _memory_summary_upsert_in_payload(
+    payload: dict[str, Any],
+    *,
+    namespace: str,
+    focus: str,
+    summary: str,
+    ttl_days: int | None = None,
+    confidence: float = 1.0,
+    source: str = "agent",
+    tags: list[str] | None = None,
+) -> None:
+    summaries = payload.get("summaries", [])
+    if not isinstance(summaries, list):
+        summaries = []
+        payload["summaries"] = summaries
+    now_iso = _now_iso()
+    expires_at = _to_iso_expiry(ttl_days)
+    for row in summaries:
+        if row.get("namespace") == namespace and row.get("focus") == focus:
+            row["summary"] = summary
+            row["confidence"] = confidence
+            row["source"] = source
+            row["tags"] = tags or []
+            row["updated_at"] = now_iso
+            row["expires_at"] = expires_at
+            return
+    summaries.append(
+        {
+            "namespace": namespace,
+            "focus": focus,
+            "summary": summary,
+            "confidence": confidence,
+            "source": source,
+            "tags": tags or [],
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "expires_at": expires_at,
+        }
+    )
+
+
 def memory_auto_compact(
     namespace: str | None = None,
     threshold_entries: int = 80,
@@ -1424,7 +1497,7 @@ def memory_auto_compact(
     summary_max_chars: int = 1200,
     drop_expired: bool = False,
 ) -> dict[str, Any]:
-    """Compact memory when size thresholds are exceeded by writing/updating summary records."""
+    """Compact persisted memory by pruning scoped entries and updating a retained summary."""
     if threshold_entries < 1:
         raise ValueError("threshold_entries must be >= 1")
     if threshold_chars < 256:
@@ -1436,72 +1509,112 @@ def memory_auto_compact(
 
     payload = _memory_load()
     now = datetime.now(timezone.utc)
-    entries = []
+    preserved_entries: list[dict[str, Any]] = []
+    scoped_entries: list[dict[str, Any]] = []
+    expired_removed = 0
     for row in payload["entries"]:
         if namespace is not None and row.get("namespace") != namespace:
+            preserved_entries.append(row)
             continue
-        if _is_expired(row.get("expires_at"), now) and not drop_expired:
+        if _is_expired(row.get("expires_at"), now):
+            if drop_expired:
+                expired_removed += 1
+                continue
+            preserved_entries.append(row)
             continue
-        entries.append(row)
-    entries_sorted = sorted(entries, key=_memory_entry_rank, reverse=True)
+        scoped_entries.append(row)
+    entries_sorted = sorted(scoped_entries, key=_memory_entry_rank, reverse=True)
     serialized = json.dumps(entries_sorted, ensure_ascii=False)
     over_threshold = len(entries_sorted) > threshold_entries or len(serialized) > threshold_chars
-    if not over_threshold:
+    removed_entries = max(0, len(entries_sorted) - min(keep_entries, len(entries_sorted))) if over_threshold else 0
+    if (over_threshold or expired_removed > 0) and not ALLOW_MUTATIONS:
         return {
             "schema": "memory_auto_compact.v1",
             "compacted": False,
             "namespace": namespace,
             "entry_count": len(entries_sorted),
             "entry_chars": len(serialized),
+            "entry_count_after": len(entries_sorted),
+            "entry_chars_after": len(serialized),
+            "kept_entries": len(entries_sorted) if not over_threshold else min(keep_entries, len(entries_sorted)),
+            "removed_entries": removed_entries,
+            "expired_removed": expired_removed,
             "threshold_entries": threshold_entries,
             "threshold_chars": threshold_chars,
-        }
-    if not ALLOW_MUTATIONS:
-        return {
-            "schema": "memory_auto_compact.v1",
-            "compacted": False,
-            "namespace": namespace,
-            "entry_count": len(entries_sorted),
-            "entry_chars": len(serialized),
-            "threshold_entries": threshold_entries,
-            "threshold_chars": threshold_chars,
+            "skipped_due_to_mutations": True,
             "reason": "mutations_disabled",
+        }
+    if not over_threshold and expired_removed == 0:
+        return {
+            "schema": "memory_auto_compact.v1",
+            "compacted": False,
+            "namespace": namespace,
+            "entry_count": len(entries_sorted),
+            "entry_chars": len(serialized),
+            "entry_count_after": len(entries_sorted),
+            "entry_chars_after": len(serialized),
+            "kept_entries": len(entries_sorted),
+            "removed_entries": 0,
+            "expired_removed": 0,
+            "threshold_entries": threshold_entries,
+            "threshold_chars": threshold_chars,
+            "skipped_due_to_mutations": False,
         }
 
     focus_ns = namespace or "global"
-    top = entries_sorted[:keep_entries]
-    lines = []
-    for row in top:
-        key = str(row.get("key", ""))[:64]
-        val = row.get("value")
-        val_txt = _trim_text(json.dumps(val, ensure_ascii=False), max_chars=180)
-        lines.append(f"- {key}: {val_txt}")
-    summary_text = _trim_text(
-        f"Auto-compact summary for namespace={focus_ns}. Kept top {len(top)} of {len(entries_sorted)} entries.\n"
-        + "\n".join(lines),
-        max_chars=summary_max_chars,
-    )
-    memory_summary_upsert(
-        namespace=focus_ns,
-        focus="auto_compact",
-        summary=summary_text,
-        ttl_days=60,
-        confidence=0.9,
-        source="memory.auto_compact",
-        tags=["auto", "compact", "summary"],
-    )
-    _memory_stats_record("compact")
-    _memory_stats_record("summary_upsert")
+    kept_entries = entries_sorted
+    summary_focus = None
+    if over_threshold:
+        kept_entries = entries_sorted[:keep_entries]
+        pruned_entries = entries_sorted[keep_entries:]
+        lines = []
+        for row in pruned_entries[: min(len(pruned_entries), keep_entries)]:
+            key = str(row.get("key", ""))[:64]
+            val = row.get("value")
+            val_txt = _trim_text(json.dumps(val, ensure_ascii=False), max_chars=180)
+            lines.append(f"- {key}: {val_txt}")
+        summary_text = _trim_text(
+            (
+                f"Auto-compact summary for namespace={focus_ns}. "
+                f"Retained {len(kept_entries)} high-rank entries and summarized {len(pruned_entries)} pruned entries.\n"
+                + "\n".join(lines)
+            ).rstrip(),
+            max_chars=summary_max_chars,
+        )
+        _memory_summary_upsert_in_payload(
+            payload,
+            namespace=focus_ns,
+            focus="auto_compact",
+            summary=summary_text,
+            ttl_days=60,
+            confidence=0.9,
+            source="memory.auto_compact",
+            tags=["auto", "compact", "summary"],
+        )
+        summary_focus = "auto_compact"
+        _memory_stats_record("summary_upsert")
+
+    payload["entries"] = preserved_entries + kept_entries
+    _memory_save(payload)
+    if removed_entries or expired_removed:
+        _memory_stats_record("compact")
+
+    after_serialized = json.dumps(kept_entries, ensure_ascii=False)
     return {
         "schema": "memory_auto_compact.v1",
-        "compacted": True,
+        "compacted": bool(removed_entries or expired_removed),
         "namespace": namespace,
         "entry_count": len(entries_sorted),
         "entry_chars": len(serialized),
-        "kept_entries": len(top),
+        "entry_count_after": len(kept_entries),
+        "entry_chars_after": len(after_serialized),
+        "kept_entries": len(kept_entries),
+        "removed_entries": removed_entries,
+        "expired_removed": expired_removed,
         "threshold_entries": threshold_entries,
         "threshold_chars": threshold_chars,
-        "summary_focus": "auto_compact",
+        "skipped_due_to_mutations": False,
+        "summary_focus": summary_focus,
     }
 
 
@@ -3017,6 +3130,14 @@ def _server_tool_names() -> set[str]:
     return set(PUBLIC_MCP_TOOL_NAMES)
 
 
+def _server_resource_uris() -> set[str]:
+    return set(PUBLIC_MCP_RESOURCE_URIS)
+
+
+def _server_resource_templates() -> set[str]:
+    return set(PUBLIC_MCP_RESOURCE_TEMPLATES)
+
+
 def _lossless_blob_store_load(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {"schema": "lossless_blob_store.v1", "blobs": {}}
@@ -3796,127 +3917,6 @@ def docker_cli_run(
         "build_log_tail": _trim_text(build_log_tail, max_chars=out_cap),
         "proposals": proposals,
     }
-
-
-class DockerRouterService:
-    """Application service for Docker CLI routing."""
-
-    def route(
-        self,
-        mode: str = "status",
-        command: list[str] | None = None,
-        cwd: str = ".",
-        control_profile: str = "build",
-        timeout_seconds: int = 1800,
-        max_output_chars: int | None = None,
-    ) -> dict[str, Any]:
-        if mode not in {"status", "run"}:
-            raise ValueError("mode must be one of: status, run")
-        if mode == "status":
-            return {
-                "schema": "docker_router.v1",
-                "mode": mode,
-                "result": docker_cli_status(),
-            }
-        if not command:
-            raise ValueError("command is required for run mode")
-        return {
-            "schema": "docker_router.v1",
-            "mode": mode,
-            "result": docker_cli_run(
-                command=command,
-                cwd=cwd,
-                control_profile=control_profile,
-                timeout_seconds=timeout_seconds,
-                max_output_chars=max_output_chars,
-            ),
-        }
-
-
-class VSCodeRouterService:
-    """Application service for VS Code tasks routing."""
-
-    def route(
-        self,
-        mode: str = "list",
-        label: str = "",
-        tasks_path: str = ".vscode/tasks.json",
-        label_prefix: str = "",
-        control_profile: str = "build",
-        timeout_seconds: int = 1800,
-        max_output_chars: int | None = None,
-    ) -> dict[str, Any]:
-        if mode not in {"list", "run"}:
-            raise ValueError("mode must be one of: list, run")
-        if mode == "list":
-            return {
-                "schema": "vscode_router.v1",
-                "mode": mode,
-                "result": vscode_tasks_list(
-                    tasks_path=tasks_path,
-                    label_prefix=label_prefix,
-                    control_profile=control_profile,
-                ),
-            }
-        if not label.strip():
-            raise ValueError("label is required for run mode")
-        return {
-            "schema": "vscode_router.v1",
-            "mode": mode,
-            "result": vscode_task_run(
-                label=label,
-                tasks_path=tasks_path,
-                control_profile=control_profile,
-                timeout_seconds=timeout_seconds,
-                max_output_chars=max_output_chars,
-            ),
-        }
-
-
-_DOCKER_ROUTER_SERVICE = DockerRouterService()
-_VSCODE_ROUTER_SERVICE = VSCodeRouterService()
-
-
-@mcp.tool()
-def docker_router(
-    mode: str = "status",
-    command: list[str] | None = None,
-    cwd: str = ".",
-    control_profile: str = "build",
-    timeout_seconds: int = 1800,
-    max_output_chars: int | None = None,
-) -> dict[str, Any]:
-    """Docker CLI gateway. mode=status|run; run validates the command against the selected control profile."""
-    return _DOCKER_ROUTER_SERVICE.route(
-        mode=mode,
-        command=command,
-        cwd=cwd,
-        control_profile=control_profile,
-        timeout_seconds=timeout_seconds,
-        max_output_chars=max_output_chars,
-    )
-
-
-@mcp.tool()
-def vscode_router(
-    mode: str = "list",
-    label: str = "",
-    tasks_path: str = ".vscode/tasks.json",
-    label_prefix: str = "",
-    control_profile: str = "build",
-    timeout_seconds: int = 1800,
-    max_output_chars: int | None = None,
-) -> dict[str, Any]:
-    """VS Code task gateway. mode=list|run; list filters tasks.json and run executes one exact label."""
-    return _VSCODE_ROUTER_SERVICE.route(
-        mode=mode,
-        label=label,
-        tasks_path=tasks_path,
-        label_prefix=label_prefix,
-        control_profile=control_profile,
-        timeout_seconds=timeout_seconds,
-        max_output_chars=max_output_chars,
-    )
 
 
 def vscode_tasks_list(
@@ -6654,11 +6654,7 @@ def tool_prompt_score(
             continue
         if scope == "core" and name not in {
             "task_router",
-            "memory_router",
-            "code_index_router",
             "workspace_transaction",
-            "docker_router",
-            "vscode_router",
             "command_runner",
             "self_test",
             "prompt_optimize",
@@ -7937,6 +7933,11 @@ def local_infer(
         selected = LOCAL_INFER_BACKEND or "endpoint"
     model_name = model or LOCAL_INFER_MODEL or "local-default"
 
+    text = ""
+    backend_name = "unavailable"
+    degraded = False
+    degraded_reason: str | None = None
+
     if selected == "endpoint":
         try:
             text = _local_infer_via_endpoint(
@@ -7946,6 +7947,7 @@ def local_infer(
                 temperature=temperature,
                 system=system,
             )
+            backend_name = "endpoint"
         except Exception as exc:
             _failure_record(
                 command=["local_infer", "endpoint"],
@@ -7953,28 +7955,41 @@ def local_infer(
                 category="local_infer",
                 suggestion="Ensure local inference endpoint is running and reachable.",
             )
-            text = ""
-            selected = "fallback"
-    if selected in {"fallback", "rule", "hash"}:
-        optimized = prompt_optimize(
-            prompt=prompt,
-            mode=_prompt_optimize_mode_for_task(task),
-        )
-        text = optimized["optimized_prompt"][:max_tokens * 6]
+            degraded = True
+            degraded_reason = "endpoint_unavailable"
+
+    if backend_name != "endpoint":
+        tool_text = _tool_assisted_infer(prompt=prompt, max_tokens=max_tokens)
+        if tool_text:
+            text = tool_text
+            backend_name = "tool_fallback"
+            degraded = True
+            if degraded_reason is None:
+                degraded_reason = "requested_tool_fallback"
+        else:
+            backend_name = "unavailable"
+            degraded = True
+            if degraded_reason is None:
+                degraded_reason = "no_grounded_fallback_available"
+
     result = {
         "schema": "local_infer.v1",
-        "backend": selected,
+        "backend": backend_name,
         "model": model_name,
         "task": task,
         "output": _trim_text(text),
         "ok": bool(text),
+        "degraded": degraded,
+        "degraded_reason": degraded_reason,
     }
     if profile == "compact":
         result = {
             "schema": "local_infer.compact.v1",
-            "backend": selected,
+            "backend": backend_name,
             "model": model_name,
             "ok": bool(text),
+            "degraded": degraded,
+            "degraded_reason": degraded_reason,
             "output": _trim_text(text, max_chars=1200),
         }
     if store_result:
@@ -7982,7 +7997,6 @@ def local_infer(
     return result
 
 
-@mcp.tool()
 def autocomplete(
     prefix: str,
     suffix: str = "",
@@ -7995,7 +8009,7 @@ def autocomplete(
     output_profile: str | None = None,
     store_result: bool = False,
 ) -> dict[str, Any]:
-    """Compatibility autocomplete endpoint. Prefer task_router(mode='autocomplete') for new integrations."""
+    """Internal autocomplete helper. Use task_router(mode='autocomplete') for MCP callers."""
     if not prefix:
         raise ValueError("prefix must not be empty")
     if max_tokens < 1:
@@ -8009,6 +8023,9 @@ def autocomplete(
     model_name = model or LOCAL_INFER_MODEL or "local-default"
 
     completion = ""
+    backend_name = "unavailable"
+    degraded = False
+    degraded_reason: str | None = None
     if selected == "endpoint":
         try:
             completion = _local_infer_via_endpoint(
@@ -8022,6 +8039,7 @@ def autocomplete(
                 ),
                 stop=stop,
             )
+            backend_name = "endpoint"
         except Exception as exc:
             _failure_record(
                 command=["autocomplete", "endpoint"],
@@ -8029,9 +8047,20 @@ def autocomplete(
                 category="autocomplete",
                 suggestion="Ensure local inference endpoint is running and reachable.",
             )
-            selected = "fallback"
-    if selected in {"fallback", "rule", "hash"}:
+            degraded = True
+            degraded_reason = "endpoint_unavailable"
+    if backend_name != "endpoint":
         completion = _autocomplete_fallback(prefix=prefix, suffix=suffix)
+        if completion:
+            backend_name = "heuristic_fallback"
+            degraded = True
+            if degraded_reason is None:
+                degraded_reason = "requested_heuristic_fallback"
+        else:
+            backend_name = "unavailable"
+            degraded = True
+            if degraded_reason is None:
+                degraded_reason = "no_heuristic_fallback_available"
 
     completion = _autocomplete_strip_wrappers(completion)
     completion = _autocomplete_apply_stops(completion, stop=stop)
@@ -8039,7 +8068,7 @@ def autocomplete(
 
     result: dict[str, Any] = {
         "schema": "autocomplete.v1",
-        "backend": selected,
+        "backend": backend_name,
         "model": model_name,
         "language": language.strip(),
         "prefix_chars": len(prefix),
@@ -8047,13 +8076,17 @@ def autocomplete(
         "max_tokens": max_tokens,
         "completion": completion,
         "ok": bool(completion),
+        "degraded": degraded,
+        "degraded_reason": degraded_reason,
     }
     if profile == "compact":
         result = {
             "schema": "autocomplete.compact.v1",
-            "backend": selected,
+            "backend": backend_name,
             "model": model_name,
             "ok": bool(completion),
+            "degraded": degraded,
+            "degraded_reason": degraded_reason,
             "completion": completion,
         }
     if store_result:
@@ -9379,30 +9412,6 @@ def _parallel_infer_one(
     output_profile: str | None,
     store_result: bool,
 ) -> dict[str, Any]:
-    selected = backend.strip().lower()
-    if selected in {"auto", "fallback", "rule", "hash"}:
-        tool_text = _tool_assisted_infer(prompt=prompt, max_tokens=max_tokens)
-        if tool_text:
-            profile = _default_output_profile(output_profile)
-            out = {
-                "schema": "local_infer.v1",
-                "backend": "tool_fallback",
-                "model": model or LOCAL_INFER_MODEL or "local-default",
-                "task": task,
-                "output": tool_text,
-                "ok": True,
-            }
-            if profile == "compact":
-                out = {
-                    "schema": "local_infer.compact.v1",
-                    "backend": "tool_fallback",
-                    "model": model or LOCAL_INFER_MODEL or "local-default",
-                    "ok": True,
-                    "output": _trim_text(tool_text, max_chars=1200),
-                }
-            if store_result:
-                out["result_id"] = _result_store_put("local_infer", out)
-            return out
     return local_infer(
         prompt=prompt,
         task=task,
@@ -10006,7 +10015,42 @@ def tool_benchmark(
     if warmup < 0:
         raise ValueError("warmup must be >= 0")
 
-    catalog = {
+    results = _tool_benchmark_measurements(tools=tools, iterations=iterations, warmup=warmup)
+    _require_mutations()
+    benchmark_file = _resolve_repo_path(report_path)
+    existing = _json_file_load(Path(report_path), {"schema": "tool_benchmark.report.v1", "tools": {}})
+    tools_payload = existing.get("tools", {}) if isinstance(existing, dict) else {}
+    if not isinstance(tools_payload, dict):
+        tools_payload = {}
+    generated_at = _now_iso()
+    for row in results:
+        tools_payload[str(row["tool"])] = {
+            "tool": row["tool"],
+            "iterations": row["iterations"],
+            "median_duration_ms": row["latency_ms_median"],
+            "latency_ms_avg": row["latency_ms_avg"],
+            "latency_ms_p95": row["latency_ms_p95"],
+            "payload_bytes_avg": row["payload_bytes_avg"],
+            "payload_bytes_max": row["payload_bytes_max"],
+            "updated_at": generated_at,
+        }
+    report = {
+        "schema": "tool_benchmark.report.v1",
+        "generated_at": generated_at,
+        "tools": dict(sorted(tools_payload.items())),
+    }
+    benchmark_file.parent.mkdir(parents=True, exist_ok=True)
+    benchmark_file.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    return {
+        "schema": "tool_benchmark.v1",
+        "report_path": report_path,
+        "results": results,
+    }
+
+
+def _tool_benchmark_catalog() -> dict[str, Callable[[], Any]]:
+    return {
         "find_paths": lambda: find_paths(path=".", recursive=True, max_entries=500, output_profile="compact"),
         "grep": lambda: grep(pattern="def ", path=".", recursive=True, max_matches=100, output_profile="compact"),
         "symbol_index": lambda: symbol_index(path=".", recursive=True, max_symbols=1000, output_profile="compact"),
@@ -10015,6 +10059,14 @@ def tool_benchmark(
         "semantic_find": lambda: semantic_find(query="tool cache", path=".", max_results=20, output_profile="compact"),
         "tree_sitter_core": lambda: tree_sitter_core(path=".", mode="parse", max_files=20, max_nodes=500, output_profile="compact", summary_mode="quick"),
     }
+
+
+def _tool_benchmark_measurements(
+    tools: list[str] | None = None,
+    iterations: int = 1,
+    warmup: int = 0,
+) -> list[dict[str, Any]]:
+    catalog = _tool_benchmark_catalog()
     selected = tools or list(catalog.keys())
     unknown = [t for t in selected if t not in catalog]
     if unknown:
@@ -10050,7 +10102,23 @@ def tool_benchmark(
                 "payload_bytes_max": int(max(size_bytes)),
             }
         )
+    return results
 
+
+@mcp.tool()
+def tool_benchmark(
+    tools: list[str] | None = None,
+    iterations: int = 3,
+    warmup: int = 1,
+    report_path: str = str(TOOL_BENCHMARK_REPORT_FILE),
+) -> dict[str, Any]:
+    """Benchmark representative tool invocations for latency and payload size and persist one median-duration entry per tool."""
+    if iterations < 1:
+        raise ValueError("iterations must be >= 1")
+    if warmup < 0:
+        raise ValueError("warmup must be >= 0")
+
+    results = _tool_benchmark_measurements(tools=tools, iterations=iterations, warmup=warmup)
     _require_mutations()
     benchmark_file = _resolve_repo_path(report_path)
     existing = _json_file_load(Path(report_path), {"schema": "tool_benchmark.report.v1", "tools": {}})
@@ -10241,8 +10309,8 @@ def output_size_guard(
     if tolerance_ratio < 1.0:
         raise ValueError("tolerance_ratio must be >= 1.0")
 
-    bench = tool_benchmark(tools=tools, iterations=1, warmup=0)
-    current = {r["tool"]: int(r["payload_bytes_max"]) for r in bench["results"]}
+    measured = _tool_benchmark_measurements(tools=tools, iterations=1, warmup=0)
+    current = {r["tool"]: int(r["payload_bytes_max"]) for r in measured}
     baseline_file = _resolve_repo_path(baseline_path)
 
     if mode == "write":
@@ -11552,59 +11620,6 @@ def constraint_solver_for_tasks(
 
 
 @mcp.tool()
-def spec_to_tests(
-    spec_text: str,
-    framework: str = "pytest",
-    output_path: str = "",
-    mode: str = "generate",
-) -> dict[str, Any]:
-    """Generate test skeletons from natural-language spec bullets."""
-    if framework not in {"pytest", "unittest"}:
-        raise ValueError("framework must be one of: pytest, unittest")
-    if mode not in {"generate", "write"}:
-        raise ValueError("mode must be one of: generate, write")
-    lines = [line.strip("-* ").strip() for line in spec_text.splitlines() if line.strip()]
-    reqs = [line for line in lines if any(tok in line.lower() for tok in {"must", "should", "shall"})]
-    if not reqs:
-        reqs = lines[:5]
-    tests: list[str] = []
-    if framework == "pytest":
-        tests.append("import pytest")
-        tests.append("")
-        for i, req in enumerate(reqs, start=1):
-            name = re.sub(r"[^a-z0-9]+", "_", req.lower()).strip("_")[:48] or f"req_{i}"
-            tests.append(f"def test_spec_{i}_{name}():")
-            tests.append(f"    # {req}")
-            tests.append("    assert True")
-            tests.append("")
-    else:
-        tests.append("import unittest")
-        tests.append("")
-        tests.append("class SpecTests(unittest.TestCase):")
-        for i, req in enumerate(reqs, start=1):
-            name = re.sub(r"[^a-z0-9]+", "_", req.lower()).strip("_")[:48] or f"req_{i}"
-            tests.append(f"    def test_spec_{i}_{name}(self):")
-            tests.append(f"        # {req}")
-            tests.append("        self.assertTrue(True)")
-            tests.append("")
-    test_code = "\n".join(tests).rstrip() + "\n"
-    if mode == "write":
-        _require_mutations()
-        if not output_path:
-            raise ValueError("output_path is required for write mode")
-        out = _resolve_repo_path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(test_code, encoding="utf-8")
-    return {
-        "schema": "spec_to_tests.v1",
-        "framework": framework,
-        "requirements_count": len(reqs),
-        "test_code": test_code,
-        "output_path": output_path if mode == "write" else None,
-    }
-
-
-@mcp.tool()
 def auto_sharding_for_analysis(
     path: str = ".",
     shard_size: int = 100,
@@ -11672,18 +11687,24 @@ def confidence_scoring(
 
 @mcp.tool()
 def runtime_contract_checker() -> dict[str, Any]:
-    """Verify runtime tool exposure vs README contract and report drift."""
+    """Verify runtime MCP tool/resource exposure vs README contract and report drift."""
     code_tools = _server_tool_names()
     readme_tools = _readme_tool_names()
+    resource_uris = _server_resource_uris()
+    resource_templates = _server_resource_templates()
+    unexpected_resources = sorted(resource_uris | resource_templates)
     missing_in_readme = sorted(code_tools - readme_tools)
     extra_in_readme = sorted(readme_tools - code_tools)
     return {
         "schema": "runtime_contract_checker.v1",
-        "ok": not missing_in_readme and not extra_in_readme,
+        "ok": not missing_in_readme and not extra_in_readme and not unexpected_resources,
         "code_tool_count": len(code_tools),
         "readme_tool_count": len(readme_tools),
+        "resource_uri_count": len(resource_uris),
+        "resource_template_count": len(resource_templates),
         "missing_in_readme": missing_in_readme,
         "extra_in_readme": extra_in_readme,
+        "unexpected_resources": unexpected_resources,
     }
 
 
@@ -11736,44 +11757,6 @@ def cost_budget_enforcer(
         "limits": limits,
         "used": used,
         "over_budget": over,
-    }
-
-
-@mcp.tool()
-def multi_agent_lane(
-    task: str,
-    lanes: list[str] | None = None,
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-) -> dict[str, Any]:
-    """Run specialized analysis lanes and merge into one decision packet."""
-    if not task.strip():
-        raise ValueError("task must not be empty")
-    selected = lanes or ["security", "risk", "docs", "tests"]
-    lane_results: dict[str, Any] = {}
-    if "security" in selected:
-        patch = _git("diff", f"{base_ref}...{head_ref}", "--", ".").stdout
-        lane_results["security"] = security_triage(diff_text=patch, max_findings=20)
-    if "risk" in selected:
-        lane_results["risk"] = risk_scoring(ref=head_ref)
-    if "docs" in selected:
-        lane_results["docs"] = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
-    if "tests" in selected:
-        lane_results["tests"] = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
-    confidence = confidence_scoring(
-        checks=[
-            {"name": "security", "ok": int(lane_results.get("security", {}).get("finding_count", 0)) == 0, "weight": 3},
-            {"name": "risk", "ok": lane_results.get("risk", {}).get("risk_level", "low") != "high", "weight": 2},
-            {"name": "docs", "ok": not lane_results.get("docs", {}).get("needs_docs_update", False), "weight": 1},
-            {"name": "tests", "ok": True, "weight": 1},
-        ]
-    )
-    return {
-        "schema": "multi_agent_lane.v1",
-        "task": task,
-        "lanes": selected,
-        "results": lane_results,
-        "confidence": confidence,
     }
 
 
@@ -12678,6 +12661,202 @@ def tree_sitter_core(
     return result
 
 
+def _repo_index_collect_import_refs(tree: ast.AST) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            imports = [node.module] if node.module else []
+        else:
+            continue
+        for imp in imports:
+            refs.append(
+                {
+                    "import": imp,
+                    "line": int(getattr(node, "lineno", 1)),
+                }
+            )
+    return refs
+
+
+def _repo_index_collect_call_edges(tree: ast.AST, rel_path: str) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        caller = node.name
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            callee = _ast_expr_name(child.func)
+            if not callee:
+                continue
+            edges.append(
+                {
+                    "path": rel_path,
+                    "caller": caller,
+                    "callee": callee,
+                    "line": int(getattr(child, "lineno", getattr(node, "lineno", 1))),
+                }
+            )
+    return edges
+
+
+def _repo_index_resolve_dependency_edges(
+    rel_path: str,
+    import_refs: list[dict[str, Any]],
+    module_to_path: dict[str, str],
+    include_stdlib: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    edges: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for row in import_refs:
+        imp = str(row.get("import", "") or "")
+        if not imp:
+            continue
+        line = int(row.get("line", 1) or 1)
+        resolved_path = None
+        for candidate_module in _import_candidates(imp):
+            resolved = module_to_path.get(candidate_module)
+            if resolved:
+                resolved_path = resolved
+                break
+        if resolved_path:
+            edges.append(
+                {
+                    "from": rel_path,
+                    "to": resolved_path,
+                    "import": imp,
+                    "line": line,
+                }
+            )
+        elif include_stdlib:
+            unresolved.append(
+                {
+                    "from": rel_path,
+                    "import": imp,
+                    "line": line,
+                }
+            )
+    return edges, unresolved
+
+
+def _repo_index_build_file_record(
+    file_path: Path,
+    meta: dict[str, Any],
+    module_to_path: dict[str, str],
+    *,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    rel_path = str(meta["path"])
+    suffix = file_path.suffix.lower()
+    record: dict[str, Any] = {
+        "path": rel_path,
+        "size": int(meta.get("size", 0)),
+        "mtime_ns": int(meta.get("mtime_ns", 0)),
+        "file_type": str(meta.get("file_type", suffix.lstrip(".") or "file")),
+        "language": "python" if suffix == ".py" else "",
+        "parse_error": "",
+        "symbols": [],
+        "import_refs": [],
+        "dependencies": [],
+        "unresolved_imports": [],
+        "call_edges": [],
+    }
+    if "sha256" in meta:
+        record["sha256"] = str(meta.get("sha256", ""))
+    if suffix != ".py" or _is_likely_binary(file_path):
+        return record
+    try:
+        source = file_path.read_text(encoding=encoding, errors="replace")
+    except OSError as exc:
+        record["parse_error"] = str(exc)
+        return record
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        record["parse_error"] = str(exc)
+        return record
+    record["symbols"] = _collect_python_symbols(source, rel_path, include_private=False)
+    record["import_refs"] = _repo_index_collect_import_refs(tree)
+    deps, unresolved = _repo_index_resolve_dependency_edges(
+        rel_path=rel_path,
+        import_refs=record["import_refs"],
+        module_to_path=module_to_path,
+        include_stdlib=False,
+    )
+    record["dependencies"] = deps
+    record["unresolved_imports"] = unresolved
+    record["call_edges"] = _repo_index_collect_call_edges(tree, rel_path=rel_path)
+    return record
+
+
+def _repo_index_materialize_payload(index_payload: dict[str, Any]) -> dict[str, Any]:
+    if str(index_payload.get("schema", "")) != "repo_index_daemon.v2":
+        raise RuntimeError("stale repo index format; run repo_index_daemon(mode='refresh') to rebuild")
+    records = index_payload.get("records", {})
+    if not isinstance(records, dict):
+        records = {}
+    file_order = index_payload.get("file_order", [])
+    if not isinstance(file_order, list):
+        file_order = sorted(records.keys())
+
+    files: list[dict[str, Any]] = []
+    symbols: list[dict[str, Any]] = []
+    dependencies: list[dict[str, Any]] = []
+    call_edges: list[dict[str, Any]] = []
+
+    for rel in file_order:
+        record = records.get(rel, {})
+        if not isinstance(record, dict):
+            continue
+        file_row = {
+            "path": str(record.get("path", rel)),
+            "size": int(record.get("size", 0) or 0),
+            "mtime_ns": int(record.get("mtime_ns", 0) or 0),
+            "file_type": str(record.get("file_type", "") or ""),
+        }
+        sha256 = str(record.get("sha256", "") or "")
+        if sha256:
+            file_row["sha256"] = sha256
+        language = str(record.get("language", "") or "")
+        if language:
+            file_row["language"] = language
+        parse_error = str(record.get("parse_error", "") or "")
+        if parse_error:
+            file_row["parse_error"] = parse_error
+        files.append(file_row)
+        if isinstance(record.get("symbols"), list):
+            symbols.extend(record["symbols"])
+        if isinstance(record.get("dependencies"), list):
+            dependencies.extend(record["dependencies"])
+        if isinstance(record.get("call_edges"), list):
+            call_edges.extend(record["call_edges"])
+
+    payload: dict[str, Any] = {
+        "schema": "repo_index_daemon.v1",
+        "generated_at": index_payload.get("generated_at"),
+        "path": index_payload.get("path"),
+        "file_count": int(index_payload.get("file_count", len(files)) or 0),
+        "symbol_count": int(index_payload.get("symbol_count", len(symbols)) or 0),
+        "dependency_edge_count": int(index_payload.get("dependency_edge_count", len(dependencies)) or 0),
+        "call_edge_count": int(index_payload.get("call_edge_count", len(call_edges)) or 0),
+        "files": files,
+        "symbols": symbols,
+        "dependencies": dependencies,
+        "call_edges": call_edges,
+        "incremental": bool(index_payload.get("incremental", True)),
+        "changed_paths_count": int(index_payload.get("changed_paths_count", 0) or 0),
+        "reused_paths_count": int(index_payload.get("reused_paths_count", 0) or 0),
+        "removed_paths_count": int(index_payload.get("removed_paths_count", 0) or 0),
+    }
+    for key in ("git_head", "git_branch"):
+        if key in index_payload:
+            payload[key] = index_payload[key]
+    return payload
+
+
 def repo_index_daemon(
     mode: str = "refresh",
     path: str = ".",
@@ -12695,7 +12874,7 @@ def repo_index_daemon(
     store_result: bool = False,
     incremental: bool = True,
 ) -> dict[str, Any]:
-    """Build/read/query a persistent repository index keyed by file metadata."""
+    """Build/read/query a persistent repository index keyed by per-file analysis records."""
     if mode not in {"refresh", "read", "query"}:
         raise ValueError("mode must be one of: refresh, read, query")
     if max_files < 1:
@@ -12711,8 +12890,9 @@ def repo_index_daemon(
         if not index_path.is_file():
             raise FileNotFoundError(str(REPO_INDEX_FILE))
         index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+        full_payload = _repo_index_materialize_payload(index_payload)
         if mode == "query":
-            value = _query_value(index_payload, query) if query.strip() else index_payload
+            value = _query_value(full_payload, query) if query.strip() else full_payload
             if isinstance(value, list):
                 value = _paginate(value, offset=offset, limit=limit)
                 if value and isinstance(value[0], dict):
@@ -12723,19 +12903,24 @@ def repo_index_daemon(
                 "value_json": _trim_text(json.dumps(value, indent=2, ensure_ascii=True)),
                 "value": value if profile != "compact" else None,
             }
-        if isinstance(index_payload.get("files"), list):
-            files = _paginate(index_payload["files"], offset=offset, limit=limit)
+        read_payload = dict(full_payload)
+        if profile != "verbose":
+            read_payload["symbols"] = []
+            read_payload["dependencies"] = []
+            read_payload["call_edges"] = []
+        if isinstance(read_payload.get("files"), list):
+            files = _paginate(read_payload["files"], offset=offset, limit=limit)
             if files and isinstance(files[0], dict):
                 files = _select_fields(files, fields)
-            index_payload["files"] = files
+            read_payload["files"] = files
         if profile == "compact":
             compact = {
                 "schema": "repo_index_daemon.compact.v1",
                 "mode": mode,
-                "generated_at": index_payload.get("generated_at"),
-                "file_count": index_payload.get("file_count", 0),
-                "symbol_count": index_payload.get("symbol_count", 0),
-                "dependency_edge_count": index_payload.get("dependency_edge_count", 0),
+                "generated_at": read_payload.get("generated_at"),
+                "file_count": read_payload.get("file_count", 0),
+                "symbol_count": read_payload.get("symbol_count", 0),
+                "dependency_edge_count": read_payload.get("dependency_edge_count", 0),
             }
             if store_result:
                 compact["result_id"] = _result_store_put("repo_index_daemon", compact)
@@ -12744,19 +12929,19 @@ def repo_index_daemon(
             quick = {
                 "schema": "repo_index_daemon.quick.v1",
                 "mode": mode,
-                "generated_at": index_payload.get("generated_at"),
-                "file_count": index_payload.get("file_count", 0),
-                "symbol_count": index_payload.get("symbol_count", 0),
+                "generated_at": read_payload.get("generated_at"),
+                "file_count": read_payload.get("file_count", 0),
+                "symbol_count": read_payload.get("symbol_count", 0),
             }
             if store_result:
                 quick["result_id"] = _result_store_put("repo_index_daemon", quick)
             return quick
-        if compress and isinstance(index_payload.get("files"), list):
-            index_payload["files_compressed"] = _compress_table(index_payload["files"])
-            index_payload.pop("files", None)
+        if compress and isinstance(read_payload.get("files"), list):
+            read_payload["files_compressed"] = _compress_table(read_payload["files"])
+            read_payload.pop("files", None)
         if store_result:
-            index_payload["result_id"] = _result_store_put("repo_index_daemon", index_payload)
-        return index_payload
+            read_payload["result_id"] = _result_store_put("repo_index_daemon", read_payload)
+        return read_payload
 
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -12765,11 +12950,14 @@ def repo_index_daemon(
     existing_payload = None
     if incremental and index_path.is_file():
         try:
-            existing_payload = json.loads(index_path.read_text(encoding="utf-8"))
+            loaded = json.loads(index_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            existing_payload = None
+            loaded = None
+        if isinstance(loaded, dict) and str(loaded.get("schema", "")) == "repo_index_daemon.v2":
+            existing_payload = loaded
 
     files_meta: list[dict[str, Any]] = []
+    module_to_path: dict[str, str] = {}
     for candidate in _iter_candidate_files(root, recursive=recursive):
         rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
         if _is_hidden_rel_path(Path(rel)):
@@ -12779,6 +12967,7 @@ def repo_index_daemon(
             "path": rel,
             "size": int(stat.st_size),
             "mtime_ns": int(stat.st_mtime_ns),
+            "file_type": candidate.suffix.lower().lstrip(".") or "file",
         }
         if include_hashes:
             try:
@@ -12786,69 +12975,87 @@ def repo_index_daemon(
             except OSError:
                 entry["sha256"] = ""
         files_meta.append(entry)
+        if candidate.suffix == ".py":
+            module_to_path[_module_name_from_relpath(candidate.relative_to(REPO_PATH))] = rel
         if len(files_meta) >= max_files:
             break
+    files_meta.sort(key=lambda row: str(row.get("path", "")))
 
+    existing_records = existing_payload.get("records", {}) if isinstance(existing_payload, dict) else {}
+    if not isinstance(existing_records, dict):
+        existing_records = {}
+    file_paths = {str(row["path"]) for row in files_meta}
+    removed_paths = sorted(path for path in existing_records.keys() if path not in file_paths)
     changed_paths: list[str] = []
-    if existing_payload and isinstance(existing_payload.get("files"), list):
-        prev = {
-            f.get("path"): (f.get("size"), f.get("mtime_ns"))
-            for f in existing_payload["files"]
-            if isinstance(f, dict) and isinstance(f.get("path"), str)
-        }
-        for row in files_meta:
-            p = row["path"]
-            sig = (row.get("size"), row.get("mtime_ns"))
-            if prev.get(p) != sig:
-                changed_paths.append(p)
+    reused_paths_count = 0
+    recomputed_python_paths_count = 0
+    records: dict[str, dict[str, Any]] = {}
 
-    reuse_prev_graphs = bool(existing_payload) and len([p for p in changed_paths if p.endswith(".py")]) == 0
-    if reuse_prev_graphs:
-        symbols = existing_payload.get("symbols", []) if isinstance(existing_payload.get("symbols"), list) else []
-        dep_edges = existing_payload.get("dependencies", []) if isinstance(existing_payload.get("dependencies"), list) else []
-        call_edges = existing_payload.get("call_edges", []) if isinstance(existing_payload.get("call_edges"), list) else []
-        dep = {"edge_count": len(dep_edges), "edges": dep_edges}
-        call = {"edge_count": len(call_edges), "edges": call_edges}
-    else:
-        symbols = symbol_index(
-            path=path,
-            include_private=False,
-            recursive=recursive,
-            max_symbols=20000,
-            output_profile="compact",
+    for row in files_meta:
+        rel = str(row["path"])
+        candidate = REPO_PATH / rel
+        previous = existing_records.get(rel)
+        reusable = (
+            incremental
+            and isinstance(previous, dict)
+            and str(previous.get("path", "")) == rel
+            and int(previous.get("size", -1) or -1) == int(row.get("size", 0) or 0)
+            and int(previous.get("mtime_ns", -1) or -1) == int(row.get("mtime_ns", 0) or 0)
+            and (not include_hashes or str(previous.get("sha256", "")) == str(row.get("sha256", "")))
+            and isinstance(previous.get("symbols"), list)
+            and isinstance(previous.get("import_refs"), list)
+            and isinstance(previous.get("call_edges"), list)
         )
-        dep = dependency_map(
-            path=path,
-            recursive=recursive,
+        if reusable:
+            record = dict(previous)
+            record["size"] = int(row["size"])
+            record["mtime_ns"] = int(row["mtime_ns"])
+            record["file_type"] = row["file_type"]
+            if "sha256" in row:
+                record["sha256"] = row["sha256"]
+            records[rel] = record
+            reused_paths_count += 1
+            continue
+        changed_paths.append(rel)
+        records[rel] = _repo_index_build_file_record(
+            candidate,
+            row,
+            module_to_path,
+        )
+        if candidate.suffix == ".py":
+            recomputed_python_paths_count += 1
+
+    for rel, record in records.items():
+        if str(record.get("language", "")) != "python":
+            continue
+        deps, unresolved = _repo_index_resolve_dependency_edges(
+            rel_path=rel,
+            import_refs=record.get("import_refs", []),
+            module_to_path=module_to_path,
             include_stdlib=False,
-            max_files=max_files,
-            output_profile="compact",
         )
-        call = call_graph(
-            path=path,
-            recursive=recursive,
-            max_edges=20000,
-            output_profile="compact",
-        )
+        record["dependencies"] = deps
+        record["unresolved_imports"] = unresolved
 
+    symbol_count = sum(len(record.get("symbols", [])) for record in records.values() if isinstance(record, dict))
+    dependency_edge_count = sum(len(record.get("dependencies", [])) for record in records.values() if isinstance(record, dict))
+    call_edge_count = sum(len(record.get("call_edges", [])) for record in records.values() if isinstance(record, dict))
     payload: dict[str, Any] = {
-        "schema": "repo_index_daemon.v1",
+        "schema": "repo_index_daemon.v2",
         "generated_at": _now_iso(),
         "path": str(root.relative_to(REPO_PATH)),
         "file_count": len(files_meta),
-        "symbol_count": (
-            int(existing_payload.get("symbol_count", 0))
-            if reuse_prev_graphs and existing_payload
-            else len(symbols)
-        ),
-        "dependency_edge_count": int(dep.get("edge_count", 0)),
-        "call_edge_count": int(call.get("edge_count", 0)),
-        "files": files_meta if profile != "compact" else files_meta[:300],
-        "symbols": symbols if profile == "verbose" else [],
-        "dependencies": dep.get("edges", []) if profile == "verbose" else [],
-        "call_edges": call.get("edges", []) if profile == "verbose" else [],
+        "symbol_count": symbol_count,
+        "dependency_edge_count": dependency_edge_count,
+        "call_edge_count": call_edge_count,
+        "records": records,
+        "file_order": [str(row["path"]) for row in files_meta],
         "incremental": incremental,
-        "changed_paths_count": len(changed_paths),
+        "include_hashes": include_hashes,
+        "changed_paths_count": len(changed_paths) + len(removed_paths),
+        "removed_paths_count": len(removed_paths),
+        "reused_paths_count": reused_paths_count,
+        "recomputed_python_paths_count": recomputed_python_paths_count,
     }
     if _is_git_repo():
         payload["git_head"] = _git("rev-parse", "HEAD").stdout.strip()
@@ -12866,7 +13073,10 @@ def repo_index_daemon(
         "dependency_edge_count": payload["dependency_edge_count"],
         "call_edge_count": payload["call_edge_count"],
         "incremental": incremental,
-        "changed_paths_count": len(changed_paths),
+        "changed_paths_count": payload["changed_paths_count"],
+        "reused_paths_count": reused_paths_count,
+        "recomputed_python_paths_count": recomputed_python_paths_count,
+        "removed_paths_count": len(removed_paths),
     }
     if summary_mode == "quick":
         result = {
@@ -12876,287 +13086,15 @@ def repo_index_daemon(
             "file_count": payload["file_count"],
             "symbol_count": payload["symbol_count"],
             "incremental": incremental,
-            "changed_paths_count": len(changed_paths),
+            "changed_paths_count": payload["changed_paths_count"],
+            "reused_paths_count": reused_paths_count,
+            "recomputed_python_paths_count": recomputed_python_paths_count,
         }
     if compress:
         result["files_compressed"] = _compress_table(files_meta[:500])
     if store_result:
         result["result_id"] = _result_store_put("repo_index_daemon", result)
     return result
-
-
-class CodeIndexRouterService:
-    """Application service for code indexing and semantic-search routing."""
-
-    def route(
-        self,
-        mode: str = "refresh",
-        path: str = ".",
-        query: str = "",
-        recursive: bool = True,
-        output_profile: str | None = None,
-        fields: list[str] | None = None,
-        offset: int = 0,
-        limit: int | None = None,
-        max_files: int = 5000,
-        max_symbols: int = 20000,
-        max_edges: int = 20000,
-        include_hashes: bool = False,
-        include_private: bool = False,
-        include_stdlib: bool = False,
-        local_rerank_top_k: int = 25,
-        use_local_rerank: bool = True,
-        summary_mode: str = "full",
-        compress: bool = False,
-        store_result: bool = False,
-        incremental: bool = True,
-        action_mode: str = "",
-        pattern: str = "",
-        case_insensitive: bool = False,
-        include_globs: list[str] | None = None,
-        exclude_globs: list[str] | None = None,
-        include_hidden: bool = False,
-        max_matches: int = 500,
-        max_file_bytes: int = 1048576,
-        node_type: str = "Call",
-        name_pattern: str = "",
-        base_ref: str = "HEAD~1",
-        head_ref: str = "HEAD",
-        snapshot_path: str = str(API_SNAPSHOT_FILE),
-    ) -> dict[str, Any]:
-        allowed = {
-            "refresh",
-            "read",
-            "query",
-            "symbols",
-            "deps",
-            "calls",
-            "search",
-            "grep",
-            "tree",
-            "ast",
-            "impact_tests",
-            "doc_sync",
-            "api_surface",
-        }
-        if mode not in allowed:
-            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-
-        if mode in {"refresh", "read", "query"}:
-            result = repo_index_daemon(
-                mode=mode,
-                path=path,
-                query=query,
-                recursive=recursive,
-                include_hashes=include_hashes,
-                max_files=max_files,
-                output_profile=output_profile,
-                fields=fields,
-                offset=offset,
-                limit=limit,
-                summary_mode=summary_mode,
-                compress=compress,
-                store_result=store_result,
-                incremental=incremental,
-            )
-        elif mode == "symbols":
-            result = symbol_index(
-                path=path,
-                recursive=recursive,
-                include_private=include_private,
-                max_symbols=max_symbols,
-                output_profile=output_profile,
-                fields=fields,
-                offset=offset,
-                limit=limit,
-            )
-        elif mode == "deps":
-            result = dependency_map(
-                path=path,
-                recursive=recursive,
-                include_stdlib=include_stdlib,
-                max_files=max_files,
-                output_profile=output_profile,
-                fields=fields,
-                offset=offset,
-                limit=limit,
-                summary_mode=summary_mode,
-                compress=compress,
-                store_result=store_result,
-            )
-        elif mode == "calls":
-            result = call_graph(
-                path=path,
-                recursive=recursive,
-                max_edges=max_edges,
-                output_profile=output_profile,
-                fields=fields,
-                offset=offset,
-                limit=limit,
-                summary_mode=summary_mode,
-                compress=compress,
-                store_result=store_result,
-            )
-        elif mode == "search":
-            result = semantic_find(
-                query=query,
-                path=path,
-                max_results=limit or 20,
-                local_rerank_top_k=local_rerank_top_k,
-                use_local_rerank=use_local_rerank,
-                output_profile=output_profile,
-                fields=fields,
-                offset=offset,
-                summary_mode=summary_mode,
-                compress=compress,
-                store_result=store_result,
-            )
-        elif mode == "grep":
-            needle = pattern or query
-            if not needle:
-                raise ValueError("query or pattern is required for grep mode")
-            result = grep(
-                pattern=needle,
-                path=path,
-                recursive=recursive,
-                case_insensitive=case_insensitive,
-                include_globs=include_globs,
-                exclude_globs=exclude_globs,
-                include_hidden=include_hidden,
-                max_matches=max_matches,
-                max_file_bytes=max_file_bytes,
-                output_profile=output_profile or "compact",
-                fields=fields,
-                offset=offset,
-                limit=limit,
-                compress=compress,
-                summary_mode=summary_mode,
-                store_result=store_result,
-            )
-        elif mode == "tree":
-            tree_mode = action_mode or "parse"
-            result = tree_sitter_core(
-                path=path,
-                mode=tree_mode,
-                recursive=recursive,
-                node_types=[node_type] if node_type else None,
-                text_pattern=query or pattern or None,
-                max_files=max_files,
-                max_nodes=max_symbols,
-                output_profile=output_profile,
-                fields=fields,
-                offset=offset,
-                limit=limit,
-                summary_mode=summary_mode,
-                compress=compress,
-                store_result=store_result,
-            )
-        elif mode == "ast":
-            result = ast_search(
-                path=path,
-                node_type=node_type,
-                name_pattern=name_pattern or query or None,
-                recursive=recursive,
-                max_results=max_matches,
-            )
-        elif mode == "impact_tests":
-            result = impact_tests(
-                base_ref=base_ref,
-                head_ref=head_ref,
-                max_tests=limit or max_matches,
-                output_profile=output_profile or "normal",
-            )
-        elif mode == "doc_sync":
-            result = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
-        else:
-            result = api_surface_snapshot(
-                path=path,
-                snapshot_path=snapshot_path,
-                mode=action_mode or "check",
-                include_private=include_private,
-            )
-        return {
-            "schema": "code_index_router.v1",
-            "mode": mode,
-            "result": result,
-        }
-
-
-_CODE_INDEX_ROUTER_SERVICE = CodeIndexRouterService()
-
-
-@mcp.tool()
-def code_index_router(
-    mode: str = "refresh",
-    path: str = ".",
-    query: str = "",
-    recursive: bool = True,
-    output_profile: str | None = None,
-    fields: list[str] | None = None,
-    offset: int = 0,
-    limit: int | None = None,
-    max_files: int = 5000,
-    max_symbols: int = 20000,
-    max_edges: int = 20000,
-    include_hashes: bool = False,
-    include_private: bool = False,
-    include_stdlib: bool = False,
-    local_rerank_top_k: int = 25,
-    use_local_rerank: bool = True,
-    summary_mode: str = "full",
-    compress: bool = False,
-    store_result: bool = False,
-    incremental: bool = True,
-    action_mode: str = "",
-    pattern: str = "",
-    case_insensitive: bool = False,
-    include_globs: list[str] | None = None,
-    exclude_globs: list[str] | None = None,
-    include_hidden: bool = False,
-    max_matches: int = 500,
-    max_file_bytes: int = 1048576,
-    node_type: str = "Call",
-    name_pattern: str = "",
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-    snapshot_path: str = str(API_SNAPSHOT_FILE),
-) -> dict[str, Any]:
-    """Strict code-intel router for repository index, search, structural analysis, and test/doc impact modes."""
-    return _CODE_INDEX_ROUTER_SERVICE.route(
-        mode=mode,
-        path=path,
-        query=query,
-        recursive=recursive,
-        output_profile=output_profile,
-        fields=fields,
-        offset=offset,
-        limit=limit,
-        max_files=max_files,
-        max_symbols=max_symbols,
-        max_edges=max_edges,
-        include_hashes=include_hashes,
-        include_private=include_private,
-        include_stdlib=include_stdlib,
-        local_rerank_top_k=local_rerank_top_k,
-        use_local_rerank=use_local_rerank,
-        summary_mode=summary_mode,
-        compress=compress,
-        store_result=store_result,
-        incremental=incremental,
-        action_mode=action_mode,
-        pattern=pattern,
-        case_insensitive=case_insensitive,
-        include_globs=include_globs,
-        exclude_globs=exclude_globs,
-        include_hidden=include_hidden,
-        max_matches=max_matches,
-        max_file_bytes=max_file_bytes,
-        node_type=node_type,
-        name_pattern=name_pattern,
-        base_ref=base_ref,
-        head_ref=head_ref,
-        snapshot_path=snapshot_path,
-    )
 
 
 @mcp.tool()
@@ -13637,775 +13575,6 @@ def memory_validate(
         "dropped_expired": dropped,
         "stale_entries": stale,
     }
-
-
-class MemoryRouterService:
-    """Application service for context-memory operations and policy routing."""
-
-    def route(
-        self,
-        mode: str = "get",
-        namespace: str | None = None,
-        key: str | None = None,
-        value: Any = None,
-        ttl_days: int | None = None,
-        confidence: float = 1.0,
-        source: str = "agent",
-        tags: list[str] | None = None,
-        focus: str = "",
-        summary: str = "",
-        topic: str = "",
-        decision: Any = None,
-        decided_by: str = "llm",
-        rationale: str = "",
-        include_expired: bool = False,
-        max_entries: int = 200,
-        include_summaries: bool = True,
-        include_effective_decisions: bool = True,
-        validate_paths: bool = True,
-        drop_expired: bool = False,
-        auto_compact: bool = False,
-        compact_threshold_entries: int = 80,
-        compact_threshold_chars: int = 16000,
-        compact_keep_entries: int = 40,
-        compact_summary_max_chars: int = 1200,
-        contains: str = "",
-        category: str = "",
-        error_text: str = "",
-        max_suggestions: int = 5,
-        issue: str = "",
-        root_cause: str = "",
-        fix: str = "",
-        path: str = ".codebase-tooling-mcp/reports",
-        query: str = "",
-        artifact_mode: str = "refresh",
-    ) -> dict[str, Any]:
-        allowed = {
-            "upsert",
-            "summary_upsert",
-            "decision_record",
-            "get",
-            "validate",
-            "auto_compact",
-            "failure_memory",
-            "root_cause",
-            "artifact_index",
-        }
-        if mode not in allowed:
-            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-        if mode == "upsert":
-            if namespace is None or key is None:
-                raise ValueError("namespace and key are required for upsert mode")
-            result = memory_upsert(
-                namespace=namespace,
-                key=key,
-                value=value,
-                ttl_days=ttl_days,
-                confidence=confidence,
-                source=source,
-                tags=tags,
-            )
-        elif mode == "summary_upsert":
-            if namespace is None:
-                raise ValueError("namespace is required for summary_upsert mode")
-            result = memory_summary_upsert(
-                namespace=namespace,
-                focus=focus,
-                summary=summary,
-                ttl_days=ttl_days,
-                confidence=confidence,
-                source=source,
-                tags=tags,
-            )
-        elif mode == "decision_record":
-            if namespace is None:
-                raise ValueError("namespace is required for decision_record mode")
-            result = memory_decision_record(
-                namespace=namespace,
-                topic=topic,
-                decision=decision,
-                decided_by=decided_by,
-                rationale=rationale,
-                ttl_days=ttl_days,
-                confidence=confidence,
-                source=source,
-                tags=tags,
-            )
-        elif mode == "validate":
-            result = memory_validate(
-                validate_paths=validate_paths,
-                drop_expired=drop_expired,
-                max_entries=max_entries,
-            )
-        elif mode == "auto_compact":
-            result = memory_auto_compact(
-                namespace=namespace,
-                threshold_entries=compact_threshold_entries,
-                threshold_chars=compact_threshold_chars,
-                keep_entries=compact_keep_entries,
-                summary_max_chars=compact_summary_max_chars,
-                drop_expired=drop_expired,
-            )
-        elif mode == "failure_memory":
-            result = failure_memory(
-                mode=query or "get",
-                category=category or None,
-                contains=contains or None,
-                max_entries=max_entries,
-                error_text=error_text,
-                max_suggestions=max_suggestions,
-            )
-        elif mode == "root_cause":
-            result = root_cause_memory(
-                mode=query or "list",
-                issue=issue,
-                root_cause=root_cause,
-                fix=fix,
-                max_entries=max_entries,
-            )
-        elif mode == "artifact_index":
-            result = artifact_memory_index(
-                mode=artifact_mode,
-                path=path,
-                query=query,
-                max_entries=max_entries,
-            )
-        else:
-            result = memory_get(
-                namespace=namespace,
-                key=key,
-                include_expired=include_expired,
-                max_entries=max_entries,
-                include_summaries=include_summaries,
-                include_effective_decisions=include_effective_decisions,
-                auto_compact=auto_compact,
-                compact_threshold_entries=compact_threshold_entries,
-                compact_threshold_chars=compact_threshold_chars,
-                compact_keep_entries=compact_keep_entries,
-                compact_summary_max_chars=compact_summary_max_chars,
-            )
-        return {
-            "schema": "memory_router.v1",
-            "mode": mode,
-            "result": result,
-        }
-
-
-_MEMORY_ROUTER_SERVICE = MemoryRouterService()
-
-
-@mcp.tool()
-def memory_router(
-    mode: str = "get",
-    namespace: str | None = None,
-    key: str | None = None,
-    value: Any = None,
-    ttl_days: int | None = None,
-    confidence: float = 1.0,
-    source: str = "agent",
-    tags: list[str] | None = None,
-    focus: str = "",
-    summary: str = "",
-    topic: str = "",
-    decision: Any = None,
-    decided_by: str = "llm",
-    rationale: str = "",
-    include_expired: bool = False,
-    max_entries: int = 200,
-    include_summaries: bool = True,
-    include_effective_decisions: bool = True,
-    validate_paths: bool = True,
-    drop_expired: bool = False,
-    auto_compact: bool = False,
-    compact_threshold_entries: int = 80,
-    compact_threshold_chars: int = 16000,
-    compact_keep_entries: int = 40,
-    compact_summary_max_chars: int = 1200,
-    contains: str = "",
-    category: str = "",
-    error_text: str = "",
-    max_suggestions: int = 5,
-    issue: str = "",
-    root_cause: str = "",
-    fix: str = "",
-    path: str = ".codebase-tooling-mcp/reports",
-    query: str = "",
-    artifact_mode: str = "refresh",
-) -> dict[str, Any]:
-    """Strict memory router for context memory, failure memory, root-cause memory, and artifact indexing."""
-    return _MEMORY_ROUTER_SERVICE.route(
-        mode=mode,
-        namespace=namespace,
-        key=key,
-        value=value,
-        ttl_days=ttl_days,
-        confidence=confidence,
-        source=source,
-        tags=tags,
-        focus=focus,
-        summary=summary,
-        topic=topic,
-        decision=decision,
-        decided_by=decided_by,
-        rationale=rationale,
-        include_expired=include_expired,
-        max_entries=max_entries,
-        include_summaries=include_summaries,
-        include_effective_decisions=include_effective_decisions,
-        validate_paths=validate_paths,
-        drop_expired=drop_expired,
-        auto_compact=auto_compact,
-        compact_threshold_entries=compact_threshold_entries,
-        compact_threshold_chars=compact_threshold_chars,
-        compact_keep_entries=compact_keep_entries,
-        compact_summary_max_chars=compact_summary_max_chars,
-        contains=contains,
-        category=category,
-        error_text=error_text,
-        max_suggestions=max_suggestions,
-        issue=issue,
-        root_cause=root_cause,
-        fix=fix,
-        path=path,
-        query=query,
-        artifact_mode=artifact_mode,
-    )
-
-
-@mcp.tool()
-def repo_router(
-    mode: str = "tree",
-    path: str = ".",
-    recursive: bool = True,
-    include_hidden: bool = False,
-    max_entries: int = 1000,
-    include_globs: list[str] | None = None,
-    exclude_globs: list[str] | None = None,
-    file_type: str = "any",
-    max_depth: int | None = None,
-    output_profile: str | None = None,
-    offset: int = 0,
-    limit: int | None = None,
-    adaptive_limits: bool = True,
-    encoding: str = "utf-8",
-    max_bytes: int = MAX_READ_BYTES,
-    max_chars: int = 20000,
-    max_pages: int = 20,
-    max_rows_per_sheet: int = 200,
-    start_line: int = 1,
-    end_line: int = 1,
-    context_before: int = 0,
-    context_after: int = 0,
-    requests: list[dict[str, Any]] | None = None,
-    query: str = "",
-) -> dict[str, Any]:
-    """Router for repository listing, reads, snippets, batches, and structured config queries."""
-    allowed = {"tree", "find", "read", "read_document", "read_snippet", "read_batch", "query_json"}
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-    if mode == "tree":
-        result = list_files(path=path, recursive=recursive, include_hidden=include_hidden, max_entries=max_entries)
-    elif mode == "find":
-        result = find_paths(
-            path=path,
-            recursive=recursive,
-            include_hidden=include_hidden,
-            include_globs=include_globs,
-            exclude_globs=exclude_globs,
-            file_type=file_type,
-            max_depth=max_depth,
-            max_entries=max_entries,
-            output_profile=output_profile or "compact",
-            offset=offset,
-            limit=limit,
-            adaptive_limits=adaptive_limits,
-        )
-    elif mode == "read":
-        result = read_file(path=path, encoding=encoding, max_bytes=max_bytes)
-    elif mode == "read_document":
-        result = read_document(
-            path=path,
-            max_chars=max_chars,
-            max_pages=max_pages,
-            max_rows_per_sheet=max_rows_per_sheet,
-            output_profile=output_profile,
-        )
-    elif mode == "read_snippet":
-        result = read_snippet(
-            path=path,
-            start_line=start_line,
-            end_line=end_line,
-            context_before=context_before,
-            context_after=context_after,
-            encoding=encoding,
-            output_profile=output_profile,
-        )
-    elif mode == "read_batch":
-        result = read_batch(
-            requests=requests or [],
-            encoding=encoding,
-            output_profile=output_profile,
-        )
-    else:
-        result = json_query(path=path, query=query, file_type=file_type, output_profile=output_profile or "normal")
-    return {"schema": "repo_router.v1", "mode": mode, "result": result}
-
-
-@mcp.tool()
-def git_router(
-    mode: str = "status",
-    ref: str = "HEAD",
-    path: str = "",
-    pathspec: str = "",
-    staged: bool = False,
-    short: bool = True,
-    limit: int = 20,
-    paths: list[str] | None = None,
-    message: str = "",
-    allow_empty: bool = False,
-    remote: str = "origin",
-    branch: str = "",
-    rebase: bool = False,
-    set_upstream: bool = False,
-    create_branch: bool = False,
-    name: str = "",
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-    diff_text: str = "",
-    max_findings: int = 20,
-) -> dict[str, Any]:
-    """Router for Git operations, diff summaries, risk scoring, and security triage."""
-    allowed = {
-        "init",
-        "status",
-        "diff",
-        "log",
-        "show",
-        "add",
-        "restore",
-        "commit",
-        "checkout",
-        "create_branch",
-        "fetch",
-        "pull",
-        "push",
-        "summarize_diff",
-        "risk",
-        "security",
-    }
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-    if mode == "init":
-        result = git_init(initial_branch=branch or name or "main")
-    elif mode == "status":
-        result = git_status(short=short)
-    elif mode == "diff":
-        result = git_diff(ref=ref if ref else None, pathspec=pathspec or None, staged=staged)
-    elif mode == "log":
-        result = git_log(limit=limit, ref=ref or "HEAD")
-    elif mode == "show":
-        result = git_show(ref=ref or "HEAD", path=path or None)
-    elif mode == "add":
-        result = git_add(paths=paths or ([path] if path else []))
-    elif mode == "restore":
-        result = git_restore(paths=paths or ([path] if path else []), staged=staged)
-    elif mode == "commit":
-        result = git_commit(message=message, allow_empty=allow_empty)
-    elif mode == "checkout":
-        result = git_checkout(ref=branch or ref, create_branch=create_branch)
-    elif mode == "create_branch":
-        result = git_create_branch(name=name or branch, checkout=create_branch or True)
-    elif mode == "fetch":
-        result = git_fetch(remote=remote, prune=staged)
-    elif mode == "pull":
-        result = git_pull(remote=remote, branch=branch or None, rebase=rebase)
-    elif mode == "push":
-        result = git_push(remote=remote, branch=branch or None, set_upstream=set_upstream)
-    elif mode == "summarize_diff":
-        result = summarize_diff(ref=ref or None, pathspec=pathspec or None, staged=staged, output_profile="compact")
-    elif mode == "risk":
-        result = risk_scoring(ref=ref or head_ref, pathspec=pathspec or None, staged=staged)
-    else:
-        patch = diff_text or git_diff(ref=f"{base_ref}...{head_ref}")
-        result = security_triage(diff_text=patch, paths=paths or ([path] if path else None), max_findings=max_findings)
-    return {"schema": "git_router.v1", "mode": mode, "result": result}
-
-
-@mcp.tool()
-def tool_router(
-    mode: str = "route",
-    query: str = "",
-    candidates: list[str] | None = None,
-    selected_tool: str = "",
-    success: bool = True,
-    latency_ms: float = 0.0,
-    min_calls: int = 2,
-    min_success_rate: float = 0.6,
-    min_score_gap: float = 5.0,
-) -> dict[str, Any]:
-    """Router for tool selection with learned ranking and intent fallback."""
-    selected = candidates or []
-    if mode == "inspect":
-        ranked = _intent_rank_candidates(query=query, candidates=selected) if selected else []
-        stats_payload = _json_file_load(TOOL_ROUTER_STATS_FILE, {"stats": {}})
-        return {
-            "schema": "tool_router.v1",
-            "mode": mode,
-            "query": query,
-            "candidates": selected,
-            "stats": stats_payload.get("stats", {}),
-            "intent_ranked": ranked,
-        }
-    result = tool_router_learned(
-        query=query,
-        candidates=selected,
-        mode=mode,
-        selected_tool=selected_tool,
-        success=success,
-        latency_ms=latency_ms,
-        min_calls=min_calls,
-        min_success_rate=min_success_rate,
-        min_score_gap=min_score_gap,
-        fallback_to_intent=True,
-    )
-    return {
-        "schema": "tool_router.v1",
-        "mode": mode,
-        "result": result,
-    }
-
-
-@mcp.tool()
-def quality_router(
-    mode: str = "self_test",
-    runner: str = "pytest",
-    target: str = "tests",
-    verbose: bool = False,
-    timeout_seconds: int = 600,
-    fail_fast: bool = False,
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-    run_test_execution: bool = True,
-    run_impact_tests: bool = True,
-    run_doc_check: bool = True,
-    run_api_check: bool = True,
-    run_risk_check: bool = True,
-    run_compile_check: bool = True,
-    snapshot_path: str = str(API_SNAPSHOT_FILE),
-    max_compile_files: int = 300,
-    summary_mode: str = "quick",
-    test_runner: str = "pytest",
-    test_target: str = "tests",
-    run_docs_check: bool = True,
-    run_license_check: bool = True,
-    run_security_check: bool = True,
-    run_tests: bool = True,
-    history_path: str = str(FLAKY_HISTORY_FILE),
-    runs: int = 5,
-    update_history: bool = True,
-    block_on_risk_level: str = "high",
-    critical_globs: list[str] | None = None,
-    require_docs_for_impl_diff: bool = True,
-    require_tests_for_critical: bool = True,
-    required_tools: list[str] | None = None,
-    required_artifacts: list[str] | None = None,
-    required_result_ids: list[str] | None = None,
-    max_age_minutes: int = 60,
-    require_order: bool = False,
-    spec_text: str = "",
-    framework: str = "pytest",
-    output_path: str = "",
-    findings: list[dict[str, Any]] | None = None,
-    replace_all: bool = False,
-    run_validation: bool = False,
-) -> dict[str, Any]:
-    """Router for testing, quality gates, spec-to-tests, and batch fixes."""
-    allowed = {"self_test", "self_check", "release_readiness", "flaky", "change_impact", "required_tool_chain", "spec_to_tests", "smart_fix"}
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-    if mode == "self_test":
-        result = self_test(runner=runner, target=target, verbose=verbose, timeout_seconds=timeout_seconds, fail_fast=fail_fast)
-    elif mode == "self_check":
-        result = self_check_pipeline(
-            base_ref=base_ref,
-            head_ref=head_ref,
-            run_test_execution=run_test_execution,
-            run_impact_tests=run_impact_tests,
-            run_doc_check=run_doc_check,
-            run_api_check=run_api_check,
-            run_risk_check=run_risk_check,
-            run_compile_check=run_compile_check,
-            snapshot_path=snapshot_path,
-            max_compile_files=max_compile_files,
-            summary_mode=summary_mode,
-        )
-    elif mode == "release_readiness":
-        result = release_readiness(
-            base_ref=base_ref,
-            head_ref=head_ref,
-            run_docs_check=run_docs_check,
-            run_impact_check=run_impact_tests,
-            run_license_check=run_license_check,
-            run_risk_check=run_risk_check,
-            run_security_check=run_security_check,
-            run_tests=run_tests,
-            summary_mode=summary_mode,
-            test_runner=test_runner,
-            test_target=test_target,
-        )
-    elif mode == "flaky":
-        result = flaky_test_detector(
-            runner=runner,
-            target=target,
-            runs=runs,
-            timeout_seconds=timeout_seconds,
-            fail_fast=fail_fast,
-            history_path=history_path,
-            update_history=update_history,
-        )
-    elif mode == "change_impact":
-        result = change_impact_gate(
-            base_ref=base_ref,
-            head_ref=head_ref,
-            block_on_risk_level=block_on_risk_level,
-            critical_globs=critical_globs,
-            require_docs_for_impl_diff=require_docs_for_impl_diff,
-            require_tests_for_critical=require_tests_for_critical,
-        )
-    elif mode == "required_tool_chain":
-        result = required_tool_chain(
-            required_tools=required_tools or [],
-            required_artifacts=required_artifacts or [],
-            required_result_ids=required_result_ids or [],
-            max_age_minutes=max_age_minutes,
-            require_order=require_order,
-        )
-    elif mode == "spec_to_tests":
-        result = spec_to_tests(
-            spec_text=spec_text,
-            framework=framework,
-            mode="generate",
-            output_path=output_path or None,
-        )
-    else:
-        result = smart_fix_batch(
-            findings=findings or [],
-            mode="apply",
-            replace_all=replace_all,
-            run_validation=run_validation,
-        )
-    return {"schema": "quality_router.v1", "mode": mode, "result": result}
-
-
-@mcp.tool()
-def governance_router(
-    mode: str = "policy",
-    action_mode: str = "",
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-    diff_text: str = "",
-    include_globs: list[str] | None = None,
-    exclude_globs: list[str] | None = None,
-    recursive: bool = True,
-    run_reuse_lint: bool = True,
-    generate_spdx: bool = False,
-    auto_fix_headers: bool = False,
-    download_missing_licenses: bool = False,
-    lint_report_path: str = str(REUSE_LINT_REPORT),
-    spdx_output_path: str = str(REUSE_SPDX_REPORT),
-    max_missing_files: int = 200,
-    action: str = "",
-    risk_level: str = "medium",
-    details: str = "",
-    approval_id: str = "",
-    approved: bool = False,
-    message: str = "",
-    ref: str = "HEAD",
-    include_diff_hints: bool = False,
-) -> dict[str, Any]:
-    """Router for policy, license, runtime contract, approval, and commit lint workflows."""
-    allowed = {"policy", "license", "runtime_contract", "human_approval", "commit_lint"}
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-    if mode == "policy":
-        result = policy_simulator(base_ref=base_ref, head_ref=head_ref, diff_text=diff_text)
-    elif mode == "license":
-        result = license_monitor(
-            path=".",
-            recursive=recursive,
-            include_globs=include_globs,
-            exclude_globs=exclude_globs,
-            run_reuse_lint=run_reuse_lint,
-            generate_spdx=generate_spdx,
-            auto_fix_headers=auto_fix_headers,
-            download_missing_licenses=download_missing_licenses,
-            lint_report_path=lint_report_path,
-            spdx_output_path=spdx_output_path,
-            max_missing_files=max_missing_files,
-        )
-    elif mode == "runtime_contract":
-        result = runtime_contract_checker()
-    elif mode == "human_approval":
-        result = human_approval_points(
-            mode=action_mode or "list",
-            action=action,
-            risk_level=risk_level,
-            details=details,
-            approval_id=approval_id,
-            approved=approved,
-        )
-    else:
-        result = commit_lint_tag(message=message, ref=ref, include_diff_hints=include_diff_hints)
-    return {"schema": "governance_router.v1", "mode": mode, "result": result}
-
-
-@mcp.tool()
-def workflow_router(
-    mode: str = "fast_path",
-    action_mode: str = "",
-    task: str = "",
-    goal: str = "",
-    constraints: list[str] | None = None,
-    include_rollback: bool = True,
-    use_cache: bool = True,
-    refresh_cache: bool = False,
-    cache_ttl_minutes: int = 240,
-    lanes: list[str] | None = None,
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-    actions: list[str] | None = None,
-    requirements: list[str] | None = None,
-    checks: list[dict[str, Any]] | None = None,
-    query: str = "",
-    path: str = ".codebase-tooling-mcp/reports",
-    max_entries: int = 100,
-    category: str = "",
-    contains: str = "",
-    error_text: str = "",
-    max_suggestions: int = 5,
-    issue: str = "",
-    root_cause: str = "",
-    fix: str = "",
-    replay_id: str = "",
-    event: dict[str, Any] | None = None,
-    max_events: int = 1000,
-    shard_size: int = 50,
-    refresh_index: bool = True,
-    run_readiness: bool = True,
-    enforce_tool_chain: bool = True,
-    store_result: bool = False,
-) -> dict[str, Any]:
-    """Router for workflow orchestration, artifact memory, failure memory, and replay helpers."""
-    allowed = {"fast_path", "compile", "multi_agent", "constraint_check", "confidence", "artifact_index", "failure_memory", "root_cause", "execution_replay", "auto_shard"}
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-    if mode == "fast_path":
-        result = fast_path_dev(
-            task=task,
-            base_ref=base_ref,
-            head_ref=head_ref,
-            refresh_index=refresh_index,
-            run_readiness=run_readiness,
-            enforce_tool_chain=enforce_tool_chain,
-            store_result=store_result,
-        )
-    elif mode == "compile":
-        result = workflow_compiler(
-            goal=goal,
-            constraints=constraints,
-            include_rollback=include_rollback,
-            use_cache=use_cache,
-            refresh_cache=refresh_cache,
-            cache_ttl_minutes=cache_ttl_minutes,
-        )
-    elif mode == "multi_agent":
-        result = multi_agent_lane(task=task, lanes=lanes, base_ref=base_ref, head_ref=head_ref)
-    elif mode == "constraint_check":
-        result = constraint_solver_for_tasks(actions=actions or [], requirements=requirements or [])
-    elif mode == "confidence":
-        result = confidence_scoring(checks=checks or [])
-    elif mode == "artifact_index":
-        result = artifact_memory_index(mode=action_mode or "refresh", path=path, query=query, max_entries=max_entries)
-    elif mode == "failure_memory":
-        result = failure_memory(
-            mode=action_mode or "get",
-            category=category or None,
-            contains=contains or None,
-            max_entries=max_entries,
-            error_text=error_text,
-            max_suggestions=max_suggestions,
-        )
-    elif mode == "root_cause":
-        result = root_cause_memory(
-            mode=action_mode or "list",
-            issue=issue,
-            root_cause=root_cause,
-            fix=fix,
-            max_entries=max_entries,
-        )
-    elif mode == "execution_replay":
-        result = execution_replay(mode=action_mode or "read", replay_id=replay_id, event=event, max_events=max_events)
-    else:
-        result = auto_sharding_for_analysis(path=path or ".", shard_size=shard_size)
-    return {"schema": "workflow_router.v1", "mode": mode, "result": result}
-
-
-@mcp.tool()
-def runtime_guard_router(
-    mode: str = "benchmark",
-    action_mode: str = "",
-    tools: list[str] | None = None,
-    iterations: int = 3,
-    warmup: int = 1,
-    baseline_path: str = str(OUTPUT_BASELINE_FILE),
-    tolerance_ratio: float = 1.2,
-    max_output_chars: int | None = None,
-    default_output_profile: str | None = None,
-    reset: bool = False,
-    max_tokens: int = 200000,
-    max_calls: int = 50,
-    max_seconds: int = 600,
-    used_tokens: int = 0,
-    used_calls: int = 0,
-    used_seconds: int = 0,
-    tool: str | None = None,
-    max_age_minutes: int = 1440,
-    limit: int = 50,
-    result_id: str = "",
-    value: Any = None,
-    offset: int = 0,
-    fields: list[str] | None = None,
-    refresh: bool = True,
-) -> dict[str, Any]:
-    """Router for benchmarks, guards, caches, result handles, and workspace facts."""
-    allowed = {"benchmark", "output_size", "golden_output", "token_budget", "cost_budget", "cache", "result_handle", "workspace_facts"}
-    if mode not in allowed:
-        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
-    if mode == "benchmark":
-        result = tool_benchmark(tools=tools, iterations=iterations, warmup=warmup)
-    elif mode == "output_size":
-        result = output_size_guard(mode=action_mode or "check", tools=tools, tolerance_ratio=tolerance_ratio, baseline_path=baseline_path)
-    elif mode == "golden_output":
-        result = golden_output_guard(mode=action_mode or "check", tools=tools, baseline_path=baseline_path)
-    elif mode == "token_budget":
-        result = token_budget_guard(max_output_chars=max_output_chars, default_output_profile=default_output_profile, reset=reset)
-    elif mode == "cost_budget":
-        result = cost_budget_enforcer(
-            mode=action_mode or "check",
-            max_tokens=max_tokens,
-            max_calls=max_calls,
-            max_seconds=max_seconds,
-            used_tokens=used_tokens,
-            used_calls=used_calls,
-            used_seconds=used_seconds,
-        )
-    elif mode == "cache":
-        result = cache_control(mode=action_mode or "stats", tool=tool, max_age_minutes=max_age_minutes, limit=limit)
-    elif mode == "result_handle":
-        result = result_handle(mode=action_mode or "fetch", result_id=result_id, tool=tool, value=value, offset=offset, limit=limit, fields=fields)
-    else:
-        result = workspace_facts(refresh=refresh)
-    return {"schema": "runtime_guard_router.v1", "mode": mode, "result": result}
 
 
 @mcp.tool()

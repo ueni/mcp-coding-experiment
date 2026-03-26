@@ -7,7 +7,6 @@ import json
 import subprocess
 import sys
 import unittest
-import urllib.parse
 import zipfile
 from unittest.mock import patch
 
@@ -21,7 +20,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("optimized_prompt", out)
         self.assertGreater(out["optimized_chars"], 0)
 
-    def test_mcp_resources_and_templates(self):
+    def test_no_public_mcp_resources_or_templates_by_default(self):
         async def run_checks():
             resources = await self.server.mcp.list_resources()
             templates = await self.server.mcp.list_resource_templates()
@@ -29,27 +28,16 @@ class ServerToolsTest(ServerToolsTestBase):
             resource_uris = {str(item.model_dump().get("uri")) for item in resources}
             template_uris = {item.model_dump().get("uriTemplate") for item in templates}
 
-            self.assertIn("repo://summary", resource_uris)
-            self.assertIn("repo://file/{path}", template_uris)
-            self.assertIn("repo://tree/{path}", template_uris)
-
-            summary_contents = await self.server.mcp.read_resource("repo://summary")
-            self.assertGreaterEqual(len(summary_contents), 1)
-            summary_payload = json.loads(summary_contents[0].content)
-            self.assertEqual(summary_payload["schema"], "resource.repo_summary.v1")
-
-            encoded_file = urllib.parse.quote("src/sample.py", safe="")
-            file_contents = await self.server.mcp.read_resource(f"repo://file/{encoded_file}")
-            self.assertGreaterEqual(len(file_contents), 1)
-            self.assertIn("def alpha", file_contents[0].content)
-
-            tree_contents = await self.server.mcp.read_resource("repo://tree/src")
-            self.assertGreaterEqual(len(tree_contents), 1)
-            tree_payload = json.loads(tree_contents[0].content)
-            self.assertEqual(tree_payload["schema"], "resource.repo_tree.v1")
-            self.assertIn("src/sample.py", tree_payload["entries"])
+            self.assertEqual(resource_uris, set())
+            self.assertEqual(template_uris, set())
 
         asyncio.run(run_checks())
+        self.assertEqual(
+            self.server._normalize_public_resource_path("src/sample.py"),
+            "src/sample.py",
+        )
+        with self.assertRaises(ValueError):
+            self.server._normalize_public_resource_path(".codebase-tooling-mcp/index/repo_index.json")
 
     def test_terminal_support_session(self):
         started = self.server.terminal_support_session(
@@ -188,28 +176,23 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(query["mode"], "query")
         self.assertIn("value_json", query)
 
-    def test_code_index_router_modes(self):
-        refreshed = self.server.code_index_router(
+    def test_code_index_leaf_modes(self):
+        refreshed = self.server.repo_index_daemon(
             mode="refresh",
             path=".",
             output_profile="compact",
             summary_mode="quick",
         )
-        self.assertEqual(refreshed["schema"], "code_index_router.v1")
-        self.assertEqual(refreshed["mode"], "refresh")
-        self.assertIn("schema", refreshed["result"])
+        self.assertEqual(refreshed["schema"], "repo_index_daemon.quick.v1")
+        self.assertGreaterEqual(refreshed["file_count"], 1)
 
-        symbols = self.server.code_index_router(
-            mode="symbols",
+        symbols = self.server.symbol_index(
             path="src",
             output_profile="compact",
-            summary_mode="quick",
             limit=10,
         )
-        self.assertEqual(symbols["schema"], "code_index_router.v1")
-        self.assertEqual(symbols["mode"], "symbols")
-        self.assertIsInstance(symbols["result"], list)
-        self.assertGreaterEqual(len(symbols["result"]), 1)
+        self.assertIsInstance(symbols, list)
+        self.assertGreaterEqual(len(symbols), 1)
 
     def test_tool_benchmark(self):
         out = self.server.tool_benchmark(tools=["find_paths", "grep"], iterations=1, warmup=0)
@@ -299,26 +282,30 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(rerank["count"], 2)
 
 
-    def test_local_infer_fallback(self):
+    def test_local_infer_fallback_without_grounded_context_is_unavailable(self):
         out = self.server.local_infer(
             prompt="explain alpha function quickly",
             backend="fallback",
             output_profile="compact",
             max_tokens=64,
         )
-        self.assertTrue(out["ok"])
-        self.assertIn("output", out)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["backend"], "unavailable")
+        self.assertTrue(out["degraded"])
+        self.assertEqual(out["degraded_reason"], "no_grounded_fallback_available")
+        self.assertEqual(out["output"], "")
 
-    def test_local_infer_fallback_uses_task_aware_prompt_optimization(self):
+    def test_local_infer_fallback_uses_grounded_tool_summary(self):
         out = self.server.local_infer(
-            prompt="review the patch for regressions",
+            prompt="Summarize src/sample.py in 2 concise sentences focused on behavior.",
             backend="fallback",
-            task="review",
             output_profile="compact",
-            max_tokens=64,
+            max_tokens=96,
         )
         self.assertTrue(out["ok"])
-        self.assertIn("high-severity issues first", out["output"])
+        self.assertEqual(out["backend"], "tool_fallback")
+        self.assertTrue(out["degraded"])
+        self.assertIn("alpha", out["output"].lower())
 
     def test_task_router_parallel_infer(self):
         out = self.server.task_router(
@@ -563,14 +550,12 @@ class ServerToolsTest(ServerToolsTestBase):
 
 
     def test_task_router_task_reads_memory_and_encodes_session_and_memory(self):
-        self.server.memory_router(
-            mode="summary_upsert",
+        self.server.memory_summary_upsert(
             namespace="task/route/security",
             focus="recent_activity",
             summary="prior route summary",
         )
-        self.server.memory_router(
-            mode="decision_record",
+        self.server.memory_decision_record(
             namespace="task/session/abc",
             topic="response_style",
             decision="be terse",
@@ -686,26 +671,22 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["memory"]["failure_recorded"])
 
     def test_task_router_task_memory_context_is_summary_first_and_capped(self):
-        self.server.memory_router(
-            mode="summary_upsert",
+        self.server.memory_summary_upsert(
             namespace="task/route/security",
             focus="recent_activity",
             summary=("route-summary " * 80).strip(),
         )
-        self.server.memory_router(
-            mode="upsert",
+        self.server.memory_upsert(
             namespace="task/route/security",
             key="raw-route",
             value={"detail": "raw route fallback should not appear"},
         )
-        self.server.memory_router(
-            mode="summary_upsert",
+        self.server.memory_summary_upsert(
             namespace="task/session/abc",
             focus="session",
             summary=("session-summary " * 80).strip(),
         )
-        self.server.memory_router(
-            mode="upsert",
+        self.server.memory_upsert(
             namespace="task/session/abc",
             key="raw-session",
             value={"detail": "raw session fallback should not appear"},
@@ -740,8 +721,9 @@ class ServerToolsTest(ServerToolsTestBase):
             max_tokens=16,
         )
         self.assertEqual(out["schema"], "autocomplete.compact.v1")
-        self.assertEqual(out["backend"], "fallback")
+        self.assertEqual(out["backend"], "heuristic_fallback")
         self.assertTrue(out["ok"])
+        self.assertTrue(out["degraded"])
         self.assertIn("completion", out)
 
     def test_semantic_find_with_local_rerank(self):
@@ -1431,14 +1413,6 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(solved["schema"], "constraint_solver_for_tasks.v1")
         self.assertFalse(solved["ok"])
 
-        st = self.server.spec_to_tests(
-            spec_text="- system must authenticate users\n- response should be fast",
-            framework="pytest",
-            mode="generate",
-        )
-        self.assertEqual(st["schema"], "spec_to_tests.v1")
-        self.assertIn("def test_spec_", st["test_code"])
-
         shards = self.server.auto_sharding_for_analysis(path=".", shard_size=2)
         self.assertEqual(shards["schema"], "auto_sharding_for_analysis.v1")
         self.assertGreaterEqual(shards["shard_count"], 1)
@@ -1452,15 +1426,14 @@ class ServerToolsTest(ServerToolsTestBase):
         contract = self.server.runtime_contract_checker()
         self.assertEqual(contract["schema"], "runtime_contract_checker.v1")
         self.assertIn("ok", contract)
+        self.assertEqual(contract["resource_uri_count"], 0)
+        self.assertEqual(contract["resource_template_count"], 0)
+        self.assertEqual(contract["unexpected_resources"], [])
 
         budget_set = self.server.cost_budget_enforcer(mode="set", max_tokens=100, max_calls=10, max_seconds=60)
         self.assertEqual(budget_set["schema"], "cost_budget_enforcer.v1")
         budget_record = self.server.cost_budget_enforcer(mode="record", used_tokens=10, used_calls=1, used_seconds=5)
         self.assertTrue(budget_record["ok"])
-
-        lane = self.server.multi_agent_lane(task="pre-release", base_ref="HEAD", head_ref="HEAD")
-        self.assertEqual(lane["schema"], "multi_agent_lane.v1")
-        self.assertIn("confidence", lane)
 
         approval = self.server.human_approval_points(mode="create", action="deploy", risk_level="high", details="prod deploy")
         self.assertEqual(approval["schema"], "human_approval_points.v1")
@@ -1627,18 +1600,16 @@ class ServerToolsTest(ServerToolsTestBase):
             )
             self.assertTrue(deleted["deleted"])
 
-    def test_memory_router_auto_compact_and_usage_stats(self):
+    def test_memory_auto_compact_and_usage_stats(self):
         for i in range(10):
-            self.server.memory_router(
-                mode="upsert",
+            self.server.memory_upsert(
                 namespace="compact_demo",
                 key=f"k{i}",
                 value={"n": i, "payload": "x" * 180},
                 ttl_days=30,
             )
 
-        out = self.server.memory_router(
-            mode="get",
+        result = self.server.memory_get(
             namespace="compact_demo",
             max_entries=100,
             auto_compact=True,
@@ -1646,20 +1617,21 @@ class ServerToolsTest(ServerToolsTestBase):
             compact_threshold_chars=1000,
             compact_keep_entries=3,
         )
-        result = out["result"]
         self.assertGreaterEqual(result["count"], 10)
         self.assertIn("usage_stats", result)
         self.assertIn("events", result["usage_stats"])
         self.assertTrue(result["auto_compact"]["compacted"])
 
-        compact = self.server.memory_router(
-            mode="auto_compact",
+        compact = self.server.memory_auto_compact(
             namespace="compact_demo",
-            compact_threshold_entries=5,
-            compact_threshold_chars=1000,
-            compact_keep_entries=3,
+            threshold_entries=5,
+            threshold_chars=1000,
+            keep_entries=3,
         )
-        self.assertTrue(compact["result"]["compacted"])
+        self.assertFalse(compact["compacted"])
+        payload = self.server._memory_load()
+        entries = [row for row in payload["entries"] if row.get("namespace") == "compact_demo"]
+        self.assertLessEqual(len(entries), 3)
 
     def test_self_test_internal_and_repo_target_routing(self):
         internal_dir = self.repo_path / "internal_selftests"
@@ -1695,7 +1667,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with self.assertRaises(ValueError):
             self.server.self_test(runner="unittest", target="repo:", timeout_seconds=10)
 
-    def test_router_split_docker_and_vscode(self):
+    def test_docker_and_vscode_leaf_helpers(self):
         vscode_dir = self.repo_path / ".vscode"
         vscode_dir.mkdir(parents=True, exist_ok=True)
         tasks_path = vscode_dir / "tasks.json"
@@ -1715,21 +1687,22 @@ class ServerToolsTest(ServerToolsTestBase):
             encoding="utf-8",
         )
 
-        with self.assertRaises(ValueError):
-            self.server.docker_router(mode="run")
+        status = self.server.docker_cli_status()
+        self.assertEqual(status["schema"], "docker_cli_status.v1")
 
-        listed = self.server.vscode_router(
-            mode="list",
+        with self.assertRaises(ValueError):
+            self.server.docker_cli_run(command=["docker", "run", "hello-world"])
+
+        listed = self.server.vscode_tasks_list(
             tasks_path=".vscode/tasks.json",
             control_profile="build",
         )
-        self.assertEqual(listed["schema"], "vscode_router.v1")
-        self.assertEqual(listed["result"]["count"], 1)
-        self.assertFalse(listed["result"]["tasks"][0]["ok"])
+        self.assertEqual(listed["schema"], "vscode_tasks_list.v1")
+        self.assertEqual(listed["count"], 1)
+        self.assertFalse(listed["tasks"][0]["ok"])
 
         with self.assertRaises(ValueError):
-            self.server.vscode_router(
-                mode="run",
+            self.server.vscode_task_run(
                 label="Docker: blocked",
                 tasks_path=".vscode/tasks.json",
                 control_profile="build",
@@ -1805,51 +1778,39 @@ class ServerToolsTest(ServerToolsTestBase):
 
         asyncio.run(run_checks())
 
-    def test_router_surface_modes(self):
+    def test_leaf_surface_modes(self):
         self.write_repo_text("config.json", '{"outer": {"value": 7}}\n')
 
-        repo_out = self.server.repo_router(mode="query_json", path="config.json", query="outer.value", file_type="json")
-        self.assertEqual(repo_out["schema"], "repo_router.v1")
-        self.assertEqual(repo_out["result"]["value"], 7)
+        repo_out = self.server.json_query(path="config.json", query="outer.value", file_type="json")
+        self.assertEqual(json.loads(repo_out["value_json"]), 7)
 
         write_out = self.server.workspace_transaction(mode="write", path="notes.txt", content="hello\n")
         self.assertEqual(write_out["schema"], "workspace_transaction.v1")
         self.assertTrue((self.repo_path / "notes.txt").is_file())
 
-        git_out = self.server.git_router(mode="status")
-        self.assertEqual(git_out["schema"], "git_router.v1")
+        git_out = self.server.git_status(short=True)
+        self.assertIn("notes.txt", git_out)
 
-        grep_out = self.server.code_index_router(mode="grep", query="alpha", path="src")
-        self.assertEqual(grep_out["schema"], "code_index_router.v1")
-        self.assertGreaterEqual(len(grep_out["result"]), 1)
+        grep_out = self.server.grep(pattern="alpha", path="src", output_profile="compact")
+        self.assertGreaterEqual(len(grep_out), 1)
 
-        mem_out = self.server.memory_router(mode="artifact_index", artifact_mode="refresh", path="docs")
-        self.assertEqual(mem_out["schema"], "memory_router.v1")
-        self.assertEqual(mem_out["mode"], "artifact_index")
+        mem_out = self.server.artifact_memory_index(mode="refresh", path="docs")
+        self.assertEqual(mem_out["schema"], "artifact_memory_index.v1")
 
-        tool_out = self.server.tool_router(mode="route", query="find files", candidates=["find_paths", "grep"])
-        self.assertEqual(tool_out["schema"], "tool_router.v1")
-        self.assertEqual(tool_out["mode"], "route")
+        tool_out = self.server.tool_router_learned(query="find files", candidates=["find_paths", "grep"], mode="route")
+        self.assertEqual(tool_out["schema"], "tool_router_learned.v1")
 
-        quality_out = self.server.quality_router(
-            mode="spec_to_tests",
-            spec_text="- system should validate tokens",
-            framework="pytest",
-        )
-        self.assertEqual(quality_out["schema"], "quality_router.v1")
+        governance_out = self.server.runtime_contract_checker()
+        self.assertEqual(governance_out["schema"], "runtime_contract_checker.v1")
 
-        governance_out = self.server.governance_router(mode="runtime_contract")
-        self.assertEqual(governance_out["schema"], "governance_router.v1")
-
-        workflow_out = self.server.workflow_router(
-            mode="constraint_check",
+        workflow_out = self.server.constraint_solver_for_tasks(
             actions=["run tests"],
             requirements=["run tests"],
         )
-        self.assertEqual(workflow_out["schema"], "workflow_router.v1")
+        self.assertTrue(workflow_out["ok"])
 
-        guard_out = self.server.runtime_guard_router(mode="workspace_facts")
-        self.assertEqual(guard_out["schema"], "runtime_guard_router.v1")
+        guard_out = self.server.workspace_facts(refresh=True)
+        self.assertIn("generated_at", guard_out)
 
         math_out = self.server.math_router(mode="verify", left="x*(x+1)", right="x**2 + x")
         self.assertEqual(math_out["schema"], "math_router.v1")
@@ -1861,21 +1822,7 @@ class ServerToolsTest(ServerToolsTestBase):
         diagram_out = self.server.diagram_router(mode="lint_mermaid", mermaid_text="A -> B", auto_fix=True)
         self.assertEqual(diagram_out["schema"], "diagram_router.v1")
 
-    def test_router_invalid_modes(self):
-        with self.assertRaises(ValueError):
-            self.server.repo_router(mode="bad")
-        with self.assertRaises(ValueError):
-            self.server.git_router(mode="bad")
-        with self.assertRaises(ValueError):
-            self.server.code_index_router(mode="bad")
-        with self.assertRaises(ValueError):
-            self.server.quality_router(mode="bad")
-        with self.assertRaises(ValueError):
-            self.server.governance_router(mode="bad")
-        with self.assertRaises(ValueError):
-            self.server.workflow_router(mode="bad")
-        with self.assertRaises(ValueError):
-            self.server.runtime_guard_router(mode="bad")
+    def test_remaining_router_invalid_modes(self):
         with self.assertRaises(ValueError):
             self.server.math_router(mode="bad")
         with self.assertRaises(ValueError):
