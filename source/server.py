@@ -9425,6 +9425,561 @@ def _parallel_infer_one(
     )
 
 
+def _guided_edit_strip_wrappers(text: str) -> str:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            raw = "\n".join(lines[1:-1]).strip()
+    return raw.strip()
+
+
+def _guided_edit_select_targets(
+    prompt: str,
+    target_paths: list[str] | None = None,
+    max_targets: int = 3,
+) -> list[str]:
+    if max_targets < 1:
+        return []
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    def add_path(raw: str) -> None:
+        candidate = str(raw or "").strip().replace("\\", "/")
+        if not candidate or candidate in seen:
+            return
+        try:
+            resolved = _resolve_repo_path(candidate)
+        except Exception:
+            return
+        if not resolved.is_file():
+            return
+        rel = str(resolved.relative_to(REPO_PATH)).replace("\\", "/")
+        if rel in seen:
+            return
+        seen.add(rel)
+        selected.append(rel)
+
+    for path in target_paths or []:
+        add_path(path)
+        if len(selected) >= max_targets:
+            return selected
+
+    for path in _extract_prompt_file_paths(prompt, max_paths=max_targets * 2):
+        add_path(path)
+        if len(selected) >= max_targets:
+            return selected
+
+    if len(selected) >= max_targets or not prompt.strip():
+        return selected
+
+    with contextlib.suppress(Exception):
+        search = semantic_find(
+            query=prompt,
+            path=".",
+            max_results=max(6, max_targets * 3),
+            output_profile="normal",
+            summary_mode="full",
+            use_local_rerank=True,
+            local_rerank_top_k=max(8, max_targets * 3),
+        )
+        for row in search.get("results", []) if isinstance(search, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            add_path(str(row.get("path", "")))
+            if len(selected) >= max_targets:
+                break
+
+    return selected
+
+
+def _guided_edit_preview_path(path: str, max_lines: int = 120, max_chars: int = 2400) -> str:
+    file_path = _resolve_repo_path(path)
+    text = file_path.read_text(encoding="utf-8", errors="replace")
+    preview_lines = text.splitlines()[:max_lines]
+    numbered = "\n".join(f"{idx + 1}: {line}" for idx, line in enumerate(preview_lines))
+    return _trim_text(numbered, max_chars=max_chars)
+
+
+def _guided_edit_parse_action(raw_output: str, fallback_paths: list[str]) -> dict[str, Any]:
+    cleaned = _guided_edit_strip_wrappers(raw_output)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("planner output did not contain a JSON object")
+    payload = json.loads(cleaned[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("planner output JSON must be an object")
+
+    supported_actions = {
+        "replace_region",
+        "extract_helper",
+        "add_test",
+        "update_docs",
+        "run_validation",
+        "stop",
+    }
+    action_type = str(payload.get("action_type", "") or "").strip().lower()
+    if action_type not in supported_actions:
+        raise ValueError(f"unsupported guided_edit action_type: {action_type}")
+
+    raw_target = payload.get("target", {})
+    if not isinstance(raw_target, dict):
+        raw_target = {}
+    path = str(raw_target.get("path", "") or "").strip().replace("\\", "/")
+    if not path and fallback_paths:
+        path = fallback_paths[0]
+    if path:
+        try:
+            resolved = _resolve_repo_path(path)
+            if resolved.is_file():
+                path = str(resolved.relative_to(REPO_PATH)).replace("\\", "/")
+        except Exception:
+            if fallback_paths:
+                path = fallback_paths[0]
+    start_line = raw_target.get("start_line", 1)
+    end_line = raw_target.get("end_line", start_line)
+    if not isinstance(start_line, int) or start_line < 1:
+        start_line = 1
+    if not isinstance(end_line, int) or end_line < start_line:
+        end_line = start_line
+
+    validation_scope = str(payload.get("validation_scope", "quick") or "quick").strip().lower() or "quick"
+    return {
+        "schema": "guided_edit.action.v1",
+        "action_type": action_type,
+        "target": {
+            "path": path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "symbol": str(raw_target.get("symbol", "") or "").strip(),
+        },
+        "goal": str(payload.get("goal", "") or "").strip(),
+        "rationale": str(payload.get("rationale", "") or "").strip(),
+        "validation_scope": validation_scope,
+    }
+
+
+def _guided_edit_parse_diff(raw_output: str) -> str:
+    cleaned = _guided_edit_strip_wrappers(raw_output)
+    lines = cleaned.splitlines()
+    start_idx = 0
+    for idx, line in enumerate(lines):
+        if line.startswith("diff --git ") or line.startswith("--- "):
+            start_idx = idx
+            break
+    diff_text = "\n".join(lines[start_idx:])
+    if not diff_text:
+        raise ValueError("edit model did not return a unified diff")
+    if "--- " not in diff_text or "+++ " not in diff_text:
+        raise ValueError("edit model output was not a unified diff")
+    if not diff_text.endswith("\n"):
+        diff_text += "\n"
+    return diff_text
+
+
+def _guided_edit_changed_paths(diff_text: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in diff_text.splitlines():
+        if not line.startswith(("+++ ", "--- ")):
+            continue
+        candidate = line[4:].strip()
+        if candidate == "/dev/null":
+            continue
+        if candidate.startswith(("a/", "b/")):
+            candidate = candidate[2:]
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        paths.append(candidate)
+    return paths
+
+
+def _guided_edit_suggest_tests(changed_paths: list[str], max_tests: int = 8) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for rel in changed_paths:
+        path = Path(rel)
+        candidates: list[str] = []
+        if "test" in path.name.lower() and path.suffix == ".py":
+            candidates.append(rel)
+        elif path.suffix == ".py":
+            candidates.extend((f"tests/test_{path.stem}.py", f"tests/{path.stem}_test.py"))
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            resolved = _resolve_repo_path(candidate)
+            if not resolved.is_file():
+                continue
+            seen.add(candidate)
+            selected.append(candidate)
+            if len(selected) >= max_tests:
+                return selected
+    return selected
+
+
+def _guided_edit_validate_step(
+    changed_paths: list[str],
+    validation_profile: str = "quick",
+    timeout_seconds: int = 120,
+) -> dict[str, Any]:
+    profile = str(validation_profile or "quick").strip().lower() or "quick"
+    if profile != "quick":
+        raise ValueError("validation_profile must currently be 'quick'")
+
+    compile_errors: list[dict[str, Any]] = []
+    py_files = [
+        rel
+        for rel in changed_paths
+        if rel.endswith(".py") and _resolve_repo_path(rel).is_file()
+    ]
+    for rel in py_files[:200]:
+        proc = subprocess.run(
+            [sys.executable, "-m", "py_compile", str(_resolve_repo_path(rel))],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            compile_errors.append({"path": rel, "stderr": _trim_text(proc.stderr)})
+
+    tests = _guided_edit_suggest_tests(changed_paths)
+    test_result: dict[str, Any] | None = None
+    if tests and not compile_errors:
+        cmd = ["pytest", "-q", *tests]
+        env = os.environ.copy()
+        existing_pythonpath = str(env.get("PYTHONPATH", "") or "").strip()
+        env["PYTHONPATH"] = (
+            f"{REPO_PATH}{os.pathsep}{existing_pythonpath}"
+            if existing_pythonpath
+            else str(REPO_PATH)
+        )
+        out_cap = _token_budget_apply_max(None)
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(REPO_PATH),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+            )
+            test_result = {
+                "ok": proc.returncode == 0,
+                "exit_code": proc.returncode,
+                "command": cmd,
+                "cwd": ".",
+                "stdout": _trim_text(proc.stdout, max_chars=out_cap),
+                "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+                "timeout": False,
+            }
+        except subprocess.TimeoutExpired as exc:
+            test_result = {
+                "ok": False,
+                "exit_code": None,
+                "command": cmd,
+                "cwd": ".",
+                "stdout": _trim_text(
+                    (exc.stdout or "") if isinstance(exc.stdout, str) else "",
+                    max_chars=out_cap,
+                ),
+                "stderr": _trim_text(
+                    (exc.stderr or "") if isinstance(exc.stderr, str) else "",
+                    max_chars=out_cap,
+                ),
+                "timeout": True,
+            }
+
+    ok = not compile_errors and (test_result is None or bool(test_result.get("ok", False)))
+    return {
+        "schema": "guided_edit.validation.v1",
+        "profile": profile,
+        "ok": ok,
+        "changed_paths": changed_paths,
+        "python_files_checked": len(py_files[:200]),
+        "compile_error_count": len(compile_errors),
+        "compile_errors": compile_errors,
+        "selected_tests": tests,
+        "test_execution": test_result,
+    }
+
+
+def _guided_edit_plan_step(
+    prompt: str,
+    task: str,
+    target_paths: list[str] | None,
+    backend: str,
+    model: str,
+    temperature: float,
+    system: str,
+) -> dict[str, Any]:
+    selected_targets = _guided_edit_select_targets(prompt=prompt, target_paths=target_paths)
+    if not selected_targets:
+        raise ValueError("guided_edit could not identify target files; pass target_paths or mention a file path in the prompt")
+
+    routing = _load_continue_model_routing()
+    resolved = _resolve_task_model_route(
+        route="coding",
+        routing=routing,
+        requested_model=model,
+        prompt=prompt,
+        task_hint=task,
+    )
+    previews = []
+    for path in selected_targets[:2]:
+        with contextlib.suppress(Exception):
+            previews.append(f"[target] {path}\n{_guided_edit_preview_path(path)}")
+    planner_prompt = (
+        "Plan exactly one bounded repository edit step.\n"
+        "Return only JSON with keys: action_type, target, goal, rationale, validation_scope.\n"
+        "Allowed action_type values: replace_region, extract_helper, add_test, update_docs, run_validation, stop.\n"
+        "Use target.path plus optional start_line/end_line and symbol.\n"
+        "Prefer the smallest useful step.\n\n"
+        f"User request:\n{prompt.strip()}\n\n"
+        f"Candidate targets:\n{chr(10).join(selected_targets)}\n\n"
+        f"Target previews:\n{chr(10).join(previews)}"
+    )
+    infer = local_infer(
+        prompt=planner_prompt,
+        task="coding",
+        backend=backend,
+        model=resolved["model"],
+        max_tokens=320,
+        temperature=temperature,
+        system=system or (
+            "You are a careful coding planner. Return one minimal, high-confidence edit step as strict JSON only."
+        ),
+        output_profile="normal",
+        store_result=False,
+    )
+    if not bool(infer.get("ok", False)):
+        raise RuntimeError("guided_edit planner did not produce output")
+    action = _guided_edit_parse_action(str(infer.get("output", "") or ""), fallback_paths=selected_targets)
+    return {
+        "routing": {
+            "selected_route": resolved["route"],
+            "selected_model": resolved["model"],
+            "selected_model_file": resolved["file"],
+            "selected_by": resolved["source"],
+            "routing_loaded": routing.get("loaded", False),
+            "routing_source": routing.get("source"),
+        },
+        "selected_targets": selected_targets,
+        "planner_result": infer,
+        "action": action,
+    }
+
+
+def _guided_edit_execute_step(
+    prompt: str,
+    task: str,
+    action: dict[str, Any],
+    backend: str,
+    model: str,
+    temperature: float,
+    system: str,
+) -> dict[str, Any]:
+    action_type = str(action.get("action_type", "") or "").strip().lower()
+    if action_type == "stop":
+        return {
+            "schema": "guided_edit.execution.v1",
+            "applied": False,
+            "stopped": True,
+            "changed_paths": [],
+        }
+    if action_type == "run_validation":
+        return {
+            "schema": "guided_edit.execution.v1",
+            "applied": False,
+            "validation_only": True,
+            "changed_paths": [],
+        }
+
+    target = action.get("target", {})
+    if not isinstance(target, dict):
+        raise ValueError("guided_edit action target must be an object")
+    target_path = str(target.get("path", "") or "").strip()
+    if not target_path:
+        raise ValueError("guided_edit action target.path must not be empty")
+    start_line = int(target.get("start_line", 1) or 1)
+    end_line = int(target.get("end_line", start_line) or start_line)
+    snippet = read_snippet(
+        path=target_path,
+        start_line=max(1, start_line),
+        end_line=max(start_line, end_line),
+        context_before=30,
+        context_after=40,
+        output_profile="compact",
+    )
+
+    routing = _load_continue_model_routing()
+    resolved = _resolve_task_model_route(
+        route="coding",
+        routing=routing,
+        requested_model=model,
+        prompt=prompt,
+        task_hint=task,
+    )
+    edit_prompt = (
+        "Apply exactly one bounded edit and return only a unified diff.\n"
+        "Do not include explanation.\n"
+        "The diff must apply cleanly with git apply.\n\n"
+        f"User request:\n{prompt.strip()}\n\n"
+        f"Planned action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
+        f"Target snippet:\n{snippet.get('content', '')}"
+    )
+    infer = local_infer(
+        prompt=edit_prompt,
+        task="coding",
+        backend=backend,
+        model=resolved["model"],
+        max_tokens=768,
+        temperature=temperature,
+        system=system or (
+            "You are a precise code editing engine. Return only a valid unified diff for the requested edit."
+        ),
+        output_profile="normal",
+        store_result=False,
+    )
+    if not bool(infer.get("ok", False)):
+        raise RuntimeError("guided_edit edit model did not produce output")
+    diff_text = _guided_edit_parse_diff(str(infer.get("output", "") or ""))
+    diff_check = apply_unified_diff(diff_text=diff_text, check_only=True)
+    if not diff_check.get("ok", False):
+        return {
+            "schema": "guided_edit.execution.v1",
+            "applied": False,
+            "diff_text": diff_text,
+            "diff_check": diff_check,
+            "diff_apply": None,
+            "changed_paths": _guided_edit_changed_paths(diff_text),
+            "edit_result": infer,
+        }
+    diff_apply = apply_unified_diff(diff_text=diff_text, check_only=False)
+    return {
+        "schema": "guided_edit.execution.v1",
+        "applied": bool(diff_apply.get("ok", False)),
+        "diff_text": diff_text,
+        "diff_check": diff_check,
+        "diff_apply": diff_apply,
+        "changed_paths": _guided_edit_changed_paths(diff_text),
+        "edit_result": infer,
+    }
+
+
+def _guided_edit_run(
+    prompt: str,
+    task: str = "general",
+    target_paths: list[str] | None = None,
+    backend: str = "auto",
+    model: str = "",
+    temperature: float = 0.2,
+    system: str = "",
+    max_steps: int = 1,
+    validation_profile: str = "quick",
+    rollback_on_failure: bool = True,
+    snapshot_before_edit: bool = True,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty")
+    if max_steps < 1:
+        raise ValueError("max_steps must be >= 1")
+    profile = str(validation_profile or "quick").strip().lower() or "quick"
+    if profile != "quick":
+        raise ValueError("validation_profile must currently be 'quick'")
+
+    plan_info = _guided_edit_plan_step(
+        prompt=prompt,
+        task=task,
+        target_paths=target_paths,
+        backend=backend,
+        model=model,
+        temperature=temperature,
+        system=system,
+    )
+    action = plan_info["action"]
+    if action["action_type"] == "stop":
+        result = {
+            "schema": "task_router.guided_edit.v1",
+            "ok": True,
+            "step_count": 0,
+            "requested_max_steps": max_steps,
+            "stopped_reason": "planner_stop",
+            "snapshot_id": "",
+            "routing": plan_info["routing"],
+            "steps": [
+                {
+                    "index": 1,
+                    "selected_targets": plan_info["selected_targets"],
+                    "plan": action,
+                    "planner_result": plan_info["planner_result"],
+                }
+            ],
+            "final_validation": {},
+        }
+        if store_result:
+            result["result_id"] = _result_store_put("task_router_guided_edit", result)
+        return result
+
+    snapshot_id = ""
+    if snapshot_before_edit:
+        snapshot = state_snapshot(label="guided-edit", include_build_dir=False)
+        snapshot_id = str(snapshot.get("snapshot_id", "") or "")
+
+    execution = _guided_edit_execute_step(
+        prompt=prompt,
+        task=task,
+        action=action,
+        backend=backend,
+        model=model,
+        temperature=temperature,
+        system=system,
+    )
+    validation = _guided_edit_validate_step(
+        changed_paths=list(execution.get("changed_paths", []) or []),
+        validation_profile=profile,
+    ) if execution.get("applied", False) else {}
+
+    rolled_back = False
+    stopped_reason = "single_step_complete"
+    ok = bool(execution.get("applied", False))
+    if not execution.get("applied", False):
+        stopped_reason = "apply_failed"
+    elif not validation.get("ok", False):
+        ok = False
+        stopped_reason = "validation_failed"
+        if rollback_on_failure and snapshot_id:
+            state_restore(snapshot_id=snapshot_id)
+            rolled_back = True
+    step = {
+        "index": 1,
+        "selected_targets": plan_info["selected_targets"],
+        "plan": action,
+        "planner_result": plan_info["planner_result"],
+        "execution": execution,
+        "validation": validation,
+        "rolled_back": rolled_back,
+    }
+    result = {
+        "schema": "task_router.guided_edit.v1",
+        "ok": ok,
+        "step_count": 1,
+        "requested_max_steps": max_steps,
+        "stopped_reason": stopped_reason,
+        "snapshot_id": snapshot_id,
+        "routing": plan_info["routing"],
+        "steps": [step],
+        "final_validation": validation,
+    }
+    if store_result:
+        result["result_id"] = _result_store_put("task_router_guided_edit", result)
+    return result
+
+
 def _infer_batch_from_prompt(prompt: str) -> list[str]:
     text = prompt.strip()
     if not text:
@@ -9464,6 +10019,7 @@ class TaskRouterService:
         mode: str = "task",
         prompt: str = "",
         task: str = "general",
+        target_paths: list[str] | None = None,
         prefix: str = "",
         suffix: str = "",
         language: str = "",
@@ -9496,6 +10052,10 @@ class TaskRouterService:
         prompts: list[str] | None = None,
         max_parallel: int = 4,
         auto_parallel_when_possible: bool = True,
+        max_steps: int = 1,
+        validation_profile: str = "quick",
+        rollback_on_failure: bool = True,
+        snapshot_before_edit: bool = True,
     ) -> dict[str, Any]:
         mode = str(mode or "task").strip().lower() or "task"
         if mode not in {
@@ -9510,9 +10070,10 @@ class TaskRouterService:
             "coding_check",
             "coding_pip",
             "coding_sandbox",
+            "guided_edit",
         }:
             raise ValueError(
-                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
+                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, guided_edit"
             )
         if mode == "status":
             return local_model_status()
@@ -9682,6 +10243,21 @@ class TaskRouterService:
             return result
         if mode == "coding_sandbox":
             return _coding_sandbox_manage(action=sandbox_action, sandbox_id=sandbox_id)
+        if mode == "guided_edit":
+            return _guided_edit_run(
+                prompt=prompt,
+                task=task,
+                target_paths=target_paths,
+                backend=backend,
+                model=model,
+                temperature=temperature,
+                system=system,
+                max_steps=max_steps,
+                validation_profile=validation_profile,
+                rollback_on_failure=rollback_on_failure,
+                snapshot_before_edit=snapshot_before_edit,
+                store_result=store_result,
+            )
         if mode == "autocomplete":
             return autocomplete(
                 prefix=prefix,
@@ -9712,17 +10288,21 @@ def task_router(
     mode: Annotated[
         str,
         Field(
-            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
+            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, guided edit, or coding sandbox/check/package behavior."
         ),
     ] = "task",
     prompt: Annotated[
         str,
-        Field(description="Primary request text for the default `task` flow, `infer`, and `coding_infer`."),
+        Field(description="Primary request text for the default `task` flow, `infer`, `coding_infer`, and `guided_edit`."),
     ] = "",
     task: Annotated[
         str,
         Field(description="Task hint such as `general`, `coding`, `micro_coding`, `review`, or `security`; used for routing and fallback prompt shaping."),
     ] = "general",
+    target_paths: Annotated[
+        list[str] | None,
+        Field(description="Optional explicit repository-relative file targets for `mode='guided_edit'`."),
+    ] = None,
     prefix: Annotated[
         str,
         Field(description="Autocomplete prefix text when `mode='autocomplete'`."),
@@ -9851,12 +10431,29 @@ def task_router(
         bool,
         Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
     ] = True,
+    max_steps: Annotated[
+        int,
+        Field(description="Maximum guided edit steps requested for `mode='guided_edit'`. The current implementation executes one bounded step."),
+    ] = 1,
+    validation_profile: Annotated[
+        str,
+        Field(description="Validation profile for `mode='guided_edit'`. The current implementation supports `quick`."),
+    ] = "quick",
+    rollback_on_failure: Annotated[
+        bool,
+        Field(description="Whether `mode='guided_edit'` should restore the pre-edit snapshot when validation fails."),
+    ] = True,
+    snapshot_before_edit: Annotated[
+        bool,
+        Field(description="Whether `mode='guided_edit'` should capture a git-backed snapshot before applying its planned diff."),
+    ] = True,
 ) -> dict[str, Any]:
-    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
+    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|guided_edit|coding_infer|coding_check|coding_pip|coding_sandbox."""
     return _TASK_ROUTER_SERVICE.route(
         mode=mode,
         prompt=prompt,
         task=task,
+        target_paths=target_paths,
         prefix=prefix,
         suffix=suffix,
         language=language,
@@ -9889,6 +10486,10 @@ def task_router(
         prompts=prompts,
         max_parallel=max_parallel,
         auto_parallel_when_possible=auto_parallel_when_possible,
+        max_steps=max_steps,
+        validation_profile=validation_profile,
+        rollback_on_failure=rollback_on_failure,
+        snapshot_before_edit=snapshot_before_edit,
     )
 
 

@@ -1600,6 +1600,132 @@ class ServerToolsTest(ServerToolsTestBase):
             )
             self.assertTrue(deleted["deleted"])
 
+    def test_task_router_guided_edit_validates_arguments(self):
+        with self.assertRaises(ValueError):
+            self.server.task_router(mode="guided_edit", prompt="update src/sample.py", max_steps=0)
+
+        with self.assertRaises(ValueError):
+            self.server.task_router(
+                mode="guided_edit",
+                prompt="update src/sample.py",
+                target_paths=["src/sample.py"],
+                validation_profile="full",
+            )
+
+    def test_task_router_guided_edit_applies_single_step_and_validates(self):
+        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
+        after = before.replace(
+            "def alpha(x):\n    return x + 1\n",
+            "def alpha(x):\n    # alpha increments the input\n    return x + 1\n",
+        )
+        sample_path = self.repo_path / "src" / "sample.py"
+        sample_path.write_text(after, encoding="utf-8")
+        diff_output = self.git("diff", "--", "src/sample.py").stdout
+        sample_path.write_text(before, encoding="utf-8")
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "keep the change minimal",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": diff_output,
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="quick",
+            )
+        self.assertEqual(out["schema"], "task_router.guided_edit.v1")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["step_count"], 1)
+        self.assertEqual(out["stopped_reason"], "single_step_complete")
+        self.assertTrue(out["snapshot_id"])
+        self.assertIn(
+            "# alpha increments the input",
+            (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
+        )
+        self.assertTrue(out["final_validation"]["ok"])
+        self.assertIn("tests/test_sample.py", out["final_validation"]["selected_tests"])
+        self.assertFalse(out["steps"][0]["rolled_back"])
+
+    def test_task_router_guided_edit_rolls_back_on_failed_validation(self):
+        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
+        after = before.replace("def alpha(x):\n", "def alpha(x)\n")
+        sample_path = self.repo_path / "src" / "sample.py"
+        sample_path.write_text(after, encoding="utf-8")
+        diff_output = self.git("diff", "--", "src/sample.py").stdout
+        sample_path.write_text(before, encoding="utf-8")
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "make a bad edit for rollback coverage",
+                "rationale": "exercise validation failure handling",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": diff_output,
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Break src/sample.py to test rollback.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="quick",
+                rollback_on_failure=True,
+                snapshot_before_edit=True,
+            )
+        self.assertEqual(out["schema"], "task_router.guided_edit.v1")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["stopped_reason"], "validation_failed")
+        self.assertEqual(out["final_validation"]["compile_error_count"], 1)
+        self.assertTrue(out["steps"][0]["rolled_back"])
+        self.assertEqual(
+            (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
+            before,
+        )
+
     def test_memory_auto_compact_and_usage_stats(self):
         for i in range(10):
             self.server.memory_upsert(
