@@ -436,7 +436,10 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["classification"]["route"], "security")
         self.assertEqual(out["routing"]["selected_model"], "deepseek-r1:1.5b")
         self.assertTrue(out["routing"]["routing_loaded"])
-        self.assertIn('"r":"SEC"', out["encoding"]["encoded_prompt"])
+        packet = json.loads(out["encoding"]["encoded_prompt"])
+        self.assertEqual(packet["r"], "SEC")
+        self.assertIn("i", packet)
+        self.assertEqual(packet["i"]["d"], "findings")
         self.assertEqual(linf.call_args.kwargs["task"], "security")
         self.assertEqual(linf.call_args.kwargs["model"], "deepseek-r1:1.5b")
 
@@ -548,6 +551,26 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["task"], "coding")
         self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
 
+    def test_task_router_task_respects_requested_max_tokens(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "security findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
+            out = self.server.task_router(
+                mode="task",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                max_tokens=64,
+                output_profile="normal",
+            )
+        self.assertEqual(linf.call_args.kwargs["max_tokens"], 64)
+        self.assertEqual(out["cost_plan"]["requested_max_tokens"], 64)
+        self.assertEqual(out["cost_plan"]["effective_max_tokens"], 64)
+
 
     def test_task_router_task_reads_memory_and_encodes_session_and_memory(self):
         self.server.memory_summary_upsert(
@@ -601,8 +624,10 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("files=11", packet["m"])
         self.assertEqual(out["memory"]["session_namespace"], "task/session/abc")
         self.assertEqual(out["memory"]["route_namespace"], "task/route/security")
+        self.assertEqual(out["intent"]["deliverable"], "findings")
+        self.assertEqual(out["cost_plan"]["effort"], "medium")
 
-    def test_task_router_task_success_persists_session_entry_and_route_summary(self):
+    def test_task_router_task_success_persists_session_entry_and_route_summary_with_evidence(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
@@ -614,7 +639,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(self.server, "local_infer", return_value=infer_payload):
             out = self.server.task_router(
                 mode="task",
-                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                prompt="Review src/sample.py for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
                 memory_session="persist",
@@ -640,8 +665,35 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("security findings", route_summaries[0]["summary"])
         self.assertTrue(out["memory"]["session_write"]["written"])
         self.assertTrue(out["memory"]["route_summary_write"]["written"])
+        self.assertGreaterEqual(out["memory"]["evidence_count"], 1)
 
-    def test_task_router_task_failure_records_failure_and_session_context(self):
+    def test_task_router_task_persists_explicit_session_without_grounded_evidence(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "deepseek-r1:1.5b",
+            "ok": True,
+            "output": "ungrounded security findings",
+        }
+        with patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.task_router(
+                mode="task",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                backend="fallback",
+                output_profile="normal",
+                memory_session="no-evidence",
+            )
+        payload = self.server._memory_load()
+        session_entries = [
+            row for row in payload["entries"] if row.get("namespace") == "task/session/no-evidence"
+        ]
+        self.assertEqual(len(session_entries), 1)
+        self.assertTrue(out["memory"]["session_write"]["written"])
+        self.assertFalse(out["memory"]["route_summary_write"]["written"])
+        self.assertEqual(out["memory"]["route_summary_write"]["reason"], "no_evidence")
+        self.assertGreaterEqual(out["memory"]["session_evidence_count"], 1)
+
+    def test_task_router_task_failure_records_failure_and_session_context_with_evidence(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
@@ -652,7 +704,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(self.server, "local_infer", return_value=infer_payload):
             out = self.server.task_router(
                 mode="task",
-                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
+                prompt="Review src/sample.py for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
                 memory_session="failure",
@@ -1649,6 +1701,15 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": diff_output,
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "agree", "confidence": 0.93, "reason": "diff matches the bounded plan"}
+                    ),
+                },
             ],
         ):
             out = self.server.task_router(
@@ -1663,6 +1724,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["step_count"], 1)
         self.assertEqual(out["stopped_reason"], "single_step_complete")
         self.assertTrue(out["snapshot_id"])
+        self.assertTrue(out["replay_id"])
         self.assertIn(
             "# alpha increments the input",
             (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
@@ -1670,6 +1732,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["final_validation"]["ok"])
         self.assertIn("tests/test_sample.py", out["final_validation"]["selected_tests"])
         self.assertFalse(out["steps"][0]["rolled_back"])
+        self.assertTrue(out["memory_write"]["written"])
 
     def test_task_router_guided_edit_rolls_back_on_failed_validation(self):
         before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
@@ -1705,6 +1768,15 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": diff_output,
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "agree", "confidence": 0.88, "reason": "diff is syntactically scoped but invalid"}
+                    ),
+                },
             ],
         ):
             out = self.server.task_router(
@@ -1725,6 +1797,114 @@ class ServerToolsTest(ServerToolsTestBase):
             (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
             before,
         )
+        self.assertTrue(out["memory_write"]["written"])
+
+    def test_task_router_guided_edit_blocks_verifier_disagreement(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "attempt an over-broad edit",
+                "rationale": "exercise verifier disagreement handling",
+                "validation_scope": "standard",
+            }
+        )
+        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
+        sample_path = self.repo_path / "src" / "sample.py"
+        sample_path.write_text(before + "\n\ndef gamma(x):\n    return x * 2\n", encoding="utf-8")
+        diff_output = self.git("diff", "--", "src/sample.py").stdout
+        sample_path.write_text(before, encoding="utf-8")
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": diff_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "disagree", "confidence": 0.95, "reason": "diff expands scope beyond the stated action"}
+                    ),
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a tiny comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="auto",
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["stopped_reason"], "verifier_disagreement")
+        self.assertFalse(out["steps"][0]["execution"]["applied"])
+        self.assertTrue(out["steps"][0]["execution"]["verification"]["blocked"])
+
+    def test_task_router_guided_edit_blocks_unrelated_update_docs_diff(self):
+        other_path = self.repo_path / "tests" / "test_smoke.py"
+        before = other_path.read_text(encoding="utf-8")
+        after = before.replace(
+            "        self.assertTrue(True)\n",
+            "        self.assertTrue(True)\n        # unrelated change\n",
+        )
+        other_path.write_text(after, encoding="utf-8")
+        diff_output = self.git("diff", "--", "tests/test_smoke.py").stdout
+        other_path.write_text(before, encoding="utf-8")
+        planner_output = json.dumps(
+            {
+                "action_type": "update_docs",
+                "target": {"path": "src/sample.py", "start_line": 1, "end_line": 4},
+                "goal": "update docs for the sample behavior",
+                "rationale": "exercise out-of-scope diff blocking",
+                "validation_scope": "standard",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": diff_output,
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Update docs for src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="auto",
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["stopped_reason"], "watchdog_blocked")
+        self.assertTrue(out["steps"][0]["execution"]["watchdog"]["blocked"])
+        self.assertIn("out_of_scope_path:tests/test_smoke.py", out["steps"][0]["execution"]["watchdog"]["blocked_reasons"])
 
     def test_memory_auto_compact_and_usage_stats(self):
         for i in range(10):

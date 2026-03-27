@@ -126,7 +126,7 @@ Public tools:
 
 ### 5.2 Router Design Principle
 
-`task_router` owns the public contract and dispatches to internal leaf implementations. Its explicit modes expose status, task inference, embeddings, autocomplete, reranking, and coding sandbox/check/package flows without publishing the full internal helper surface.
+`task_router` owns the public contract and dispatches to internal leaf implementations. Its explicit modes expose status, task inference, embeddings, autocomplete, reranking, guided edit, and coding sandbox/check/package flows without publishing the full internal helper surface. The task path now emits a structured intent packet plus adaptive cost/watchdog metadata, and the guided-edit path adds verifier, replay, benchmark, and evidence-backed memory hooks.
 
 ### 5.3 Internal Leaf Tools
 
@@ -234,7 +234,7 @@ Primary cost vectors:
 
 Recommended controls:
 
-- Reuse the persisted per-file repo index (`repo_index_daemon`) instead of rebuilding full analysis state.
+- Reuse the persisted per-file repo index (`repo_index_daemon`) and its semantic DAG instead of rebuilding full analysis state.
 - Use `read_snippet`/focused queries over full-file reads when possible.
 - Gate output size early (`token_budget_guard`).
 - Use explicit benchmark and guard checks when you need them; do not rely on hidden router layers to optimize automatically.

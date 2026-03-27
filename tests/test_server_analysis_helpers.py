@@ -155,15 +155,24 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
         self.assertEqual(compact["schema"], "repo_index_daemon.compact.v1")
         self.assertIn("result_id", compact)
         self.assertEqual(quick["schema"], "repo_index_daemon.quick.v1")
+        self.assertIn("semantic_dag_edge_count", quick)
         self.assertIn("files_compressed", verbose)
+        self.assertIn("semantic_dag", verbose)
+        self.assertGreaterEqual(verbose["semantic_dag"]["edge_count"], 1)
         self.assertIn("value_json", queried)
+        initial_dag_edge_count = int(verbose["semantic_dag"]["edge_count"])
         index_payload = json.loads(
             (self.repo_path / ".codebase-tooling-mcp" / "index" / "repo_index.json").read_text(encoding="utf-8")
         )
         self.assertEqual(index_payload["schema"], "repo_index_daemon.v2")
         self.assertIn("records", index_payload)
 
-        self.write_repo_text("docs/a.md", "updated docs\n")
+        self.write_repo_text("docs/a.md", "updated docs mention src/sample.py and alpha\n")
+        read_without_refresh = self.server.repo_index_daemon(
+            mode="read",
+            output_profile="normal",
+        )
+        self.assertEqual(read_without_refresh["semantic_dag"]["edge_count"], initial_dag_edge_count)
         incremented = self.server.repo_index_daemon(
             mode="refresh",
             path=".",
@@ -172,6 +181,14 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
         )
         self.assertGreaterEqual(incremented["changed_paths_count"], 1)
         self.assertGreaterEqual(incremented["reused_paths_count"], 1)
+        refreshed_verbose = self.server.repo_index_daemon(
+            mode="read",
+            output_profile="normal",
+        )
+        self.assertGreaterEqual(
+            refreshed_verbose["semantic_dag"]["edge_count"],
+            initial_dag_edge_count,
+        )
 
     def test_tool_assisted_infer_helpers_and_parallel_fallback(self):
         self.write_repo_text(

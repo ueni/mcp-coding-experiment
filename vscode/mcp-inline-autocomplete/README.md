@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # MCP Inline Autocomplete (VS Code Extension)
 
-Inline completion provider for VS Code backed by this repository's MCP server tool `autocomplete`.
+Inline completion provider for VS Code backed by this repository's `task_router(mode="autocomplete")` flow.
 
 ## Requirements
 

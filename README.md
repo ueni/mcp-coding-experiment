@@ -296,6 +296,9 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - `source/Dockerfile` preloads the full default model set declared by `CONTINUE_OLLAMA_MODELS` into the image, and `source/entrypoint.sh` seeds those models into the runtime model directory before server startup.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
 - `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided.
+- `task_router(mode="task")` now emits a structured intent packet, adaptive cost plan, and watchdog metadata before inference, and only writes long-term task memory when grounded evidence is attached.
+- `task_router(mode="guided_edit")` now runs a bounded edit planner, diff verifier, watchdog scan, replay log, workflow benchmark record, and evidence-backed edit memory write in a single step.
+- `repo_index_daemon` now materializes a semantic DAG that links files, symbols, tests, and docs using dependency edges and document mentions.
 - Setting `CONTINUE_OLLAMA_MODELS` to an empty value declares that no default bundled model set is required. In that mode, Continue may report `model not found` until models are installed manually or `OLLAMA_ALLOW_PULL=true` is used.
 - A `404` on `http://127.0.0.1:2345/v1/` does not invalidate the native Ollama integration in this repo; the native base and `/api/tags` are the relevant health checks.
 
@@ -320,7 +323,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 - `task_router`
 
-`task_router()` is the single public MCP entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
+`task_router()` is the single public MCP entrypoint and now defaults to `mode="task"`. It classifies the request, encodes a structured intent packet, attaches compact memory and retrieval context, records adaptive execution metadata, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
 No public MCP resources or resource templates are exposed by default.
 

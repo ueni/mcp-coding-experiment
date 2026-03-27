@@ -131,6 +131,7 @@ EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
 ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
 TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.json")
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
+WORKFLOW_BENCHMARK_FILE = Path(".codebase-tooling-mcp/reports/WORKFLOW_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 # Keep the external MCP contract to a single entrypoint; the rest remain internal call targets.
 PUBLIC_MCP_TOOL_NAMES = {
@@ -401,15 +402,57 @@ TASK_ROUTE_ALIASES = {
     "search": "research",
 }
 TASK_ROUTE_SYSTEM_PROMPTS = {
-    "general": "Interpret compact JSON input. q is the request, m is compact task memory when present, and k is retrieved repository context when present. Answer directly and concisely.",
-    "coding": "Interpret compact JSON input. q is a coding task, m is compact task memory when present, and k is retrieved repository context when present. Return implementation-focused output only.",
-    "refactor": "Interpret compact JSON input. q is a refactor task, m is compact task memory when present, and k is retrieved repository context when present. Focus on cleaner structure with minimal churn.",
-    "review": "Interpret compact JSON input. q is a review task, m is compact task memory when present, and k is retrieved repository context when present. Return concise findings first with file and line when possible.",
-    "security": "Interpret compact JSON input. q is a security task, m is compact task memory when present, and k is retrieved repository context when present. Prioritize concrete vulnerabilities, exploitability, and fixes.",
-    "math": "Interpret compact JSON input. q is a math task, m is compact task memory when present, and k is retrieved repository context when present. Return exact reasoning and the final result.",
-    "vision": "Interpret compact JSON input. q is a vision task, m is compact task memory when present, and k is retrieved repository context when present. Focus on visible evidence only.",
-    "research": "Interpret compact JSON input. q is a research task, m is compact task memory when present, and k is retrieved repository context when present. Return a concise factual synthesis.",
+    "general": "Interpret compact JSON input. q is the request, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Answer directly and concisely.",
+    "coding": "Interpret compact JSON input. q is a coding task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return implementation-focused output only.",
+    "refactor": "Interpret compact JSON input. q is a refactor task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Focus on cleaner structure with minimal churn.",
+    "review": "Interpret compact JSON input. q is a review task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return concise findings first with file and line when possible.",
+    "security": "Interpret compact JSON input. q is a security task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Prioritize concrete vulnerabilities, exploitability, and fixes.",
+    "math": "Interpret compact JSON input. q is a math task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return exact reasoning and the final result.",
+    "vision": "Interpret compact JSON input. q is a vision task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Focus on visible evidence only.",
+    "research": "Interpret compact JSON input. q is a research task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return a concise factual synthesis.",
 }
+TASK_INTENT_MUTATION_KEYWORDS = {
+    "add",
+    "change",
+    "create",
+    "delete",
+    "edit",
+    "fix",
+    "implement",
+    "modify",
+    "patch",
+    "refactor",
+    "rename",
+    "replace",
+    "rewrite",
+    "update",
+}
+TASK_INTENT_CONSTRAINT_MARKERS = (
+    "only",
+    "without",
+    "do not",
+    "don't",
+    "keep",
+    "minimal",
+    "minimize",
+    "concise",
+    "focused",
+    "bounded",
+    "avoid",
+)
+WATCHDOG_PROMPT_MARKERS = (
+    "ignore previous instructions",
+    "ignore prior instructions",
+    "reveal the system prompt",
+    "show the developer prompt",
+    "disclose hidden instructions",
+    "bypass the guardrails",
+)
+WATCHDOG_BLOCKED_PATH_PREFIXES = (
+    ".codebase-tooling-mcp/",
+    ".continue/",
+    ".git/",
+)
 TASK_RETRIEVAL_STOPWORDS = {
     "a",
     "about",
@@ -1448,6 +1491,31 @@ def _memory_entry_rank(entry: dict[str, Any]) -> tuple[float, float]:
     return confidence, epoch
 
 
+def _normalize_memory_evidence(evidence: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not isinstance(evidence, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for row in evidence[:8]:
+        if not isinstance(row, dict):
+            continue
+        item: dict[str, Any] = {}
+        for key in ("kind", "path", "result_id", "replay_id", "diff_id", "validation_id", "summary", "backend"):
+            value = row.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                item[key] = _trim_task_inline_text(text, max_chars=180)
+        if "ok" in row:
+            item["ok"] = bool(row.get("ok"))
+        if "count" in row:
+            with contextlib.suppress(Exception):
+                item["count"] = int(row.get("count", 0) or 0)
+        if item:
+            normalized.append(item)
+    return normalized
+
+
 def _memory_summary_upsert_in_payload(
     payload: dict[str, Any],
     *,
@@ -1458,6 +1526,7 @@ def _memory_summary_upsert_in_payload(
     confidence: float = 1.0,
     source: str = "agent",
     tags: list[str] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
 ) -> None:
     summaries = payload.get("summaries", [])
     if not isinstance(summaries, list):
@@ -1465,6 +1534,7 @@ def _memory_summary_upsert_in_payload(
         payload["summaries"] = summaries
     now_iso = _now_iso()
     expires_at = _to_iso_expiry(ttl_days)
+    normalized_evidence = _normalize_memory_evidence(evidence)
     for row in summaries:
         if row.get("namespace") == namespace and row.get("focus") == focus:
             row["summary"] = summary
@@ -1473,20 +1543,23 @@ def _memory_summary_upsert_in_payload(
             row["tags"] = tags or []
             row["updated_at"] = now_iso
             row["expires_at"] = expires_at
+            if normalized_evidence:
+                row["evidence"] = normalized_evidence
             return
-    summaries.append(
-        {
-            "namespace": namespace,
-            "focus": focus,
-            "summary": summary,
-            "confidence": confidence,
-            "source": source,
-            "tags": tags or [],
-            "created_at": now_iso,
-            "updated_at": now_iso,
-            "expires_at": expires_at,
-        }
-    )
+    row = {
+        "namespace": namespace,
+        "focus": focus,
+        "summary": summary,
+        "confidence": confidence,
+        "source": source,
+        "tags": tags or [],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "expires_at": expires_at,
+    }
+    if normalized_evidence:
+        row["evidence"] = normalized_evidence
+    summaries.append(row)
 
 
 def memory_auto_compact(
@@ -8408,12 +8481,14 @@ def _encode_task_prompt_packet(
     memory_session: str = '',
     memory_context: str = '',
     retrieval_context: str = '',
+    intent_packet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = re.sub(r'\s+', ' ', prompt.strip())
     task_norm = task.strip().lower()
     session_norm = _normalize_task_memory_session(memory_session)
     memory_text = _trim_task_inline_text(memory_context, max_chars=900)
     retrieval_text = _trim_task_context_block(retrieval_context, max_chars=1400)
+    compact_intent = intent_packet.get('compact', {}) if isinstance(intent_packet, dict) else {}
     packet = {
         'r': TASK_ROUTE_CODE_MAP.get(route, 'G'),
         'q': normalized,
@@ -8425,9 +8500,11 @@ def _encode_task_prompt_packet(
         packet['m'] = memory_text
     if retrieval_text:
         packet['k'] = retrieval_text
+    if compact_intent:
+        packet['i'] = compact_intent
     encoded_prompt = json.dumps(packet, ensure_ascii=True, separators=(',', ':'))
     return {
-        'schema': 'task_prompt_packet.v1',
+        'schema': 'task_prompt_packet.v2',
         'codec': 'compact_json_v1',
         'route': route,
         'route_code': packet['r'],
@@ -8435,10 +8512,254 @@ def _encode_task_prompt_packet(
         'normalized_chars': len(normalized),
         'memory_chars': len(memory_text),
         'retrieval_chars': len(retrieval_text),
+        'intent_chars': len(json.dumps(compact_intent, ensure_ascii=True, separators=(',', ':'))) if compact_intent else 0,
         'encoded_chars': len(encoded_prompt),
         'char_saving_vs_original': len(prompt) - len(encoded_prompt),
         'char_saving_vs_normalized': len(normalized) - len(encoded_prompt),
         'encoded_prompt': encoded_prompt,
+    }
+
+
+def _extract_task_constraints(prompt: str, max_items: int = 4) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    text = " ".join(str(prompt or "").split())
+    if not text:
+        return out
+    pieces = re.split(r"(?<=[.;!?])\s+|,\s+", text)
+    for piece in pieces:
+        normalized = piece.strip()
+        if not normalized:
+            continue
+        low = normalized.lower()
+        if not any(marker in low for marker in TASK_INTENT_CONSTRAINT_MARKERS):
+            continue
+        item = _trim_task_inline_text(normalized, max_chars=120)
+        if not item:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _infer_task_deliverable(route: str, prompt: str) -> str:
+    low = str(prompt or "").lower()
+    if route in {"review", "security"} or any(token in low for token in ("review", "audit", "finding", "findings")):
+        return "findings"
+    if route in {"coding", "refactor"} or any(
+        token in low for token in ("implement", "fix", "edit", "patch", "refactor", "rename", "update code")
+    ):
+        return "code_change"
+    if any(token in low for token in ("plan", "roadmap", "steps", "strategy")):
+        return "plan"
+    if route == "research" or any(token in low for token in ("summarize", "summary", "compare", "explain")):
+        return "summary"
+    return "answer"
+
+
+def _task_risk_level(
+    route: str,
+    prompt: str,
+    *,
+    target_paths: list[str] | None = None,
+    mutation_intent: bool = False,
+) -> str:
+    score = 0
+    low = str(prompt or "").lower()
+    if route in {"security", "review"}:
+        score += 2
+    if route in {"coding", "refactor"} or mutation_intent:
+        score += 1
+    if target_paths:
+        score += 1
+    if any(token in low for token in ("all files", "entire repo", "whole repo", "production", "authentication")):
+        score += 1
+    if score >= 3:
+        return "high"
+    if score >= 1:
+        return "medium"
+    return "low"
+
+
+def _build_task_intent_packet(
+    *,
+    prompt: str,
+    route: str,
+    task: str = "general",
+    target_paths: list[str] | None = None,
+    retrieval_info: dict[str, Any] | None = None,
+    validation_profile: str = "",
+    max_steps: int = 0,
+) -> dict[str, Any]:
+    normalized = re.sub(r"\s+", " ", str(prompt or "").strip())
+    targets = [str(path).replace("\\", "/") for path in (target_paths or _extract_prompt_file_paths(prompt, max_paths=4)) if str(path).strip()]
+    mutation_intent = route in {"coding", "refactor"} or any(
+        token in normalized.lower() for token in TASK_INTENT_MUTATION_KEYWORDS
+    )
+    constraints = _extract_task_constraints(prompt, max_items=4)
+    deliverable = _infer_task_deliverable(route, prompt)
+    risk_level = _task_risk_level(
+        route,
+        prompt,
+        target_paths=targets,
+        mutation_intent=mutation_intent,
+    )
+    validation = validation_profile.strip().lower() if validation_profile.strip() else "repo_grounded"
+    if validation == "repo_grounded" and route in {"review", "security"}:
+        validation = "evidence_first"
+    if validation == "repo_grounded" and mutation_intent:
+        validation = "compile_or_tests"
+    if validation == "repo_grounded" and deliverable == "summary":
+        validation = "grounded_summary"
+    goal = _trim_task_inline_text(normalized, max_chars=180)
+    retrieval_items = int(retrieval_info.get("item_count", 0) or 0) if isinstance(retrieval_info, dict) else 0
+    compact = {
+        "g": goal,
+        "d": deliverable,
+        "r": risk_level[:1].upper(),
+        "u": mutation_intent,
+        "v": validation,
+    }
+    if targets:
+        compact["p"] = targets[:3]
+    if constraints:
+        compact["c"] = constraints[:3]
+    if retrieval_items:
+        compact["k"] = retrieval_items
+    if max_steps > 0:
+        compact["n"] = int(max_steps)
+    return {
+        "schema": "task_intent.v1",
+        "route": route,
+        "task": str(task or "general").strip().lower() or "general",
+        "goal": goal,
+        "deliverable": deliverable,
+        "risk_level": risk_level,
+        "mutation_intent": mutation_intent,
+        "target_paths": targets[:4],
+        "constraints": constraints,
+        "validation": validation,
+        "retrieval_item_count": retrieval_items,
+        "compact": compact,
+    }
+
+
+def _build_task_cost_plan(
+    *,
+    route: str,
+    prompt: str,
+    retrieval_info: dict[str, Any] | None,
+    intent: dict[str, Any],
+    max_tokens: int,
+) -> dict[str, Any]:
+    requested = max(1, int(max_tokens))
+    score = 0
+    reasons: list[str] = []
+    normalized = re.sub(r"\s+", " ", str(prompt or "").strip())
+    retrieval_count = int(retrieval_info.get("item_count", 0) or 0) if isinstance(retrieval_info, dict) else 0
+    target_count = len(intent.get("target_paths", [])) if isinstance(intent.get("target_paths"), list) else 0
+    if len(normalized) > 180:
+        score += 1
+        reasons.append("long_prompt")
+    if retrieval_count >= 2:
+        score += 1
+        reasons.append("multiple_retrieval_items")
+    if route == "security":
+        score += 2
+        reasons.append("route:security")
+    elif route in {"review", "research"}:
+        score += 1
+        reasons.append(f"route:{route}")
+    if bool(intent.get("mutation_intent")):
+        score += 1
+        reasons.append("mutation_intent")
+    if target_count >= 1:
+        score += 1
+        reasons.append("explicit_targets")
+    if score <= 1:
+        effort = "low"
+        effective_max_tokens = min(requested, 256)
+        verifier_mode = "off"
+        validation = "quick"
+    elif score <= 3:
+        effort = "medium"
+        effective_max_tokens = min(requested, 640)
+        verifier_mode = "light"
+        validation = "standard"
+    else:
+        effort = "high"
+        effective_max_tokens = min(requested, 1024)
+        verifier_mode = "strict"
+        validation = "standard"
+    return {
+        "schema": "task_cost_plan.v1",
+        "requested_max_tokens": requested,
+        "effective_max_tokens": effective_max_tokens,
+        "effort": effort,
+        "score": score,
+        "reasons": reasons,
+        "verifier_mode": verifier_mode,
+        "validation_profile": validation,
+        "escalated": effective_max_tokens != requested or verifier_mode != "off",
+    }
+
+
+def _watchdog_path_blocked(path: str) -> bool:
+    rel = str(path or "").strip().replace("\\", "/").lstrip("./")
+    if not rel:
+        return False
+    return rel in {".git", ".continue", ".codebase-tooling-mcp"} or rel.startswith(WATCHDOG_BLOCKED_PATH_PREFIXES)
+
+
+def _watchdog_scan(
+    *,
+    prompt: str = "",
+    action: dict[str, Any] | None = None,
+    diff_text: str = "",
+    allowed_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    flags: list[str] = []
+    blocked_reasons: list[str] = []
+    low_prompt = str(prompt or "").lower()
+    for marker in WATCHDOG_PROMPT_MARKERS:
+        if marker in low_prompt:
+            flags.append(f"prompt:{marker}")
+            blocked_reasons.append(f"prompt_marker:{marker}")
+    candidate_paths: list[str] = []
+    if isinstance(action, dict):
+        target = action.get("target", {})
+        if isinstance(target, dict):
+            target_path = str(target.get("path", "") or "").strip()
+            if target_path:
+                candidate_paths.append(target_path)
+    if diff_text:
+        candidate_paths.extend(_guided_edit_changed_paths(diff_text))
+    normalized_allowed = {
+        str(path).replace("\\", "/").lstrip("./")
+        for path in (allowed_paths or [])
+        if str(path).strip()
+    }
+    for path in candidate_paths:
+        normalized = str(path).replace("\\", "/").lstrip("./")
+        if _watchdog_path_blocked(normalized):
+            blocked_reasons.append(f"blocked_path:{normalized}")
+        if normalized_allowed and normalized not in normalized_allowed:
+            blocked_reasons.append(f"out_of_scope_path:{normalized}")
+    if diff_text:
+        touched = _guided_edit_changed_paths(diff_text)
+        if len(touched) > max(3, len(normalized_allowed) or 1):
+            flags.append("wide_diff_surface")
+    return {
+        "schema": "watchdog_scan.v1",
+        "ok": not blocked_reasons,
+        "blocked": bool(blocked_reasons),
+        "flags": sorted(set(flags)),
+        "blocked_reasons": sorted(set(blocked_reasons)),
     }
 
 
@@ -8725,6 +9046,37 @@ def _summarize_task_response(infer: dict[str, Any], max_chars: int = 260) -> str
     return 'inference reported no output'
 
 
+def _task_memory_evidence(
+    *,
+    prompt: str,
+    retrieval_info: dict[str, Any],
+    infer: dict[str, Any],
+    result_id: str = "",
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for path in _extract_prompt_file_paths(prompt, max_paths=3):
+        evidence.append({"kind": "prompt_path", "path": path})
+    for item in retrieval_info.get("items", []) if isinstance(retrieval_info, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "") or "").strip()
+        if not path:
+            continue
+        evidence.append(
+            {
+                "kind": str(item.get("source", "retrieval") or "retrieval"),
+                "path": path,
+                "summary": _trim_task_inline_text(item.get("content", ""), max_chars=120),
+            }
+        )
+    if result_id and evidence:
+        evidence.append({"kind": "result", "result_id": result_id})
+    backend = str(infer.get("backend", "") or "").strip()
+    if backend and evidence:
+        evidence.append({"kind": "inference", "backend": backend, "ok": bool(infer.get("ok", False))})
+    return _normalize_memory_evidence(evidence)
+
+
 def _persist_task_memory(
     *,
     prompt: str,
@@ -8733,6 +9085,7 @@ def _persist_task_memory(
     encoded: dict[str, Any],
     infer: dict[str, Any],
     memory_info: dict[str, Any],
+    retrieval_info: dict[str, Any],
     result_id: str = '',
 ) -> dict[str, Any]:
     route = str(classification.get('route') or resolved.get('route') or 'general')
@@ -8741,11 +9094,36 @@ def _persist_task_memory(
     response_summary = _summarize_task_response(infer)
     session_namespace = str(memory_info.get('session_namespace') or _task_session_namespace('default'))
     route_namespace = str(memory_info.get('route_namespace') or _task_route_namespace(route))
+    evidence = _task_memory_evidence(
+        prompt=prompt,
+        retrieval_info=retrieval_info,
+        infer=infer,
+        result_id=result_id,
+    )
+    session_evidence = list(evidence)
+    memory_session_name = str(memory_info.get('memory_session') or 'default')
+    if not session_evidence and memory_session_name != 'default':
+        synthetic_session_evidence: list[dict[str, Any]] = [
+            {
+                'kind': 'session',
+                'summary': memory_session_name,
+            }
+        ]
+        if result_id:
+            synthetic_session_evidence.append({'kind': 'result', 'result_id': result_id})
+        backend = str(infer.get('backend', '') or '').strip()
+        if backend:
+            synthetic_session_evidence.append(
+                {'kind': 'inference', 'backend': backend, 'ok': bool(infer.get('ok', False))}
+            )
+        session_evidence = _normalize_memory_evidence(synthetic_session_evidence)
     state: dict[str, Any] = {
         'session_write': {'written': False},
         'route_summary_write': {'written': False},
         'session_compaction': {'compacted': False},
         'failure_recorded': False,
+        'evidence_count': len(evidence),
+        'session_evidence_count': len(session_evidence),
     }
     session_value = {
         'route': route,
@@ -8761,37 +9139,45 @@ def _persist_task_memory(
         session_value['result_id'] = result_id
 
     if ALLOW_MUTATIONS:
-        try:
-            session_write = memory_upsert(
-                namespace=session_namespace,
-                key=f"call:{_now_iso()}",
-                value=session_value,
-                ttl_days=7,
-                confidence=float(classification.get('confidence', 0.0) or 0.0),
-                source='task_router.task.auto',
-                tags=['task', 'session', route],
-            )
-            state['session_write'] = {**session_write, 'written': True}
-        except Exception as exc:
-            state['session_write'] = {'written': False, 'error': str(exc)}
+        if session_evidence:
+            try:
+                session_write = memory_upsert(
+                    namespace=session_namespace,
+                    key=f"call:{_now_iso()}",
+                    value=session_value,
+                    ttl_days=7,
+                    confidence=float(classification.get('confidence', 0.0) or 0.0),
+                    source='task_router.task.auto',
+                    tags=['task', 'session', route],
+                    evidence=session_evidence,
+                )
+                state['session_write'] = {**session_write, 'written': True}
+            except Exception as exc:
+                state['session_write'] = {'written': False, 'error': str(exc)}
+        else:
+            state['session_write'] = {'written': False, 'reason': 'no_evidence'}
 
-        route_summary = _trim_task_inline_text(
-            f"model={resolved.get('model', '')} ok={task_ok} req={request_summary} resp={response_summary}",
-            max_chars=600,
-        )
-        try:
-            route_write = memory_summary_upsert(
-                namespace=route_namespace,
-                focus='recent_activity',
-                summary=route_summary,
-                ttl_days=30,
-                confidence=float(classification.get('confidence', 0.0) or 0.0),
-                source='task_router.task.auto',
-                tags=['task', 'route', route],
+        if evidence:
+            route_summary = _trim_task_inline_text(
+                f"model={resolved.get('model', '')} ok={task_ok} req={request_summary} resp={response_summary}",
+                max_chars=600,
             )
-            state['route_summary_write'] = {**route_write, 'written': True}
-        except Exception as exc:
-            state['route_summary_write'] = {'written': False, 'error': str(exc)}
+            try:
+                route_write = memory_summary_upsert(
+                    namespace=route_namespace,
+                    focus='recent_activity',
+                    summary=route_summary,
+                    ttl_days=30,
+                    confidence=float(classification.get('confidence', 0.0) or 0.0),
+                    source='task_router.task.auto',
+                    tags=['task', 'route', route],
+                    evidence=evidence,
+                )
+                state['route_summary_write'] = {**route_write, 'written': True}
+            except Exception as exc:
+                state['route_summary_write'] = {'written': False, 'error': str(exc)}
+        else:
+            state['route_summary_write'] = {'written': False, 'reason': 'no_evidence'}
 
         try:
             state['session_compaction'] = memory_auto_compact(
@@ -9097,6 +9483,7 @@ def _task_infer(
 ) -> dict[str, Any]:
     if not prompt.strip():
         raise ValueError('prompt must not be empty')
+    t0 = time.perf_counter()
     profile = _default_output_profile(output_profile)
     classification = _classify_task_prompt(prompt=prompt, task=task)
     routing = _load_continue_model_routing()
@@ -9115,6 +9502,20 @@ def _task_infer(
         prompt=prompt,
         route=str(classification['route']),
     )
+    intent = _build_task_intent_packet(
+        prompt=prompt,
+        route=str(classification['route']),
+        task=task,
+        retrieval_info=retrieval_info,
+    )
+    cost_plan = _build_task_cost_plan(
+        route=str(classification['route']),
+        prompt=prompt,
+        retrieval_info=retrieval_info,
+        intent=intent,
+        max_tokens=max_tokens,
+    )
+    watchdog = _watchdog_scan(prompt=prompt)
     encoded = _encode_task_prompt_packet(
         prompt=prompt,
         route=str(classification['route']),
@@ -9122,6 +9523,7 @@ def _task_infer(
         memory_session=str(memory_info['memory_session']),
         memory_context=str(memory_info['context']),
         retrieval_context=str(retrieval_info['context']),
+        intent_packet=intent,
     )
     effective_system = system or TASK_ROUTE_SYSTEM_PROMPTS.get(
         str(classification['route']),
@@ -9132,7 +9534,7 @@ def _task_infer(
         task=str(classification['route']),
         backend=backend,
         model=str(resolved['model']),
-        max_tokens=max_tokens,
+        max_tokens=int(cost_plan['effective_max_tokens']),
         temperature=temperature,
         system=effective_system,
         output_profile=output_profile,
@@ -9156,6 +9558,9 @@ def _task_infer(
             **memory_info,
             'forced': True,
         },
+        'intent': intent,
+        'cost_plan': cost_plan,
+        'watchdog': watchdog,
         'retrieval': retrieval_info,
         'infer': infer,
     }
@@ -9172,6 +9577,10 @@ def _task_infer(
             'memory_chars': memory_info['context_chars'],
             'retrieval_count': retrieval_info['item_count'],
             'retrieval_chars': retrieval_info['context_chars'],
+            'deliverable': intent['deliverable'],
+            'risk_level': intent['risk_level'],
+            'effort': cost_plan['effort'],
+            'watchdog_blocked': watchdog['blocked'],
             'ok': task_ok,
             'output': infer.get('output', ''),
         }
@@ -9186,12 +9595,27 @@ def _task_infer(
         encoded=encoded,
         infer=infer,
         memory_info=memory_info,
+        retrieval_info=retrieval_info,
         result_id=task_result_id or str(infer.get('result_id') or ''),
+    )
+    benchmark = _workflow_benchmark_record(
+        "task_router.task",
+        {
+            "ok": task_ok,
+            "route": str(classification.get("route") or ""),
+            "backend": str(infer.get("backend") or ""),
+            "degraded": bool(infer.get("degraded", False)),
+            "retrieval_count": int(retrieval_info.get("item_count", 0) or 0),
+            "evidence_count": int(persisted.get("evidence_count", 0) or 0),
+            "watchdog_blocked": bool(watchdog.get("blocked", False)),
+            "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        },
     )
     if 'memory' in result and isinstance(result['memory'], dict):
         result['memory'].update(persisted)
     else:
         result['memory_write'] = persisted
+    result['workflow_benchmark'] = benchmark
     return result
 
 
@@ -9620,14 +10044,271 @@ def _guided_edit_suggest_tests(changed_paths: list[str], max_tests: int = 8) -> 
     return selected
 
 
+def _guided_edit_allowed_paths(action: dict[str, Any], selected_targets: list[str]) -> list[str]:
+    allowed: set[str] = {str(path).replace("\\", "/") for path in selected_targets if str(path).strip()}
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    action_type = str(action.get("action_type", "") or "").strip().lower()
+    if isinstance(target, dict):
+        path = str(target.get("path", "") or "").strip().replace("\\", "/")
+        if path:
+            allowed.add(path)
+            if action_type == "add_test":
+                allowed.update(_guided_edit_suggest_tests([path], max_tests=6))
+    if action_type == "update_docs":
+        readme = _resolve_repo_path("README.md")
+        if readme.is_file():
+            allowed.add("README.md")
+        docs_root = _resolve_repo_path("docs")
+        if docs_root.is_dir():
+            doc_count = 0
+            for candidate in docs_root.rglob("*"):
+                if doc_count >= 24 or not candidate.is_file():
+                    continue
+                rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+                if _is_hidden_rel_path(Path(rel)):
+                    continue
+                if _semantic_role_for_path(rel) != "doc":
+                    continue
+                allowed.add(rel)
+                doc_count += 1
+    return sorted(allowed)
+
+
+def _guided_edit_parse_verification(raw_output: str) -> dict[str, Any]:
+    cleaned = _guided_edit_strip_wrappers(raw_output)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        return {
+            "schema": "guided_edit.verification.v1",
+            "verdict": "unavailable",
+            "confidence": 0.0,
+            "reason": "verifier output did not contain JSON",
+        }
+    payload = json.loads(cleaned[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("guided_edit verifier output must be a JSON object")
+    verdict = str(payload.get("verdict", "unclear") or "unclear").strip().lower()
+    if verdict not in {"agree", "disagree", "unclear"}:
+        verdict = "unclear"
+    confidence = float(payload.get("confidence", 0.0) or 0.0)
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "schema": "guided_edit.verification.v1",
+        "verdict": verdict,
+        "confidence": confidence,
+        "reason": _trim_task_inline_text(payload.get("reason", ""), max_chars=220),
+    }
+
+
+def _guided_edit_verify_step(
+    *,
+    prompt: str,
+    action: dict[str, Any],
+    diff_text: str,
+    backend: str,
+    model: str,
+    temperature: float,
+    system: str,
+    verifier_mode: str,
+) -> dict[str, Any]:
+    if verifier_mode == "off":
+        return {
+            "schema": "guided_edit.verification.v1",
+            "run": False,
+            "ok": True,
+            "blocked": False,
+            "verdict": "skipped",
+            "confidence": 0.0,
+            "reason": "verifier disabled by adaptive plan",
+        }
+    routing = _load_continue_model_routing()
+    resolved = _resolve_task_model_route(
+        route="review",
+        routing=routing,
+        requested_model=model,
+        prompt=prompt,
+        task_hint="review",
+    )
+    verify_prompt = (
+        "Review this bounded edit plan and diff.\n"
+        "Return strict JSON with keys: verdict, confidence, reason.\n"
+        "verdict must be one of agree, disagree, unclear.\n"
+        "Disagree when the diff does not match the action, expands scope, or looks unsafe.\n\n"
+        f"User request:\n{prompt.strip()}\n\n"
+        f"Action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
+        f"Unified diff:\n{diff_text}"
+    )
+    infer = local_infer(
+        prompt=verify_prompt,
+        task="review",
+        backend=backend,
+        model=resolved["model"],
+        max_tokens=220 if verifier_mode == "light" else 320,
+        temperature=temperature,
+        system=system or "You are a strict edit verifier. Return JSON only.",
+        output_profile="normal",
+        store_result=False,
+    )
+    if not bool(infer.get("ok", False)):
+        return {
+            "schema": "guided_edit.verification.v1",
+            "run": True,
+            "ok": True,
+            "blocked": False,
+            "verdict": "unavailable",
+            "confidence": 0.0,
+            "reason": "verifier unavailable",
+            "infer": infer,
+        }
+    parsed = _guided_edit_parse_verification(str(infer.get("output", "") or ""))
+    blocked = parsed["verdict"] == "disagree" and float(parsed["confidence"]) >= 0.5
+    return {
+        **parsed,
+        "run": True,
+        "ok": not blocked,
+        "blocked": blocked,
+        "infer": infer,
+    }
+
+
+def _guided_edit_risk_summary(changed_paths: list[str]) -> dict[str, Any]:
+    score = 0
+    reasons: list[str] = []
+    normalized = [str(path).replace("\\", "/") for path in changed_paths]
+    if len(normalized) > 2:
+        score += 1
+        reasons.append("multiple_files")
+    if any(path.startswith(("source/", "src/")) for path in normalized):
+        score += 1
+        reasons.append("source_changes")
+    if any("server.py" in path or "Dockerfile" in path or path.startswith(".github/") for path in normalized):
+        score += 1
+        reasons.append("sensitive_paths")
+    level = "high" if score >= 3 else "medium" if score >= 1 else "low"
+    return {
+        "risk_score": score,
+        "risk_level": level,
+        "reasons": reasons,
+    }
+
+
+def _guided_edit_memory_evidence(
+    *,
+    action: dict[str, Any],
+    execution: dict[str, Any],
+    validation: dict[str, Any],
+    snapshot_id: str,
+    replay_id: str,
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    if isinstance(target, dict):
+        path = str(target.get("path", "") or "").strip()
+        if path:
+            evidence.append({"kind": "target_path", "path": path})
+    for path in list(execution.get("changed_paths", []) or [])[:4]:
+        evidence.append({"kind": "changed_path", "path": str(path)})
+    diff_text = str(execution.get("diff_text", "") or "")
+    if diff_text:
+        evidence.append(
+            {
+                "kind": "diff",
+                "diff_id": hashlib.sha256(diff_text.encode("utf-8")).hexdigest()[:16],
+                "summary": _trim_task_inline_text(diff_text, max_chars=120),
+            }
+        )
+    selected_tests = list(validation.get("selected_tests", []) or [])
+    if selected_tests:
+        evidence.append({"kind": "tests", "count": len(selected_tests), "summary": ", ".join(selected_tests[:4])})
+    if validation:
+        evidence.append(
+            {
+                "kind": "validation",
+                "ok": bool(validation.get("ok", False)),
+                "validation_id": hashlib.sha256(
+                    json.dumps(validation, sort_keys=True, ensure_ascii=True).encode("utf-8")
+                ).hexdigest()[:16],
+            }
+        )
+    if snapshot_id:
+        evidence.append({"kind": "snapshot", "result_id": snapshot_id})
+    if replay_id:
+        evidence.append({"kind": "replay", "replay_id": replay_id})
+    return _normalize_memory_evidence(evidence)
+
+
+def _guided_edit_persist_memory(
+    *,
+    prompt: str,
+    action: dict[str, Any],
+    execution: dict[str, Any],
+    validation: dict[str, Any],
+    stopped_reason: str,
+    snapshot_id: str,
+    replay_id: str,
+) -> dict[str, Any]:
+    evidence = _guided_edit_memory_evidence(
+        action=action,
+        execution=execution,
+        validation=validation,
+        snapshot_id=snapshot_id,
+        replay_id=replay_id,
+    )
+    if not ALLOW_MUTATIONS:
+        return {"written": False, "reason": "mutations_disabled", "evidence_count": len(evidence)}
+    if not evidence:
+        return {"written": False, "reason": "no_evidence", "evidence_count": 0}
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    target_path = str(target.get("path", "") or "").strip() if isinstance(target, dict) else ""
+    namespace = f"guided_edit/targets/{target_path or 'unknown'}"
+    value = {
+        "action_type": str(action.get("action_type", "") or ""),
+        "goal": str(action.get("goal", "") or ""),
+        "stopped_reason": stopped_reason,
+        "ok": bool(validation.get("ok", execution.get("applied", False))),
+        "request_summary": _trim_task_inline_text(prompt, max_chars=160),
+    }
+    write = memory_upsert(
+        namespace=namespace,
+        key=f"edit:{_now_iso()}",
+        value=value,
+        ttl_days=14,
+        confidence=0.9 if value["ok"] else 0.6,
+        source="guided_edit.auto",
+        tags=["guided_edit", str(action.get("action_type", "") or "unknown")],
+        evidence=evidence,
+    )
+    summary = memory_summary_upsert(
+        namespace=namespace,
+        focus="recent_edit",
+        summary=_trim_task_inline_text(
+            f"{action.get('action_type', '')} stopped={stopped_reason} ok={value['ok']} goal={value['goal']}",
+            max_chars=220,
+        ),
+        ttl_days=21,
+        confidence=0.8 if value["ok"] else 0.5,
+        source="guided_edit.auto",
+        tags=["guided_edit", "summary"],
+        evidence=evidence,
+    )
+    return {
+        "written": True,
+        "namespace": namespace,
+        "entry": write,
+        "summary": summary,
+        "evidence_count": len(evidence),
+    }
+
+
 def _guided_edit_validate_step(
     changed_paths: list[str],
     validation_profile: str = "quick",
     timeout_seconds: int = 120,
 ) -> dict[str, Any]:
     profile = str(validation_profile or "quick").strip().lower() or "quick"
-    if profile != "quick":
-        raise ValueError("validation_profile must currently be 'quick'")
+    if profile not in {"quick", "standard"}:
+        raise ValueError("validation_profile must be one of: quick, standard")
 
     compile_errors: list[dict[str, Any]] = []
     py_files = [
@@ -9694,7 +10375,7 @@ def _guided_edit_validate_step(
             }
 
     ok = not compile_errors and (test_result is None or bool(test_result.get("ok", False)))
-    return {
+    result = {
         "schema": "guided_edit.validation.v1",
         "profile": profile,
         "ok": ok,
@@ -9705,6 +10386,9 @@ def _guided_edit_validate_step(
         "selected_tests": tests,
         "test_execution": test_result,
     }
+    if profile == "standard":
+        result["risk"] = _guided_edit_risk_summary(changed_paths)
+    return result
 
 
 def _guided_edit_plan_step(
@@ -9713,6 +10397,7 @@ def _guided_edit_plan_step(
     target_paths: list[str] | None,
     backend: str,
     model: str,
+    max_tokens: int,
     temperature: float,
     system: str,
 ) -> dict[str, Any]:
@@ -9747,7 +10432,7 @@ def _guided_edit_plan_step(
         task="coding",
         backend=backend,
         model=resolved["model"],
-        max_tokens=320,
+        max_tokens=max(160, int(max_tokens)),
         temperature=temperature,
         system=system or (
             "You are a careful coding planner. Return one minimal, high-confidence edit step as strict JSON only."
@@ -9777,10 +10462,13 @@ def _guided_edit_execute_step(
     prompt: str,
     task: str,
     action: dict[str, Any],
+    selected_targets: list[str],
     backend: str,
     model: str,
+    max_tokens: int,
     temperature: float,
     system: str,
+    verifier_mode: str,
 ) -> dict[str, Any]:
     action_type = str(action.get("action_type", "") or "").strip().lower()
     if action_type == "stop":
@@ -9789,6 +10477,8 @@ def _guided_edit_execute_step(
             "applied": False,
             "stopped": True,
             "changed_paths": [],
+            "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
+            "verification": {"schema": "guided_edit.verification.v1", "run": False, "ok": True, "blocked": False, "verdict": "skipped", "confidence": 0.0, "reason": "stop action"},
         }
     if action_type == "run_validation":
         return {
@@ -9796,6 +10486,8 @@ def _guided_edit_execute_step(
             "applied": False,
             "validation_only": True,
             "changed_paths": [],
+            "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
+            "verification": {"schema": "guided_edit.verification.v1", "run": False, "ok": True, "blocked": False, "verdict": "skipped", "confidence": 0.0, "reason": "validation only"},
         }
 
     target = action.get("target", {})
@@ -9836,7 +10528,7 @@ def _guided_edit_execute_step(
         task="coding",
         backend=backend,
         model=resolved["model"],
-        max_tokens=768,
+        max_tokens=max(256, int(max_tokens)),
         temperature=temperature,
         system=system or (
             "You are a precise code editing engine. Return only a valid unified diff for the requested edit."
@@ -9847,16 +10539,56 @@ def _guided_edit_execute_step(
     if not bool(infer.get("ok", False)):
         raise RuntimeError("guided_edit edit model did not produce output")
     diff_text = _guided_edit_parse_diff(str(infer.get("output", "") or ""))
+    allowed_paths = _guided_edit_allowed_paths(action, selected_targets)
+    watchdog = _watchdog_scan(
+        prompt=prompt,
+        action=action,
+        diff_text=diff_text,
+        allowed_paths=allowed_paths,
+    )
+    changed_paths = _guided_edit_changed_paths(diff_text)
     diff_check = apply_unified_diff(diff_text=diff_text, check_only=True)
-    if not diff_check.get("ok", False):
+    if watchdog.get("blocked", False):
         return {
             "schema": "guided_edit.execution.v1",
             "applied": False,
             "diff_text": diff_text,
             "diff_check": diff_check,
             "diff_apply": None,
-            "changed_paths": _guided_edit_changed_paths(diff_text),
+            "changed_paths": changed_paths,
             "edit_result": infer,
+            "watchdog": watchdog,
+            "verification": {
+                "schema": "guided_edit.verification.v1",
+                "run": False,
+                "ok": True,
+                "blocked": False,
+                "verdict": "skipped",
+                "confidence": 0.0,
+                "reason": "watchdog blocked diff before apply",
+            },
+        }
+    verification = _guided_edit_verify_step(
+        prompt=prompt,
+        action=action,
+        diff_text=diff_text,
+        backend=backend,
+        model=model,
+        temperature=temperature,
+        system=system,
+        verifier_mode=verifier_mode,
+    )
+    if not diff_check.get("ok", False) or verification.get("blocked", False):
+        return {
+            "schema": "guided_edit.execution.v1",
+            "applied": False,
+            "diff_text": diff_text,
+            "diff_check": diff_check,
+            "diff_apply": None,
+            "changed_paths": changed_paths,
+            "edit_result": infer,
+            "watchdog": watchdog,
+            "verification": verification,
         }
     diff_apply = apply_unified_diff(diff_text=diff_text, check_only=False)
     return {
@@ -9865,8 +10597,10 @@ def _guided_edit_execute_step(
         "diff_text": diff_text,
         "diff_check": diff_check,
         "diff_apply": diff_apply,
-        "changed_paths": _guided_edit_changed_paths(diff_text),
+        "changed_paths": changed_paths,
         "edit_result": infer,
+        "watchdog": watchdog,
+        "verification": verification,
     }
 
 
@@ -9876,6 +10610,7 @@ def _guided_edit_run(
     target_paths: list[str] | None = None,
     backend: str = "auto",
     model: str = "",
+    max_tokens: int = 768,
     temperature: float = 0.2,
     system: str = "",
     max_steps: int = 1,
@@ -9889,8 +10624,72 @@ def _guided_edit_run(
     if max_steps < 1:
         raise ValueError("max_steps must be >= 1")
     profile = str(validation_profile or "quick").strip().lower() or "quick"
-    if profile != "quick":
-        raise ValueError("validation_profile must currently be 'quick'")
+    if profile not in {"quick", "standard", "auto"}:
+        raise ValueError("validation_profile must be one of: quick, standard, auto")
+    t0 = time.perf_counter()
+    intent = _build_task_intent_packet(
+        prompt=prompt,
+        route="coding",
+        task=task,
+        target_paths=target_paths,
+        validation_profile=profile,
+        max_steps=max_steps,
+    )
+    cost_plan = _build_task_cost_plan(
+        route="coding",
+        prompt=prompt,
+        retrieval_info={},
+        intent=intent,
+        max_tokens=max_tokens,
+    )
+    prompt_watchdog = _watchdog_scan(prompt=prompt)
+    replay_id = ""
+    if ALLOW_MUTATIONS:
+        with contextlib.suppress(Exception):
+            replay = execution_replay(mode="start")
+            replay_id = str(replay.get("replay_id", "") or "")
+            if replay_id:
+                execution_replay(
+                    mode="log",
+                    replay_id=replay_id,
+                    event={"stage": "prompt_watchdog", "watchdog": prompt_watchdog},
+                )
+
+    def _finish(result: dict[str, Any]) -> dict[str, Any]:
+        if replay_id:
+            with contextlib.suppress(Exception):
+                execution_replay(
+                    mode="log",
+                    replay_id=replay_id,
+                    event={
+                        "stage": "finish",
+                        "ok": bool(result.get("ok", False)),
+                        "stopped_reason": str(result.get("stopped_reason", "") or ""),
+                    },
+                )
+                execution_replay(mode="finish", replay_id=replay_id)
+        if store_result:
+            result["result_id"] = _result_store_put("task_router_guided_edit", result)
+        return result
+
+    if prompt_watchdog.get("blocked", False):
+        return _finish(
+            {
+                "schema": "task_router.guided_edit.v1",
+                "ok": False,
+                "step_count": 0,
+                "requested_max_steps": max_steps,
+                "stopped_reason": "watchdog_blocked",
+                "snapshot_id": "",
+                "replay_id": replay_id,
+                "intent": intent,
+                "cost_plan": cost_plan,
+                "watchdog": prompt_watchdog,
+                "routing": {},
+                "steps": [],
+                "final_validation": {},
+            }
+        )
 
     plan_info = _guided_edit_plan_step(
         prompt=prompt,
@@ -9898,32 +10697,75 @@ def _guided_edit_run(
         target_paths=target_paths,
         backend=backend,
         model=model,
+        max_tokens=max(200, min(int(cost_plan["effective_max_tokens"]), 384)),
         temperature=temperature,
         system=system,
     )
+    if replay_id:
+        with contextlib.suppress(Exception):
+            execution_replay(
+                mode="log",
+                replay_id=replay_id,
+                event={"stage": "plan", "action": plan_info.get("action"), "targets": plan_info.get("selected_targets")},
+            )
     action = plan_info["action"]
+    planning_watchdog = _watchdog_scan(
+        prompt=prompt,
+        action=action,
+        allowed_paths=_guided_edit_allowed_paths(action, plan_info["selected_targets"]),
+    )
+    if planning_watchdog.get("blocked", False):
+        return _finish(
+            {
+                "schema": "task_router.guided_edit.v1",
+                "ok": False,
+                "step_count": 0,
+                "requested_max_steps": max_steps,
+                "stopped_reason": "watchdog_blocked",
+                "snapshot_id": "",
+                "replay_id": replay_id,
+                "intent": intent,
+                "cost_plan": cost_plan,
+                "watchdog": prompt_watchdog,
+                "routing": plan_info["routing"],
+                "steps": [
+                    {
+                        "index": 1,
+                        "selected_targets": plan_info["selected_targets"],
+                        "plan": action,
+                        "planner_result": plan_info["planner_result"],
+                        "planning_watchdog": planning_watchdog,
+                    }
+                ],
+                "final_validation": {},
+            }
+        )
     if action["action_type"] == "stop":
-        result = {
-            "schema": "task_router.guided_edit.v1",
-            "ok": True,
-            "step_count": 0,
-            "requested_max_steps": max_steps,
-            "stopped_reason": "planner_stop",
-            "snapshot_id": "",
-            "routing": plan_info["routing"],
-            "steps": [
-                {
-                    "index": 1,
-                    "selected_targets": plan_info["selected_targets"],
-                    "plan": action,
-                    "planner_result": plan_info["planner_result"],
-                }
-            ],
-            "final_validation": {},
-        }
-        if store_result:
-            result["result_id"] = _result_store_put("task_router_guided_edit", result)
-        return result
+        return _finish(
+            {
+                "schema": "task_router.guided_edit.v1",
+                "ok": True,
+                "step_count": 0,
+                "requested_max_steps": max_steps,
+                "stopped_reason": "planner_stop",
+                "snapshot_id": "",
+                "replay_id": replay_id,
+                "intent": intent,
+                "cost_plan": cost_plan,
+                "watchdog": prompt_watchdog,
+                "routing": plan_info["routing"],
+                "steps": [
+                    {
+                        "index": 1,
+                        "selected_targets": plan_info["selected_targets"],
+                        "plan": action,
+                        "planner_result": plan_info["planner_result"],
+                        "planning_watchdog": planning_watchdog,
+                    }
+                ],
+                "final_validation": {},
+            }
+        )
 
     snapshot_id = ""
     if snapshot_before_edit:
@@ -9934,36 +10776,98 @@ def _guided_edit_run(
         prompt=prompt,
         task=task,
         action=action,
+        selected_targets=plan_info["selected_targets"],
         backend=backend,
         model=model,
+        max_tokens=max(320, int(cost_plan["effective_max_tokens"])),
         temperature=temperature,
         system=system,
+        verifier_mode=str(cost_plan.get("verifier_mode", "light") or "light"),
     )
+    if replay_id:
+        with contextlib.suppress(Exception):
+            execution_replay(
+                mode="log",
+                replay_id=replay_id,
+                event={
+                    "stage": "execution",
+                    "applied": execution.get("applied", False),
+                    "changed_paths": execution.get("changed_paths", []),
+                    "watchdog": execution.get("watchdog", {}),
+                    "verification": execution.get("verification", {}),
+                },
+            )
+    effective_profile = profile
+    if effective_profile == "auto":
+        candidate = str(action.get("validation_scope", "") or cost_plan.get("validation_profile", "quick")).strip().lower()
+        effective_profile = candidate if candidate in {"quick", "standard"} else "quick"
     validation = _guided_edit_validate_step(
         changed_paths=list(execution.get("changed_paths", []) or []),
-        validation_profile=profile,
+        validation_profile=effective_profile,
     ) if execution.get("applied", False) else {}
+    if replay_id and validation:
+        with contextlib.suppress(Exception):
+            execution_replay(
+                mode="log",
+                replay_id=replay_id,
+                event={"stage": "validation", "validation": validation},
+            )
 
     rolled_back = False
     stopped_reason = "single_step_complete"
     ok = bool(execution.get("applied", False))
     if not execution.get("applied", False):
-        stopped_reason = "apply_failed"
+        if bool(execution.get("watchdog", {}).get("blocked", False)):
+            stopped_reason = "watchdog_blocked"
+        elif bool(execution.get("verification", {}).get("blocked", False)):
+            stopped_reason = "verifier_disagreement"
+        else:
+            stopped_reason = "apply_failed"
     elif not validation.get("ok", False):
         ok = False
         stopped_reason = "validation_failed"
         if rollback_on_failure and snapshot_id:
             state_restore(snapshot_id=snapshot_id)
             rolled_back = True
+            if replay_id:
+                with contextlib.suppress(Exception):
+                    execution_replay(
+                        mode="log",
+                        replay_id=replay_id,
+                        event={"stage": "rollback", "snapshot_id": snapshot_id},
+                    )
     step = {
         "index": 1,
         "selected_targets": plan_info["selected_targets"],
         "plan": action,
         "planner_result": plan_info["planner_result"],
+        "planning_watchdog": planning_watchdog,
         "execution": execution,
         "validation": validation,
         "rolled_back": rolled_back,
     }
+    memory_write = _guided_edit_persist_memory(
+        prompt=prompt,
+        action=action,
+        execution=execution,
+        validation=validation,
+        stopped_reason=stopped_reason,
+        snapshot_id=snapshot_id,
+        replay_id=replay_id,
+    )
+    benchmark = _workflow_benchmark_record(
+        "task_router.guided_edit",
+        {
+            "ok": ok,
+            "stopped_reason": stopped_reason,
+            "action_type": str(action.get("action_type", "") or ""),
+            "changed_path_count": len(list(execution.get("changed_paths", []) or [])),
+            "verification_blocked": bool(execution.get("verification", {}).get("blocked", False)),
+            "watchdog_blocked": bool(execution.get("watchdog", {}).get("blocked", False)) or bool(prompt_watchdog.get("blocked", False)),
+            "evidence_count": int(memory_write.get("evidence_count", 0) or 0),
+            "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        },
+    )
     result = {
         "schema": "task_router.guided_edit.v1",
         "ok": ok,
@@ -9971,13 +10875,18 @@ def _guided_edit_run(
         "requested_max_steps": max_steps,
         "stopped_reason": stopped_reason,
         "snapshot_id": snapshot_id,
+        "replay_id": replay_id,
+        "intent": intent,
+        "cost_plan": cost_plan,
+        "watchdog": prompt_watchdog,
         "routing": plan_info["routing"],
         "steps": [step],
         "final_validation": validation,
+        "effective_validation_profile": effective_profile,
+        "memory_write": memory_write,
+        "workflow_benchmark": benchmark,
     }
-    if store_result:
-        result["result_id"] = _result_store_put("task_router_guided_edit", result)
-    return result
+    return _finish(result)
 
 
 def _infer_batch_from_prompt(prompt: str) -> list[str]:
@@ -10250,6 +11159,7 @@ class TaskRouterService:
                 target_paths=target_paths,
                 backend=backend,
                 model=model,
+                max_tokens=max_tokens,
                 temperature=temperature,
                 system=system,
                 max_steps=max_steps,
@@ -10433,11 +11343,11 @@ def task_router(
     ] = True,
     max_steps: Annotated[
         int,
-        Field(description="Maximum guided edit steps requested for `mode='guided_edit'`. The current implementation executes one bounded step."),
+        Field(description="Maximum guided edit steps requested for `mode='guided_edit'`. The current implementation executes one bounded step and records replay/benchmark data for that step."),
     ] = 1,
     validation_profile: Annotated[
         str,
-        Field(description="Validation profile for `mode='guided_edit'`. The current implementation supports `quick`."),
+        Field(description="Validation profile for `mode='guided_edit'`. Use `quick`, `standard`, or `auto` to let the adaptive planner choose."),
     ] = "quick",
     rollback_on_failure: Annotated[
         bool,
@@ -10704,6 +11614,65 @@ def _tool_benchmark_measurements(
             }
         )
     return results
+
+
+def _workflow_benchmark_load() -> dict[str, Any]:
+    payload = _json_file_load(
+        WORKFLOW_BENCHMARK_FILE,
+        {"schema": "workflow_benchmark.report.v1", "workflows": {}},
+    )
+    workflows = payload.get("workflows", {})
+    if not isinstance(workflows, dict):
+        workflows = {}
+    payload["workflows"] = workflows
+    return payload
+
+
+def _workflow_benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(rows)
+    success = sum(1 for row in rows if bool(row.get("ok", False)))
+    avg_duration_ms = round(
+        sum(float(row.get("duration_ms", 0.0) or 0.0) for row in rows) / max(1, total),
+        2,
+    )
+    return {
+        "run_count": total,
+        "success_count": success,
+        "success_rate": round(success / max(1, total), 4),
+        "avg_duration_ms": avg_duration_ms,
+    }
+
+
+def _workflow_benchmark_record(workflow: str, metrics: dict[str, Any]) -> dict[str, Any]:
+    workflow_name = str(workflow or "").strip() or "unknown"
+    row = {"ts": _now_iso(), **(metrics if isinstance(metrics, dict) else {})}
+    if not ALLOW_MUTATIONS:
+        return {
+            "schema": "workflow_benchmark.report.v1",
+            "workflow": workflow_name,
+            "written": False,
+            "summary": _workflow_benchmark_summary([row]),
+            "run": row,
+            "reason": "mutations_disabled",
+        }
+    payload = _workflow_benchmark_load()
+    workflows = payload.get("workflows", {})
+    rows = workflows.get(workflow_name, [])
+    if not isinstance(rows, list):
+        rows = []
+    rows.append(row)
+    rows = rows[-50:]
+    workflows[workflow_name] = rows
+    payload["workflows"] = workflows
+    payload["updated_at"] = _now_iso()
+    _json_file_save(WORKFLOW_BENCHMARK_FILE, payload)
+    return {
+        "schema": "workflow_benchmark.report.v1",
+        "workflow": workflow_name,
+        "written": True,
+        "summary": _workflow_benchmark_summary(rows),
+        "run": row,
+    }
 
 
 @mcp.tool()
@@ -13393,9 +14362,113 @@ def _repo_index_build_file_record(
     return record
 
 
-def _repo_index_materialize_payload(index_payload: dict[str, Any]) -> dict[str, Any]:
-    if str(index_payload.get("schema", "")) != "repo_index_daemon.v2":
-        raise RuntimeError("stale repo index format; run repo_index_daemon(mode='refresh') to rebuild")
+def _semantic_role_for_path(path: str) -> str:
+    rel = str(path or "").replace("\\", "/").lower()
+    if rel.endswith((".md", ".rst", ".txt")) or rel.startswith("docs/") or rel == "readme.md":
+        return "doc"
+    if rel.startswith("tests/") or "/test" in rel or rel.endswith("_test.py"):
+        return "test"
+    if rel.endswith((".py", ".js", ".ts", ".tsx", ".go", ".rs", ".sh")):
+        return "code"
+    return "other"
+
+
+def _repo_index_build_semantic_dag(payload: dict[str, Any]) -> dict[str, Any]:
+    files = payload.get("files", [])
+    symbols = payload.get("symbols", [])
+    dependencies = payload.get("dependencies", [])
+    file_nodes: list[dict[str, Any]] = []
+    symbol_nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    path_set: set[str] = set()
+    role_by_path: dict[str, str] = {}
+    symbol_name_map: dict[str, list[str]] = {}
+
+    for row in files if isinstance(files, list) else []:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path", "") or "").strip()
+        if not path:
+            continue
+        role = _semantic_role_for_path(path)
+        role_by_path[path] = role
+        path_set.add(path)
+        file_nodes.append({"id": f"file:{path}", "kind": "file", "role": role, "path": path})
+
+    for row in symbols if isinstance(symbols, list) else []:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path", "") or "").strip()
+        name = str(row.get("name", "") or "").strip()
+        if not path or not name:
+            continue
+        node_id = f"symbol:{path}:{name}"
+        symbol_nodes.append(
+            {
+                "id": node_id,
+                "kind": "symbol",
+                "path": path,
+                "name": name,
+                "symbol_kind": str(row.get("kind", "") or ""),
+            }
+        )
+        symbol_name_map.setdefault(name, []).append(node_id)
+        edges.append({"kind": "defines", "from": f"file:{path}", "to": node_id})
+
+    for row in dependencies if isinstance(dependencies, list) else []:
+        if not isinstance(row, dict):
+            continue
+        src = str(row.get("from", "") or "").strip()
+        dst = str(row.get("to", "") or "").strip()
+        if not src or not dst:
+            continue
+        edge_kind = "test_covers" if role_by_path.get(src) == "test" else "dependency"
+        edges.append({"kind": edge_kind, "from": f"file:{src}", "to": f"file:{dst}"})
+
+    for path, role in role_by_path.items():
+        if role != "test":
+            continue
+        stem = Path(path).stem
+        candidates = {
+            f"src/{stem.removeprefix('test_')}.py",
+            f"source/{stem.removeprefix('test_')}.py",
+        }
+        for candidate in sorted(candidates):
+            if candidate in path_set:
+                edges.append({"kind": "test_covers", "from": f"file:{path}", "to": f"file:{candidate}"})
+
+    doc_candidates = [path for path, role in role_by_path.items() if role == "doc"]
+    for doc_path in doc_candidates[:120]:
+        try:
+            text = _resolve_repo_path(doc_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for mention in sorted(set(re.findall(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", text)))[:80]:
+            normalized = mention.replace("\\", "/")
+            if normalized in path_set:
+                edges.append({"kind": "doc_mentions_path", "from": f"file:{doc_path}", "to": f"file:{normalized}"})
+        for name, node_ids in list(symbol_name_map.items())[:400]:
+            if len(name) < 4 or len(node_ids) > 3:
+                continue
+            if re.search(rf"`{re.escape(name)}`|\b{re.escape(name)}\b", text):
+                for node_id in node_ids:
+                    edges.append({"kind": "doc_mentions_symbol", "from": f"file:{doc_path}", "to": node_id})
+
+    edge_kind_counts: dict[str, int] = {}
+    for edge in edges:
+        kind = str(edge.get("kind", "") or "")
+        edge_kind_counts[kind] = edge_kind_counts.get(kind, 0) + 1
+    return {
+        "schema": "semantic_dag.v1",
+        "node_count": len(file_nodes) + len(symbol_nodes),
+        "edge_count": len(edges),
+        "edge_kinds": dict(sorted(edge_kind_counts.items())),
+        "nodes": file_nodes + symbol_nodes,
+        "edges": edges,
+    }
+
+
+def _repo_index_materialize_core_payload(index_payload: dict[str, Any]) -> dict[str, Any]:
     records = index_payload.get("records", {})
     if not isinstance(records, dict):
         records = {}
@@ -13458,6 +14531,25 @@ def _repo_index_materialize_payload(index_payload: dict[str, Any]) -> dict[str, 
     return payload
 
 
+def _repo_index_materialize_payload(index_payload: dict[str, Any]) -> dict[str, Any]:
+    if str(index_payload.get("schema", "")) != "repo_index_daemon.v2":
+        raise RuntimeError("stale repo index format; run repo_index_daemon(mode='refresh') to rebuild")
+    payload = _repo_index_materialize_core_payload(index_payload)
+    stored_dag = index_payload.get("semantic_dag")
+    if isinstance(stored_dag, dict):
+        payload["semantic_dag"] = stored_dag
+    else:
+        payload["semantic_dag"] = {
+            "schema": "semantic_dag.v1",
+            "node_count": 0,
+            "edge_count": 0,
+            "edge_kinds": {},
+            "nodes": [],
+            "edges": [],
+        }
+    return payload
+
+
 def repo_index_daemon(
     mode: str = "refresh",
     path: str = ".",
@@ -13509,6 +14601,14 @@ def repo_index_daemon(
             read_payload["symbols"] = []
             read_payload["dependencies"] = []
             read_payload["call_edges"] = []
+            dag = read_payload.get("semantic_dag", {})
+            if isinstance(dag, dict):
+                read_payload["semantic_dag"] = {
+                    "schema": dag.get("schema"),
+                    "node_count": dag.get("node_count", 0),
+                    "edge_count": dag.get("edge_count", 0),
+                    "edge_kinds": dag.get("edge_kinds", {}),
+                }
         if isinstance(read_payload.get("files"), list):
             files = _paginate(read_payload["files"], offset=offset, limit=limit)
             if files and isinstance(files[0], dict):
@@ -13522,6 +14622,7 @@ def repo_index_daemon(
                 "file_count": read_payload.get("file_count", 0),
                 "symbol_count": read_payload.get("symbol_count", 0),
                 "dependency_edge_count": read_payload.get("dependency_edge_count", 0),
+                "semantic_dag_edge_count": int(read_payload.get("semantic_dag", {}).get("edge_count", 0) or 0),
             }
             if store_result:
                 compact["result_id"] = _result_store_put("repo_index_daemon", compact)
@@ -13533,6 +14634,7 @@ def repo_index_daemon(
                 "generated_at": read_payload.get("generated_at"),
                 "file_count": read_payload.get("file_count", 0),
                 "symbol_count": read_payload.get("symbol_count", 0),
+                "semantic_dag_edge_count": int(read_payload.get("semantic_dag", {}).get("edge_count", 0) or 0),
             }
             if store_result:
                 quick["result_id"] = _result_store_put("repo_index_daemon", quick)
@@ -13661,9 +14763,13 @@ def repo_index_daemon(
     if _is_git_repo():
         payload["git_head"] = _git("rev-parse", "HEAD").stdout.strip()
         payload["git_branch"] = _git("branch", "--show-current").stdout.strip()
+    payload["semantic_dag"] = _repo_index_build_semantic_dag(
+        _repo_index_materialize_core_payload(payload)
+    )
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    semantic_dag_summary = payload.get("semantic_dag", {})
     result = {
         "schema": "repo_index_daemon.refresh.v1",
         "mode": mode,
@@ -13678,6 +14784,7 @@ def repo_index_daemon(
         "reused_paths_count": reused_paths_count,
         "recomputed_python_paths_count": recomputed_python_paths_count,
         "removed_paths_count": len(removed_paths),
+        "semantic_dag_edge_count": int(semantic_dag_summary.get("edge_count", 0) or 0),
     }
     if summary_mode == "quick":
         result = {
@@ -13690,6 +14797,7 @@ def repo_index_daemon(
             "changed_paths_count": payload["changed_paths_count"],
             "reused_paths_count": reused_paths_count,
             "recomputed_python_paths_count": recomputed_python_paths_count,
+            "semantic_dag_edge_count": int(semantic_dag_summary.get("edge_count", 0) or 0),
         }
     if compress:
         result["files_compressed"] = _compress_table(files_meta[:500])
@@ -13839,6 +14947,7 @@ def memory_upsert(
     confidence: float = 1.0,
     source: str = "agent",
     tags: list[str] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create or update a structured context memory record."""
     _require_mutations()
@@ -13851,6 +14960,7 @@ def memory_upsert(
     entries = payload["entries"]
     now_iso = _now_iso()
     expires_at = _to_iso_expiry(ttl_days)
+    normalized_evidence = _normalize_memory_evidence(evidence)
     updated = False
     for entry in entries:
         if entry.get("namespace") == namespace and entry.get("key") == key:
@@ -13860,23 +14970,26 @@ def memory_upsert(
             entry["tags"] = tags or []
             entry["updated_at"] = now_iso
             entry["expires_at"] = expires_at
+            if normalized_evidence:
+                entry["evidence"] = normalized_evidence
             updated = True
             break
 
     if not updated:
-        entries.append(
-            {
-                "namespace": namespace,
-                "key": key,
-                "value": value,
-                "confidence": confidence,
-                "source": source,
-                "tags": tags or [],
-                "created_at": now_iso,
-                "updated_at": now_iso,
-                "expires_at": expires_at,
-            }
-        )
+        row = {
+            "namespace": namespace,
+            "key": key,
+            "value": value,
+            "confidence": confidence,
+            "source": source,
+            "tags": tags or [],
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "expires_at": expires_at,
+        }
+        if normalized_evidence:
+            row["evidence"] = normalized_evidence
+        entries.append(row)
 
     _memory_save(payload)
     return {
@@ -13885,6 +14998,7 @@ def memory_upsert(
         "key": key,
         "updated": True,
         "expires_at": expires_at,
+        "evidence_count": len(normalized_evidence),
     }
 
 
@@ -13896,6 +15010,7 @@ def memory_summary_upsert(
     confidence: float = 1.0,
     source: str = "agent",
     tags: list[str] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create or update memory summary/focus records for context retention."""
     _require_mutations()
@@ -13907,6 +15022,7 @@ def memory_summary_upsert(
     summaries = payload["summaries"]
     now_iso = _now_iso()
     expires_at = _to_iso_expiry(ttl_days)
+    normalized_evidence = _normalize_memory_evidence(evidence)
     updated = False
     for row in summaries:
         if row.get("namespace") == namespace and row.get("focus") == focus:
@@ -13916,22 +15032,25 @@ def memory_summary_upsert(
             row["tags"] = tags or []
             row["updated_at"] = now_iso
             row["expires_at"] = expires_at
+            if normalized_evidence:
+                row["evidence"] = normalized_evidence
             updated = True
             break
     if not updated:
-        summaries.append(
-            {
-                "namespace": namespace,
-                "focus": focus,
-                "summary": summary,
-                "confidence": confidence,
-                "source": source,
-                "tags": tags or [],
-                "created_at": now_iso,
-                "updated_at": now_iso,
-                "expires_at": expires_at,
-            }
-        )
+        row = {
+            "namespace": namespace,
+            "focus": focus,
+            "summary": summary,
+            "confidence": confidence,
+            "source": source,
+            "tags": tags or [],
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "expires_at": expires_at,
+        }
+        if normalized_evidence:
+            row["evidence"] = normalized_evidence
+        summaries.append(row)
     _memory_save(payload)
     return {
         "path": str(MEMORY_FILE),
@@ -13939,6 +15058,7 @@ def memory_summary_upsert(
         "focus": focus,
         "updated": True,
         "expires_at": expires_at,
+        "evidence_count": len(normalized_evidence),
     }
 
 

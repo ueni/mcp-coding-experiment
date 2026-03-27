@@ -1,7 +1,7 @@
 {
   "name": "mcp-inline-autocomplete",
   "displayName": "MCP Inline Autocomplete",
-  "description": "Inline autocomplete provider backed by an MCP tool endpoint.",
+  "description": "Inline autocomplete provider backed by task_router autocomplete mode.",
   "version": "0.0.1",
   "publisher": "local",
   "engines": {
