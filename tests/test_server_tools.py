@@ -1827,6 +1827,20 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "def alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
                     "model": "phi4-mini-reasoning:3.8b",
                     "ok": True,
                     "output": json.dumps(
@@ -1857,10 +1871,16 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertFalse(out["steps"][0]["rolled_back"])
         self.assertEqual(out["steps"][0]["execution"]["isolation"]["backend"], "git_worktree")
         self.assertTrue(out["steps"][0]["execution"]["materialized"])
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
+        self.assertEqual(len(out["steps"][0]["execution"]["candidates"]), 3)
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "initial")
         self.assertTrue(out["memory_write"]["written"])
         self.assertTrue(out["memory_write"]["experience_write"]["written"])
         self.assertEqual(out["replay_summary"]["schema"], "execution_replay.summary.v1")
         self.assertEqual(out["replay_diagnosis"]["schema"], "execution_replay.diagnosis.v1")
+        self.assertIn("candidate_selection", out["replay_summary"]["stages"])
+        self.assertEqual(out["workflow_benchmark"]["run"]["candidate_count"], 3)
+        self.assertEqual(out["workflow_benchmark"]["run"]["selected_candidate_index"], 1)
         self.assertGreaterEqual(out["repo_memory"]["entry_count"], 1)
         self.assertGreaterEqual(out["skill_pack"]["module_count"], 1)
         self.assertEqual(out["state_machine"]["states"], ["start", "plan", "execute", "validate", "finish"])
@@ -1910,6 +1930,20 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "def alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
                     "model": "phi4-mini-reasoning:3.8b",
                     "ok": True,
                     "output": json.dumps(
@@ -1932,6 +1966,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIsNotNone(out["steps"][0]["repair_result"])
         self.assertEqual(out["steps"][0]["execution"]["isolation"]["backend"], "git_worktree")
         self.assertTrue(out["steps"][0]["execution"]["materialized"])
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
 
     def test_task_router_guided_edit_repairs_invalid_edit_output(self):
         before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
@@ -1972,6 +2007,13 @@ class ServerToolsTest(ServerToolsTestBase):
                     "backend": "endpoint",
                     "model": "phi4-mini:3.8b",
                     "ok": True,
+                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
                     "output": repaired_output,
                 },
                 {
@@ -1994,14 +2036,19 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertTrue(out["ok"])
         self.assertTrue(out["steps"][0]["execution"]["repair_used"])
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 2)
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
         self.assertIsNotNone(out["steps"][0]["execution"]["repair_result"])
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "repair")
 
     def test_task_router_guided_edit_rolls_back_on_failed_validation(self):
         before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
         invalid_replacement_output = (
             "def alpha(x)\n"
             "    return x + 1"
+        )
+        wrong_behavior_output = (
+            "def alpha(x):\n"
+            "    return x + 999"
         )
         planner_output = json.dumps(
             {
@@ -2028,7 +2075,21 @@ class ServerToolsTest(ServerToolsTestBase):
                     "backend": "fallback",
                     "model": "qwen2.5-coder:3b",
                     "ok": True,
+                    "output": wrong_behavior_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
                     "output": invalid_replacement_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
                 },
                 {
                     "schema": "local_infer.v1",
@@ -2053,7 +2114,8 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["schema"], "task_router.guided_edit.v1")
         self.assertFalse(out["ok"])
         self.assertEqual(out["stopped_reason"], "validation_failed")
-        self.assertEqual(out["final_validation"]["compile_error_count"], 1)
+        self.assertEqual(out["final_validation"]["compile_error_count"], 0)
+        self.assertFalse(out["final_validation"]["test_execution"]["ok"])
         self.assertFalse(out["steps"][0]["rolled_back"])
         self.assertEqual(
             (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
@@ -2061,6 +2123,8 @@ class ServerToolsTest(ServerToolsTestBase):
         )
         self.assertTrue(out["memory_write"]["written"])
         self.assertFalse(out["steps"][0]["execution"].get("materialized", False))
+        self.assertEqual(out["workflow_benchmark"]["run"]["verifier_false_positive"], 1)
+        self.assertTrue(out["verifier_false_positive_write"]["written"])
         self.assertEqual(out["state_machine"]["current_state"], "validate")
         self.assertEqual(out["state_machine"]["terminal_reason"], "validation_failed")
 
@@ -2078,6 +2142,16 @@ class ServerToolsTest(ServerToolsTestBase):
             "def alpha(x):\n"
             "    # over-broad change\n"
             "    return x + 2"
+        )
+        broader_replacement_output = (
+            "def alpha(x):\n"
+            "    # another broad change\n"
+            "    return x + 3"
+        )
+        repair_replacement_output = (
+            "def alpha(x):\n"
+            "    # repaired but still broad\n"
+            "    return x + 4"
         )
         with patch.object(
             self.server,
@@ -2100,18 +2174,16 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "qwen2.5-coder:3b",
                     "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "disagree", "confidence": 0.95, "reason": "diff expands scope beyond the stated action"}
-                    ),
+                    "output": broader_replacement_output,
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini:3.8b",
+                    "model": "qwen2.5-coder:3b",
                     "ok": True,
-                    "output": broad_replacement_output,
+                    "output": repair_replacement_output,
                 },
                 {
                     "schema": "local_infer.v1",
@@ -2120,6 +2192,24 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "disagree", "confidence": 0.97, "reason": "repaired diff still expands scope beyond the stated action"}
+                    ),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "disagree", "confidence": 0.96, "reason": "alternate diff still expands scope beyond the stated action"}
+                    ),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "disagree", "confidence": 0.97, "reason": "repair diff still expands scope beyond the stated action"}
                     ),
                 },
             ],
@@ -2136,6 +2226,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertFalse(out["steps"][0]["execution"]["applied"])
         self.assertTrue(out["steps"][0]["execution"]["verification"]["blocked"])
         self.assertTrue(out["steps"][0]["execution"]["repair_used"])
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
         self.assertEqual(out["state_machine"]["current_state"], "execute")
         self.assertEqual(out["state_machine"]["terminal_reason"], "verifier_disagreement")
 
@@ -2209,6 +2300,13 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
+                },
             ],
         ):
             out = self.server.task_router(
@@ -2222,7 +2320,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["stopped_reason"], "edit_invalid")
         self.assertEqual(out["failure_diagnosis"]["failure_stage"], "execute")
         self.assertEqual(out["failure_diagnosis"]["reason"], "edit_invalid")
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 2)
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
         self.assertTrue(out["steps"][0]["execution"]["repair_used"])
         self.assertEqual(out["state_machine"]["current_state"], "execute")
         self.assertEqual(out["state_machine"]["terminal_reason"], "edit_invalid")
@@ -2300,6 +2398,13 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
+                },
             ],
         ):
             out = self.server.task_router(
@@ -2348,6 +2453,205 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["state_machine"]["states"], ["start", "plan", "execute", "validate", "finish"])
         self.assertEqual(out["state_machine"]["current_state"], "plan")
         self.assertEqual(out["state_machine"]["terminal_reason"], "planner_stop")
+
+    def test_task_router_guided_edit_ranks_candidates_and_selects_later_success(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "exercise candidate ranking",
+                "validation_scope": "quick",
+            }
+        )
+        candidate_one = (
+            "def beta(y):\n"
+            "    return y - 1"
+        )
+        candidate_two = (
+            "def alpha(x):\n"
+            "    # alpha increments the input\n"
+            "    return x + 2"
+        )
+        candidate_three = (
+            "def alpha(x):\n"
+            "    # alpha increments the input\n"
+            "    # kept intentionally verbose for ranking coverage\n"
+            "    return x + 1"
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": planner_output},
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_one},
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_two},
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_three},
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps({"verdict": "disagree", "confidence": 0.9, "reason": "candidate changes behavior"}),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps({"verdict": "agree", "confidence": 0.93, "reason": "candidate matches the bounded request"}),
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["index"], 3)
+        self.assertEqual(out["steps"][0]["execution"]["candidates"][0]["stop_reason"], "acceptance_failed")
+        self.assertEqual(out["steps"][0]["execution"]["candidates"][1]["stop_reason"], "verifier_disagreement")
+        self.assertEqual(out["steps"][0]["execution"]["candidates"][2]["stop_reason"], "selected")
+
+    def test_task_router_guided_edit_verifier_uses_review_route_even_with_explicit_model(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "capture verifier routing",
+                "validation_scope": "quick",
+            }
+        )
+        verifier_models = []
+
+        def fake_infer(*, prompt, model, **kwargs):
+            if prompt.startswith("Plan exactly one bounded repository edit step."):
+                return {"schema": "local_infer.v1", "backend": "fallback", "model": model, "ok": True, "output": planner_output}
+            if prompt.startswith("Apply exactly one bounded edit to the target region."):
+                if "Strategy: Produce the highest-confidence minimal edit." in prompt:
+                    return {
+                        "schema": "local_infer.v1",
+                        "backend": "fallback",
+                        "model": model,
+                        "ok": True,
+                        "output": "def alpha(x):\n    # alpha increments the input\n    return x + 1",
+                    }
+                return {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": model,
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                }
+            verifier_models.append(model)
+            return {
+                "schema": "local_infer.v1",
+                "backend": "fallback",
+                "model": model,
+                "ok": True,
+                "output": json.dumps({"verdict": "agree", "confidence": 0.9, "reason": "candidate matches the request"}),
+            }
+
+        with patch.object(self.server, "local_infer", side_effect=fake_infer):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                model="qwen2.5-coder:1.5b",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertTrue(verifier_models)
+        self.assertTrue(all(model == "phi4-mini-reasoning:3.8b" for model in verifier_models))
+
+    def test_guided_edit_acceptance_action_specific_postconditions(self):
+        doc_region = {
+            "path": "README.md",
+            "original_text": "# Demo\nAlpha behavior\n",
+            "original_lines": ["# Demo\n", "Alpha behavior\n"],
+            "start_line": 1,
+            "end_line": 2,
+            "region_text": "# Demo\nAlpha behavior\n",
+            "context_before_text": "",
+            "context_after_text": "",
+        }
+        doc_diff = self.server._guided_edit_build_local_diff(
+            target_region=doc_region,
+            replacement_text="# Demo\nBehavior overview\n",
+            max_extra_lines=2,
+        )
+        update_docs_acceptance = self.server._guided_edit_acceptance(
+            prompt='Update README.md and include "Alpha behavior".',
+            action={
+                "action_type": "update_docs",
+                "goal": "include Alpha behavior",
+                "rationale": "docs coverage",
+                "target": {"path": "README.md", "start_line": 1, "end_line": 2},
+                "postconditions": {},
+            },
+            target_region=doc_region,
+            parsed_edit={"mode": "replacement_text", "replacement_text": "# Demo\nBehavior overview\n", "diff_text": doc_diff},
+            allowed_paths=["README.md"],
+        )
+        self.assertFalse(update_docs_acceptance["ok"])
+        self.assertIn("update_docs_missing_required_phrase", update_docs_acceptance["hard_failures"])
+
+        add_test_acceptance = self.server._guided_edit_acceptance(
+            prompt="Add a regression test.",
+            action={
+                "action_type": "add_test",
+                "goal": "add regression test",
+                "rationale": "tests only",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "postconditions": {},
+            },
+            target_region=self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0),
+            parsed_edit={
+                "mode": "raw_diff",
+                "diff_text": (
+                    "--- a/src/sample.py\n"
+                    "+++ b/src/sample.py\n"
+                    "@@ -3,2 +3,3 @@\n"
+                    " def alpha(x):\n"
+                    "+    # not a test\n"
+                    "     return x + 1\n"
+                ),
+            },
+            allowed_paths=["src/sample.py"],
+        )
+        self.assertFalse(add_test_acceptance["ok"])
+        self.assertIn("add_test_must_change_test_paths", add_test_acceptance["hard_failures"])
+
+        extract_helper_acceptance = self.server._guided_edit_acceptance(
+            prompt="Extract helper helper_alpha from src/sample.py.",
+            action={
+                "action_type": "extract_helper",
+                "goal": "extract helper_alpha",
+                "rationale": "extract helper helper_alpha",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4, "symbol": "helper_alpha"},
+                "postconditions": {},
+            },
+            target_region=self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0),
+            parsed_edit={
+                "mode": "raw_diff",
+                "diff_text": (
+                    "--- a/src/sample.py\n"
+                    "+++ b/src/sample.py\n"
+                    "@@ -3,2 +3,2 @@\n"
+                    " def alpha(x):\n"
+                    "-    return x + 1\n"
+                    "+    return x + 2\n"
+                ),
+            },
+            allowed_paths=["src/sample.py"],
+        )
+        self.assertFalse(extract_helper_acceptance["ok"])
+        self.assertIn("extract_helper_missing_helper_symbol", extract_helper_acceptance["hard_failures"])
 
     def test_memory_auto_compact_and_usage_stats(self):
         for i in range(10):

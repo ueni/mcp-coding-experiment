@@ -10760,6 +10760,43 @@ def _guided_edit_parse_action(raw_output: str, fallback_paths: list[str]) -> dic
         validation_scope = str(raw_validation_scope or "quick").strip().lower() or "quick"
     if validation_scope not in {"quick", "standard", "auto"}:
         validation_scope = "quick"
+    raw_postconditions = payload.get("postconditions", {})
+    if not isinstance(raw_postconditions, dict):
+        raw_postconditions = {}
+
+    def _string_list(value: Any, *, limit: int = 8) -> list[str]:
+        if isinstance(value, str):
+            items = [value]
+        elif isinstance(value, list):
+            items = value
+        else:
+            items = []
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text[:160])
+            if len(out) >= limit:
+                break
+        return out
+
+    postconditions = {
+        "must_include": _string_list(raw_postconditions.get("must_include")),
+        "must_preserve": _string_list(raw_postconditions.get("must_preserve")),
+        "require_symbol": str(raw_postconditions.get("require_symbol", "") or "").strip()[:160],
+        "max_line_delta": None,
+    }
+    raw_max_line_delta = raw_postconditions.get("max_line_delta")
+    if isinstance(raw_max_line_delta, int):
+        postconditions["max_line_delta"] = max(0, raw_max_line_delta)
+    elif isinstance(raw_max_line_delta, str) and raw_max_line_delta.strip().isdigit():
+        postconditions["max_line_delta"] = max(0, int(raw_max_line_delta.strip()))
     return {
         "schema": "guided_edit.action.v1",
         "action_type": action_type,
@@ -10772,6 +10809,7 @@ def _guided_edit_parse_action(raw_output: str, fallback_paths: list[str]) -> dic
         "goal": str(payload.get("goal", "") or "").strip(),
         "rationale": str(payload.get("rationale", "") or "").strip(),
         "validation_scope": validation_scope,
+        "postconditions": postconditions,
     }
 
 
@@ -10828,8 +10866,12 @@ def _guided_edit_target_region(
     context_before: int = 4,
     context_after: int = 4,
     encoding: str = "utf-8",
+    repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    file_path = _resolve_repo_path(path)
+    if repo_root is None:
+        file_path = _resolve_repo_path(path)
+    else:
+        file_path = (repo_root / path).resolve()
     original_text = file_path.read_text(encoding=encoding, errors="replace")
     original_lines = original_text.splitlines(keepends=True)
     if not original_lines:
@@ -10850,13 +10892,12 @@ def _guided_edit_target_region(
     }
 
 
-def _guided_edit_build_local_diff(
+def _guided_edit_render_structured_update(
     *,
     target_region: dict[str, Any],
     replacement_text: str,
     max_extra_lines: int | None = None,
-) -> str:
-    target_path = str(target_region.get("path", "") or "").strip()
+) -> dict[str, Any]:
     original_text = str(target_region.get("original_text", "") or "")
     original_lines = list(target_region.get("original_lines", []) or [])
     start_line = int(target_region.get("start_line", 1) or 1)
@@ -10868,6 +10909,7 @@ def _guided_edit_build_local_diff(
         normalized += "\n"
     original_line_count = len(region_text.splitlines())
     replacement_line_count = len(normalized.splitlines())
+    line_delta = replacement_line_count - original_line_count
     if (
         max_extra_lines is not None
         and replacement_line_count > original_line_count + max(0, int(max_extra_lines))
@@ -10882,6 +10924,31 @@ def _guided_edit_build_local_diff(
     updated_text = "".join(updated_lines)
     if updated_text == original_text:
         raise ValueError("structured replacement did not change the file")
+    return {
+        "normalized_replacement": normalized,
+        "replacement_lines": replacement_lines,
+        "replacement_line_count": replacement_line_count,
+        "original_line_count": original_line_count,
+        "line_delta": line_delta,
+        "updated_text": updated_text,
+        "updated_lines": updated_lines,
+    }
+
+
+def _guided_edit_build_local_diff(
+    *,
+    target_region: dict[str, Any],
+    replacement_text: str,
+    max_extra_lines: int | None = None,
+) -> str:
+    target_path = str(target_region.get("path", "") or "").strip()
+    original_text = str(target_region.get("original_text", "") or "")
+    rendered = _guided_edit_render_structured_update(
+        target_region=target_region,
+        replacement_text=replacement_text,
+        max_extra_lines=max_extra_lines,
+    )
+    updated_text = str(rendered["updated_text"])
     diff_lines = list(
         difflib.unified_diff(
             original_text.splitlines(keepends=True),
@@ -11131,6 +11198,334 @@ def _guided_edit_allowed_paths(action: dict[str, Any], selected_targets: list[st
     return sorted(allowed)
 
 
+def _guided_edit_postcondition_list(value: Any, *, limit: int = 8) -> list[str]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text[:160])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _guided_edit_destructive_request(*parts: Any) -> bool:
+    lowered = " ".join(str(part or "") for part in parts).lower()
+    return bool(re.search(r"\b(rename|rewrite|replace|remove|delete)\b", lowered))
+
+
+def _guided_edit_extract_required_phrases(prompt: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"['\"]([^'\"]{2,120})['\"]", str(prompt or "")):
+        text = str(match.group(1) or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= 6:
+            break
+    return out
+
+
+def _guided_edit_substantive_lines(text: str) -> list[str]:
+    out: list[str] = []
+    for raw in str(text or "").splitlines():
+        normalized = re.sub(r"\s+", " ", raw.strip())
+        if not normalized:
+            continue
+        if not re.search(r"[A-Za-z0-9_]", normalized):
+            continue
+        out.append(normalized)
+    return out
+
+
+def _guided_edit_markdown_headings(text: str) -> list[str]:
+    headings: list[str] = []
+    for raw in str(text or "").splitlines():
+        stripped = raw.strip()
+        if not stripped.startswith("#"):
+            continue
+        if not re.match(r"^#{1,6}\s+\S", stripped):
+            continue
+        headings.append(stripped)
+    return headings
+
+
+def _guided_edit_similarity_ratio(left: str, right: str) -> float:
+    a = re.sub(r"\s+", " ", str(left or "").strip())
+    b = re.sub(r"\s+", " ", str(right or "").strip())
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return round(difflib.SequenceMatcher(a=a, b=b).ratio(), 4)
+
+
+def _guided_edit_changed_line_count(diff_text: str) -> int:
+    count = 0
+    for line in str(diff_text or "").splitlines():
+        if line.startswith(("+++", "---", "@@")):
+            continue
+        if line.startswith(("+", "-")):
+            count += 1
+    return count
+
+
+def _guided_edit_is_test_path(path: str) -> bool:
+    rel = str(path or "").replace("\\", "/").strip().lower()
+    return (
+        rel.startswith("tests/")
+        or rel.startswith("test/")
+        or "/tests/" in rel
+        or Path(rel).name.startswith("test_")
+        or Path(rel).name.endswith("_test.py")
+    )
+
+
+def _guided_edit_extract_helper_symbol(action: dict[str, Any]) -> str:
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    if isinstance(target, dict):
+        symbol = str(target.get("symbol", "") or "").strip()
+        if symbol:
+            return symbol
+    combined = " ".join(
+        [
+            str(action.get("goal", "") or ""),
+            str(action.get("rationale", "") or ""),
+        ]
+    )
+    for match in re.finditer(r"\b(?:helper|function|method|symbol)\s+([A-Za-z_][A-Za-z0-9_]*)\b", combined):
+        symbol = str(match.group(1) or "").strip()
+        if symbol:
+            return symbol
+    return ""
+
+
+def _guided_edit_normalize_postconditions(
+    *,
+    prompt: str,
+    action: dict[str, Any],
+    target_region: dict[str, Any],
+) -> dict[str, Any]:
+    raw = action.get("postconditions", {}) if isinstance(action, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    action_type = str(action.get("action_type", "") or "").strip().lower()
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    target_path = str(target.get("path", "") or "").strip().replace("\\", "/") if isinstance(target, dict) else ""
+    must_include = _guided_edit_postcondition_list(raw.get("must_include"))
+    for phrase in _guided_edit_extract_required_phrases(prompt):
+        if phrase.lower() not in {item.lower() for item in must_include}:
+            must_include.append(phrase)
+    must_preserve = _guided_edit_postcondition_list(raw.get("must_preserve"))
+    destructive = _guided_edit_destructive_request(prompt, action.get("goal", ""), action.get("rationale", ""))
+    if action_type == "replace_region" and not destructive:
+        substantive = _guided_edit_substantive_lines(target_region.get("region_text", ""))
+        if substantive:
+            for line in substantive[:2]:
+                if line.lower() not in {item.lower() for item in must_preserve}:
+                    must_preserve.append(line)
+    if action_type == "update_docs":
+        for heading in _guided_edit_markdown_headings(target_region.get("region_text", "")):
+            if heading.lower() not in {item.lower() for item in must_preserve}:
+                must_preserve.append(heading)
+    require_symbol = str(raw.get("require_symbol", "") or "").strip()
+    if not require_symbol and action_type == "extract_helper":
+        require_symbol = _guided_edit_extract_helper_symbol(action)
+    max_line_delta = raw.get("max_line_delta")
+    if isinstance(max_line_delta, int):
+        normalized_max_line_delta = max(0, max_line_delta)
+    elif isinstance(max_line_delta, str) and max_line_delta.strip().isdigit():
+        normalized_max_line_delta = max(0, int(max_line_delta.strip()))
+    elif action_type in {"replace_region", "update_docs"}:
+        normalized_max_line_delta = 2
+    elif action_type == "add_test":
+        normalized_max_line_delta = 24
+    else:
+        normalized_max_line_delta = 12
+    return {
+        "must_include": must_include[:8],
+        "must_preserve": must_preserve[:8],
+        "require_symbol": require_symbol[:160],
+        "max_line_delta": normalized_max_line_delta,
+        "target_path": target_path,
+    }
+
+
+def _guided_edit_acceptance(
+    *,
+    prompt: str,
+    action: dict[str, Any],
+    target_region: dict[str, Any],
+    parsed_edit: dict[str, Any],
+    allowed_paths: list[str],
+) -> dict[str, Any]:
+    action_type = str(action.get("action_type", "") or "").strip().lower()
+    normalized = _guided_edit_normalize_postconditions(
+        prompt=prompt,
+        action=action,
+        target_region=target_region,
+    )
+    diff_text = str(parsed_edit.get("diff_text", "") or "")
+    mode = str(parsed_edit.get("mode", "") or "")
+    replacement_text = str(parsed_edit.get("replacement_text", "") or "")
+    target_path = str(normalized.get("target_path", "") or "")
+    changed_paths = _guided_edit_changed_paths(diff_text)
+    changed_path_set = {str(path).replace("\\", "/").strip() for path in changed_paths if str(path).strip()}
+    allowed = {str(path).replace("\\", "/").strip() for path in allowed_paths if str(path).strip()}
+    hard_failures: list[str] = []
+    soft_flags: list[str] = []
+    if not diff_text:
+        hard_failures.append("missing_diff")
+    if not changed_path_set:
+        hard_failures.append("no_changed_paths")
+    for path in sorted(changed_path_set):
+        if _watchdog_path_blocked(path):
+            hard_failures.append(f"blocked_path:{path}")
+        if allowed and path not in allowed:
+            hard_failures.append(f"out_of_scope_path:{path}")
+    if action_type in {"replace_region", "update_docs"}:
+        if mode != "replacement_text":
+            hard_failures.append("structured_only_action_requires_replacement_text")
+        if target_path and changed_path_set != {target_path}:
+            hard_failures.append("structured_only_action_must_change_target_file_only")
+    line_delta = 0
+    updated_text = ""
+    if mode == "replacement_text":
+        with contextlib.suppress(Exception):
+            rendered = _guided_edit_render_structured_update(
+                target_region=target_region,
+                replacement_text=replacement_text,
+                max_extra_lines=int(normalized.get("max_line_delta", 0) or 0),
+            )
+            line_delta = int(rendered.get("line_delta", 0) or 0)
+            updated_text = str(rendered.get("updated_text", "") or "")
+    if abs(line_delta) > int(normalized.get("max_line_delta", 0) or 0):
+        hard_failures.append("line_delta_exceeded")
+
+    original_region_text = str(target_region.get("region_text", "") or "")
+    original_substantive = _guided_edit_substantive_lines(original_region_text)
+    replacement_substantive = _guided_edit_substantive_lines(replacement_text or updated_text)
+    preserved_lines = [
+        line for line in original_substantive
+        if line in set(replacement_substantive)
+    ]
+    destructive = _guided_edit_destructive_request(prompt, action.get("goal", ""), action.get("rationale", ""))
+    if action_type == "replace_region" and original_substantive and not destructive and not preserved_lines:
+        hard_failures.append("replace_region_must_preserve_one_substantive_line")
+    must_include = list(normalized.get("must_include", []) or [])
+    must_include_hits = [
+        phrase
+        for phrase in must_include
+        if phrase.lower() in (replacement_text or updated_text).lower()
+    ]
+    if action_type == "update_docs":
+        original_headings = _guided_edit_markdown_headings(original_region_text)
+        replacement_headings = _guided_edit_markdown_headings(replacement_text or updated_text)
+        if original_headings and not destructive:
+            missing_headings = [
+                heading for heading in original_headings
+                if heading.lower() not in {item.lower() for item in replacement_headings}
+            ]
+            if missing_headings:
+                hard_failures.append("update_docs_missing_required_heading")
+        if must_include and len(must_include_hits) < len(must_include):
+            hard_failures.append("update_docs_missing_required_phrase")
+    if action_type == "add_test":
+        if not changed_paths or not all(_guided_edit_is_test_path(path) for path in changed_paths):
+            hard_failures.append("add_test_must_change_test_paths")
+        selected_tests = _guided_edit_suggest_tests(changed_paths, max_tests=8)
+        for path in changed_paths:
+            if _guided_edit_is_test_path(path) and path not in selected_tests:
+                hard_failures.append("add_test_selected_tests_missing_changed_test")
+                break
+        if "def test_" not in diff_text and "class Test" not in diff_text:
+            soft_flags.append("missing_explicit_test_symbol")
+    if action_type == "extract_helper":
+        required_symbol = str(normalized.get("require_symbol", "") or "").strip()
+        if required_symbol:
+            if f"def {required_symbol}" not in diff_text and f"class {required_symbol}" not in diff_text:
+                hard_failures.append("extract_helper_missing_helper_symbol")
+            if required_symbol not in diff_text:
+                hard_failures.append("extract_helper_missing_helper_reference")
+        else:
+            soft_flags.append("extract_helper_symbol_unknown")
+    if target_path.endswith(".py") and updated_text:
+        try:
+            ast.parse(updated_text)
+        except SyntaxError:
+            hard_failures.append("python_parse_failed")
+
+    similarity = _guided_edit_similarity_ratio(original_region_text, replacement_text or updated_text)
+    phrase_coverage = round(len(must_include_hits) / max(1, len(must_include)), 4) if must_include else 1.0
+    preserved_anchor_count = 0
+    for block in (
+        str(target_region.get("context_before_text", "") or ""),
+        str(target_region.get("context_after_text", "") or ""),
+    ):
+        for raw in reversed(block.splitlines()):
+            text = raw.strip()
+            if text:
+                if text in updated_text:
+                    preserved_anchor_count += 1
+                break
+    score = round(
+        max(0.0, similarity) * 0.45
+        + phrase_coverage * 0.25
+        + (1.0 if not hard_failures else 0.0) * 0.2
+        + min(1.0, preserved_anchor_count / 2.0) * 0.1,
+        4,
+    )
+    if similarity < 0.2:
+        soft_flags.append("low_similarity")
+    return {
+        "schema": "guided_edit.acceptance.v1",
+        "ok": not hard_failures,
+        "score": score,
+        "hard_failures": sorted(set(hard_failures)),
+        "soft_flags": sorted(set(soft_flags)),
+        "similarity": similarity,
+        "phrase_coverage": phrase_coverage,
+        "changed_path_count": len(changed_paths),
+        "changed_line_count": _guided_edit_changed_line_count(diff_text),
+        "diff_length": len(diff_text),
+        "line_delta": line_delta,
+        "preserved_anchor_count": preserved_anchor_count,
+        "preserved_substantive_count": len(preserved_lines),
+        "postconditions": normalized,
+    }
+
+
+def _guided_edit_candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    acceptance = candidate.get("acceptance", {}) if isinstance(candidate.get("acceptance"), dict) else {}
+    hard_failures = list(acceptance.get("hard_failures", []) or [])
+    return (
+        0 if candidate.get("parse_ok", False) else 1,
+        0 if not hard_failures else 1,
+        -float(acceptance.get("score", 0.0) or 0.0),
+        -float(acceptance.get("phrase_coverage", 0.0) or 0.0),
+        int(acceptance.get("line_delta", 0) or 0),
+        int(acceptance.get("diff_length", 0) or 0),
+        int(candidate.get("strategy_rank", 99) or 99),
+    )
+
+
 def _guided_edit_parse_verification(raw_output: str) -> dict[str, Any]:
     cleaned = _guided_edit_strip_wrappers(raw_output)
     start = cleaned.find("{")
@@ -11192,6 +11587,7 @@ def _guided_edit_repair_action_output(
         "Rewrite the planner output as one strict JSON object only.\n"
         "Do not include markdown fences or commentary.\n"
         "Required keys: action_type, target, goal, rationale, validation_scope.\n"
+        "Optional key: postconditions with must_include, must_preserve, require_symbol, max_line_delta.\n"
         "Allowed action_type values: replace_region, extract_helper, add_test, update_docs, run_validation, stop.\n"
         "target.path must be one of these files when possible:\n"
         f"{chr(10).join(selected_targets) or 'none'}\n"
@@ -11387,9 +11783,11 @@ def _guided_edit_verify_step(
     *,
     prompt: str,
     action: dict[str, Any],
+    target_region: dict[str, Any],
+    rewritten_text: str,
+    acceptance: dict[str, Any],
     diff_text: str,
     backend: str,
-    model: str,
     temperature: float,
     system: str,
     verifier_mode: str,
@@ -11408,17 +11806,33 @@ def _guided_edit_verify_step(
     resolved = _resolve_task_model_route(
         route="review",
         routing=routing,
-        requested_model=model,
         prompt=prompt,
         task_hint="review",
     )
     verify_prompt = (
-        "Review this bounded edit plan and diff.\n"
+        "Review this bounded edit candidate.\n"
         "Return strict JSON with keys: verdict, confidence, reason.\n"
         "verdict must be one of agree, disagree, unclear.\n"
-        "Disagree when the diff does not match the action, expands scope, or looks unsafe.\n\n"
+        "Treat your decision as veto-only.\n"
+        "Disagree when the candidate violates the postconditions, changes the wrong scope, or looks semantically wrong.\n\n"
         f"User request:\n{prompt.strip()}\n\n"
         f"Action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
+        f"Normalized postconditions:\n{json.dumps(acceptance.get('postconditions', {}), ensure_ascii=True, sort_keys=True)}\n\n"
+        "Original target region:\n"
+        "<BEGIN_ORIGINAL_REGION>\n"
+        f"{str(target_region.get('region_text', '') or '')}\n"
+        "<END_ORIGINAL_REGION>\n\n"
+        "Rewritten target region:\n"
+        "<BEGIN_REWRITTEN_REGION>\n"
+        f"{rewritten_text}\n"
+        "<END_REWRITTEN_REGION>\n\n"
+        "Surrounding context:\n"
+        "<CONTEXT_BEFORE>\n"
+        f"{str(target_region.get('context_before_text', '') or '')}\n"
+        "<END_CONTEXT_BEFORE>\n"
+        "<CONTEXT_AFTER>\n"
+        f"{str(target_region.get('context_after_text', '') or '')}\n"
+        "<END_CONTEXT_AFTER>\n\n"
         f"Unified diff:\n{diff_text}"
     )
     infer = local_infer(
@@ -11500,6 +11914,24 @@ def _guided_edit_memory_evidence(
                 "summary": _trim_task_inline_text(diff_text, max_chars=120),
             }
         )
+    selected_candidate = execution.get("selected_candidate", {}) if isinstance(execution.get("selected_candidate"), dict) else {}
+    if selected_candidate:
+        evidence.append(
+            {
+                "kind": "candidate",
+                "strategy": str(selected_candidate.get("strategy", "") or ""),
+                "score": float(selected_candidate.get("acceptance", {}).get("score", 0.0) or 0.0),
+            }
+        )
+        acceptance = selected_candidate.get("acceptance", {}) if isinstance(selected_candidate.get("acceptance"), dict) else {}
+        evidence.append(
+            {
+                "kind": "acceptance",
+                "ok": bool(acceptance.get("ok", False)),
+                "score": float(acceptance.get("score", 0.0) or 0.0),
+                "summary": ",".join(list(acceptance.get("hard_failures", []) or [])[:3]) or "accepted",
+            }
+        )
     selected_tests = list(validation.get("selected_tests", []) or [])
     if selected_tests:
         evidence.append({"kind": "tests", "count": len(selected_tests), "summary": ", ".join(selected_tests[:4])})
@@ -11544,12 +11976,15 @@ def _guided_edit_persist_memory(
     target = action.get("target", {}) if isinstance(action, dict) else {}
     target_path = str(target.get("path", "") or "").strip() if isinstance(target, dict) else ""
     namespace = f"guided_edit/targets/{target_path or 'unknown'}"
+    selected_candidate = execution.get("selected_candidate", {}) if isinstance(execution.get("selected_candidate"), dict) else {}
     value = {
         "action_type": str(action.get("action_type", "") or ""),
         "goal": str(action.get("goal", "") or ""),
         "stopped_reason": stopped_reason,
         "ok": bool(validation.get("ok", execution.get("applied", False))),
         "request_summary": _trim_task_inline_text(prompt, max_chars=160),
+        "candidate_strategy": str(selected_candidate.get("strategy", "") or ""),
+        "acceptance_score": float(execution.get("acceptance", {}).get("score", 0.0) or 0.0),
     }
     write = memory_upsert(
         namespace=namespace,
@@ -11588,6 +12023,8 @@ def _guided_edit_persist_memory(
             "selected_tests": list(validation.get("selected_tests", []) or [])[:8],
             "replay_id": replay_id,
             "snapshot_id": snapshot_id,
+            "candidate_strategy": value["candidate_strategy"],
+            "acceptance_score": value["acceptance_score"],
         }
         exp_write = memory_upsert(
             namespace=experience_namespace,
@@ -11630,6 +12067,40 @@ def _guided_edit_persist_memory(
         "evidence_count": len(evidence),
         "experience_write": experience_write,
     }
+
+
+def _guided_edit_record_verifier_false_positive(
+    *,
+    action: dict[str, Any],
+    execution: dict[str, Any],
+    replay_id: str,
+) -> dict[str, Any]:
+    count = int(execution.get("verifier_false_positive_count", 0) or 0)
+    if count < 1:
+        return {"written": False, "count": 0}
+    if not ALLOW_MUTATIONS:
+        return {"written": False, "count": count, "reason": "mutations_disabled"}
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    target_path = str(target.get("path", "") or "").strip() if isinstance(target, dict) else ""
+    selected = execution.get("selected_candidate", {}) if isinstance(execution.get("selected_candidate"), dict) else {}
+    command = ["guided_edit", str(action.get("action_type", "") or "unknown"), target_path or "unknown"]
+    _failure_record(
+        command=command,
+        stderr=f"verifier_false_positive count={count} replay_id={replay_id or 'none'}",
+        stdout=json.dumps(
+            {
+                "replay_id": replay_id,
+                "candidate_strategy": str(selected.get("strategy", "") or ""),
+                "changed_paths": list(execution.get("changed_paths", []) or [])[:8],
+                "stopped_reason": str(execution.get("stopped_reason_hint", "") or ""),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+        category="guided_edit_verifier",
+        suggestion="Strengthen guided_edit postconditions or review-route verification for this edit pattern.",
+    )
+    return {"written": True, "count": count}
 
 
 def _guided_edit_validate_step(
@@ -11798,6 +12269,7 @@ def _guided_edit_plan_step(
     planner_prompt = (
         "Plan exactly one bounded repository edit step.\n"
         "Return only JSON with keys: action_type, target, goal, rationale, validation_scope.\n"
+        "You may also include postconditions with keys: must_include, must_preserve, require_symbol, max_line_delta.\n"
         "Allowed action_type values: replace_region, extract_helper, add_test, update_docs, run_validation, stop.\n"
         "Use target.path plus optional start_line/end_line and symbol.\n"
         "Prefer the smallest useful step.\n\n"
@@ -11926,6 +12398,15 @@ def _guided_edit_execute_step(
     skill_pack: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     action_type = str(action.get("action_type", "") or "").strip().lower()
+    verification_skipped = {
+        "schema": "guided_edit.verification.v1",
+        "run": False,
+        "ok": True,
+        "blocked": False,
+        "verdict": "skipped",
+        "confidence": 0.0,
+        "reason": "",
+    }
     if action_type == "stop":
         return {
             "schema": "guided_edit.execution.v1",
@@ -11933,7 +12414,10 @@ def _guided_edit_execute_step(
             "stopped": True,
             "changed_paths": [],
             "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-            "verification": {"schema": "guided_edit.verification.v1", "run": False, "ok": True, "blocked": False, "verdict": "skipped", "confidence": 0.0, "reason": "stop action"},
+            "verification": {**verification_skipped, "reason": "stop action"},
+            "acceptance": {"schema": "guided_edit.acceptance.v1", "ok": True, "score": 1.0, "hard_failures": [], "soft_flags": []},
+            "candidates": [],
+            "selected_candidate": None,
         }
     if action_type == "run_validation":
         return {
@@ -11942,7 +12426,10 @@ def _guided_edit_execute_step(
             "validation_only": True,
             "changed_paths": [],
             "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-            "verification": {"schema": "guided_edit.verification.v1", "run": False, "ok": True, "blocked": False, "verdict": "skipped", "confidence": 0.0, "reason": "validation only"},
+            "verification": {**verification_skipped, "reason": "validation only"},
+            "acceptance": {"schema": "guided_edit.acceptance.v1", "ok": True, "score": 1.0, "hard_failures": [], "soft_flags": []},
+            "candidates": [],
+            "selected_candidate": None,
         }
 
     target = action.get("target", {})
@@ -11952,7 +12439,6 @@ def _guided_edit_execute_step(
     if not target_path:
         raise ValueError("guided_edit action target.path must not be empty")
     structured_only = _guided_edit_prefers_structured_rewrite(action_type)
-    max_extra_lines = 2 if structured_only else None
     start_line = int(target.get("start_line", 1) or 1)
     end_line = int(target.get("end_line", start_line) or start_line)
     target_region = _guided_edit_target_region(
@@ -11962,6 +12448,12 @@ def _guided_edit_execute_step(
         context_before=4,
         context_after=4,
     )
+    normalized_postconditions = _guided_edit_normalize_postconditions(
+        prompt=prompt,
+        action=action,
+        target_region=target_region,
+    )
+    action = {**action, "postconditions": normalized_postconditions}
 
     routing = _load_continue_model_routing()
     resolved = _resolve_task_model_route(
@@ -11973,352 +12465,407 @@ def _guided_edit_execute_step(
         retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
         repo_memory_info=repo_memory_info,
     )
-    edit_mode_instructions = (
-        "Return only the replacement text for the target region.\n"
+    allowed_paths = _guided_edit_allowed_paths(action, selected_targets)
+    base_system = system or (
+        "You are a precise code editing engine. Return only the replacement text for the target region."
         if structured_only
-        else (
-            "Preferred output: return only the replacement text for the target region.\n"
-            "Acceptable fallback: return one git-compatible unified diff for only the target file.\n"
-        )
+        else "You are a precise code editing engine. Return only the replacement text for the target region or a valid unified diff."
     )
-    edit_diff_header_instructions = (
-        ""
-        if structured_only
-        else (
-            "If you return a diff, use repository-relative file headers exactly as:\n"
-            f"--- a/{target_path}\n+++ b/{target_path}\n\n"
-        )
-    )
-    edit_prompt = (
-        "Apply exactly one bounded edit to the target region.\n"
-        f"{edit_mode_instructions}"
-        "Do not include explanation or markdown fences.\n"
-        f"Only change the target file: {target_path}\n"
-        f"{edit_diff_header_instructions}"
-        f"Target line range: {target_region['start_line']}-{target_region['end_line']}\n\n"
-        f"User request:\n{prompt.strip()}\n\n"
-        f"Planned action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
-        "Rewrite only this target region:\n"
-        "<BEGIN_TARGET_REGION>\n"
-        f"{target_region['region_text']}\n"
-        "<END_TARGET_REGION>\n\n"
-        "Surrounding context:\n"
-        "<CONTEXT_BEFORE>\n"
-        f"{target_region['context_before_text']}\n"
-        "<END_CONTEXT_BEFORE>\n"
-        "<CONTEXT_AFTER>\n"
-        f"{target_region['context_after_text']}\n"
-        "<END_CONTEXT_AFTER>\n\n"
-        "Keep the edit minimal and preserve valid syntax."
-    )
-    infer = local_infer(
-        prompt=edit_prompt,
-        task="coding",
-        backend=backend,
-        model=resolved["model"],
-        max_tokens=max(256, int(max_tokens)),
-        temperature=temperature,
-        system=system
-        or (
-            "You are a precise code editing engine. Return only the replacement text for the target region."
+
+    def candidate_prompt(
+        *,
+        strategy: str,
+        previous_output: str = "",
+        failure_reason: str = "",
+    ) -> str:
+        edit_mode_instructions = (
+            "Return only the replacement text for the target region.\n"
             if structured_only
-            else "You are a precise code editing engine. Return only the replacement text for the target region or a valid unified diff."
-        ),
-        output_profile="normal",
-        store_result=False,
-    )
-    edit_attempts = [
-        {
-            "attempt": 1,
-            "kind": "initial",
+            else (
+                "Preferred output: return only the replacement text for the target region.\n"
+                "Acceptable fallback: return one git-compatible unified diff for only the target file.\n"
+            )
+        )
+        edit_diff_header_instructions = (
+            ""
+            if structured_only
+            else (
+                "If you return a diff, use repository-relative file headers exactly as:\n"
+                f"--- a/{target_path}\n+++ b/{target_path}\n\n"
+            )
+        )
+        strategy_instruction = {
+            "initial": "Produce the highest-confidence minimal edit.",
+            "alternate": "Produce an alternate minimal edit that preserves more original text and headings when possible.",
+            "repair": "Repair the previous candidate using the failure reason and keep the edit strictly bounded.",
+        }.get(strategy, "Produce a minimal bounded edit.")
+        extra = ""
+        if previous_output:
+            extra += f"\nPrevious output:\n{previous_output}"
+        if failure_reason:
+            extra += f"\nFailure reason:\n{failure_reason}"
+        return (
+            "Apply exactly one bounded edit to the target region.\n"
+            f"{edit_mode_instructions}"
+            "Do not include explanation or markdown fences.\n"
+            f"Only change the target file: {target_path}\n"
+            f"{edit_diff_header_instructions}"
+            f"Target line range: {target_region['start_line']}-{target_region['end_line']}\n"
+            f"Strategy: {strategy_instruction}\n\n"
+            f"User request:\n{prompt.strip()}\n\n"
+            f"Planned action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
+            "Rewrite only this target region:\n"
+            "<BEGIN_TARGET_REGION>\n"
+            f"{target_region['region_text']}\n"
+            "<END_TARGET_REGION>\n\n"
+            "Surrounding context:\n"
+            "<CONTEXT_BEFORE>\n"
+            f"{target_region['context_before_text']}\n"
+            "<END_CONTEXT_BEFORE>\n"
+            "<CONTEXT_AFTER>\n"
+            f"{target_region['context_after_text']}\n"
+            "<END_CONTEXT_AFTER>\n\n"
+            f"Normalized postconditions:\n{json.dumps(normalized_postconditions, ensure_ascii=True, sort_keys=True)}\n"
+            f"{extra}\n\n"
+            "Keep the edit minimal and preserve valid syntax."
+        )
+
+    def strategy_temperature(strategy: str) -> float:
+        if strategy == "initial" and structured_only:
+            return 0.0
+        if strategy == "alternate":
+            return min(float(temperature), 0.2)
+        if strategy == "repair":
+            return 0.1
+        return float(temperature)
+
+    def run_candidate(
+        *,
+        strategy: str,
+        strategy_rank: int,
+        previous_output: str = "",
+        failure_reason: str = "",
+    ) -> dict[str, Any]:
+        prompt_text = candidate_prompt(
+            strategy=strategy,
+            previous_output=previous_output,
+            failure_reason=failure_reason,
+        )
+        infer = local_infer(
+            prompt=prompt_text,
+            task="coding",
+            backend=backend,
+            model=resolved["model"],
+            max_tokens=max(256, int(max_tokens)),
+            temperature=strategy_temperature(strategy),
+            system=base_system,
+            output_profile="normal",
+            store_result=False,
+        )
+        candidate: dict[str, Any] = {
+            "strategy": strategy,
+            "strategy_rank": strategy_rank,
+            "temperature": strategy_temperature(strategy),
             "model": resolved["model"],
-            "ok": bool(infer.get("ok", False)),
-        }
-    ]
-    if not bool(infer.get("ok", False)):
-        return {
-            "schema": "guided_edit.execution.v1",
-            "applied": False,
+            "infer": infer,
+            "parse_ok": False,
+            "parse_mode": "",
+            "diff_hash": "",
             "diff_text": "",
+            "rewritten_text": "",
+            "changed_paths": [],
+            "acceptance": {
+                "schema": "guided_edit.acceptance.v1",
+                "ok": False,
+                "score": 0.0,
+                "hard_failures": ["parse_error"],
+                "soft_flags": [],
+                "postconditions": normalized_postconditions,
+            },
+            "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
             "diff_check": None,
             "diff_apply": None,
-            "changed_paths": [],
-            "edit_result": infer,
-            "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-            "verification": {"schema": "guided_edit.verification.v1", "run": False, "ok": False, "blocked": False, "verdict": "unavailable", "confidence": 0.0, "reason": "edit model unavailable"},
-            "repair_result": None,
-            "repair_used": False,
-            "attempt_count": 1,
-            "edit_attempts": edit_attempts,
-            "stopped_reason_hint": "edit_failed",
-            "failure_reason": "guided_edit edit model did not produce output",
+            "verification": {**verification_skipped, "reason": "candidate not evaluated"},
+            "validation": {},
+            "stop_reason": "",
+            "failure_reason": "",
+            "duplicate_of": None,
+            "verifier_false_positive": False,
         }
-    repair_result = None
-    try:
-        parsed_edit = _guided_edit_output_to_diff(
-            raw_output=str(infer.get("output", "") or ""),
-            target_region=target_region,
-            allow_raw_diff=not structured_only,
-            max_extra_lines=max_extra_lines,
+        if not bool(infer.get("ok", False)):
+            candidate["stop_reason"] = "edit_failed"
+            candidate["failure_reason"] = "guided_edit edit model did not produce output"
+            return candidate
+        try:
+            parsed_edit = _guided_edit_output_to_diff(
+                raw_output=str(infer.get("output", "") or ""),
+                target_region=target_region,
+                allow_raw_diff=not structured_only,
+                max_extra_lines=int(normalized_postconditions.get("max_line_delta", 0) or 0),
+            )
+        except Exception as exc:
+            candidate["stop_reason"] = "edit_invalid"
+            candidate["failure_reason"] = str(exc)
+            return candidate
+        candidate["parse_ok"] = True
+        candidate["parse_mode"] = str(parsed_edit.get("mode", "") or "")
+        candidate["diff_text"] = str(parsed_edit.get("diff_text", "") or "")
+        candidate["diff_hash"] = hashlib.sha256(candidate["diff_text"].encode("utf-8")).hexdigest()[:16]
+        candidate["changed_paths"] = _guided_edit_changed_paths(candidate["diff_text"])
+        candidate["rewritten_text"] = str(
+            parsed_edit.get("replacement_text", "") or target_region.get("region_text", "") or ""
         )
-        diff_text = str(parsed_edit["diff_text"])
-    except Exception as exc:
-        repair_result = _guided_edit_repair_diff_output(
+        candidate["acceptance"] = _guided_edit_acceptance(
             prompt=prompt,
             action=action,
             target_region=target_region,
-            allow_raw_diff=not structured_only,
-            previous_output=str(infer.get("output", "") or ""),
-            failure_reason=str(exc),
-            backend=backend,
-            temperature=temperature,
-            system=system,
-        )
-        edit_attempts.append(
-            {
-                "attempt": 2,
-                "kind": "repair",
-                "model": str(repair_result.get("routing", {}).get("selected_model", "") or ""),
-                "ok": bool(repair_result.get("ok", False)),
-                "reason": str(exc),
-            }
-        )
-        if not repair_result.get("ok", False):
-            return {
-                "schema": "guided_edit.execution.v1",
-                "applied": False,
-                "diff_text": "",
-                "diff_check": None,
-                "diff_apply": None,
-                "changed_paths": [],
-                "edit_result": infer,
-                "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-                "verification": {"schema": "guided_edit.verification.v1", "run": False, "ok": False, "blocked": False, "verdict": "unavailable", "confidence": 0.0, "reason": "edit output invalid"},
-                "repair_result": repair_result.get("infer"),
-                "repair_used": True,
-                "attempt_count": len(edit_attempts),
-                "edit_attempts": edit_attempts,
-                "stopped_reason_hint": "edit_invalid",
-                "failure_reason": str(repair_result.get("error", "") or str(exc)),
-            }
-        diff_text = str(repair_result["diff_text"])
-
-    allowed_paths = _guided_edit_allowed_paths(action, selected_targets)
-    worktree_info = _guided_edit_create_temp_worktree()
-    worktree_root = Path(str(worktree_info.get("worktree_root", "") or ""))
-    keep_worktree = False
-
-    def evaluate_candidate(candidate_diff: str) -> dict[str, Any]:
-        candidate_watchdog = _watchdog_scan(
-            prompt=prompt,
-            action=action,
-            diff_text=candidate_diff,
+            parsed_edit=parsed_edit,
             allowed_paths=allowed_paths,
         )
-        candidate_changed_paths = _guided_edit_changed_paths(candidate_diff)
-        candidate_diff_check = apply_unified_diff(
-            diff_text=candidate_diff,
-            check_only=True,
-            repo_root=worktree_root,
+        if not candidate["acceptance"].get("ok", False):
+            candidate["stop_reason"] = "acceptance_failed"
+            candidate["failure_reason"] = "; ".join(candidate["acceptance"].get("hard_failures", []) or [])
+        return candidate
+
+    candidates: list[dict[str, Any]] = []
+    strategies: list[str]
+    if structured_only:
+        strategies = ["initial", "alternate"]
+    else:
+        strategies = ["initial"]
+    for idx, strategy in enumerate(strategies, start=1):
+        candidates.append(run_candidate(strategy=strategy, strategy_rank=idx))
+    if candidates:
+        prior = sorted(candidates, key=_guided_edit_candidate_sort_key)[0]
+        candidates.append(
+            run_candidate(
+                strategy="repair",
+                strategy_rank=len(candidates) + 1,
+                previous_output=str(prior.get("infer", {}).get("output", "") or ""),
+                failure_reason=str(prior.get("failure_reason", "") or "candidate failed acceptance or parsing"),
+            )
         )
-        candidate_verification = (
-            {
-                "schema": "guided_edit.verification.v1",
-                "run": False,
-                "ok": True,
-                "blocked": False,
-                "verdict": "skipped",
-                "confidence": 0.0,
-                "reason": "watchdog blocked diff before apply",
-            }
-            if candidate_watchdog.get("blocked", False)
-            else {
-                "schema": "guided_edit.verification.v1",
-                "run": False,
-                "ok": False,
-                "blocked": False,
-                "verdict": "skipped",
-                "confidence": 0.0,
-                "reason": _trim_task_inline_text(
-                    candidate_diff_check.get("stderr", "") or "diff did not apply cleanly",
+
+    seen_hashes: dict[str, int] = {}
+    ranked_input: list[dict[str, Any]] = []
+    for idx, candidate in enumerate(candidates, start=1):
+        candidate["index"] = idx
+        if candidate.get("parse_ok", False):
+            diff_hash = str(candidate.get("diff_hash", "") or "")
+            if diff_hash and diff_hash in seen_hashes:
+                candidate["duplicate_of"] = seen_hashes[diff_hash]
+                candidate["stop_reason"] = "duplicate_candidate"
+                candidate["failure_reason"] = f"duplicate_of:{seen_hashes[diff_hash]}"
+            elif diff_hash:
+                seen_hashes[diff_hash] = idx
+                ranked_input.append(candidate)
+        else:
+            ranked_input.append(candidate)
+    ranked_candidates = sorted(ranked_input, key=_guided_edit_candidate_sort_key)
+    for rank, candidate in enumerate(ranked_candidates, start=1):
+        candidate["rank"] = rank
+
+    selected_candidate: dict[str, Any] | None = None
+    selected_worktree: dict[str, Any] | None = None
+
+    def public_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "index": int(candidate.get("index", 0) or 0),
+            "rank": int(candidate.get("rank", 0) or 0),
+            "strategy": str(candidate.get("strategy", "") or ""),
+            "model": str(candidate.get("model", "") or ""),
+            "temperature": float(candidate.get("temperature", 0.0) or 0.0),
+            "parse_ok": bool(candidate.get("parse_ok", False)),
+            "parse_mode": str(candidate.get("parse_mode", "") or ""),
+            "acceptance": candidate.get("acceptance", {}),
+            "watchdog": candidate.get("watchdog", {}),
+            "verification": candidate.get("verification", {}),
+            "diff_check": candidate.get("diff_check"),
+            "diff_apply": candidate.get("diff_apply"),
+            "validation": candidate.get("validation", {}),
+            "changed_paths": list(candidate.get("changed_paths", []) or []),
+            "stop_reason": str(candidate.get("stop_reason", "") or ""),
+            "failure_reason": str(candidate.get("failure_reason", "") or ""),
+            "verifier_false_positive": bool(candidate.get("verifier_false_positive", False)),
+        }
+
+    for candidate in ranked_candidates:
+        if not candidate.get("parse_ok", False):
+            continue
+        if candidate.get("duplicate_of"):
+            continue
+        if not bool(candidate.get("acceptance", {}).get("ok", False)):
+            continue
+        candidate["watchdog"] = _watchdog_scan(
+            prompt=prompt,
+            action=action,
+            diff_text=str(candidate.get("diff_text", "") or ""),
+            allowed_paths=allowed_paths,
+        )
+        if candidate["watchdog"].get("blocked", False):
+            candidate["stop_reason"] = "watchdog_blocked"
+            candidate["failure_reason"] = "watchdog blocked candidate diff"
+            continue
+        worktree_info = _guided_edit_create_temp_worktree()
+        worktree_root = Path(str(worktree_info.get("worktree_root", "") or ""))
+        keep_worktree = False
+        try:
+            candidate["diff_check"] = apply_unified_diff(
+                diff_text=str(candidate.get("diff_text", "") or ""),
+                check_only=True,
+                repo_root=worktree_root,
+            )
+            if not bool(candidate["diff_check"].get("ok", False)):
+                candidate["stop_reason"] = "apply_failed"
+                candidate["failure_reason"] = _trim_task_inline_text(
+                    candidate["diff_check"].get("stderr", "") or "diff did not apply cleanly",
                     max_chars=220,
-                ),
-            }
-            if not candidate_diff_check.get("ok", False)
-            else _guided_edit_verify_step(
+                )
+                continue
+            candidate["diff_apply"] = apply_unified_diff(
+                diff_text=str(candidate.get("diff_text", "") or ""),
+                check_only=False,
+                repo_root=worktree_root,
+            )
+            if not bool(candidate["diff_apply"].get("ok", False)):
+                candidate["stop_reason"] = "apply_failed"
+                candidate["failure_reason"] = _trim_task_inline_text(
+                    candidate["diff_apply"].get("stderr", "") or "diff did not apply cleanly",
+                    max_chars=220,
+                )
+                continue
+            rewritten_region = _guided_edit_target_region(
+                target_path,
+                start_line,
+                end_line,
+                context_before=4,
+                context_after=4,
+                repo_root=worktree_root,
+            )
+            candidate["rewritten_text"] = str(rewritten_region.get("region_text", "") or candidate.get("rewritten_text", "") or "")
+            candidate["verification"] = _guided_edit_verify_step(
                 prompt=prompt,
                 action=action,
-                diff_text=candidate_diff,
+                target_region=target_region,
+                rewritten_text=str(candidate.get("rewritten_text", "") or ""),
+                acceptance=candidate.get("acceptance", {}),
+                diff_text=str(candidate.get("diff_text", "") or ""),
                 backend=backend,
-                model=model,
                 temperature=temperature,
                 system=system,
                 verifier_mode=verifier_mode,
             )
-        )
-        return {
-            "watchdog": candidate_watchdog,
-            "changed_paths": candidate_changed_paths,
-            "diff_check": candidate_diff_check,
-            "verification": candidate_verification,
+            if bool(candidate["verification"].get("blocked", False)):
+                candidate["stop_reason"] = "verifier_disagreement"
+                candidate["failure_reason"] = str(candidate["verification"].get("reason", "") or "verifier blocked candidate")
+                continue
+            candidate["validation"] = _guided_edit_validate_step(
+                changed_paths=list(candidate.get("changed_paths", []) or []),
+                validation_profile=validation_profile,
+                repo_root=worktree_root,
+            )
+            if not bool(candidate["validation"].get("ok", False)):
+                candidate["stop_reason"] = "validation_failed"
+                candidate["failure_reason"] = "validation failed in isolated worktree"
+                if str(candidate["verification"].get("verdict", "") or "") in {"agree", "unclear"}:
+                    candidate["verifier_false_positive"] = True
+                continue
+            keep_worktree = True
+            candidate["stop_reason"] = "selected"
+            selected_candidate = candidate
+            selected_worktree = worktree_info
+            candidate["isolation"] = worktree_info
+            break
+        finally:
+            if not keep_worktree:
+                _guided_edit_remove_temp_worktree(worktree_info)
+
+    public_candidates = [public_candidate(candidate) for candidate in sorted(candidates, key=lambda row: int(row.get("index", 0) or 0))]
+    best_candidate = selected_candidate or (sorted(candidates, key=_guided_edit_candidate_sort_key)[0] if candidates else None)
+    selected_public = public_candidate(selected_candidate) if selected_candidate else None
+    repair_candidates = [candidate for candidate in candidates if str(candidate.get("strategy", "") or "") == "repair"]
+    selected_repair = repair_candidates[-1]["infer"] if repair_candidates else None
+    edit_attempts = [
+        {
+            "attempt": int(candidate.get("index", 0) or 0),
+            "kind": "repair" if str(candidate.get("strategy", "") or "") == "repair" else "alternate" if str(candidate.get("strategy", "") or "") == "alternate" else "initial",
+            "model": str(candidate.get("model", "") or ""),
+            "ok": bool(candidate.get("parse_ok", False)) and bool(candidate.get("acceptance", {}).get("ok", False)),
+            "reason": str(candidate.get("failure_reason", "") or ""),
         }
-    try:
-        evaluated = evaluate_candidate(diff_text)
-        watchdog = evaluated["watchdog"]
-        changed_paths = evaluated["changed_paths"]
-        diff_check = evaluated["diff_check"]
-        verification = evaluated["verification"]
-        if watchdog.get("blocked", False):
-            return {
-                "schema": "guided_edit.execution.v1",
-                "applied": False,
-                "diff_text": diff_text,
-                "diff_check": diff_check,
-                "diff_apply": None,
-                "changed_paths": changed_paths,
-                "edit_result": infer,
-                "watchdog": watchdog,
-                "verification": verification,
-                "repair_result": repair_result.get("infer") if isinstance(repair_result, dict) else None,
-                "repair_used": bool(repair_result),
-                "attempt_count": len(edit_attempts),
-                "edit_attempts": edit_attempts,
-                "stopped_reason_hint": "watchdog_blocked",
-                "failure_reason": "watchdog blocked diff before apply",
-                "structured_only": structured_only,
-                "isolation": {"backend": "git_worktree"},
-                "validation": {},
-            }
-        if not diff_check.get("ok", False) or verification.get("blocked", False):
-            repair_reason = _trim_task_inline_text(
-                verification.get("reason", "") if verification.get("blocked", False) else diff_check.get("stderr", ""),
-                max_chars=220,
-            ) or "candidate diff failed apply or verification"
-            repair_result = _guided_edit_repair_diff_output(
-                prompt=prompt,
-                action=action,
-                target_region=target_region,
-                allow_raw_diff=not structured_only,
-                previous_output=diff_text,
-                failure_reason=repair_reason,
-                backend=backend,
-                temperature=temperature,
-                system=system,
-            )
-            edit_attempts.append(
-                {
-                    "attempt": len(edit_attempts) + 1,
-                    "kind": "repair",
-                    "model": str(repair_result.get("routing", {}).get("selected_model", "") or ""),
-                    "ok": bool(repair_result.get("ok", False)),
-                    "reason": repair_reason,
-                }
-            )
-            if repair_result.get("ok", False):
-                diff_text = str(repair_result["diff_text"])
-                evaluated = evaluate_candidate(diff_text)
-                watchdog = evaluated["watchdog"]
-                changed_paths = evaluated["changed_paths"]
-                diff_check = evaluated["diff_check"]
-                verification = evaluated["verification"]
-            if watchdog.get("blocked", False):
-                return {
-                    "schema": "guided_edit.execution.v1",
-                    "applied": False,
-                    "diff_text": diff_text,
-                    "diff_check": diff_check,
-                    "diff_apply": None,
-                    "changed_paths": changed_paths,
-                    "edit_result": infer,
-                    "watchdog": watchdog,
-                    "verification": verification,
-                    "repair_result": repair_result.get("infer"),
-                    "repair_used": True,
-                    "attempt_count": len(edit_attempts),
-                    "edit_attempts": edit_attempts,
-                    "stopped_reason_hint": "watchdog_blocked",
-                    "failure_reason": "watchdog blocked repaired diff before apply",
-                    "structured_only": structured_only,
-                    "isolation": {"backend": "git_worktree"},
-                    "validation": {},
-                }
-            if not diff_check.get("ok", False) or verification.get("blocked", False):
-                stopped_reason_hint = "verifier_disagreement" if verification.get("blocked", False) else "apply_failed"
-                return {
-                    "schema": "guided_edit.execution.v1",
-                    "applied": False,
-                    "diff_text": diff_text,
-                    "diff_check": diff_check,
-                    "diff_apply": None,
-                    "changed_paths": changed_paths,
-                    "edit_result": infer,
-                    "watchdog": watchdog,
-                    "verification": verification,
-                    "repair_result": repair_result.get("infer"),
-                    "repair_used": True,
-                    "attempt_count": len(edit_attempts),
-                    "edit_attempts": edit_attempts,
-                    "stopped_reason_hint": stopped_reason_hint,
-                    "failure_reason": repair_reason,
-                    "structured_only": structured_only,
-                    "isolation": {"backend": "git_worktree"},
-                    "validation": {},
-                }
-        diff_apply = apply_unified_diff(
-            diff_text=diff_text,
-            check_only=False,
-            repo_root=worktree_root,
-        )
-        if not bool(diff_apply.get("ok", False)):
-            return {
-                "schema": "guided_edit.execution.v1",
-                "applied": False,
-                "diff_text": diff_text,
-                "diff_check": diff_check,
-                "diff_apply": diff_apply,
-                "changed_paths": changed_paths,
-                "edit_result": infer,
-                "watchdog": watchdog,
-                "verification": verification,
-                "repair_result": repair_result.get("infer") if isinstance(repair_result, dict) else None,
-                "repair_used": bool(repair_result),
-                "attempt_count": len(edit_attempts),
-                "edit_attempts": edit_attempts,
-                "stopped_reason_hint": "apply_failed",
-                "failure_reason": _trim_task_inline_text(diff_apply.get("stderr", ""), max_chars=220),
-                "structured_only": structured_only,
-                "isolation": {"backend": "git_worktree"},
-                "validation": {},
-            }
-        validation = _guided_edit_validate_step(
-            changed_paths=list(changed_paths),
-            validation_profile=validation_profile,
-            repo_root=worktree_root,
-        )
-        keep_worktree = bool(validation.get("ok", False))
+        for candidate in sorted(candidates, key=lambda row: int(row.get("index", 0) or 0))
+    ]
+
+    if selected_candidate is None:
+        stopped_reason_hint = "edit_invalid"
+        failure_reason = "guided_edit could not produce an acceptable candidate"
+        if any(str(candidate.get("stop_reason", "") or "") == "verifier_disagreement" for candidate in candidates):
+            stopped_reason_hint = "verifier_disagreement"
+            failure_reason = "verifier blocked all acceptable candidates"
+        elif any(str(candidate.get("stop_reason", "") or "") == "validation_failed" for candidate in candidates):
+            stopped_reason_hint = "validation_failed"
+            failure_reason = "validation failed for all acceptable candidates"
+        elif any(str(candidate.get("stop_reason", "") or "") == "apply_failed" for candidate in candidates):
+            stopped_reason_hint = "apply_failed"
+            failure_reason = "all acceptable candidates failed to apply"
+        elif any(str(candidate.get("stop_reason", "") or "") == "watchdog_blocked" for candidate in candidates):
+            stopped_reason_hint = "watchdog_blocked"
+            failure_reason = "watchdog blocked all acceptable candidates"
+        elif any(str(candidate.get("stop_reason", "") or "") == "edit_failed" for candidate in candidates):
+            stopped_reason_hint = "edit_failed"
+            failure_reason = "guided_edit edit model did not produce usable output"
         return {
             "schema": "guided_edit.execution.v1",
-            "applied": True,
-            "diff_text": diff_text,
-            "diff_check": diff_check,
-            "diff_apply": diff_apply,
-            "changed_paths": changed_paths,
-            "edit_result": infer,
-            "watchdog": watchdog,
-            "verification": verification,
-            "repair_result": repair_result.get("infer") if isinstance(repair_result, dict) else None,
-            "repair_used": bool(repair_result),
+            "applied": False,
+            "diff_text": str(best_candidate.get("diff_text", "") or "") if isinstance(best_candidate, dict) else "",
+            "diff_check": best_candidate.get("diff_check") if isinstance(best_candidate, dict) else None,
+            "diff_apply": best_candidate.get("diff_apply") if isinstance(best_candidate, dict) else None,
+            "changed_paths": list(best_candidate.get("changed_paths", []) or []) if isinstance(best_candidate, dict) else [],
+            "edit_result": best_candidate.get("infer", {}) if isinstance(best_candidate, dict) else {},
+            "watchdog": best_candidate.get("watchdog", {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []}) if isinstance(best_candidate, dict) else {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
+            "verification": best_candidate.get("verification", {**verification_skipped, "reason": "no candidate selected"}) if isinstance(best_candidate, dict) else {**verification_skipped, "reason": "no candidate selected"},
+            "acceptance": best_candidate.get("acceptance", {"schema": "guided_edit.acceptance.v1", "ok": False, "score": 0.0, "hard_failures": ["no_candidate"], "soft_flags": []}) if isinstance(best_candidate, dict) else {"schema": "guided_edit.acceptance.v1", "ok": False, "score": 0.0, "hard_failures": ["no_candidate"], "soft_flags": []},
+            "repair_result": selected_repair,
+            "repair_used": bool(repair_candidates),
             "attempt_count": len(edit_attempts),
             "edit_attempts": edit_attempts,
-            "stopped_reason_hint": "" if bool(validation.get("ok", False)) else "validation_failed",
-            "failure_reason": "" if bool(validation.get("ok", False)) else "validation failed in isolated worktree",
+            "stopped_reason_hint": stopped_reason_hint,
+            "failure_reason": failure_reason,
             "structured_only": structured_only,
-            "isolation": worktree_info,
-            "validation": validation,
+            "isolation": {"backend": "git_worktree"},
+            "validation": best_candidate.get("validation", {}) if isinstance(best_candidate, dict) else {},
+            "candidates": public_candidates,
+            "selected_candidate": None,
+            "acceptance_failures": sum(1 for candidate in candidates if not bool(candidate.get("acceptance", {}).get("ok", False))),
+            "verifier_false_positive_count": sum(1 for candidate in candidates if bool(candidate.get("verifier_false_positive", False))),
         }
-    finally:
-        if not keep_worktree:
-            _guided_edit_remove_temp_worktree(worktree_info)
+
+    return {
+        "schema": "guided_edit.execution.v1",
+        "applied": True,
+        "diff_text": str(selected_candidate.get("diff_text", "") or ""),
+        "diff_check": selected_candidate.get("diff_check"),
+        "diff_apply": selected_candidate.get("diff_apply"),
+        "changed_paths": list(selected_candidate.get("changed_paths", []) or []),
+        "edit_result": selected_candidate.get("infer", {}),
+        "watchdog": selected_candidate.get("watchdog", {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []}),
+        "verification": selected_candidate.get("verification", verification_skipped),
+        "acceptance": selected_candidate.get("acceptance", {"schema": "guided_edit.acceptance.v1", "ok": True, "score": 1.0, "hard_failures": [], "soft_flags": []}),
+        "repair_result": selected_repair,
+        "repair_used": bool(repair_candidates),
+        "attempt_count": len(edit_attempts),
+        "edit_attempts": edit_attempts,
+        "stopped_reason_hint": "" if bool(selected_candidate.get("validation", {}).get("ok", False)) else "validation_failed",
+        "failure_reason": "",
+        "structured_only": structured_only,
+        "isolation": selected_worktree or {"backend": "git_worktree"},
+        "validation": selected_candidate.get("validation", {}),
+        "candidates": public_candidates,
+        "selected_candidate": selected_public,
+        "materialized": False,
+        "acceptance_failures": sum(1 for candidate in candidates if not bool(candidate.get("acceptance", {}).get("ok", False))),
+        "verifier_false_positive_count": sum(1 for candidate in candidates if bool(candidate.get("verifier_false_positive", False))),
+    }
 
 
 def _guided_edit_run(
@@ -12590,6 +13137,18 @@ def _guided_edit_run(
                 mode="log",
                 replay_id=replay_id,
                 event={
+                    "stage": "candidate_selection",
+                    "candidate_count": len(list(execution.get("candidates", []) or [])),
+                    "selected_candidate": execution.get("selected_candidate"),
+                    "candidates": execution.get("candidates", []),
+                },
+            )
+    if replay_id:
+        with contextlib.suppress(Exception):
+            execution_replay(
+                mode="log",
+                replay_id=replay_id,
+                event={
                     "stage": "execution",
                     "applied": execution.get("applied", False),
                     "changed_paths": execution.get("changed_paths", []),
@@ -12677,6 +13236,11 @@ def _guided_edit_run(
         "materialize": materialize_result,
         "rolled_back": rolled_back,
     }
+    verifier_false_positive_write = _guided_edit_record_verifier_false_positive(
+        action=action,
+        execution=execution,
+        replay_id=replay_id,
+    )
     memory_write = _guided_edit_persist_memory(
         prompt=prompt,
         action=action,
@@ -12698,6 +13262,17 @@ def _guided_edit_run(
             "verification_blocked": bool(execution.get("verification", {}).get("blocked", False)),
             "watchdog_blocked": bool(execution.get("watchdog", {}).get("blocked", False)) or bool(prompt_watchdog.get("blocked", False)),
             "evidence_count": int(memory_write.get("evidence_count", 0) or 0),
+            "candidate_count": len(list(execution.get("candidates", []) or [])),
+            "selected_candidate_index": int(
+                (
+                    execution.get("selected_candidate", {})
+                    if isinstance(execution.get("selected_candidate"), dict)
+                    else {}
+                ).get("index", 0)
+                or 0
+            ),
+            "acceptance_failures": int(execution.get("acceptance_failures", 0) or 0),
+            "verifier_false_positive": int(execution.get("verifier_false_positive_count", 0) or 0),
             "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         },
     )
@@ -12763,6 +13338,7 @@ def _guided_edit_run(
         "final_validation": validation,
         "effective_validation_profile": effective_profile,
         "memory_write": memory_write,
+        "verifier_false_positive_write": verifier_false_positive_write,
         "workflow_benchmark": benchmark,
         "failure_diagnosis": failure_diagnosis,
         "state_machine": _guided_edit_state_machine(
