@@ -1968,6 +1968,88 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["steps"][0]["execution"]["materialized"])
         self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
 
+    def test_task_router_guided_edit_repairs_prior_violation_from_planner(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "add_test",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "wrongly choose tests for a comment request",
+                "validation_scope": "quick",
+            }
+        )
+        repaired_planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "keep the change minimal",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": repaired_planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "def alpha(x):\n    # alpha increments the input\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "def alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "agree", "confidence": 0.92, "reason": "repaired planner action matches the request"}
+                    ),
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="endpoint",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["steps"][0]["planner_attempts"]), 2)
+        self.assertEqual(out["steps"][0]["planner_attempts"][1]["kind"], "repair")
+        self.assertEqual(out["steps"][0]["plan"]["action_type"], "replace_region")
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "initial")
+
     def test_task_router_guided_edit_repairs_invalid_edit_output(self):
         before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
         repaired_output = (
@@ -2184,6 +2266,33 @@ class ServerToolsTest(ServerToolsTestBase):
                     "model": "qwen2.5-coder:3b",
                     "ok": True,
                     "output": repair_replacement_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"winner": "tie", "reason": "both candidates are similarly broad"}
+                    ),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"winner": "tie", "reason": "both candidates are similarly broad"}
+                    ),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"winner": "tie", "reason": "both candidates are similarly broad"}
+                    ),
                 },
                 {
                     "schema": "local_infer.v1",
@@ -2492,6 +2601,15 @@ class ServerToolsTest(ServerToolsTestBase):
                     "backend": "fallback",
                     "model": "phi4-mini-reasoning:3.8b",
                     "ok": True,
+                    "output": json.dumps(
+                        {"winner": "tie", "reason": "both candidates are similarly scoped before verification"}
+                    ),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
                     "output": json.dumps({"verdict": "disagree", "confidence": 0.9, "reason": "candidate changes behavior"}),
                 },
                 {
@@ -2515,6 +2633,63 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["steps"][0]["execution"]["candidates"][0]["stop_reason"], "acceptance_failed")
         self.assertEqual(out["steps"][0]["execution"]["candidates"][1]["stop_reason"], "verifier_disagreement")
         self.assertEqual(out["steps"][0]["execution"]["candidates"][2]["stop_reason"], "selected")
+
+    def test_task_router_guided_edit_pairwise_prefers_better_candidate(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "exercise pairwise ranking",
+                "validation_scope": "quick",
+            }
+        )
+        candidate_one = (
+            "def alpha(x):\n"
+            "    # alpha increments the input in a somewhat verbose way\n"
+            "    return x + 1"
+        )
+        candidate_two = (
+            "def alpha(x):\n"
+            "    # alpha increments the input\n"
+            "    return x + 1"
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": planner_output},
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_one},
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_two},
+                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": "Target snippet:\ndef alpha(x):\n    return x + 1"},
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps({"winner": "right", "reason": "right is the smaller valid edit"}),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps({"verdict": "agree", "confidence": 0.93, "reason": "candidate matches the bounded request"}),
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["index"], 2)
+        self.assertEqual(out["workflow_benchmark"]["run"]["selected_candidate_index"], 2)
+        self.assertEqual(out["steps"][0]["execution"]["candidates"][0]["pairwise_score"], -1)
+        self.assertEqual(out["steps"][0]["execution"]["candidates"][1]["pairwise_score"], 1)
 
     def test_task_router_guided_edit_verifier_uses_review_route_even_with_explicit_model(self):
         planner_output = json.dumps(
@@ -2547,6 +2722,14 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
                 }
+            if prompt.startswith("Repair the bounded edit output for the target region."):
+                return {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": model,
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                }
             verifier_models.append(model)
             return {
                 "schema": "local_infer.v1",
@@ -2568,6 +2751,25 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["ok"])
         self.assertTrue(verifier_models)
         self.assertTrue(all(model == "phi4-mini-reasoning:3.8b" for model in verifier_models))
+
+    def test_guided_edit_output_to_diff_accepts_micro_edit(self):
+        region = self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0)
+        parsed = self.server._guided_edit_output_to_diff(
+            raw_output=json.dumps(
+                {
+                    "op": "insert_before",
+                    "anchor": "return x + 1",
+                    "text": "    # alpha increments the input",
+                }
+            ),
+            target_region=region,
+            allow_raw_diff=False,
+            allow_micro_edit=True,
+            max_extra_lines=2,
+        )
+        self.assertEqual(parsed["mode"], "micro_edit")
+        self.assertIn("# alpha increments the input", parsed["replacement_text"])
+        self.assertIn("src/sample.py", parsed["diff_text"])
 
     def test_guided_edit_acceptance_action_specific_postconditions(self):
         doc_region = {
@@ -2652,6 +2854,66 @@ class ServerToolsTest(ServerToolsTestBase):
         )
         self.assertFalse(extract_helper_acceptance["ok"])
         self.assertIn("extract_helper_missing_helper_symbol", extract_helper_acceptance["hard_failures"])
+
+    def test_task_router_guided_edit_records_regression_on_failure(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "force regression recording",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="endpoint",
+                validation_profile="quick",
+            )
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["regression_write"]["written"])
+        regression_path = self.repo_path / ".codebase-tooling-mcp" / "reports" / "GUIDED_EDIT_REGRESSIONS.json"
+        self.assertTrue(regression_path.is_file())
+        payload = json.loads(regression_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema"], "guided_edit.regressions.v1")
+        self.assertEqual(payload["entries"][-1]["target_path"], "src/sample.py")
+        self.assertEqual(payload["entries"][-1]["stopped_reason"], "edit_invalid")
 
     def test_memory_auto_compact_and_usage_stats(self):
         for i in range(10):

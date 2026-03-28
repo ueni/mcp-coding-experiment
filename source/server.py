@@ -136,6 +136,7 @@ TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.
 WORKFLOW_BENCHMARK_FILE = Path(".codebase-tooling-mcp/reports/WORKFLOW_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 SKILL_PACK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/SKILL_PACK_LINT.json")
+GUIDED_EDIT_REGRESSION_FILE = Path(".codebase-tooling-mcp/reports/GUIDED_EDIT_REGRESSIONS.json")
 REPO_HISTORY_MEMORY_MAX_COMMITS = max(10, int(os.getenv("REPO_HISTORY_MEMORY_MAX_COMMITS", "40")))
 REPO_HISTORY_MEMORY_MAX_FILES = max(4, int(os.getenv("REPO_HISTORY_MEMORY_MAX_FILES", "12")))
 REPO_HISTORY_MEMORY_MAX_ENTRIES = max(2, int(os.getenv("REPO_HISTORY_MEMORY_MAX_ENTRIES", "6")))
@@ -10786,10 +10787,16 @@ def _guided_edit_parse_action(raw_output: str, fallback_paths: list[str]) -> dic
                 break
         return out
 
+    raw_require_symbol = raw_postconditions.get("require_symbol", "")
+    if isinstance(raw_require_symbol, list):
+        require_symbol = next((str(item or "").strip() for item in raw_require_symbol if str(item or "").strip()), "")
+    else:
+        require_symbol = str(raw_require_symbol or "").strip()
+
     postconditions = {
         "must_include": _string_list(raw_postconditions.get("must_include")),
         "must_preserve": _string_list(raw_postconditions.get("must_preserve")),
-        "require_symbol": str(raw_postconditions.get("require_symbol", "") or "").strip()[:160],
+        "require_symbol": require_symbol[:160],
         "max_line_delta": None,
     }
     raw_max_line_delta = raw_postconditions.get("max_line_delta")
@@ -10810,6 +10817,37 @@ def _guided_edit_parse_action(raw_output: str, fallback_paths: list[str]) -> dic
         "rationale": str(payload.get("rationale", "") or "").strip(),
         "validation_scope": validation_scope,
         "postconditions": postconditions,
+}
+
+
+def _guided_edit_parse_micro_edit(raw_output: str) -> dict[str, Any]:
+    cleaned = _guided_edit_strip_wrappers(raw_output)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("edit output did not contain micro-edit JSON")
+    payload = json.loads(cleaned[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("micro-edit output must be a JSON object")
+    op = str(payload.get("op", "") or "").strip().lower()
+    supported_ops = {"insert_before", "insert_after", "replace_line", "replace_region"}
+    if op not in supported_ops:
+        raise ValueError(f"unsupported micro-edit op: {op}")
+    text = str(payload.get("text", "") or "").replace("\r\n", "\n")
+    if not text.strip():
+        raise ValueError("micro-edit text must not be empty")
+    anchor = str(payload.get("anchor", "") or "").strip()
+    line_number = payload.get("line")
+    if line_number is not None and (not isinstance(line_number, int) or line_number < 1):
+        raise ValueError("micro-edit line must be a positive integer")
+    if op != "replace_region" and not anchor and line_number is None:
+        raise ValueError("micro-edit requires anchor or line for non-region operations")
+    return {
+        "schema": "guided_edit.micro_edit.v1",
+        "op": op,
+        "anchor": anchor,
+        "line": line_number,
+        "text": text,
     }
 
 
@@ -10856,6 +10894,61 @@ def _guided_edit_parse_replacement_text(raw_output: str) -> str:
     if not normalized.strip():
         raise ValueError("edit model did not return replacement text")
     return normalized
+
+
+def _guided_edit_apply_micro_edit(
+    *,
+    target_region: dict[str, Any],
+    micro_edit: dict[str, Any],
+) -> dict[str, Any]:
+    op = str(micro_edit.get("op", "") or "").strip().lower()
+    text = str(micro_edit.get("text", "") or "").replace("\r\n", "\n")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    region_lines = str(target_region.get("region_text", "") or "").splitlines(keepends=True)
+    if not region_lines:
+        raise ValueError("micro-edit target region is empty")
+    anchor = str(micro_edit.get("anchor", "") or "").strip()
+    line_number = micro_edit.get("line")
+    target_idx: int | None = None
+    if isinstance(line_number, int):
+        relative = line_number - int(target_region.get("start_line", 1) or 1)
+        if 0 <= relative < len(region_lines):
+            target_idx = relative
+        else:
+            raise ValueError("micro-edit line is outside target region")
+    elif anchor:
+        anchor_norm = anchor.strip()
+        for idx, raw in enumerate(region_lines):
+            if anchor_norm in raw:
+                target_idx = idx
+                break
+        if target_idx is None:
+            raise ValueError("micro-edit anchor not found in target region")
+    updated_lines = list(region_lines)
+    if op == "replace_region":
+        replacement_text = text
+    elif op == "replace_line":
+        if target_idx is None:
+            raise ValueError("micro-edit replace_line requires anchor or line")
+        updated_lines[target_idx : target_idx + 1] = [text]
+        replacement_text = "".join(updated_lines)
+    elif op == "insert_before":
+        if target_idx is None:
+            raise ValueError("micro-edit insert_before requires anchor or line")
+        updated_lines[target_idx:target_idx] = [text]
+        replacement_text = "".join(updated_lines)
+    elif op == "insert_after":
+        if target_idx is None:
+            raise ValueError("micro-edit insert_after requires anchor or line")
+        updated_lines[target_idx + 1 : target_idx + 1] = [text]
+        replacement_text = "".join(updated_lines)
+    else:
+        raise ValueError(f"unsupported micro-edit op: {op}")
+    return {
+        "replacement_text": replacement_text.rstrip("\n"),
+        "micro_edit": micro_edit,
+    }
 
 
 def _guided_edit_target_region(
@@ -10970,8 +11063,29 @@ def _guided_edit_output_to_diff(
     raw_output: str,
     target_region: dict[str, Any],
     allow_raw_diff: bool = True,
+    allow_micro_edit: bool = False,
     max_extra_lines: int | None = None,
 ) -> dict[str, Any]:
+    if allow_micro_edit:
+        try:
+            micro_edit = _guided_edit_parse_micro_edit(raw_output)
+            micro_rendered = _guided_edit_apply_micro_edit(
+                target_region=target_region,
+                micro_edit=micro_edit,
+            )
+            replacement_text = str(micro_rendered["replacement_text"])
+            return {
+                "mode": "micro_edit",
+                "micro_edit": micro_edit,
+                "replacement_text": replacement_text,
+                "diff_text": _guided_edit_build_local_diff(
+                    target_region=target_region,
+                    replacement_text=replacement_text,
+                    max_extra_lines=max_extra_lines,
+                ),
+            }
+        except Exception:
+            pass
     if allow_raw_diff:
         try:
             return {
@@ -11198,6 +11312,79 @@ def _guided_edit_allowed_paths(action: dict[str, Any], selected_targets: list[st
     return sorted(allowed)
 
 
+def _guided_edit_prompt_profile(prompt: str, selected_targets: list[str] | None = None) -> dict[str, Any]:
+    lowered = f" {str(prompt or '').lower()} "
+    target_list = [str(path).replace("\\", "/") for path in (selected_targets or []) if str(path).strip()]
+    doc_targets = [path for path in target_list if _semantic_role_for_path(path) == "doc"]
+    test_targets = [path for path in target_list if _guided_edit_is_test_path(path)]
+    explicit_tests = bool(re.search(r"\b(test|tests|unit test|regression test|pytest|spec)\b", lowered))
+    explicit_docs = bool(re.search(r"\b(doc|docs|readme|document|documentation|commentary)\b", lowered))
+    comment_only = bool(re.search(r"\b(comment|docstring|annotation|note)\b", lowered))
+    insert_only = bool(re.search(r"\b(insert|add|prepend|append)\b", lowered))
+    tiny_edit = bool(re.search(r"\b(exactly one line|one comment line|single comment line|insert exactly one)\b", lowered))
+    if comment_only and insert_only:
+        tiny_edit = True
+    preferred_actions: list[str] = []
+    discouraged_actions: list[str] = []
+    if explicit_tests or test_targets:
+        preferred_actions.append("add_test")
+    if explicit_docs or doc_targets:
+        preferred_actions.append("update_docs")
+    if comment_only or tiny_edit or insert_only:
+        preferred_actions.append("replace_region")
+        discouraged_actions.extend(["add_test"])
+    if not preferred_actions:
+        preferred_actions.append("replace_region")
+    if doc_targets and "replace_region" in preferred_actions and "update_docs" not in preferred_actions:
+        preferred_actions.insert(0, "update_docs")
+    return {
+        "preferred_actions": list(dict.fromkeys(preferred_actions)),
+        "discouraged_actions": list(dict.fromkeys(discouraged_actions)),
+        "comment_only": comment_only,
+        "explicit_tests": explicit_tests,
+        "explicit_docs": explicit_docs,
+        "tiny_edit": tiny_edit,
+        "insert_only": insert_only,
+    }
+
+
+def _guided_edit_prior_violation(
+    *,
+    action: dict[str, Any],
+    prompt_profile: dict[str, Any],
+    selected_targets: list[str],
+) -> str:
+    action_type = str(action.get("action_type", "") or "").strip().lower()
+    preferred = set(prompt_profile.get("preferred_actions", []) or [])
+    discouraged = set(prompt_profile.get("discouraged_actions", []) or [])
+    if action_type in discouraged:
+        return f"action_type {action_type} is discouraged for this request"
+    if prompt_profile.get("comment_only") and action_type == "add_test":
+        return "comment-only requests should not plan add_test"
+    if prompt_profile.get("explicit_docs") and action_type == "add_test":
+        return "documentation requests should not plan add_test"
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    target_path = str(target.get("path", "") or "").strip().replace("\\", "/") if isinstance(target, dict) else ""
+    if action_type == "add_test" and target_path and not _guided_edit_is_test_path(target_path) and not prompt_profile.get("explicit_tests"):
+        return "add_test planned against a non-test target without explicit test intent"
+    if preferred and action_type not in preferred and prompt_profile.get("tiny_edit") and action_type in {"extract_helper", "add_test"}:
+        return f"tiny edit requests should prefer {', '.join(sorted(preferred))}"
+    return ""
+
+
+def _guided_edit_postcondition_noise(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return True
+    if re.match(r"^\d+:\s", stripped):
+        return True
+    if "/" in stripped and "." in stripped:
+        return True
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return True
+    return False
+
+
 def _guided_edit_postcondition_list(value: Any, *, limit: int = 8) -> list[str]:
     if isinstance(value, str):
         items = [value]
@@ -11229,7 +11416,7 @@ def _guided_edit_destructive_request(*parts: Any) -> bool:
 def _guided_edit_extract_required_phrases(prompt: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
-    for match in re.finditer(r"['\"]([^'\"]{2,120})['\"]", str(prompt or "")):
+    for match in re.finditer(r"['\"`]{1}([^'\"`]{2,120})['\"`]{1}", str(prompt or "")):
         text = str(match.group(1) or "").strip()
         if not text:
             continue
@@ -11329,11 +11516,19 @@ def _guided_edit_normalize_postconditions(
     action_type = str(action.get("action_type", "") or "").strip().lower()
     target = action.get("target", {}) if isinstance(action, dict) else {}
     target_path = str(target.get("path", "") or "").strip().replace("\\", "/") if isinstance(target, dict) else ""
-    must_include = _guided_edit_postcondition_list(raw.get("must_include"))
+    must_include = [
+        item
+        for item in _guided_edit_postcondition_list(raw.get("must_include"))
+        if not _guided_edit_postcondition_noise(item)
+    ]
     for phrase in _guided_edit_extract_required_phrases(prompt):
         if phrase.lower() not in {item.lower() for item in must_include}:
             must_include.append(phrase)
-    must_preserve = _guided_edit_postcondition_list(raw.get("must_preserve"))
+    must_preserve = [
+        item
+        for item in _guided_edit_postcondition_list(raw.get("must_preserve"))
+        if not _guided_edit_postcondition_noise(item)
+    ]
     destructive = _guided_edit_destructive_request(prompt, action.get("goal", ""), action.get("rationale", ""))
     if action_type == "replace_region" and not destructive:
         substantive = _guided_edit_substantive_lines(target_region.get("region_text", ""))
@@ -11345,7 +11540,13 @@ def _guided_edit_normalize_postconditions(
         for heading in _guided_edit_markdown_headings(target_region.get("region_text", "")):
             if heading.lower() not in {item.lower() for item in must_preserve}:
                 must_preserve.append(heading)
-    require_symbol = str(raw.get("require_symbol", "") or "").strip()
+    raw_require_symbol = raw.get("require_symbol", "")
+    if isinstance(raw_require_symbol, list):
+        require_symbol = next((str(item or "").strip() for item in raw_require_symbol if str(item or "").strip()), "")
+    else:
+        require_symbol = str(raw_require_symbol or "").strip()
+    if _guided_edit_postcondition_noise(require_symbol):
+        require_symbol = ""
     if not require_symbol and action_type == "extract_helper":
         require_symbol = _guided_edit_extract_helper_symbol(action)
     max_line_delta = raw.get("max_line_delta")
@@ -11401,13 +11602,13 @@ def _guided_edit_acceptance(
         if allowed and path not in allowed:
             hard_failures.append(f"out_of_scope_path:{path}")
     if action_type in {"replace_region", "update_docs"}:
-        if mode != "replacement_text":
+        if mode not in {"replacement_text", "micro_edit"}:
             hard_failures.append("structured_only_action_requires_replacement_text")
         if target_path and changed_path_set != {target_path}:
             hard_failures.append("structured_only_action_must_change_target_file_only")
     line_delta = 0
     updated_text = ""
-    if mode == "replacement_text":
+    if mode in {"replacement_text", "micro_edit"}:
         with contextlib.suppress(Exception):
             rendered = _guided_edit_render_structured_update(
                 target_region=target_region,
@@ -11518,12 +11719,114 @@ def _guided_edit_candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...
     return (
         0 if candidate.get("parse_ok", False) else 1,
         0 if not hard_failures else 1,
+        -int(candidate.get("pairwise_score", 0) or 0),
         -float(acceptance.get("score", 0.0) or 0.0),
         -float(acceptance.get("phrase_coverage", 0.0) or 0.0),
-        int(acceptance.get("line_delta", 0) or 0),
+        abs(int(acceptance.get("line_delta", 0) or 0)),
         int(acceptance.get("diff_length", 0) or 0),
         int(candidate.get("strategy_rank", 99) or 99),
     )
+
+
+def _guided_edit_prefers_micro_edit(
+    *,
+    prompt: str,
+    action: dict[str, Any],
+    target_region: dict[str, Any],
+) -> bool:
+    profile = _guided_edit_prompt_profile(prompt, [str(action.get("target", {}).get("path", "") or "")])
+    action_type = str(action.get("action_type", "") or "").strip().lower()
+    region_line_count = len(str(target_region.get("region_text", "") or "").splitlines())
+    return bool(
+        action_type in {"replace_region", "update_docs"}
+        and profile.get("tiny_edit")
+        and region_line_count <= 6
+    )
+
+
+def _guided_edit_regression_load() -> dict[str, Any]:
+    payload = _json_file_load(
+        GUIDED_EDIT_REGRESSION_FILE,
+        {"schema": "guided_edit.regressions.v1", "entries": []},
+    )
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    payload["entries"] = entries
+    return payload
+
+
+def _guided_edit_regression_context(
+    *,
+    prompt: str,
+    target_paths: list[str],
+    max_entries: int = 3,
+) -> dict[str, Any]:
+    payload = _guided_edit_regression_load()
+    lowered = str(prompt or "").lower()
+    terms = {term for term in re.split(r"\W+", lowered) if len(term) > 3}
+    targets = {str(path).replace("\\", "/") for path in target_paths if str(path).strip()}
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for row in payload.get("entries", []):
+        if not isinstance(row, dict):
+            continue
+        score = 0
+        row_target = str(row.get("target_path", "") or "").replace("\\", "/")
+        if row_target and row_target in targets:
+            score += 3
+        row_text = f"{row.get('prompt_summary', '')} {row.get('failure_reason', '')}".lower()
+        score += sum(1 for term in terms if term in row_text)
+        if score <= 0:
+            continue
+        ranked.append((score, row))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    entries = [row for _, row in ranked[:max_entries]]
+    context_lines = [
+        _trim_task_inline_text(
+            f"{row.get('action_type', '')} failed={row.get('stopped_reason', '')} reason={row.get('failure_reason', '')}",
+            max_chars=180,
+        )
+        for row in entries
+    ]
+    return {
+        "schema": "guided_edit.regression_context.v1",
+        "entry_count": len(entries),
+        "entries": entries,
+        "context": "\n".join(context_lines),
+    }
+
+
+def _guided_edit_regression_record(
+    *,
+    prompt: str,
+    action: dict[str, Any],
+    execution: dict[str, Any],
+    stopped_reason: str,
+    replay_id: str,
+) -> dict[str, Any]:
+    if not ALLOW_MUTATIONS:
+        return {"written": False, "reason": "mutations_disabled"}
+    payload = _guided_edit_regression_load()
+    entries = payload.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    target = action.get("target", {}) if isinstance(action, dict) else {}
+    entry = {
+        "ts": _now_iso(),
+        "prompt_summary": _trim_task_inline_text(prompt, max_chars=180),
+        "action_type": str(action.get("action_type", "") or ""),
+        "target_path": str(target.get("path", "") or "").strip() if isinstance(target, dict) else "",
+        "stopped_reason": stopped_reason,
+        "failure_reason": str(execution.get("failure_reason", "") or stopped_reason),
+        "candidate_stop_reasons": [str(row.get("stop_reason", "") or "") for row in list(execution.get("candidates", []) or [])[:4]],
+        "acceptance_failures": int(execution.get("acceptance_failures", 0) or 0),
+        "replay_id": replay_id,
+    }
+    entries.append(entry)
+    payload["entries"] = entries[-100:]
+    payload["updated_at"] = _now_iso()
+    _json_file_save(GUIDED_EDIT_REGRESSION_FILE, payload)
+    return {"written": True, "entry": entry, "count": len(payload["entries"])}
 
 
 def _guided_edit_parse_verification(raw_output: str) -> dict[str, Any]:
@@ -11571,6 +11874,8 @@ def _guided_edit_repair_action_output(
     prompt: str,
     raw_output: str,
     selected_targets: list[str],
+    prompt_profile: dict[str, Any] | None = None,
+    failure_reason: str = "",
     backend: str,
     temperature: float,
     system: str,
@@ -11593,6 +11898,8 @@ def _guided_edit_repair_action_output(
         f"{chr(10).join(selected_targets) or 'none'}\n"
         "validation_scope must be exactly one of: quick, standard, auto.\n\n"
         f"User request:\n{prompt.strip()}\n\n"
+        f"Action priors:\n{json.dumps(prompt_profile or {}, ensure_ascii=True, sort_keys=True)}\n\n"
+        f"Repair reason:\n{failure_reason or 'planner output violated the contract'}\n\n"
         f"Original planner output:\n{raw_output}"
     )
     infer = local_infer(
@@ -11657,8 +11964,9 @@ def _guided_edit_repair_diff_output(
     action: dict[str, Any],
     target_region: dict[str, Any],
     allow_raw_diff: bool,
+    allow_micro_edit: bool,
     previous_output: str,
-    failure_reason: str,
+    failure_diagnostics: dict[str, Any],
     backend: str,
     temperature: float,
     system: str,
@@ -11693,7 +12001,15 @@ def _guided_edit_repair_diff_output(
     repair_prompt = (
         "Repair the bounded edit output for the target region.\n"
         f"{repair_mode_instructions}"
-        "Do not include markdown fences or explanation.\n"
+        + (
+            (
+                "Preferred structured format for tiny edits: return JSON like "
+                '{"op":"insert_before","anchor":"return x + 1","text":"    # comment"}.\n'
+            )
+            if allow_micro_edit
+            else ""
+        )
+        + "Do not include markdown fences or explanation.\n"
         f"Only modify this file: {target_path or 'unknown'}\n"
         f"{diff_header_instructions}"
         f"User request:\n{prompt.strip()}\n\n"
@@ -11709,7 +12025,7 @@ def _guided_edit_repair_diff_output(
         "<CONTEXT_AFTER>\n"
         f"{str(target_region.get('context_after_text', '') or '')}\n"
         "<END_CONTEXT_AFTER>\n\n"
-        f"Failure reason:\n{failure_reason or 'previous output was not acceptable'}\n\n"
+        f"Failure diagnostics JSON:\n{json.dumps(failure_diagnostics, ensure_ascii=True, sort_keys=True)}\n\n"
         f"Previous model output:\n{previous_output}"
     )
     infer = local_infer(
@@ -11747,6 +12063,7 @@ def _guided_edit_repair_diff_output(
             raw_output=str(infer.get("output", "") or ""),
             target_region=target_region,
             allow_raw_diff=allow_raw_diff,
+            allow_micro_edit=allow_micro_edit,
             max_extra_lines=max_extra_lines,
         )
     except Exception as exc:
@@ -11774,8 +12091,10 @@ def _guided_edit_repair_diff_output(
             "routing_loaded": routing.get("loaded", False),
             "routing_source": routing.get("source"),
         },
+        "parsed_edit": parsed,
         "diff_text": str(parsed["diff_text"]),
         "mode": str(parsed.get("mode", "") or ""),
+        "replacement_text": str(parsed.get("replacement_text", "") or ""),
     }
 
 
@@ -11864,6 +12183,70 @@ def _guided_edit_verify_step(
         "run": True,
         "ok": not blocked,
         "blocked": blocked,
+        "infer": infer,
+    }
+
+
+def _guided_edit_pairwise_compare(
+    *,
+    prompt: str,
+    action: dict[str, Any],
+    target_region: dict[str, Any],
+    left: dict[str, Any],
+    right: dict[str, Any],
+    backend: str,
+    system: str,
+) -> dict[str, Any]:
+    routing = _load_continue_model_routing()
+    resolved = _resolve_task_model_route(
+        route="review",
+        routing=routing,
+        prompt=prompt,
+        task_hint="review",
+    )
+    compare_prompt = (
+        "Compare two bounded edit candidates for the same request.\n"
+        "Return strict JSON with keys: winner, reason.\n"
+        "winner must be one of: left, right, tie.\n"
+        "Prefer the candidate that better satisfies the user request, preserves behavior, and keeps the edit minimal.\n\n"
+        f"User request:\n{prompt.strip()}\n\n"
+        f"Action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
+        "Original target region:\n"
+        "<BEGIN_ORIGINAL_REGION>\n"
+        f"{str(target_region.get('region_text', '') or '')}\n"
+        "<END_ORIGINAL_REGION>\n\n"
+        f"Left candidate acceptance:\n{json.dumps(left.get('acceptance', {}), ensure_ascii=True, sort_keys=True)}\n"
+        f"Left rewritten region:\n{str(left.get('rewritten_text', '') or '')}\n\n"
+        f"Right candidate acceptance:\n{json.dumps(right.get('acceptance', {}), ensure_ascii=True, sort_keys=True)}\n"
+        f"Right rewritten region:\n{str(right.get('rewritten_text', '') or '')}\n"
+    )
+    infer = local_infer(
+        prompt=compare_prompt,
+        task="review",
+        backend=backend,
+        model=resolved["model"],
+        max_tokens=180,
+        temperature=0.0,
+        system=system or "You are a strict pairwise edit ranker. Return JSON only.",
+        output_profile="normal",
+        store_result=False,
+    )
+    if not bool(infer.get("ok", False)):
+        return {"winner": "tie", "reason": "pairwise_unavailable", "infer": infer}
+    cleaned = _guided_edit_strip_wrappers(str(infer.get("output", "") or ""))
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        return {"winner": "tie", "reason": "pairwise_invalid_json", "infer": infer}
+    payload = json.loads(cleaned[start : end + 1])
+    if not isinstance(payload, dict):
+        return {"winner": "tie", "reason": "pairwise_invalid_payload", "infer": infer}
+    winner = str(payload.get("winner", "tie") or "tie").strip().lower()
+    if winner not in {"left", "right", "tie"}:
+        winner = "tie"
+    return {
+        "winner": winner,
+        "reason": _trim_task_inline_text(payload.get("reason", ""), max_chars=220),
         "infer": infer,
     }
 
@@ -12206,6 +12589,7 @@ def _guided_edit_plan_step(
     system: str,
 ) -> dict[str, Any]:
     selected_targets = _guided_edit_select_targets(prompt=prompt, target_paths=target_paths)
+    prompt_profile = _guided_edit_prompt_profile(prompt, selected_targets)
     if not selected_targets:
         return {
             "ok": False,
@@ -12234,6 +12618,11 @@ def _guided_edit_plan_step(
         },
         retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
         repo_memory=repo_memory,
+    )
+    regression_context = _guided_edit_regression_context(
+        prompt=prompt,
+        target_paths=selected_targets,
+        max_entries=3,
     )
 
     routing = _load_continue_model_routing()
@@ -12274,10 +12663,12 @@ def _guided_edit_plan_step(
         "Use target.path plus optional start_line/end_line and symbol.\n"
         "Prefer the smallest useful step.\n\n"
         f"User request:\n{prompt.strip()}\n\n"
+        f"Action priors:\n{json.dumps(prompt_profile, ensure_ascii=True, sort_keys=True)}\n\n"
         f"Candidate targets:\n{chr(10).join(selected_targets)}\n\n"
         f"Target previews:\n{chr(10).join(previews)}\n\n"
         f"Recent repository history:\n{chr(10).join(repo_history_lines) or 'none'}\n\n"
-        f"Curated skills:\n{chr(10).join(skill_lines) or 'none'}"
+        f"Curated skills:\n{chr(10).join(skill_lines) or 'none'}\n\n"
+        f"Recent guided_edit regressions:\n{regression_context.get('context', '') or 'none'}"
     )
     infer = local_infer(
         prompt=planner_prompt,
@@ -12328,6 +12719,8 @@ def _guided_edit_plan_step(
             prompt=prompt,
             raw_output=str(infer.get("output", "") or ""),
             selected_targets=selected_targets,
+            prompt_profile=prompt_profile,
+            failure_reason=str(exc),
             backend=backend,
             temperature=temperature,
             system=system,
@@ -12362,6 +12755,33 @@ def _guided_edit_plan_step(
                 "repair_result": repair_result.get("infer"),
             }
         action = dict(repair_result["action"])
+    prior_violation = _guided_edit_prior_violation(
+        action=action,
+        prompt_profile=prompt_profile,
+        selected_targets=selected_targets,
+    )
+    if prior_violation:
+        repair_result = _guided_edit_repair_action_output(
+            prompt=prompt,
+            raw_output=json.dumps(action, ensure_ascii=True, sort_keys=True),
+            selected_targets=selected_targets,
+            prompt_profile=prompt_profile,
+            failure_reason=prior_violation,
+            backend=backend,
+            temperature=temperature,
+            system=system,
+        )
+        planner_attempts.append(
+            {
+                "attempt": len(planner_attempts) + 1,
+                "kind": "repair",
+                "model": str(repair_result.get("routing", {}).get("selected_model", "") or ""),
+                "ok": bool(repair_result.get("ok", False)),
+                "reason": prior_violation,
+            }
+        )
+        if repair_result.get("ok", False):
+            action = dict(repair_result["action"])
     return {
         "ok": True,
         "routing": {
@@ -12454,6 +12874,33 @@ def _guided_edit_execute_step(
         target_region=target_region,
     )
     action = {**action, "postconditions": normalized_postconditions}
+    prompt_profile = _guided_edit_prompt_profile(prompt, selected_targets)
+    regression_context = _guided_edit_regression_context(
+        prompt=prompt,
+        target_paths=selected_targets,
+        max_entries=3,
+    )
+    allow_micro_edit = structured_only and _guided_edit_prefers_micro_edit(
+        prompt=prompt,
+        action=action,
+        target_region=target_region,
+    )
+    repo_history_lines = [
+        _trim_task_inline_text(
+            f"{row.get('commit', '')} {row.get('subject', '')} [{', '.join(row.get('files', [])[:2])}]",
+            max_chars=140,
+        )
+        for row in list((repo_memory_info or {}).get("entries", []) or [])[:3]
+        if isinstance(row, dict)
+    ]
+    skill_lines = [
+        _trim_task_inline_text(
+            f"{row.get('title', '')}: {row.get('summary', '')}",
+            max_chars=140,
+        )
+        for row in list((skill_pack or {}).get("modules", []) or [])[:3]
+        if isinstance(row, dict)
+    ]
 
     routing = _load_continue_model_routing()
     resolved = _resolve_task_model_route(
@@ -12478,14 +12925,19 @@ def _guided_edit_execute_step(
         previous_output: str = "",
         failure_reason: str = "",
     ) -> str:
-        edit_mode_instructions = (
-            "Return only the replacement text for the target region.\n"
-            if structured_only
-            else (
+        if structured_only and allow_micro_edit:
+            edit_mode_instructions = (
+                "Preferred output for tiny edits: return JSON with keys op, anchor or line, and text.\n"
+                "Supported ops: insert_before, insert_after, replace_line, replace_region.\n"
+                "Acceptable fallback: return only the replacement text for the target region.\n"
+            )
+        elif structured_only:
+            edit_mode_instructions = "Return only the replacement text for the target region.\n"
+        else:
+            edit_mode_instructions = (
                 "Preferred output: return only the replacement text for the target region.\n"
                 "Acceptable fallback: return one git-compatible unified diff for only the target file.\n"
             )
-        )
         edit_diff_header_instructions = (
             ""
             if structured_only
@@ -12526,6 +12978,10 @@ def _guided_edit_execute_step(
             f"{target_region['context_after_text']}\n"
             "<END_CONTEXT_AFTER>\n\n"
             f"Normalized postconditions:\n{json.dumps(normalized_postconditions, ensure_ascii=True, sort_keys=True)}\n"
+            f"Action priors:\n{json.dumps(prompt_profile, ensure_ascii=True, sort_keys=True)}\n"
+            f"Recent repository history:\n{chr(10).join(repo_history_lines) or 'none'}\n"
+            f"Curated skills:\n{chr(10).join(skill_lines) or 'none'}\n"
+            f"Recent guided_edit regressions:\n{regression_context.get('context', '') or 'none'}\n"
             f"{extra}\n\n"
             "Keep the edit minimal and preserve valid syntax."
         )
@@ -12539,41 +12995,40 @@ def _guided_edit_execute_step(
             return 0.1
         return float(temperature)
 
+    def candidate_failure_diagnostics(candidate: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "strategy": str(candidate.get("strategy", "") or ""),
+            "stop_reason": str(candidate.get("stop_reason", "") or ""),
+            "failure_reason": str(candidate.get("failure_reason", "") or ""),
+            "parse_ok": bool(candidate.get("parse_ok", False)),
+            "parse_mode": str(candidate.get("parse_mode", "") or ""),
+            "acceptance": candidate.get("acceptance", {}),
+            "changed_paths": list(candidate.get("changed_paths", []) or []),
+            "action_priors": prompt_profile,
+        }
+
     def run_candidate(
         *,
         strategy: str,
         strategy_rank: int,
         previous_output: str = "",
         failure_reason: str = "",
+        failure_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        prompt_text = candidate_prompt(
-            strategy=strategy,
-            previous_output=previous_output,
-            failure_reason=failure_reason,
-        )
-        infer = local_infer(
-            prompt=prompt_text,
-            task="coding",
-            backend=backend,
-            model=resolved["model"],
-            max_tokens=max(256, int(max_tokens)),
-            temperature=strategy_temperature(strategy),
-            system=base_system,
-            output_profile="normal",
-            store_result=False,
-        )
         candidate: dict[str, Any] = {
             "strategy": strategy,
             "strategy_rank": strategy_rank,
             "temperature": strategy_temperature(strategy),
             "model": resolved["model"],
-            "infer": infer,
+            "infer": {},
             "parse_ok": False,
             "parse_mode": "",
             "diff_hash": "",
             "diff_text": "",
             "rewritten_text": "",
             "changed_paths": [],
+            "pairwise_score": 0,
+            "pairwise_comparisons": [],
             "acceptance": {
                 "schema": "guided_edit.acceptance.v1",
                 "ok": False,
@@ -12592,21 +13047,66 @@ def _guided_edit_execute_step(
             "duplicate_of": None,
             "verifier_false_positive": False,
         }
-        if not bool(infer.get("ok", False)):
-            candidate["stop_reason"] = "edit_failed"
-            candidate["failure_reason"] = "guided_edit edit model did not produce output"
-            return candidate
-        try:
-            parsed_edit = _guided_edit_output_to_diff(
-                raw_output=str(infer.get("output", "") or ""),
+        parsed_edit: dict[str, Any]
+        if strategy == "repair":
+            repair = _guided_edit_repair_diff_output(
+                prompt=prompt,
+                action=action,
                 target_region=target_region,
                 allow_raw_diff=not structured_only,
-                max_extra_lines=int(normalized_postconditions.get("max_line_delta", 0) or 0),
+                allow_micro_edit=allow_micro_edit,
+                previous_output=previous_output,
+                failure_diagnostics=failure_diagnostics or {},
+                backend=backend,
+                temperature=temperature,
+                system=system,
             )
-        except Exception as exc:
-            candidate["stop_reason"] = "edit_invalid"
-            candidate["failure_reason"] = str(exc)
-            return candidate
+            candidate["infer"] = repair.get("infer", {})
+            candidate["model"] = str(repair.get("routing", {}).get("selected_model", "") or resolved["model"])
+            if not bool(repair.get("ok", False)):
+                candidate["stop_reason"] = (
+                    "edit_failed" if not bool(candidate["infer"].get("ok", False)) else "edit_invalid"
+                )
+                candidate["failure_reason"] = str(
+                    repair.get("error", "") or "guided_edit edit repair did not produce usable output"
+                )
+                return candidate
+            parsed = repair.get("parsed_edit", {})
+            parsed_edit = parsed if isinstance(parsed, dict) else {}
+        else:
+            prompt_text = candidate_prompt(
+                strategy=strategy,
+                previous_output=previous_output,
+                failure_reason=failure_reason,
+            )
+            infer = local_infer(
+                prompt=prompt_text,
+                task="coding",
+                backend=backend,
+                model=resolved["model"],
+                max_tokens=max(256, int(max_tokens)),
+                temperature=strategy_temperature(strategy),
+                system=base_system,
+                output_profile="normal",
+                store_result=False,
+            )
+            candidate["infer"] = infer
+            if not bool(infer.get("ok", False)):
+                candidate["stop_reason"] = "edit_failed"
+                candidate["failure_reason"] = "guided_edit edit model did not produce output"
+                return candidate
+            try:
+                parsed_edit = _guided_edit_output_to_diff(
+                    raw_output=str(infer.get("output", "") or ""),
+                    target_region=target_region,
+                    allow_raw_diff=not structured_only,
+                    allow_micro_edit=allow_micro_edit,
+                    max_extra_lines=int(normalized_postconditions.get("max_line_delta", 0) or 0),
+                )
+            except Exception as exc:
+                candidate["stop_reason"] = "edit_invalid"
+                candidate["failure_reason"] = str(exc)
+                return candidate
         candidate["parse_ok"] = True
         candidate["parse_mode"] = str(parsed_edit.get("mode", "") or "")
         candidate["diff_text"] = str(parsed_edit.get("diff_text", "") or "")
@@ -12643,6 +13143,7 @@ def _guided_edit_execute_step(
                 strategy_rank=len(candidates) + 1,
                 previous_output=str(prior.get("infer", {}).get("output", "") or ""),
                 failure_reason=str(prior.get("failure_reason", "") or "candidate failed acceptance or parsing"),
+                failure_diagnostics=candidate_failure_diagnostics(prior),
             )
         )
 
@@ -12661,6 +13162,47 @@ def _guided_edit_execute_step(
                 ranked_input.append(candidate)
         else:
             ranked_input.append(candidate)
+    pairwise_candidates = [
+        candidate
+        for candidate in ranked_input
+        if candidate.get("parse_ok", False)
+        and not candidate.get("duplicate_of")
+        and bool(candidate.get("acceptance", {}).get("ok", False))
+    ]
+    for left_index in range(len(pairwise_candidates)):
+        left = pairwise_candidates[left_index]
+        for right_index in range(left_index + 1, len(pairwise_candidates)):
+            right = pairwise_candidates[right_index]
+            comparison = _guided_edit_pairwise_compare(
+                prompt=prompt,
+                action=action,
+                target_region=target_region,
+                left=left,
+                right=right,
+                backend=backend,
+                system=system,
+            )
+            winner = str(comparison.get("winner", "tie") or "tie")
+            left["pairwise_comparisons"].append(
+                {
+                    "against": int(right.get("index", 0) or 0),
+                    "winner": winner,
+                    "reason": str(comparison.get("reason", "") or ""),
+                }
+            )
+            right["pairwise_comparisons"].append(
+                {
+                    "against": int(left.get("index", 0) or 0),
+                    "winner": "left" if winner == "right" else "right" if winner == "left" else "tie",
+                    "reason": str(comparison.get("reason", "") or ""),
+                }
+            )
+            if winner == "left":
+                left["pairwise_score"] = int(left.get("pairwise_score", 0) or 0) + 1
+                right["pairwise_score"] = int(right.get("pairwise_score", 0) or 0) - 1
+            elif winner == "right":
+                left["pairwise_score"] = int(left.get("pairwise_score", 0) or 0) - 1
+                right["pairwise_score"] = int(right.get("pairwise_score", 0) or 0) + 1
     ranked_candidates = sorted(ranked_input, key=_guided_edit_candidate_sort_key)
     for rank, candidate in enumerate(ranked_candidates, start=1):
         candidate["rank"] = rank
@@ -12677,6 +13219,8 @@ def _guided_edit_execute_step(
             "temperature": float(candidate.get("temperature", 0.0) or 0.0),
             "parse_ok": bool(candidate.get("parse_ok", False)),
             "parse_mode": str(candidate.get("parse_mode", "") or ""),
+            "pairwise_score": int(candidate.get("pairwise_score", 0) or 0),
+            "pairwise_comparisons": list(candidate.get("pairwise_comparisons", []) or []),
             "acceptance": candidate.get("acceptance", {}),
             "watchdog": candidate.get("watchdog", {}),
             "verification": candidate.get("verification", {}),
@@ -12687,6 +13231,7 @@ def _guided_edit_execute_step(
             "stop_reason": str(candidate.get("stop_reason", "") or ""),
             "failure_reason": str(candidate.get("failure_reason", "") or ""),
             "verifier_false_positive": bool(candidate.get("verifier_false_positive", False)),
+            "duplicate_of": candidate.get("duplicate_of"),
         }
 
     for candidate in ranked_candidates:
@@ -13250,6 +13795,15 @@ def _guided_edit_run(
         snapshot_id=snapshot_id,
         replay_id=replay_id,
     )
+    regression_write = {"written": False}
+    if not ok:
+        regression_write = _guided_edit_regression_record(
+            prompt=prompt,
+            action=action,
+            execution=execution,
+            stopped_reason=stopped_reason,
+            replay_id=replay_id,
+        )
     benchmark = _workflow_benchmark_record(
         "task_router.guided_edit",
         {
@@ -13338,6 +13892,7 @@ def _guided_edit_run(
         "final_validation": validation,
         "effective_validation_profile": effective_profile,
         "memory_write": memory_write,
+        "regression_write": regression_write,
         "verifier_false_positive_write": verifier_false_positive_write,
         "workflow_benchmark": benchmark,
         "failure_diagnosis": failure_diagnosis,
