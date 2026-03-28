@@ -2195,7 +2195,8 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "task_router.guided_edit.v1")
         self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "validation_failed")
+        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
+        self.assertEqual(out["abstain_reason"], "validation_abstain")
         self.assertEqual(out["final_validation"]["compile_error_count"], 0)
         self.assertFalse(out["final_validation"]["test_execution"]["ok"])
         self.assertFalse(out["steps"][0]["rolled_back"])
@@ -2208,7 +2209,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["workflow_benchmark"]["run"]["verifier_false_positive"], 1)
         self.assertTrue(out["verifier_false_positive_write"]["written"])
         self.assertEqual(out["state_machine"]["current_state"], "validate")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "validation_failed")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
 
     def test_task_router_guided_edit_blocks_verifier_disagreement(self):
         planner_output = json.dumps(
@@ -2331,13 +2332,14 @@ class ServerToolsTest(ServerToolsTestBase):
                 validation_profile="auto",
             )
         self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "verifier_disagreement")
+        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
+        self.assertEqual(out["abstain_reason"], "verifier_veto_abstain")
         self.assertFalse(out["steps"][0]["execution"]["applied"])
         self.assertTrue(out["steps"][0]["execution"]["verification"]["blocked"])
         self.assertTrue(out["steps"][0]["execution"]["repair_used"])
         self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
         self.assertEqual(out["state_machine"]["current_state"], "execute")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "verifier_disagreement")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
 
     def test_task_router_guided_edit_returns_structured_failure_for_invalid_planner_output(self):
         with patch.object(
@@ -2416,6 +2418,13 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "still invalid",
+                },
             ],
         ):
             out = self.server.task_router(
@@ -2426,13 +2435,14 @@ class ServerToolsTest(ServerToolsTestBase):
                 validation_profile="quick",
             )
         self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "edit_invalid")
+        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
+        self.assertEqual(out["abstain_reason"], "low_confidence_abstain")
         self.assertEqual(out["failure_diagnosis"]["failure_stage"], "execute")
-        self.assertEqual(out["failure_diagnosis"]["reason"], "edit_invalid")
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
+        self.assertEqual(out["failure_diagnosis"]["reason"], "low_confidence_abstain")
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 4)
         self.assertTrue(out["steps"][0]["execution"]["repair_used"])
         self.assertEqual(out["state_machine"]["current_state"], "execute")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "edit_invalid")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
 
     def test_guided_edit_parse_verification_accepts_word_confidence(self):
         parsed = self.server._guided_edit_parse_verification(
@@ -2514,6 +2524,13 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "still invalid",
+                },
             ],
         ):
             out = self.server.task_router(
@@ -2524,11 +2541,12 @@ class ServerToolsTest(ServerToolsTestBase):
                 validation_profile="auto",
             )
         self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "edit_invalid")
+        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
+        self.assertEqual(out["abstain_reason"], "low_confidence_abstain")
         self.assertFalse(out["steps"][0]["execution"]["watchdog"]["blocked"])
-        self.assertEqual(out["steps"][0]["execution"]["stopped_reason_hint"], "edit_invalid")
+        self.assertEqual(out["steps"][0]["execution"]["stopped_reason_hint"], "low_confidence_abstain")
         self.assertEqual(out["state_machine"]["current_state"], "execute")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "edit_invalid")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
 
     def test_task_router_guided_edit_planner_stop_uses_normalized_state_machine(self):
         planner_output = json.dumps(
@@ -2707,7 +2725,7 @@ class ServerToolsTest(ServerToolsTestBase):
             if prompt.startswith("Plan exactly one bounded repository edit step."):
                 return {"schema": "local_infer.v1", "backend": "fallback", "model": model, "ok": True, "output": planner_output}
             if prompt.startswith("Apply exactly one bounded edit to the target region."):
-                if "Strategy: Produce the highest-confidence minimal edit." in prompt:
+                if "Strategy: Produce the highest-confidence minimal bounded edit." in prompt:
                     return {
                         "schema": "local_infer.v1",
                         "backend": "fallback",
@@ -2897,6 +2915,13 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "still invalid",
+                },
             ],
         ):
             out = self.server.task_router(
@@ -2913,7 +2938,124 @@ class ServerToolsTest(ServerToolsTestBase):
         payload = json.loads(regression_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["schema"], "guided_edit.regressions.v1")
         self.assertEqual(payload["entries"][-1]["target_path"], "src/sample.py")
-        self.assertEqual(payload["entries"][-1]["stopped_reason"], "edit_invalid")
+        self.assertEqual(payload["entries"][-1]["stopped_reason"], "low_confidence_abstain")
+
+    def test_task_router_guided_edit_uses_deterministic_micro_edit_for_exact_anchor(self):
+        seen_prompts = []
+
+        def fake_infer(*, prompt, model, **kwargs):
+            seen_prompts.append(prompt)
+            return {
+                "schema": "local_infer.v1",
+                "backend": "fallback",
+                "model": model,
+                "ok": True,
+                "output": json.dumps(
+                    {
+                        "verdict": "agree",
+                        "confidence": 0.95,
+                        "reason": "deterministic micro edit matches the bounded request",
+                    }
+                ),
+            }
+
+        with patch.object(self.server, "local_infer", side_effect=fake_infer):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt='Add this exact line: "    # alpha increments the input" before "return x + 1" in src/sample.py.',
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["routing"]["selected_route"], "deterministic_micro")
+        self.assertEqual(out["steps"][0]["planner_attempts"][0]["kind"], "deterministic")
+        self.assertEqual(out["generation_tier"], 0)
+        self.assertFalse(any(prompt.startswith("Plan exactly one bounded repository edit step.") for prompt in seen_prompts))
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "deterministic")
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["generation_tier"], 0)
+        self.assertIn(
+            "    # alpha increments the input\n    return x + 1\n",
+            (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
+        )
+
+    def test_task_router_guided_edit_uses_stronger_fallback_only_after_tier1_exhaustion(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "exercise stronger fallback routing",
+                "validation_scope": "quick",
+            }
+        )
+        models = []
+
+        def fake_infer(*, prompt, model, **kwargs):
+            models.append(model)
+            if prompt.startswith("Plan exactly one bounded repository edit step."):
+                return {"schema": "local_infer.v1", "backend": "fallback", "model": model, "ok": True, "output": planner_output}
+            if prompt.startswith("Apply exactly one bounded edit to the target region."):
+                return {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": model,
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                }
+            if prompt.startswith("Repair the bounded edit output for the target region."):
+                if model == "phi4-mini:3.8b":
+                    return {
+                        "schema": "local_infer.v1",
+                        "backend": "fallback",
+                        "model": model,
+                        "ok": True,
+                        "output": "def alpha(x):\n    # alpha increments the input\n    return x + 1",
+                    }
+                return {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": model,
+                    "ok": True,
+                    "output": "Recent repository history:\ninvalid",
+                }
+            return {
+                "schema": "local_infer.v1",
+                "backend": "fallback",
+                "model": model,
+                "ok": True,
+                "output": json.dumps(
+                    {"verdict": "agree", "confidence": 0.92, "reason": "fallback candidate is the first valid edit"}
+                ),
+            }
+
+        with patch.object(self.server, "local_infer", side_effect=fake_infer):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["generation_tier"], 2)
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "fallback")
+        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["generation_tier"], 2)
+        self.assertIn("phi4-mini:3.8b", models)
+
+    def test_guided_edit_replay_benchmark_report_tracks_thresholds(self):
+        results = (
+            [{"bucket": "tiny_anchored", "applied_success": True, "safe_outcome": True} for _ in range(80)]
+            + [{"bucket": "bounded_semantic", "applied_success": True, "safe_outcome": True} for _ in range(70)]
+            + [{"bucket": "structural", "applied_success": True, "safe_outcome": True} for _ in range(46)]
+            + [{"bucket": "structural", "applied_success": False, "safe_outcome": True} for _ in range(4)]
+        )
+        report = self.server._guided_edit_replay_benchmark_report(results=results, min_cases=200)
+        self.assertEqual(report["schema"], "guided_edit.replay_benchmark.v1")
+        self.assertEqual(report["case_count"], 200)
+        self.assertTrue(report["thresholds_met"])
+        self.assertEqual(report["bucket_metrics"]["tiny_anchored"]["applied_success_rate"], 1.0)
+        self.assertEqual(report["bucket_metrics"]["structural"]["applied_success_rate"], 0.92)
 
     def test_memory_auto_compact_and_usage_stats(self):
         for i in range(10):
