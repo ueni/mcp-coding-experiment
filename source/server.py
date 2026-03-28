@@ -5669,14 +5669,24 @@ def semantic_find(
     if not root.exists():
         raise FileNotFoundError(path)
 
+    quick_mode = summary_mode == "quick"
     terms = [t.lower() for t in re.split(r"\s+", query.strip()) if t]
     candidates: dict[str, dict[str, Any]] = {}
+    path_scan_limit = 5000
+    grep_match_limit = 200
+    include_symbol_candidates = True
+    if quick_mode:
+        path_scan_limit = min(1200, max(200, max_results * 80))
+        grep_match_limit = min(80, max(16, max_results * 4))
+        # Full symbol indexing walks every Python file and is too expensive for
+        # interactive quick summaries such as task_router retrieval.
+        include_symbol_candidates = False
 
     for rel in find_paths(
         path=path,
         recursive=True,
         include_hidden=False,
-        max_entries=5000,
+        max_entries=path_scan_limit,
         output_profile="compact",
         file_type="file",
     ):
@@ -5694,7 +5704,7 @@ def semantic_find(
             candidates[f"path:{rel}"]["reasons"].append("path_term_match")
 
     symbol_term = "|".join(re.escape(t) for t in terms if t)
-    if symbol_term:
+    if symbol_term and include_symbol_candidates:
         for sym in symbol_index(
             path=path,
             include_private=include_private_symbols,
@@ -5727,7 +5737,7 @@ def semantic_find(
             path=path,
             recursive=True,
             case_insensitive=True,
-            max_matches=200,
+            max_matches=grep_match_limit,
             output_profile="compact",
         )
         for m in matches:
@@ -5779,11 +5789,12 @@ def semantic_find(
         "count": len(ranked),
         "results": ranked,
     }
-    if summary_mode == "quick":
+    if quick_mode:
         result = {
             "schema": "semantic_find.quick.v1",
             "query": query,
             "count": len(ranked),
+            "results": ranked[: min(len(ranked), 12)],
             "top_paths": [r.get("path") for r in ranked[:20] if isinstance(r, dict)],
         }
     if compress and isinstance(result.get("results"), list):
@@ -10144,13 +10155,30 @@ def _build_task_retrieval_context(
                 local_rerank_top_k=max(8, max_items * 3),
             )
             search_rows = search.get('results', []) if isinstance(search, dict) else []
-            explored_candidates += len(search_rows) if isinstance(search_rows, list) else 0
-            for row in search_rows if isinstance(search_rows, list) else []:
-                if not isinstance(row, dict):
-                    continue
-                add_item(_task_retrieval_preview_from_search_row(row=row, max_chars=420))
-                if len(items) >= max_items:
-                    break
+            if isinstance(search_rows, list) and search_rows:
+                explored_candidates += len(search_rows)
+                for row in search_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    add_item(_task_retrieval_preview_from_search_row(row=row, max_chars=420))
+                    if len(items) >= max_items:
+                        break
+            elif isinstance(search, dict):
+                top_paths = search.get('top_paths', [])
+                if isinstance(top_paths, list):
+                    explored_candidates += len(top_paths)
+                    for candidate_path in top_paths:
+                        if not isinstance(candidate_path, str) or not candidate_path.strip():
+                            continue
+                        add_item(
+                            _task_retrieval_preview_from_path(
+                                path=candidate_path,
+                                source='code_search',
+                                max_chars=420,
+                            )
+                        )
+                        if len(items) >= max_items:
+                            break
         except Exception as exc:
             errors.append({'source': 'semantic_find', 'error': str(exc)})
 

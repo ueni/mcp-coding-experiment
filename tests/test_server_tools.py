@@ -133,6 +133,34 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["schema"], "semantic_find.quick.v1")
         self.assertIn("result_id", out)
 
+    def test_semantic_find_quick_skips_symbol_index_and_returns_ranked_results(self):
+        grep_payload = [
+            {
+                "path": "src/sample.py",
+                "line": 1,
+                "column": 5,
+                "match": "alpha",
+                "lineText": "def alpha(x):",
+            }
+        ]
+        with patch.object(self.server, "find_paths", return_value=["src/sample.py"]), patch.object(
+            self.server,
+            "symbol_index",
+            side_effect=AssertionError("symbol_index should not run in semantic_find quick mode"),
+        ), patch.object(self.server, "grep", return_value=grep_payload):
+            out = self.server.semantic_find(
+                query="alpha",
+                path=".",
+                summary_mode="quick",
+                output_profile="normal",
+            )
+        self.assertEqual(out["schema"], "semantic_find.quick.v1")
+        self.assertEqual(out["count"], 1)
+        self.assertIn("results", out)
+        self.assertGreaterEqual(len(out["results"]), 1)
+        self.assertEqual(out["results"][0]["path"], "src/sample.py")
+        self.assertIn("src/sample.py", out["top_paths"])
+
     def test_dependency_map_and_call_graph(self):
         dep = self.server.dependency_map(
             path="src",
@@ -491,6 +519,43 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("context", out["context_packet"])
         self.assertGreaterEqual(out["retrieval"]["telemetry"]["explored_candidates"], 1)
         self.assertEqual(out["retrieval"]["telemetry"]["selected_items"], 1)
+
+    def test_task_router_task_retrieval_context_uses_quick_top_paths(self):
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "phi4-mini-reasoning:3.8b",
+            "ok": True,
+            "output": "review findings",
+        }
+        search_payload = {
+            "schema": "semantic_find.quick.v1",
+            "query": "sample alpha behavior regressions",
+            "count": 1,
+            "top_paths": ["src/sample.py"],
+        }
+        snippet_payload = {
+            "path": "src/sample.py",
+            "start_line": 1,
+            "end_line": 6,
+            "content": "def alpha(x):\n    return x + 1\n",
+        }
+        with patch.object(self.server, "semantic_find", return_value=search_payload), patch.object(
+            self.server, "read_snippet", return_value=snippet_payload
+        ), patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.task_router(
+                mode="task",
+                prompt="Review sample alpha behavior for regressions.",
+                backend="fallback",
+                output_profile="normal",
+            )
+        packet = json.loads(out["encoding"]["encoded_prompt"])
+        self.assertIn("k", packet)
+        self.assertIn("src/sample.py", packet["k"])
+        self.assertEqual(out["retrieval"]["item_count"], 1)
+        self.assertEqual(out["retrieval"]["items"][0]["path"], "src/sample.py")
+        self.assertEqual(out["retrieval"]["sources"]["code_search"], 1)
+        self.assertGreaterEqual(out["retrieval"]["telemetry"]["explored_candidates"], 1)
 
     def test_task_router_task_uses_repo_memory_and_curated_skill_pack(self):
         sample_path = self.repo_path / "src" / "sample.py"
