@@ -50,6 +50,29 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         self.assertGreaterEqual(result["summary_count"], 1)
         self.assertGreaterEqual(result["count"], 1)
 
+    def test_memory_quarantine_blocks_task_context_injection(self):
+        self.server.memory_upsert(
+            namespace="task/session/quarantine-demo",
+            key="unsafe-note",
+            value={"detail": "unverified external memory"},
+            trust_level="low",
+        )
+        visible = self.server.memory_get(namespace="task/session/quarantine-demo")
+        hidden = self.server.memory_get(
+            namespace="task/session/quarantine-demo",
+            include_quarantined=True,
+        )
+        context = self.server._task_namespace_memory_context(
+            "task/session/quarantine-demo",
+            max_chars=240,
+        )
+
+        self.assertEqual(visible["count"], 0)
+        self.assertEqual(visible["quarantined_entry_count"], 1)
+        self.assertEqual(hidden["count"], 1)
+        self.assertTrue(hidden["entries"][0]["quarantined"])
+        self.assertEqual(context, "")
+
     def test_memory_validate_flags_stale_paths_and_drops_expired(self):
         self.server.memory_upsert(
             namespace="validate-demo",

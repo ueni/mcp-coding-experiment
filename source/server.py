@@ -133,6 +133,93 @@ TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.js
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
 WORKFLOW_BENCHMARK_FILE = Path(".codebase-tooling-mcp/reports/WORKFLOW_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
+SKILL_PACK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/SKILL_PACK_LINT.json")
+REPO_HISTORY_MEMORY_MAX_COMMITS = max(10, int(os.getenv("REPO_HISTORY_MEMORY_MAX_COMMITS", "40")))
+REPO_HISTORY_MEMORY_MAX_FILES = max(4, int(os.getenv("REPO_HISTORY_MEMORY_MAX_FILES", "12")))
+REPO_HISTORY_MEMORY_MAX_ENTRIES = max(2, int(os.getenv("REPO_HISTORY_MEMORY_MAX_ENTRIES", "6")))
+MEMORY_TRUST_LEVELS = {"low", "medium", "high"}
+CURATED_TASK_SKILL_PACKS: dict[str, list[dict[str, str]]] = {
+    "coding": [
+        {
+            "id": "scoped_edit",
+            "title": "Scoped Edit",
+            "summary": "Change only the named files or symbols and keep the patch minimal.",
+        },
+        {
+            "id": "compile_then_tests",
+            "title": "Compile Then Tests",
+            "summary": "Validate syntax first, then run impacted tests before expanding scope.",
+        },
+        {
+            "id": "api_docs_sync",
+            "title": "API And Docs Sync",
+            "summary": "If behavior changes, update docs or public API notes in the same edit.",
+        },
+    ],
+    "review": [
+        {
+            "id": "evidence_first",
+            "title": "Evidence First",
+            "summary": "Cite concrete files, symbols, diffs, or outputs before making a claim.",
+        },
+        {
+            "id": "severity_order",
+            "title": "Severity Order",
+            "summary": "Report behavioral regressions and correctness risks before style issues.",
+        },
+        {
+            "id": "missing_tests",
+            "title": "Missing Tests",
+            "summary": "Call out missing tests when behavior changed without validation coverage.",
+        },
+    ],
+    "security": [
+        {
+            "id": "trust_boundaries",
+            "title": "Trust Boundaries",
+            "summary": "Inspect auth, secrets, untrusted input, and state-changing boundaries first.",
+        },
+        {
+            "id": "evidence_first",
+            "title": "Evidence First",
+            "summary": "Ground findings in reachable code paths and concrete repository evidence.",
+        },
+        {
+            "id": "safe_abstain",
+            "title": "Safe Abstain",
+            "summary": "If proof is weak, downgrade confidence instead of overstating impact.",
+        },
+    ],
+    "research": [
+        {
+            "id": "task_scoped_context",
+            "title": "Task Scoped Context",
+            "summary": "Prefer short task-specific snippets over broad repository-wide guidance.",
+        },
+        {
+            "id": "artifact_memory",
+            "title": "Artifact Memory",
+            "summary": "Use reports, baselines, and snapshots when they directly answer the request.",
+        },
+        {
+            "id": "compare_sources",
+            "title": "Compare Sources",
+            "summary": "When multiple repo sources disagree, surface the mismatch explicitly.",
+        },
+    ],
+    "general": [
+        {
+            "id": "compact_answer",
+            "title": "Compact Answer",
+            "summary": "Prefer a short direct answer unless code or repository grounding is required.",
+        },
+        {
+            "id": "repo_grounding",
+            "title": "Repo Grounding",
+            "summary": "If the request mentions repo paths or symbols, ground the answer in them.",
+        },
+    ],
+}
 # Keep the external MCP contract to a single entrypoint; the rest remain internal call targets.
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
@@ -1491,6 +1578,28 @@ def _memory_entry_rank(entry: dict[str, Any]) -> tuple[float, float]:
     return confidence, epoch
 
 
+def _normalize_memory_trust_level(trust_level: str | None) -> str:
+    normalized = str(trust_level or "").strip().lower()
+    if normalized not in MEMORY_TRUST_LEVELS:
+        return "medium"
+    return normalized
+
+
+def _normalize_memory_provenance(provenance: str | None) -> str:
+    normalized = _trim_task_inline_text(provenance or "agent", max_chars=80)
+    return normalized or "agent"
+
+
+def _memory_row_quarantined(row: dict[str, Any]) -> bool:
+    return bool(row.get("quarantined", False))
+
+
+def _memory_row_allowed_for_context(row: dict[str, Any]) -> bool:
+    if _memory_row_quarantined(row):
+        return False
+    return _normalize_memory_trust_level(str(row.get("trust_level", "medium") or "medium")) != "low"
+
+
 def _normalize_memory_evidence(evidence: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     if not isinstance(evidence, list):
         return []
@@ -1499,7 +1608,18 @@ def _normalize_memory_evidence(evidence: list[dict[str, Any]] | None) -> list[di
         if not isinstance(row, dict):
             continue
         item: dict[str, Any] = {}
-        for key in ("kind", "path", "result_id", "replay_id", "diff_id", "validation_id", "summary", "backend"):
+        for key in (
+            "kind",
+            "path",
+            "result_id",
+            "replay_id",
+            "diff_id",
+            "validation_id",
+            "summary",
+            "backend",
+            "provenance",
+            "trust_level",
+        ):
             value = row.get(key)
             if value is None:
                 continue
@@ -1511,9 +1631,23 @@ def _normalize_memory_evidence(evidence: list[dict[str, Any]] | None) -> list[di
         if "count" in row:
             with contextlib.suppress(Exception):
                 item["count"] = int(row.get("count", 0) or 0)
+        if "quarantined" in row:
+            item["quarantined"] = bool(row.get("quarantined", False))
         if item:
             normalized.append(item)
     return normalized
+
+
+def _memory_apply_metadata(
+    row: dict[str, Any],
+    *,
+    provenance: str,
+    trust_level: str,
+    quarantined: bool,
+) -> None:
+    row["provenance"] = _normalize_memory_provenance(provenance)
+    row["trust_level"] = _normalize_memory_trust_level(trust_level)
+    row["quarantined"] = bool(quarantined)
 
 
 def _memory_summary_upsert_in_payload(
@@ -1527,6 +1661,9 @@ def _memory_summary_upsert_in_payload(
     source: str = "agent",
     tags: list[str] | None = None,
     evidence: list[dict[str, Any]] | None = None,
+    provenance: str = "agent",
+    trust_level: str = "medium",
+    quarantined: bool = False,
 ) -> None:
     summaries = payload.get("summaries", [])
     if not isinstance(summaries, list):
@@ -1545,6 +1682,12 @@ def _memory_summary_upsert_in_payload(
             row["expires_at"] = expires_at
             if normalized_evidence:
                 row["evidence"] = normalized_evidence
+            _memory_apply_metadata(
+                row,
+                provenance=provenance,
+                trust_level=trust_level,
+                quarantined=quarantined,
+            )
             return
     row = {
         "namespace": namespace,
@@ -1559,6 +1702,12 @@ def _memory_summary_upsert_in_payload(
     }
     if normalized_evidence:
         row["evidence"] = normalized_evidence
+    _memory_apply_metadata(
+        row,
+        provenance=provenance,
+        trust_level=trust_level,
+        quarantined=quarantined,
+    )
     summaries.append(row)
 
 
@@ -1663,6 +1812,8 @@ def memory_auto_compact(
             confidence=0.9,
             source="memory.auto_compact",
             tags=["auto", "compact", "summary"],
+            provenance="memory.auto_compact",
+            trust_level="high",
         )
         summary_focus = "auto_compact"
         _memory_stats_record("summary_upsert")
@@ -8481,6 +8632,7 @@ def _encode_task_prompt_packet(
     memory_session: str = '',
     memory_context: str = '',
     retrieval_context: str = '',
+    task_context: str = '',
     intent_packet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = re.sub(r'\s+', ' ', prompt.strip())
@@ -8488,6 +8640,7 @@ def _encode_task_prompt_packet(
     session_norm = _normalize_task_memory_session(memory_session)
     memory_text = _trim_task_inline_text(memory_context, max_chars=900)
     retrieval_text = _trim_task_context_block(retrieval_context, max_chars=1400)
+    task_context_text = _trim_task_inline_text(task_context, max_chars=420)
     compact_intent = intent_packet.get('compact', {}) if isinstance(intent_packet, dict) else {}
     packet = {
         'r': TASK_ROUTE_CODE_MAP.get(route, 'G'),
@@ -8500,6 +8653,8 @@ def _encode_task_prompt_packet(
         packet['m'] = memory_text
     if retrieval_text:
         packet['k'] = retrieval_text
+    if task_context_text:
+        packet['x'] = task_context_text
     if compact_intent:
         packet['i'] = compact_intent
     encoded_prompt = json.dumps(packet, ensure_ascii=True, separators=(',', ':'))
@@ -8512,6 +8667,7 @@ def _encode_task_prompt_packet(
         'normalized_chars': len(normalized),
         'memory_chars': len(memory_text),
         'retrieval_chars': len(retrieval_text),
+        'task_context_chars': len(task_context_text),
         'intent_chars': len(json.dumps(compact_intent, ensure_ascii=True, separators=(',', ':'))) if compact_intent else 0,
         'encoded_chars': len(encoded_prompt),
         'char_saving_vs_original': len(prompt) - len(encoded_prompt),
@@ -8654,6 +8810,7 @@ def _build_task_cost_plan(
     route: str,
     prompt: str,
     retrieval_info: dict[str, Any] | None,
+    repo_memory_info: dict[str, Any] | None,
     intent: dict[str, Any],
     max_tokens: int,
 ) -> dict[str, Any]:
@@ -8662,6 +8819,7 @@ def _build_task_cost_plan(
     reasons: list[str] = []
     normalized = re.sub(r"\s+", " ", str(prompt or "").strip())
     retrieval_count = int(retrieval_info.get("item_count", 0) or 0) if isinstance(retrieval_info, dict) else 0
+    repo_memory_count = int(repo_memory_info.get("entry_count", 0) or 0) if isinstance(repo_memory_info, dict) else 0
     target_count = len(intent.get("target_paths", [])) if isinstance(intent.get("target_paths"), list) else 0
     if len(normalized) > 180:
         score += 1
@@ -8681,6 +8839,9 @@ def _build_task_cost_plan(
     if target_count >= 1:
         score += 1
         reasons.append("explicit_targets")
+    if repo_memory_count >= 1:
+        score += 1
+        reasons.append("repo_history_memory")
     if score <= 1:
         effort = "low"
         effective_max_tokens = min(requested, 256)
@@ -8769,6 +8930,8 @@ def _resolve_task_model_route(
     requested_model: str = '',
     prompt: str = '',
     task_hint: str = '',
+    retrieval_info: dict[str, Any] | None = None,
+    repo_memory_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     explicit_model = requested_model.strip()
     if explicit_model:
@@ -8783,6 +8946,8 @@ def _resolve_task_model_route(
         hint_norm = str(task_hint or '').strip().lower()
         selected_micro = hint_norm in MICRO_CODING_TASK_HINTS
         selected_source = 'task_hint:micro_coding'
+        retrieval_count = int(retrieval_info.get("item_count", 0) or 0) if isinstance(retrieval_info, dict) else 0
+        repo_memory_count = int(repo_memory_info.get("entry_count", 0) or 0) if isinstance(repo_memory_info, dict) else 0
         if not selected_micro:
             normalized_prompt = re.sub(r'\s+', ' ', str(prompt or '').strip())
             selected_micro = (
@@ -8793,6 +8958,16 @@ def _resolve_task_model_route(
             )
             if selected_micro:
                 selected_source = 'auto:short_coding_prompt'
+        if not selected_micro:
+            normalized_prompt = re.sub(r'\s+', ' ', str(prompt or '').strip())
+            selected_micro = (
+                bool(normalized_prompt)
+                and len(normalized_prompt) <= max(CODING_MICRO_MAX_PROMPT_CHARS, 1000)
+                and retrieval_count >= 1
+                and repo_memory_count >= 1
+            )
+            if selected_micro:
+                selected_source = 'auto:repo_specialist_grounded'
         if selected_micro:
             routes_cfg = routing.get('routes', {}) if isinstance(routing.get('routes', {}), dict) else {}
             selected = routes_cfg.get(CODING_MICRO_ROUTE, {}) if isinstance(routes_cfg.get(CODING_MICRO_ROUTE, {}), dict) else {}
@@ -8934,6 +9109,8 @@ def _task_namespace_memory_context(
     for row in payload.get('summaries', []):
         if row.get('namespace') != namespace:
             continue
+        if not _memory_row_allowed_for_context(row):
+            continue
         if _is_expired(row.get('expires_at'), now):
             continue
         summaries.append(dict(row))
@@ -8965,6 +9142,8 @@ def _task_namespace_memory_context(
     entries = []
     for row in payload.get('entries', []):
         if row.get('namespace') != namespace:
+            continue
+        if not _memory_row_allowed_for_context(row):
             continue
         if _is_expired(row.get('expires_at'), now):
             continue
@@ -9050,6 +9229,7 @@ def _task_memory_evidence(
     *,
     prompt: str,
     retrieval_info: dict[str, Any],
+    repo_memory_info: dict[str, Any],
     infer: dict[str, Any],
     result_id: str = "",
 ) -> list[dict[str, Any]]:
@@ -9069,6 +9249,21 @@ def _task_memory_evidence(
                 "summary": _trim_task_inline_text(item.get("content", ""), max_chars=120),
             }
         )
+    for row in repo_memory_info.get("entries", [])[:3] if isinstance(repo_memory_info, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        commit_id = str(row.get("commit", "") or "").strip()
+        subject = str(row.get("subject", "") or "").strip()
+        if commit_id or subject:
+            evidence.append(
+                {
+                    "kind": "repo_history",
+                    "result_id": commit_id[:12] if commit_id else "",
+                    "summary": _trim_task_inline_text(subject, max_chars=120),
+                    "provenance": "git_history",
+                    "trust_level": "high",
+                }
+            )
     if result_id and evidence:
         evidence.append({"kind": "result", "result_id": result_id})
     backend = str(infer.get("backend", "") or "").strip()
@@ -9086,6 +9281,7 @@ def _persist_task_memory(
     infer: dict[str, Any],
     memory_info: dict[str, Any],
     retrieval_info: dict[str, Any],
+    repo_memory_info: dict[str, Any],
     result_id: str = '',
 ) -> dict[str, Any]:
     route = str(classification.get('route') or resolved.get('route') or 'general')
@@ -9097,6 +9293,7 @@ def _persist_task_memory(
     evidence = _task_memory_evidence(
         prompt=prompt,
         retrieval_info=retrieval_info,
+        repo_memory_info=repo_memory_info,
         infer=infer,
         result_id=result_id,
     )
@@ -9150,6 +9347,8 @@ def _persist_task_memory(
                     source='task_router.task.auto',
                     tags=['task', 'session', route],
                     evidence=session_evidence,
+                    provenance='task_router.session',
+                    trust_level='high',
                 )
                 state['session_write'] = {**session_write, 'written': True}
             except Exception as exc:
@@ -9172,6 +9371,8 @@ def _persist_task_memory(
                     source='task_router.task.auto',
                     tags=['task', 'route', route],
                     evidence=evidence,
+                    provenance='task_router.route',
+                    trust_level='high',
                 )
                 state['route_summary_write'] = {**route_write, 'written': True}
             except Exception as exc:
@@ -9373,6 +9574,497 @@ def _task_artifact_candidates(terms: list[str], max_items: int = 3) -> list[dict
     return scored[:max_items]
 
 
+def _summarize_task_retrieval_item(item: dict[str, Any], max_chars: int = 140) -> str:
+    path = str(item.get("path", "") or "").strip()
+    content = str(item.get("content", "") or "")
+    snippet = ""
+    for line in content.splitlines():
+        trimmed = line.strip()
+        if trimmed:
+            snippet = trimmed
+            break
+    summary = f"{path}: {snippet}" if path and snippet else path or snippet
+    return _trim_task_inline_text(summary, max_chars=max_chars)
+
+
+def _lint_skill_pack(pack: list[dict[str, Any]], max_modules: int = 3) -> dict[str, Any]:
+    module_ids: list[str] = []
+    duplicates: list[str] = []
+    seen: set[str] = set()
+    summary_chars = 0
+    for row in pack:
+        if not isinstance(row, dict):
+            continue
+        module_id = str(row.get("id", "") or "").strip().lower()
+        if not module_id:
+            continue
+        if module_id in seen and module_id not in duplicates:
+            duplicates.append(module_id)
+        seen.add(module_id)
+        module_ids.append(module_id)
+        summary_chars += len(str(row.get("summary", "") or ""))
+    return {
+        "schema": "skill_pack_lint.v1",
+        "module_count": len(module_ids),
+        "duplicates": duplicates,
+        "max_modules": max_modules,
+        "summary_chars": summary_chars,
+        "ok": len(module_ids) <= max_modules and not duplicates and summary_chars <= 420,
+    }
+
+
+@mcp.tool()
+def skill_pack_lint(
+    route: str = "general",
+    pack: list[dict[str, Any]] | None = None,
+    max_modules: int = 3,
+) -> dict[str, Any]:
+    """Lint small curated skill packs used by task_router context assembly."""
+    if max_modules < 1:
+        raise ValueError("max_modules must be >= 1")
+    selected = pack if isinstance(pack, list) else CURATED_TASK_SKILL_PACKS.get(route, CURATED_TASK_SKILL_PACKS["general"])
+    rows: list[dict[str, Any]] = []
+    for row in selected[: max_modules + 2]:
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                "id": _trim_task_inline_text(row.get("id", ""), max_chars=40),
+                "title": _trim_task_inline_text(row.get("title", ""), max_chars=48),
+                "summary": _trim_task_inline_text(row.get("summary", ""), max_chars=160),
+            }
+        )
+    lint = _lint_skill_pack(rows, max_modules=max_modules)
+    if ALLOW_MUTATIONS:
+        report = {
+            "schema": "skill_pack_lint.report.v1",
+            "route": route,
+            "generated_at": _now_iso(),
+            "pack": rows,
+            "lint": lint,
+        }
+        path = _resolve_repo_path(str(SKILL_PACK_REPORT_FILE))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "schema": "skill_pack_lint.v1",
+        "route": route,
+        "pack": rows,
+        "lint": lint,
+    }
+
+
+def _select_curated_skill_pack(
+    *,
+    route: str,
+    intent: dict[str, Any] | None = None,
+    retrieval_info: dict[str, Any] | None = None,
+    repo_memory: dict[str, Any] | None = None,
+    max_modules: int = 3,
+) -> dict[str, Any]:
+    route_norm = str(route or "general").strip().lower() or "general"
+    base_rows = CURATED_TASK_SKILL_PACKS.get(route_norm, CURATED_TASK_SKILL_PACKS["general"])
+    selected: list[dict[str, str]] = []
+    mutation_intent = bool((intent or {}).get("mutation_intent", False))
+    retrieval_count = int((retrieval_info or {}).get("item_count", 0) or 0)
+    repo_hits = int((repo_memory or {}).get("entry_count", 0) or 0)
+    for row in base_rows:
+        if not isinstance(row, dict):
+            continue
+        module_id = str(row.get("id", "") or "").strip().lower()
+        if route_norm == "general" and mutation_intent and module_id == "compact_answer":
+            continue
+        if route_norm in {"review", "security"} and retrieval_count <= 0 and module_id == "missing_tests":
+            continue
+        if route_norm == "research" and repo_hits <= 0 and module_id == "artifact_memory":
+            continue
+        selected.append(
+            {
+                "id": module_id,
+                "title": _trim_task_inline_text(row.get("title", ""), max_chars=48),
+                "summary": _trim_task_inline_text(row.get("summary", ""), max_chars=160),
+            }
+        )
+        if len(selected) >= max_modules:
+            break
+    lint = _lint_skill_pack(selected, max_modules=max_modules)
+    if not lint["ok"]:
+        selected = selected[:max_modules]
+        lint = _lint_skill_pack(selected, max_modules=max_modules)
+    return {
+        "schema": "task_skill_pack.v1",
+        "route": route_norm,
+        "module_count": len(selected),
+        "modules": selected,
+        "lint": lint,
+    }
+
+
+def _parse_git_log_records(raw: str) -> list[dict[str, Any]]:
+    commits: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in str(raw or "").splitlines():
+        if "\x1f" in line:
+            parts = line.split("\x1f")
+            commit = parts[0].strip()
+            current = {
+                "commit": commit,
+                "date": parts[1].strip() if len(parts) > 1 else "",
+                "subject": parts[2].strip() if len(parts) > 2 else "",
+                "files": [],
+            }
+            commits.append(current)
+            continue
+        if current is None:
+            continue
+        candidate = line.strip()
+        if not candidate:
+            continue
+        current["files"].append(candidate.replace("\\", "/"))
+    return commits
+
+
+def _repo_history_matches_scope(path: str, scope_prefixes: list[str] | None) -> bool:
+    if not scope_prefixes:
+        return True
+    normalized = str(path or "").strip().replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    for prefix in scope_prefixes:
+        scoped = str(prefix or "").strip().replace("\\", "/").strip("/")
+        if not scoped or scoped == ".":
+            return True
+        if normalized == scoped or normalized.startswith(scoped + "/"):
+            return True
+    return False
+
+
+def _repo_history_filter_snapshot(
+    snapshot: dict[str, Any] | None,
+    *,
+    target_paths: list[str] | None = None,
+    terms: list[str] | None = None,
+    max_entries: int = REPO_HISTORY_MEMORY_MAX_ENTRIES,
+) -> dict[str, Any]:
+    base = snapshot if isinstance(snapshot, dict) else {}
+    targets = [str(path).replace("\\", "/") for path in (target_paths or []) if str(path).strip()]
+    search_terms = [str(term).strip().lower() for term in (terms or []) if str(term).strip()]
+    entries_in = base.get("entries", [])
+    hot_in = base.get("hot_paths", [])
+    if not isinstance(entries_in, list):
+        entries_in = []
+    if not isinstance(hot_in, list):
+        hot_in = []
+    if not targets and not search_terms:
+        return {
+            **base,
+            "entry_count": min(len(entries_in), max_entries),
+            "entries": entries_in[:max_entries],
+            "hot_path_count": len(hot_in),
+            "hot_paths": hot_in,
+        } if isinstance(base, dict) and base else {
+            "schema": "repo_history_memory.v1",
+            "enabled": False,
+            "entry_count": 0,
+            "entries": [],
+            "hot_path_count": 0,
+            "hot_paths": [],
+            "context": "",
+        }
+
+    filtered_entries: list[dict[str, Any]] = []
+    for row in entries_in:
+        if not isinstance(row, dict):
+            continue
+        files = [str(path).replace("\\", "/") for path in row.get("files", []) if str(path).strip()]
+        subject_low = str(row.get("subject", "") or "").lower()
+        target_match = not targets or any(path in targets for path in files)
+        term_match = (
+            not search_terms
+            or any(term in subject_low or any(term in path.lower() for path in files) for term in search_terms)
+        )
+        if target_match and term_match:
+            filtered_entries.append(dict(row))
+    filtered_hot: list[dict[str, Any]] = []
+    for row in hot_in:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path", "") or "").strip().replace("\\", "/")
+        if targets and path not in targets:
+            continue
+        if search_terms and not any(term in path.lower() for term in search_terms):
+            continue
+        filtered_hot.append(dict(row))
+    parts: list[str] = []
+    if filtered_hot:
+        parts.append(
+            "hot="
+            + ", ".join(f"{row.get('path', '')}({row.get('count', 0)})" for row in filtered_hot[:4])
+        )
+    if filtered_entries:
+        parts.append(
+            "recent="
+            + " | ".join(
+                _trim_task_inline_text(
+                    f"{row.get('commit', '')} {row.get('subject', '')} [{', '.join(row.get('files', [])[:2])}]",
+                    max_chars=140,
+                )
+                for row in filtered_entries[:3]
+            )
+        )
+    return {
+        "schema": "repo_history_memory.v1",
+        "enabled": bool(base.get("enabled", False)),
+        "target_paths": targets[:8],
+        "terms": search_terms[:8],
+        "entry_count": min(len(filtered_entries), max_entries),
+        "entries": filtered_entries[:max_entries],
+        "hot_path_count": len(filtered_hot),
+        "hot_paths": filtered_hot,
+        "context": _trim_task_inline_text(" ; ".join(parts), max_chars=420),
+    }
+
+
+def _repo_history_memory_snapshot(
+    *,
+    target_paths: list[str] | None = None,
+    terms: list[str] | None = None,
+    max_commits: int = REPO_HISTORY_MEMORY_MAX_COMMITS,
+    max_entries: int = REPO_HISTORY_MEMORY_MAX_ENTRIES,
+    scope_prefixes: list[str] | None = None,
+) -> dict[str, Any]:
+    if not _is_git_repo():
+        return {
+            "schema": "repo_history_memory.v1",
+            "enabled": False,
+            "entry_count": 0,
+            "entries": [],
+            "hot_paths": [],
+            "context": "",
+        }
+    target_list = [str(path).replace("\\", "/") for path in (target_paths or []) if str(path).strip()]
+    search_terms = [str(term).strip().lower() for term in (terms or []) if str(term).strip()]
+    args = ["log", "--date=short", f"-n{max_commits}", "--format=%H%x1f%ad%x1f%s", "--name-only"]
+    if target_list:
+        args.extend(["--", *target_list[:8]])
+    result = _git(*args, check=False)
+    commits = _parse_git_log_records(result.stdout)
+    if not commits and not target_list:
+        return {
+            "schema": "repo_history_memory.v1",
+            "enabled": True,
+            "entry_count": 0,
+            "entries": [],
+            "hot_paths": [],
+            "context": "",
+        }
+    scored: list[tuple[float, dict[str, Any]]] = []
+    hot_counts: dict[str, int] = {}
+    for row in commits:
+        files = [
+            str(path).replace("\\", "/")
+            for path in row.get("files", [])
+            if str(path).strip() and _repo_history_matches_scope(str(path), scope_prefixes)
+        ]
+        if scope_prefixes and not files:
+            continue
+        for rel in files:
+            hot_counts[rel] = hot_counts.get(rel, 0) + 1
+        score = 0.0
+        subject_low = str(row.get("subject", "") or "").lower()
+        if target_list:
+            score += 3.0 if any(rel in target_list for rel in files) else 0.0
+        for term in search_terms:
+            if term and (term in subject_low or any(term in rel.lower() for rel in files)):
+                score += 1.0
+        if score <= 0 and not target_list and search_terms:
+            continue
+        files_preview = files[:4]
+        scored.append(
+            (
+                score,
+                {
+                    "commit": str(row.get("commit", "") or "")[:12],
+                    "date": str(row.get("date", "") or ""),
+                    "subject": _trim_task_inline_text(row.get("subject", ""), max_chars=140),
+                    "files": files_preview,
+                    "score": round(score, 2),
+                },
+            )
+        )
+    scored.sort(key=lambda item: (item[0], item[1].get("date", ""), item[1].get("commit", "")), reverse=True)
+    entries = [row for _, row in scored[:max_entries]]
+    hot_paths = [
+        {"path": path, "count": count}
+        for path, count in sorted(hot_counts.items(), key=lambda item: (item[1], item[0]), reverse=True)[:REPO_HISTORY_MEMORY_MAX_FILES]
+    ]
+    parts: list[str] = []
+    if hot_paths:
+        parts.append(
+            "hot="
+            + ", ".join(f"{row['path']}({row['count']})" for row in hot_paths[:4])
+        )
+    if entries:
+        parts.append(
+            "recent="
+            + " | ".join(
+                _trim_task_inline_text(
+                    f"{row['commit']} {row['subject']} [{', '.join(row['files'][:2])}]",
+                    max_chars=140,
+                )
+                for row in entries[:3]
+            )
+        )
+    return {
+        "schema": "repo_history_memory.v1",
+        "enabled": True,
+        "scope_prefixes": [str(prefix).replace("\\", "/") for prefix in (scope_prefixes or []) if str(prefix).strip()],
+        "target_paths": target_list[:8],
+        "terms": search_terms[:8],
+        "entry_count": len(entries),
+        "entries": entries,
+        "hot_path_count": len(hot_paths),
+        "hot_paths": hot_paths,
+        "context": _trim_task_inline_text(" ; ".join(parts), max_chars=420),
+    }
+
+
+def _load_repo_history_memory_snapshot() -> dict[str, Any] | None:
+    index_path = _resolve_repo_path(str(REPO_INDEX_FILE))
+    if not index_path.is_file():
+        return None
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    history_memory = payload.get("history_memory")
+    return history_memory if isinstance(history_memory, dict) else None
+
+
+def _repo_memory_lookup(
+    *,
+    prompt: str,
+    target_paths: list[str] | None = None,
+    retrieval_info: dict[str, Any] | None = None,
+    max_entries: int = REPO_HISTORY_MEMORY_MAX_ENTRIES,
+) -> dict[str, Any]:
+    base_snapshot = _load_repo_history_memory_snapshot()
+    targets = [str(path).replace("\\", "/") for path in (target_paths or []) if str(path).strip()]
+    if not targets:
+        targets.extend(_extract_prompt_file_paths(prompt, max_paths=4))
+    terms = _task_retrieval_terms(prompt, max_terms=6)
+    if isinstance(retrieval_info, dict):
+        for item in retrieval_info.get("items", [])[:4]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", "") or "").strip()
+            if path and path not in targets:
+                targets.append(path)
+    snapshot = _repo_history_filter_snapshot(
+        base_snapshot if isinstance(base_snapshot, dict) else None,
+        target_paths=targets[:8],
+        terms=terms,
+        max_entries=max_entries,
+    )
+    if (not isinstance(snapshot, dict) or (targets or terms) and not snapshot.get("entries") and not snapshot.get("hot_paths")) and not isinstance(base_snapshot, dict):
+        snapshot = _repo_history_memory_snapshot(
+            target_paths=targets[:8],
+            terms=terms,
+            max_entries=max_entries,
+        )
+    if not isinstance(snapshot, dict):
+        snapshot = {
+            "schema": "repo_history_memory.v1",
+            "enabled": False,
+            "entry_count": 0,
+            "hot_path_count": 0,
+            "entries": [],
+            "hot_paths": [],
+            "context": "",
+        }
+    return snapshot
+
+
+def _build_task_context_packet(
+    *,
+    prompt: str,
+    route: str,
+    intent: dict[str, Any],
+    retrieval_info: dict[str, Any],
+    repo_memory: dict[str, Any],
+    skill_pack: dict[str, Any],
+    max_chars: int = 1400,
+) -> dict[str, Any]:
+    parts: list[str] = []
+    goal = _trim_task_inline_text(intent.get("goal", prompt), max_chars=180)
+    if goal:
+        _append_task_context_piece(parts, f"goal={goal}", max_chars=max_chars)
+    targets = [str(path) for path in intent.get("target_paths", [])[:3]] if isinstance(intent.get("target_paths"), list) else []
+    if targets:
+        _append_task_context_piece(parts, f"targets={', '.join(targets)}", max_chars=max_chars)
+    constraints = [str(item) for item in intent.get("constraints", [])[:3]] if isinstance(intent.get("constraints"), list) else []
+    if constraints:
+        _append_task_context_piece(parts, f"constraints={'; '.join(constraints)}", max_chars=max_chars)
+    retrieval_items = []
+    for item in retrieval_info.get("items", [])[:3] if isinstance(retrieval_info, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        summary = _summarize_task_retrieval_item(item, max_chars=140)
+        if summary:
+            retrieval_items.append(summary)
+    if retrieval_items:
+        _append_task_context_piece(parts, f"retrieval={' | '.join(retrieval_items)}", max_chars=max_chars)
+    repo_bits: list[str] = []
+    for row in repo_memory.get("entries", [])[:2] if isinstance(repo_memory, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        repo_bits.append(
+            _trim_task_inline_text(
+                f"{row.get('commit', '')} {row.get('subject', '')}",
+                max_chars=96,
+            )
+        )
+    if not repo_bits:
+        for row in repo_memory.get("hot_paths", [])[:3] if isinstance(repo_memory, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            repo_bits.append(f"{row.get('path', '')}({row.get('count', 0)})")
+    if repo_bits:
+        _append_task_context_piece(parts, f"history={' | '.join(repo_bits)}", max_chars=max_chars)
+    skill_summaries = []
+    for row in skill_pack.get("modules", [])[:3] if isinstance(skill_pack, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        skill_summaries.append(_trim_task_inline_text(row.get("summary", ""), max_chars=96))
+    if skill_summaries:
+        _append_task_context_piece(parts, f"skills={' | '.join(skill_summaries)}", max_chars=max_chars)
+    context = " | ".join(parts)
+    return {
+        "schema": "task_context_packet.v1",
+        "route": route,
+        "chars": len(context),
+        "sections": len(parts),
+        "context": context,
+    }
+
+
+GUIDED_EDIT_STATE_SEQUENCE = ["start", "plan", "execute", "validate", "finish"]
+
+
+def _guided_edit_state_machine(current_state: str, terminal_reason: str = "") -> dict[str, Any]:
+    state = str(current_state or "").strip().lower() or "finish"
+    if state not in GUIDED_EDIT_STATE_SEQUENCE:
+        state = "finish"
+    payload = {
+        "schema": "guided_edit.state_machine.v1",
+        "current_state": state,
+        "states": list(GUIDED_EDIT_STATE_SEQUENCE),
+    }
+    if terminal_reason:
+        payload["terminal_reason"] = str(terminal_reason)
+    return payload
+
+
 def _build_task_retrieval_context(
     prompt: str,
     route: str,
@@ -9389,6 +10081,14 @@ def _build_task_retrieval_context(
             'context': '',
             'sources': {},
             'items': [],
+            'selected_paths': [],
+            'telemetry': {
+                'query_terms': [],
+                'explored_candidates': 0,
+                'selected_items': 0,
+                'wasted_candidates': 0,
+                'wasted_ratio': 0.0,
+            },
             'errors': [],
         }
 
@@ -9397,6 +10097,7 @@ def _build_task_retrieval_context(
     items: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     seen: set[tuple[str, Any, Any]] = set()
+    explored_candidates = 0
 
     def add_item(item: dict[str, Any] | None) -> None:
         if not item or len(items) >= max_items:
@@ -9408,6 +10109,7 @@ def _build_task_retrieval_context(
         items.append(item)
 
     for path in _extract_prompt_file_paths(prompt, max_paths=2):
+        explored_candidates += 1
         add_item(_task_retrieval_preview_from_path(path=path, source='explicit_path', max_chars=420))
 
     if len(items) < max_items and query:
@@ -9421,7 +10123,9 @@ def _build_task_retrieval_context(
                 use_local_rerank=True,
                 local_rerank_top_k=max(8, max_items * 3),
             )
-            for row in search.get('results', []) if isinstance(search, dict) else []:
+            search_rows = search.get('results', []) if isinstance(search, dict) else []
+            explored_candidates += len(search_rows) if isinstance(search_rows, list) else 0
+            for row in search_rows if isinstance(search_rows, list) else []:
                 if not isinstance(row, dict):
                     continue
                 add_item(_task_retrieval_preview_from_search_row(row=row, max_chars=420))
@@ -9434,7 +10138,9 @@ def _build_task_retrieval_context(
         needle in prompt.lower() for needle in ('report', 'artifact', 'baseline', 'snapshot', '.codebase-tooling-mcp')
     )
     if wants_artifacts and len(items) < max_items:
-        for row in _task_artifact_candidates(terms, max_items=max_items * 2):
+        artifact_rows = _task_artifact_candidates(terms, max_items=max_items * 2)
+        explored_candidates += len(artifact_rows)
+        for row in artifact_rows:
             item = _task_retrieval_preview_from_path(path=row['path'], source='artifact_index', max_chars=360)
             if item is None:
                 continue
@@ -9465,6 +10171,14 @@ def _build_task_retrieval_context(
         'context': context,
         'sources': source_counts,
         'items': items,
+        'selected_paths': [str(item.get('path', '') or '') for item in items],
+        'telemetry': {
+            'query_terms': terms,
+            'explored_candidates': explored_candidates,
+            'selected_items': len(items),
+            'wasted_candidates': max(0, explored_candidates - len(items)),
+            'wasted_ratio': round(max(0, explored_candidates - len(items)) / max(1, explored_candidates), 4),
+        },
         'errors': errors[:4],
     }
 
@@ -9487,13 +10201,6 @@ def _task_infer(
     profile = _default_output_profile(output_profile)
     classification = _classify_task_prompt(prompt=prompt, task=task)
     routing = _load_continue_model_routing()
-    resolved = _resolve_task_model_route(
-        route=str(classification['route']),
-        routing=routing,
-        requested_model=model,
-        prompt=prompt,
-        task_hint=task,
-    )
     memory_info = _build_task_memory_context(
         route=str(classification['route']),
         memory_session=memory_session,
@@ -9502,16 +10209,45 @@ def _task_infer(
         prompt=prompt,
         route=str(classification['route']),
     )
+    repo_memory = _repo_memory_lookup(
+        prompt=prompt,
+        target_paths=list(classification.get("file_hints", []) or []),
+        retrieval_info=retrieval_info,
+    )
     intent = _build_task_intent_packet(
         prompt=prompt,
         route=str(classification['route']),
         task=task,
         retrieval_info=retrieval_info,
     )
+    skill_pack = _select_curated_skill_pack(
+        route=str(classification["route"]),
+        intent=intent,
+        retrieval_info=retrieval_info,
+        repo_memory=repo_memory,
+    )
+    context_packet = _build_task_context_packet(
+        prompt=prompt,
+        route=str(classification["route"]),
+        intent=intent,
+        retrieval_info=retrieval_info,
+        repo_memory=repo_memory,
+        skill_pack=skill_pack,
+    )
+    resolved = _resolve_task_model_route(
+        route=str(classification['route']),
+        routing=routing,
+        requested_model=model,
+        prompt=prompt,
+        task_hint=task,
+        retrieval_info=retrieval_info,
+        repo_memory_info=repo_memory,
+    )
     cost_plan = _build_task_cost_plan(
         route=str(classification['route']),
         prompt=prompt,
         retrieval_info=retrieval_info,
+        repo_memory_info=repo_memory,
         intent=intent,
         max_tokens=max_tokens,
     )
@@ -9522,7 +10258,8 @@ def _task_infer(
         task=task,
         memory_session=str(memory_info['memory_session']),
         memory_context=str(memory_info['context']),
-        retrieval_context=str(retrieval_info['context']),
+        retrieval_context=str(retrieval_info.get('context', '') or ''),
+        task_context=str(context_packet['context']),
         intent_packet=intent,
     )
     effective_system = system or TASK_ROUTE_SYSTEM_PROMPTS.get(
@@ -9562,6 +10299,9 @@ def _task_infer(
         'cost_plan': cost_plan,
         'watchdog': watchdog,
         'retrieval': retrieval_info,
+        'context_packet': context_packet,
+        'repo_memory': repo_memory,
+        'skill_pack': skill_pack,
         'infer': infer,
     }
     if profile == 'compact':
@@ -9576,11 +10316,13 @@ def _task_infer(
             'memory_session': memory_info['memory_session'],
             'memory_chars': memory_info['context_chars'],
             'retrieval_count': retrieval_info['item_count'],
-            'retrieval_chars': retrieval_info['context_chars'],
+            'retrieval_chars': context_packet['chars'],
             'deliverable': intent['deliverable'],
             'risk_level': intent['risk_level'],
             'effort': cost_plan['effort'],
             'watchdog_blocked': watchdog['blocked'],
+            'repo_memory_count': repo_memory.get('entry_count', 0),
+            'skill_count': skill_pack.get('module_count', 0),
             'ok': task_ok,
             'output': infer.get('output', ''),
         }
@@ -9596,8 +10338,30 @@ def _task_infer(
         infer=infer,
         memory_info=memory_info,
         retrieval_info=retrieval_info,
+        repo_memory_info=repo_memory,
         result_id=task_result_id or str(infer.get('result_id') or ''),
     )
+    failure_diagnosis: dict[str, Any] = {
+        "schema": "task_failure_diagnosis.v1",
+        "failed": not task_ok,
+        "failure_stage": "",
+        "reason": "",
+    }
+    if not task_ok:
+        reason = "model_unavailable" if not bool(infer.get("ok", False)) else "empty_output"
+        if bool(watchdog.get("blocked", False)):
+            reason = "prompt_watchdog_blocked"
+        elif int(retrieval_info.get("item_count", 0) or 0) == 0 and intent.get("mutation_intent", False):
+            reason = "missing_repo_context"
+        failure_diagnosis = {
+            "schema": "task_failure_diagnosis.v1",
+            "failed": True,
+            "failure_stage": "infer",
+            "reason": reason,
+            "retrieval_count": int(retrieval_info.get("item_count", 0) or 0),
+            "repo_memory_count": int(repo_memory.get("entry_count", 0) or 0),
+            "watchdog_blocked": bool(watchdog.get("blocked", False)),
+        }
     benchmark = _workflow_benchmark_record(
         "task_router.task",
         {
@@ -9606,6 +10370,9 @@ def _task_infer(
             "backend": str(infer.get("backend") or ""),
             "degraded": bool(infer.get("degraded", False)),
             "retrieval_count": int(retrieval_info.get("item_count", 0) or 0),
+            "retrieval_explored": int(retrieval_info.get("telemetry", {}).get("explored_candidates", 0) or 0),
+            "repo_memory_count": int(repo_memory.get("entry_count", 0) or 0),
+            "skill_count": int(skill_pack.get("module_count", 0) or 0),
             "evidence_count": int(persisted.get("evidence_count", 0) or 0),
             "watchdog_blocked": bool(watchdog.get("blocked", False)),
             "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -9613,6 +10380,9 @@ def _task_infer(
     )
     if 'memory' in result and isinstance(result['memory'], dict):
         result['memory'].update(persisted)
+    if isinstance(result, dict):
+        result["failure_diagnosis"] = failure_diagnosis
+        result["workflow_benchmark"] = benchmark
     else:
         result['memory_write'] = persisted
     result['workflow_benchmark'] = benchmark
@@ -10278,6 +11048,8 @@ def _guided_edit_persist_memory(
         source="guided_edit.auto",
         tags=["guided_edit", str(action.get("action_type", "") or "unknown")],
         evidence=evidence,
+        provenance="guided_edit.target",
+        trust_level="high",
     )
     summary = memory_summary_upsert(
         namespace=namespace,
@@ -10291,13 +11063,60 @@ def _guided_edit_persist_memory(
         source="guided_edit.auto",
         tags=["guided_edit", "summary"],
         evidence=evidence,
+        provenance="guided_edit.summary",
+        trust_level="high",
     )
+    experience_write = {"written": False}
+    if value["ok"]:
+        experience_namespace = f"guided_edit/experience/{str(action.get('action_type', '') or 'unknown')}"
+        experience_value = {
+            "target_path": target_path,
+            "goal": value["goal"],
+            "changed_paths": list(execution.get("changed_paths", []) or [])[:8],
+            "selected_tests": list(validation.get("selected_tests", []) or [])[:8],
+            "replay_id": replay_id,
+            "snapshot_id": snapshot_id,
+        }
+        exp_write = memory_upsert(
+            namespace=experience_namespace,
+            key=f"experience:{_now_iso()}",
+            value=experience_value,
+            ttl_days=30,
+            confidence=0.92,
+            source="guided_edit.experience.auto",
+            tags=["guided_edit", "experience", str(action.get("action_type", "") or "unknown")],
+            evidence=evidence,
+            provenance="guided_edit.experience",
+            trust_level="high",
+        )
+        exp_summary = memory_summary_upsert(
+            namespace=experience_namespace,
+            focus="recent_success",
+            summary=_trim_task_inline_text(
+                f"{action.get('action_type', '')} target={target_path} tests={', '.join(experience_value['selected_tests'][:3]) or 'none'}",
+                max_chars=220,
+            ),
+            ttl_days=45,
+            confidence=0.88,
+            source="guided_edit.experience.auto",
+            tags=["guided_edit", "experience", "summary"],
+            evidence=evidence,
+            provenance="guided_edit.experience",
+            trust_level="high",
+        )
+        experience_write = {
+            "written": True,
+            "namespace": experience_namespace,
+            "entry": exp_write,
+            "summary": exp_summary,
+        }
     return {
         "written": True,
         "namespace": namespace,
         "entry": write,
         "summary": summary,
         "evidence_count": len(evidence),
+        "experience_write": experience_write,
     }
 
 
@@ -10405,6 +11224,22 @@ def _guided_edit_plan_step(
     if not selected_targets:
         raise ValueError("guided_edit could not identify target files; pass target_paths or mention a file path in the prompt")
 
+    repo_memory = _repo_memory_lookup(
+        prompt=prompt,
+        target_paths=selected_targets,
+        retrieval_info={"items": [{"path": path} for path in selected_targets]},
+    )
+    skill_pack = _select_curated_skill_pack(
+        route="coding",
+        intent={
+            "mutation_intent": True,
+            "target_paths": selected_targets,
+            "goal": _trim_task_inline_text(prompt, max_chars=180),
+        },
+        retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
+        repo_memory=repo_memory,
+    )
+
     routing = _load_continue_model_routing()
     resolved = _resolve_task_model_route(
         route="coding",
@@ -10412,11 +11247,29 @@ def _guided_edit_plan_step(
         requested_model=model,
         prompt=prompt,
         task_hint=task,
+        retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
+        repo_memory_info=repo_memory,
     )
     previews = []
     for path in selected_targets[:2]:
         with contextlib.suppress(Exception):
             previews.append(f"[target] {path}\n{_guided_edit_preview_path(path)}")
+    repo_history_lines = [
+        _trim_task_inline_text(
+            f"{row.get('commit', '')} {row.get('subject', '')} [{', '.join(row.get('files', [])[:2])}]",
+            max_chars=140,
+        )
+        for row in repo_memory.get("entries", [])[:3]
+        if isinstance(row, dict)
+    ]
+    skill_lines = [
+        _trim_task_inline_text(
+            f"{row.get('title', '')}: {row.get('summary', '')}",
+            max_chars=140,
+        )
+        for row in skill_pack.get("modules", [])[:3]
+        if isinstance(row, dict)
+    ]
     planner_prompt = (
         "Plan exactly one bounded repository edit step.\n"
         "Return only JSON with keys: action_type, target, goal, rationale, validation_scope.\n"
@@ -10425,7 +11278,9 @@ def _guided_edit_plan_step(
         "Prefer the smallest useful step.\n\n"
         f"User request:\n{prompt.strip()}\n\n"
         f"Candidate targets:\n{chr(10).join(selected_targets)}\n\n"
-        f"Target previews:\n{chr(10).join(previews)}"
+        f"Target previews:\n{chr(10).join(previews)}\n\n"
+        f"Recent repository history:\n{chr(10).join(repo_history_lines) or 'none'}\n\n"
+        f"Curated skills:\n{chr(10).join(skill_lines) or 'none'}"
     )
     infer = local_infer(
         prompt=planner_prompt,
@@ -10453,6 +11308,8 @@ def _guided_edit_plan_step(
             "routing_source": routing.get("source"),
         },
         "selected_targets": selected_targets,
+        "repo_memory": repo_memory,
+        "skill_pack": skill_pack,
         "planner_result": infer,
         "action": action,
     }
@@ -10469,6 +11326,8 @@ def _guided_edit_execute_step(
     temperature: float,
     system: str,
     verifier_mode: str,
+    repo_memory_info: dict[str, Any] | None = None,
+    skill_pack: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     action_type = str(action.get("action_type", "") or "").strip().lower()
     if action_type == "stop":
@@ -10514,14 +11373,31 @@ def _guided_edit_execute_step(
         requested_model=model,
         prompt=prompt,
         task_hint=task,
+        retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
+        repo_memory_info=repo_memory_info,
     )
+    repo_history_lines = [
+        _trim_task_inline_text(
+            f"{row.get('commit', '')} {row.get('subject', '')}",
+            max_chars=120,
+        )
+        for row in (repo_memory_info or {}).get("entries", [])[:2]
+        if isinstance(row, dict)
+    ]
+    skill_lines = [
+        _trim_task_inline_text(row.get("summary", ""), max_chars=100)
+        for row in (skill_pack or {}).get("modules", [])[:3]
+        if isinstance(row, dict)
+    ]
     edit_prompt = (
         "Apply exactly one bounded edit and return only a unified diff.\n"
         "Do not include explanation.\n"
         "The diff must apply cleanly with git apply.\n\n"
         f"User request:\n{prompt.strip()}\n\n"
         f"Planned action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
-        f"Target snippet:\n{snippet.get('content', '')}"
+        f"Target snippet:\n{snippet.get('content', '')}\n\n"
+        f"Recent repository history:\n{chr(10).join(repo_history_lines) or 'none'}\n\n"
+        f"Curated skills:\n{chr(10).join(skill_lines) or 'none'}"
     )
     infer = local_infer(
         prompt=edit_prompt,
@@ -10627,6 +11503,11 @@ def _guided_edit_run(
     if profile not in {"quick", "standard", "auto"}:
         raise ValueError("validation_profile must be one of: quick, standard, auto")
     t0 = time.perf_counter()
+    repo_memory_seed = _repo_memory_lookup(
+        prompt=prompt,
+        target_paths=target_paths,
+        retrieval_info={},
+    )
     intent = _build_task_intent_packet(
         prompt=prompt,
         route="coding",
@@ -10639,8 +11520,15 @@ def _guided_edit_run(
         route="coding",
         prompt=prompt,
         retrieval_info={},
+        repo_memory_info=repo_memory_seed,
         intent=intent,
         max_tokens=max_tokens,
+    )
+    skill_pack_seed = _select_curated_skill_pack(
+        route="coding",
+        intent=intent,
+        retrieval_info={},
+        repo_memory=repo_memory_seed,
     )
     prompt_watchdog = _watchdog_scan(prompt=prompt)
     replay_id = ""
@@ -10649,6 +11537,17 @@ def _guided_edit_run(
             replay = execution_replay(mode="start")
             replay_id = str(replay.get("replay_id", "") or "")
             if replay_id:
+                execution_replay(
+                    mode="log",
+                    replay_id=replay_id,
+                    event={
+                        "stage": "start",
+                        "prompt_summary": _trim_task_inline_text(prompt, max_chars=180),
+                        "intent": intent,
+                        "repo_memory_count": int(repo_memory_seed.get("entry_count", 0) or 0),
+                        "skill_count": int(skill_pack_seed.get("module_count", 0) or 0),
+                    },
+                )
                 execution_replay(
                     mode="log",
                     replay_id=replay_id,
@@ -10668,6 +11567,8 @@ def _guided_edit_run(
                     },
                 )
                 execution_replay(mode="finish", replay_id=replay_id)
+                result["replay_summary"] = execution_replay(mode="summarize", replay_id=replay_id)
+                result["replay_diagnosis"] = execution_replay(mode="diagnose", replay_id=replay_id)
         if store_result:
             result["result_id"] = _result_store_put("task_router_guided_edit", result)
         return result
@@ -10683,11 +11584,14 @@ def _guided_edit_run(
                 "snapshot_id": "",
                 "replay_id": replay_id,
                 "intent": intent,
+                "repo_memory": repo_memory_seed,
+                "skill_pack": skill_pack_seed,
                 "cost_plan": cost_plan,
                 "watchdog": prompt_watchdog,
                 "routing": {},
                 "steps": [],
                 "final_validation": {},
+                "state_machine": _guided_edit_state_machine("start", "watchdog_blocked"),
             }
         )
 
@@ -10725,6 +11629,8 @@ def _guided_edit_run(
                 "snapshot_id": "",
                 "replay_id": replay_id,
                 "intent": intent,
+                "repo_memory": plan_info.get("repo_memory", repo_memory_seed),
+                "skill_pack": plan_info.get("skill_pack", skill_pack_seed),
                 "cost_plan": cost_plan,
                 "watchdog": prompt_watchdog,
                 "routing": plan_info["routing"],
@@ -10738,6 +11644,7 @@ def _guided_edit_run(
                     }
                 ],
                 "final_validation": {},
+                "state_machine": _guided_edit_state_machine("plan", "watchdog_blocked"),
             }
         )
     if action["action_type"] == "stop":
@@ -10751,6 +11658,8 @@ def _guided_edit_run(
                 "snapshot_id": "",
                 "replay_id": replay_id,
                 "intent": intent,
+                "repo_memory": plan_info.get("repo_memory", repo_memory_seed),
+                "skill_pack": plan_info.get("skill_pack", skill_pack_seed),
                 "cost_plan": cost_plan,
                 "watchdog": prompt_watchdog,
                 "routing": plan_info["routing"],
@@ -10764,6 +11673,7 @@ def _guided_edit_run(
                     }
                 ],
                 "final_validation": {},
+                "state_machine": _guided_edit_state_machine("plan", "planner_stop"),
             }
         )
 
@@ -10783,6 +11693,8 @@ def _guided_edit_run(
         temperature=temperature,
         system=system,
         verifier_mode=str(cost_plan.get("verifier_mode", "light") or "light"),
+        repo_memory_info=plan_info.get("repo_memory"),
+        skill_pack=plan_info.get("skill_pack"),
     )
     if replay_id:
         with contextlib.suppress(Exception):
@@ -10862,12 +11774,50 @@ def _guided_edit_run(
             "stopped_reason": stopped_reason,
             "action_type": str(action.get("action_type", "") or ""),
             "changed_path_count": len(list(execution.get("changed_paths", []) or [])),
+            "repo_memory_count": int(plan_info.get("repo_memory", {}).get("entry_count", 0) or 0),
+            "skill_count": int(plan_info.get("skill_pack", {}).get("module_count", 0) or 0),
             "verification_blocked": bool(execution.get("verification", {}).get("blocked", False)),
             "watchdog_blocked": bool(execution.get("watchdog", {}).get("blocked", False)) or bool(prompt_watchdog.get("blocked", False)),
             "evidence_count": int(memory_write.get("evidence_count", 0) or 0),
             "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         },
     )
+    failure_diagnosis = {
+        "schema": "guided_edit.failure_diagnosis.v1",
+        "failed": not ok,
+        "failure_stage": "",
+        "reason": "",
+    }
+    if not ok:
+        if stopped_reason == "watchdog_blocked":
+            failure_diagnosis = {
+                "schema": "guided_edit.failure_diagnosis.v1",
+                "failed": True,
+                "failure_stage": "execute" if execution.get("watchdog", {}).get("blocked", False) else "start",
+                "reason": "watchdog_blocked",
+            }
+        elif stopped_reason == "verifier_disagreement":
+            failure_diagnosis = {
+                "schema": "guided_edit.failure_diagnosis.v1",
+                "failed": True,
+                "failure_stage": "execute",
+                "reason": "verifier_disagreement",
+            }
+        elif stopped_reason == "validation_failed":
+            failure_diagnosis = {
+                "schema": "guided_edit.failure_diagnosis.v1",
+                "failed": True,
+                "failure_stage": "validate",
+                "reason": "validation_failed",
+                "compile_error_count": int(validation.get("compile_error_count", 0) or 0),
+            }
+        else:
+            failure_diagnosis = {
+                "schema": "guided_edit.failure_diagnosis.v1",
+                "failed": True,
+                "failure_stage": "execute",
+                "reason": "apply_failed",
+            }
     result = {
         "schema": "task_router.guided_edit.v1",
         "ok": ok,
@@ -10877,6 +11827,8 @@ def _guided_edit_run(
         "snapshot_id": snapshot_id,
         "replay_id": replay_id,
         "intent": intent,
+        "repo_memory": plan_info.get("repo_memory", repo_memory_seed),
+        "skill_pack": plan_info.get("skill_pack", skill_pack_seed),
         "cost_plan": cost_plan,
         "watchdog": prompt_watchdog,
         "routing": plan_info["routing"],
@@ -10885,6 +11837,11 @@ def _guided_edit_run(
         "effective_validation_profile": effective_profile,
         "memory_write": memory_write,
         "workflow_benchmark": benchmark,
+        "failure_diagnosis": failure_diagnosis,
+        "state_machine": _guided_edit_state_machine(
+            "validate" if stopped_reason == "validation_failed" else "execute" if not ok else "finish",
+            stopped_reason,
+        ),
     }
     return _finish(result)
 
@@ -13414,6 +14371,112 @@ def root_cause_memory(
     return {"schema": "root_cause_memory.v1", "mode": mode, "count": len(suggestions), "suggestions": suggestions}
 
 
+def _execution_replay_diagnose_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    events = payload.get("events", [])
+    if not isinstance(events, list):
+        events = []
+    failure_stage = ""
+    reason = ""
+    for row in events:
+        if not isinstance(row, dict):
+            continue
+        event = row.get("event", {})
+        if not isinstance(event, dict):
+            continue
+        stage = str(event.get("stage", "") or "")
+        watchdog = event.get("watchdog", {})
+        verification = event.get("verification", {})
+        validation = event.get("validation", {})
+        if isinstance(watchdog, dict) and bool(watchdog.get("blocked", False)):
+            failure_stage = stage or "watchdog"
+            blocked_reasons = watchdog.get("blocked_reasons", [])
+            reason = (
+                str(blocked_reasons[0])
+                if isinstance(blocked_reasons, list) and blocked_reasons
+                else "watchdog_blocked"
+            )
+            break
+        if isinstance(verification, dict) and bool(verification.get("blocked", False)):
+            failure_stage = stage or "verification"
+            reason = str(verification.get("reason", "") or "verifier_disagreement")
+            break
+        if isinstance(validation, dict) and not bool(validation.get("ok", True)):
+            failure_stage = stage or "validation"
+            if int(validation.get("compile_error_count", 0) or 0) > 0:
+                reason = "compile_error"
+            elif isinstance(validation.get("test_execution"), dict) and not bool(validation["test_execution"].get("ok", True)):
+                reason = "test_failure"
+            else:
+                reason = "validation_failed"
+            break
+    if not failure_stage:
+        for row in reversed(events):
+            if not isinstance(row, dict):
+                continue
+            event = row.get("event", {})
+            if not isinstance(event, dict):
+                continue
+            if "ok" in event and not bool(event.get("ok", True)):
+                failure_stage = str(event.get("stage", "") or "finish")
+                reason = str(event.get("stopped_reason", "") or "failed")
+                break
+    return {
+        "schema": "execution_replay.diagnosis.v1",
+        "replay_id": str(payload.get("replay_id", "") or ""),
+        "failed": bool(failure_stage),
+        "failure_stage": failure_stage,
+        "reason": reason,
+    }
+
+
+def _execution_replay_summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    events = payload.get("events", [])
+    if not isinstance(events, list):
+        events = []
+    stages: list[str] = []
+    changed_paths: list[str] = []
+    prompt_summary = ""
+    selected_targets: list[str] = []
+    stopped_reason = ""
+    ok = False
+    for row in events:
+        if not isinstance(row, dict):
+            continue
+        event = row.get("event", {})
+        if not isinstance(event, dict):
+            continue
+        stage = str(event.get("stage", "") or "")
+        if stage and stage not in stages:
+            stages.append(stage)
+        if stage == "start":
+            prompt_summary = _trim_task_inline_text(event.get("prompt_summary", ""), max_chars=180)
+        if stage == "plan":
+            targets = event.get("targets", [])
+            if isinstance(targets, list):
+                selected_targets = [str(path) for path in targets[:4]]
+        if stage == "execution":
+            paths = event.get("changed_paths", [])
+            if isinstance(paths, list):
+                changed_paths = [str(path) for path in paths[:8]]
+        if stage == "finish":
+            ok = bool(event.get("ok", False))
+            stopped_reason = str(event.get("stopped_reason", "") or "")
+    diagnosis = _execution_replay_diagnose_payload(payload)
+    return {
+        "schema": "execution_replay.summary.v1",
+        "replay_id": str(payload.get("replay_id", "") or ""),
+        "status": str(payload.get("status", "") or ""),
+        "ok": ok,
+        "stopped_reason": stopped_reason,
+        "prompt_summary": prompt_summary,
+        "stage_count": len(stages),
+        "stages": stages,
+        "selected_targets": selected_targets,
+        "changed_paths": changed_paths,
+        "failure_diagnosis": diagnosis,
+    }
+
+
 @mcp.tool()
 def execution_replay(
     mode: str = "start",
@@ -13422,8 +14485,8 @@ def execution_replay(
     max_events: int = 1000,
 ) -> dict[str, Any]:
     """Record and replay deterministic execution event streams."""
-    if mode not in {"start", "log", "finish", "read"}:
-        raise ValueError("mode must be one of: start, log, finish, read")
+    if mode not in {"start", "log", "finish", "read", "summarize", "diagnose"}:
+        raise ValueError("mode must be one of: start, log, finish, read, summarize, diagnose")
     if max_events < 1:
         raise ValueError("max_events must be >= 1")
     EXECUTION_REPLAY_DIR.mkdir(parents=True, exist_ok=True)
@@ -13445,6 +14508,10 @@ def execution_replay(
         events = []
     if mode == "read":
         return {"schema": "execution_replay.v1", "mode": mode, "replay_id": replay_id, "status": payload.get("status"), "events": events[:max_events]}
+    if mode == "summarize":
+        return _execution_replay_summarize_payload(payload)
+    if mode == "diagnose":
+        return _execution_replay_diagnose_payload(payload)
     _require_mutations()
     if mode == "log":
         events.append({"ts": _now_iso(), "event": event or {}})
@@ -14525,6 +15592,9 @@ def _repo_index_materialize_core_payload(index_payload: dict[str, Any]) -> dict[
         "reused_paths_count": int(index_payload.get("reused_paths_count", 0) or 0),
         "removed_paths_count": int(index_payload.get("removed_paths_count", 0) or 0),
     }
+    history_memory = index_payload.get("history_memory")
+    if isinstance(history_memory, dict):
+        payload["history_memory"] = history_memory
     for key in ("git_head", "git_branch"):
         if key in index_payload:
             payload[key] = index_payload[key]
@@ -14623,6 +15693,7 @@ def repo_index_daemon(
                 "symbol_count": read_payload.get("symbol_count", 0),
                 "dependency_edge_count": read_payload.get("dependency_edge_count", 0),
                 "semantic_dag_edge_count": int(read_payload.get("semantic_dag", {}).get("edge_count", 0) or 0),
+                "history_memory_entry_count": int(read_payload.get("history_memory", {}).get("entry_count", 0) or 0),
             }
             if store_result:
                 compact["result_id"] = _result_store_put("repo_index_daemon", compact)
@@ -14635,6 +15706,7 @@ def repo_index_daemon(
                 "file_count": read_payload.get("file_count", 0),
                 "symbol_count": read_payload.get("symbol_count", 0),
                 "semantic_dag_edge_count": int(read_payload.get("semantic_dag", {}).get("edge_count", 0) or 0),
+                "history_memory_entry_count": int(read_payload.get("history_memory", {}).get("entry_count", 0) or 0),
             }
             if store_result:
                 quick["result_id"] = _result_store_put("repo_index_daemon", quick)
@@ -14759,6 +15831,14 @@ def repo_index_daemon(
         "removed_paths_count": len(removed_paths),
         "reused_paths_count": reused_paths_count,
         "recomputed_python_paths_count": recomputed_python_paths_count,
+        "history_memory": _repo_history_memory_snapshot(
+            max_commits=REPO_HISTORY_MEMORY_MAX_COMMITS,
+            scope_prefixes=(
+                []
+                if str(root.relative_to(REPO_PATH)).replace("\\", "/") in {"", "."}
+                else [str(root.relative_to(REPO_PATH)).replace("\\", "/")]
+            ),
+        ),
     }
     if _is_git_repo():
         payload["git_head"] = _git("rev-parse", "HEAD").stdout.strip()
@@ -14785,6 +15865,7 @@ def repo_index_daemon(
         "recomputed_python_paths_count": recomputed_python_paths_count,
         "removed_paths_count": len(removed_paths),
         "semantic_dag_edge_count": int(semantic_dag_summary.get("edge_count", 0) or 0),
+        "history_memory_entry_count": int(payload.get("history_memory", {}).get("entry_count", 0) or 0),
     }
     if summary_mode == "quick":
         result = {
@@ -14798,6 +15879,7 @@ def repo_index_daemon(
             "reused_paths_count": reused_paths_count,
             "recomputed_python_paths_count": recomputed_python_paths_count,
             "semantic_dag_edge_count": int(semantic_dag_summary.get("edge_count", 0) or 0),
+            "history_memory_entry_count": int(payload.get("history_memory", {}).get("entry_count", 0) or 0),
         }
     if compress:
         result["files_compressed"] = _compress_table(files_meta[:500])
@@ -14948,6 +16030,9 @@ def memory_upsert(
     source: str = "agent",
     tags: list[str] | None = None,
     evidence: list[dict[str, Any]] | None = None,
+    provenance: str = "agent",
+    trust_level: str = "medium",
+    quarantined: bool | None = None,
 ) -> dict[str, Any]:
     """Create or update a structured context memory record."""
     _require_mutations()
@@ -14961,6 +16046,11 @@ def memory_upsert(
     now_iso = _now_iso()
     expires_at = _to_iso_expiry(ttl_days)
     normalized_evidence = _normalize_memory_evidence(evidence)
+    normalized_provenance = _normalize_memory_provenance(provenance)
+    normalized_trust = _normalize_memory_trust_level(trust_level)
+    effective_quarantine = bool(quarantined) if quarantined is not None else (
+        normalized_trust == "low" and not normalized_evidence
+    )
     updated = False
     for entry in entries:
         if entry.get("namespace") == namespace and entry.get("key") == key:
@@ -14972,6 +16062,12 @@ def memory_upsert(
             entry["expires_at"] = expires_at
             if normalized_evidence:
                 entry["evidence"] = normalized_evidence
+            _memory_apply_metadata(
+                entry,
+                provenance=normalized_provenance,
+                trust_level=normalized_trust,
+                quarantined=effective_quarantine,
+            )
             updated = True
             break
 
@@ -14989,6 +16085,12 @@ def memory_upsert(
         }
         if normalized_evidence:
             row["evidence"] = normalized_evidence
+        _memory_apply_metadata(
+            row,
+            provenance=normalized_provenance,
+            trust_level=normalized_trust,
+            quarantined=effective_quarantine,
+        )
         entries.append(row)
 
     _memory_save(payload)
@@ -14999,6 +16101,8 @@ def memory_upsert(
         "updated": True,
         "expires_at": expires_at,
         "evidence_count": len(normalized_evidence),
+        "trust_level": normalized_trust,
+        "quarantined": effective_quarantine,
     }
 
 
@@ -15011,6 +16115,9 @@ def memory_summary_upsert(
     source: str = "agent",
     tags: list[str] | None = None,
     evidence: list[dict[str, Any]] | None = None,
+    provenance: str = "agent",
+    trust_level: str = "medium",
+    quarantined: bool | None = None,
 ) -> dict[str, Any]:
     """Create or update memory summary/focus records for context retention."""
     _require_mutations()
@@ -15023,6 +16130,11 @@ def memory_summary_upsert(
     now_iso = _now_iso()
     expires_at = _to_iso_expiry(ttl_days)
     normalized_evidence = _normalize_memory_evidence(evidence)
+    normalized_provenance = _normalize_memory_provenance(provenance)
+    normalized_trust = _normalize_memory_trust_level(trust_level)
+    effective_quarantine = bool(quarantined) if quarantined is not None else (
+        normalized_trust == "low" and not normalized_evidence
+    )
     updated = False
     for row in summaries:
         if row.get("namespace") == namespace and row.get("focus") == focus:
@@ -15034,6 +16146,12 @@ def memory_summary_upsert(
             row["expires_at"] = expires_at
             if normalized_evidence:
                 row["evidence"] = normalized_evidence
+            _memory_apply_metadata(
+                row,
+                provenance=normalized_provenance,
+                trust_level=normalized_trust,
+                quarantined=effective_quarantine,
+            )
             updated = True
             break
     if not updated:
@@ -15050,6 +16168,12 @@ def memory_summary_upsert(
         }
         if normalized_evidence:
             row["evidence"] = normalized_evidence
+        _memory_apply_metadata(
+            row,
+            provenance=normalized_provenance,
+            trust_level=normalized_trust,
+            quarantined=effective_quarantine,
+        )
         summaries.append(row)
     _memory_save(payload)
     return {
@@ -15059,6 +16183,8 @@ def memory_summary_upsert(
         "updated": True,
         "expires_at": expires_at,
         "evidence_count": len(normalized_evidence),
+        "trust_level": normalized_trust,
+        "quarantined": effective_quarantine,
     }
 
 
@@ -15124,6 +16250,7 @@ def memory_get(
     namespace: str | None = None,
     key: str | None = None,
     include_expired: bool = False,
+    include_quarantined: bool = False,
     max_entries: int = 200,
     include_summaries: bool = True,
     include_effective_decisions: bool = True,
@@ -15141,11 +16268,16 @@ def memory_get(
     now = datetime.now(timezone.utc)
     entries_out: list[dict[str, Any]] = []
     summaries_out: list[dict[str, Any]] = []
+    quarantined_entries = 0
+    quarantined_summaries = 0
 
     for entry in payload["entries"]:
         if namespace is not None and entry.get("namespace") != namespace:
             continue
         if key is not None and entry.get("key") != key:
+            continue
+        if _memory_row_quarantined(entry) and not include_quarantined:
+            quarantined_entries += 1
             continue
         expired = _is_expired(entry.get("expires_at"), now)
         if expired and not include_expired:
@@ -15159,6 +16291,9 @@ def memory_get(
     if include_summaries:
         for row in payload["summaries"]:
             if namespace is not None and row.get("namespace") != namespace:
+                continue
+            if _memory_row_quarantined(row) and not include_quarantined:
+                quarantined_summaries += 1
                 continue
             expired = _is_expired(row.get("expires_at"), now)
             if expired and not include_expired:
@@ -15203,6 +16338,8 @@ def memory_get(
         "summaries": summaries_out,
         "effective_decision_count": len(effective_decisions),
         "effective_decisions": effective_decisions,
+        "quarantined_entry_count": quarantined_entries,
+        "quarantined_summary_count": quarantined_summaries,
         "usage_stats": _memory_stats_load(),
     }
     if compact_result is not None:

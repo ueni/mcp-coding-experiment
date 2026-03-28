@@ -126,7 +126,7 @@ Public tools:
 
 ### 5.2 Router Design Principle
 
-`task_router` owns the public contract and dispatches to internal leaf implementations. Its explicit modes expose status, task inference, embeddings, autocomplete, reranking, guided edit, and coding sandbox/check/package flows without publishing the full internal helper surface. The task path now emits a structured intent packet plus adaptive cost/watchdog metadata, and the guided-edit path adds verifier, replay, benchmark, and evidence-backed memory hooks.
+`task_router` owns the public contract and dispatches to internal leaf implementations. Its explicit modes expose status, task inference, embeddings, autocomplete, reranking, guided edit, and coding sandbox/check/package flows without publishing the full internal helper surface. The task path now emits a structured intent packet plus compact context packet, repository-history memory, retrieval telemetry, curated skill hints, adaptive cost/watchdog metadata, and provenance-aware memory writes. The guided-edit path adds verifier, replay summarization/diagnosis, workflow benchmarking, and evidence-backed experience memory hooks.
 
 ### 5.3 Internal Leaf Tools
 

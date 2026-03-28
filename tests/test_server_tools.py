@@ -488,6 +488,67 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["retrieval"]["item_count"], 1)
         self.assertEqual(out["retrieval"]["sources"]["code_search"], 1)
         self.assertEqual(out["retrieval"]["items"][0]["path"], "src/sample.py")
+        self.assertIn("context", out["context_packet"])
+        self.assertGreaterEqual(out["retrieval"]["telemetry"]["explored_candidates"], 1)
+        self.assertEqual(out["retrieval"]["telemetry"]["selected_items"], 1)
+
+    def test_task_router_task_uses_repo_memory_and_curated_skill_pack(self):
+        sample_path = self.repo_path / "src" / "sample.py"
+        sample_path.write_text(
+            sample_path.read_text(encoding="utf-8").replace(
+                "    return alpha(y)\n",
+                "    # recent commit for repo memory\n    return alpha(y)\n",
+            ),
+            encoding="utf-8",
+        )
+        self.commit_all("feat(sample): update sample behavior")
+        infer_payload = {
+            "schema": "local_infer.v1",
+            "backend": "fallback",
+            "model": "qwen2.5-coder:1.5b",
+            "ok": True,
+            "output": "bounded patch plan",
+        }
+        search_payload = {
+            "schema": "semantic_find.quick.v1",
+            "query": "sample helper minimal patch",
+            "count": 1,
+            "results": [
+                {
+                    "kind": "symbol",
+                    "path": "src/sample.py",
+                    "name": "alpha",
+                    "line_start": 3,
+                    "line_end": 7,
+                    "score": 6.0,
+                }
+            ],
+        }
+        snippet_payload = {
+            "path": "src/sample.py",
+            "start_line": 1,
+            "end_line": 8,
+            "content": "def alpha(x):\n    return x + 1\n",
+        }
+        prompt = (
+            "Implement a careful but bounded update for src/sample.py that preserves behavior, "
+            "stays repository-grounded, and only changes the minimum necessary region. "
+        ) * 5
+        with patch.object(self.server, "semantic_find", return_value=search_payload), patch.object(
+            self.server, "read_snippet", return_value=snippet_payload
+        ), patch.object(self.server, "local_infer", return_value=infer_payload):
+            out = self.server.task_router(
+                mode="task",
+                prompt=prompt,
+                backend="fallback",
+                output_profile="normal",
+            )
+        self.assertEqual(out["routing"]["selected_by"], "auto:repo_specialist_grounded")
+        self.assertGreaterEqual(out["repo_memory"]["entry_count"], 1)
+        self.assertGreaterEqual(out["skill_pack"]["module_count"], 1)
+        self.assertIn("history=", out["context_packet"]["context"])
+        self.assertIn("skills=", out["context_packet"]["context"])
+        self.assertEqual(out["retrieval"]["telemetry"]["selected_items"], 1)
 
     def test_task_router_defaults_to_task_mode(self):
         infer_payload = {
@@ -570,6 +631,13 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["max_tokens"], 64)
         self.assertEqual(out["cost_plan"]["requested_max_tokens"], 64)
         self.assertEqual(out["cost_plan"]["effective_max_tokens"], 64)
+
+    def test_skill_pack_lint_curated_pack_is_small_and_unique(self):
+        out = self.server.skill_pack_lint(route="coding")
+        self.assertEqual(out["schema"], "skill_pack_lint.v1")
+        self.assertTrue(out["lint"]["ok"])
+        self.assertLessEqual(out["lint"]["module_count"], 3)
+        self.assertEqual(out["lint"]["duplicates"], [])
 
 
     def test_task_router_task_reads_memory_and_encodes_session_and_memory(self):
@@ -1518,6 +1586,60 @@ class ServerToolsTest(ServerToolsTestBase):
         done = self.server.execution_replay(mode="finish", replay_id=rid)
         self.assertEqual(done["status"], "closed")
 
+    def test_execution_replay_summarize_and_diagnose_failure(self):
+        replay = self.server.execution_replay(mode="start")
+        rid = replay["replay_id"]
+        self.server.execution_replay(
+            mode="log",
+            replay_id=rid,
+            event={"stage": "start", "prompt_summary": "Update src/sample.py"},
+        )
+        self.server.execution_replay(
+            mode="log",
+            replay_id=rid,
+            event={
+                "stage": "execution",
+                "changed_paths": ["src/sample.py"],
+                "verification": {"blocked": True, "reason": "diff expands scope"},
+            },
+        )
+        self.server.execution_replay(
+            mode="log",
+            replay_id=rid,
+            event={"stage": "finish", "ok": False, "stopped_reason": "verifier_disagreement"},
+        )
+        self.server.execution_replay(mode="finish", replay_id=rid)
+        summary = self.server.execution_replay(mode="summarize", replay_id=rid)
+        diagnosis = self.server.execution_replay(mode="diagnose", replay_id=rid)
+        self.assertEqual(summary["schema"], "execution_replay.summary.v1")
+        self.assertEqual(summary["changed_paths"], ["src/sample.py"])
+        self.assertFalse(summary["ok"])
+        self.assertEqual(diagnosis["schema"], "execution_replay.diagnosis.v1")
+        self.assertTrue(diagnosis["failed"])
+        self.assertEqual(diagnosis["failure_stage"], "execution")
+        self.assertIn("scope", diagnosis["reason"])
+
+    def test_execution_replay_summarize_defaults_to_not_ok_without_finish_event(self):
+        replay = self.server.execution_replay(mode="start")
+        rid = replay["replay_id"]
+        self.server.execution_replay(
+            mode="log",
+            replay_id=rid,
+            event={"stage": "start", "prompt_summary": "Inspect src/sample.py"},
+        )
+        self.server.execution_replay(
+            mode="log",
+            replay_id=rid,
+            event={"stage": "execution", "changed_paths": ["src/sample.py"]},
+        )
+        self.server.execution_replay(mode="finish", replay_id=rid)
+
+        summary = self.server.execution_replay(mode="summarize", replay_id=rid)
+
+        self.assertEqual(summary["status"], "closed")
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["changed_paths"], ["src/sample.py"])
+
     def test_task_router_coding_modes_and_validation(self):
         with self.assertRaises(ValueError):
             self.server.task_router(mode="not_a_mode")
@@ -1733,6 +1855,14 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("tests/test_sample.py", out["final_validation"]["selected_tests"])
         self.assertFalse(out["steps"][0]["rolled_back"])
         self.assertTrue(out["memory_write"]["written"])
+        self.assertTrue(out["memory_write"]["experience_write"]["written"])
+        self.assertEqual(out["replay_summary"]["schema"], "execution_replay.summary.v1")
+        self.assertEqual(out["replay_diagnosis"]["schema"], "execution_replay.diagnosis.v1")
+        self.assertGreaterEqual(out["repo_memory"]["entry_count"], 1)
+        self.assertGreaterEqual(out["skill_pack"]["module_count"], 1)
+        self.assertEqual(out["state_machine"]["states"], ["start", "plan", "execute", "validate", "finish"])
+        self.assertEqual(out["state_machine"]["current_state"], "finish")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "single_step_complete")
 
     def test_task_router_guided_edit_rolls_back_on_failed_validation(self):
         before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
@@ -1798,6 +1928,8 @@ class ServerToolsTest(ServerToolsTestBase):
             before,
         )
         self.assertTrue(out["memory_write"]["written"])
+        self.assertEqual(out["state_machine"]["current_state"], "validate")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "validation_failed")
 
     def test_task_router_guided_edit_blocks_verifier_disagreement(self):
         planner_output = json.dumps(
@@ -1854,6 +1986,8 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["stopped_reason"], "verifier_disagreement")
         self.assertFalse(out["steps"][0]["execution"]["applied"])
         self.assertTrue(out["steps"][0]["execution"]["verification"]["blocked"])
+        self.assertEqual(out["state_machine"]["current_state"], "execute")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "verifier_disagreement")
 
     def test_task_router_guided_edit_blocks_unrelated_update_docs_diff(self):
         other_path = self.repo_path / "tests" / "test_smoke.py"
@@ -1905,6 +2039,41 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["stopped_reason"], "watchdog_blocked")
         self.assertTrue(out["steps"][0]["execution"]["watchdog"]["blocked"])
         self.assertIn("out_of_scope_path:tests/test_smoke.py", out["steps"][0]["execution"]["watchdog"]["blocked_reasons"])
+        self.assertEqual(out["state_machine"]["current_state"], "execute")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "watchdog_blocked")
+
+    def test_task_router_guided_edit_planner_stop_uses_normalized_state_machine(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "stop",
+                "target": {"path": "src/sample.py", "start_line": 1, "end_line": 4},
+                "goal": "no edit required",
+                "rationale": "the request is already satisfied",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            return_value={
+                "schema": "local_infer.v1",
+                "backend": "fallback",
+                "model": "qwen2.5-coder:3b",
+                "ok": True,
+                "output": planner_output,
+            },
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Leave src/sample.py unchanged.",
+                target_paths=["src/sample.py"],
+                backend="fallback",
+                validation_profile="quick",
+            )
+        self.assertEqual(out["stopped_reason"], "planner_stop")
+        self.assertEqual(out["state_machine"]["states"], ["start", "plan", "execute", "validate", "finish"])
+        self.assertEqual(out["state_machine"]["current_state"], "plan")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "planner_stop")
 
     def test_memory_auto_compact_and_usage_stats(self):
         for i in range(10):
