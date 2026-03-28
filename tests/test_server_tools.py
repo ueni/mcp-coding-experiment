@@ -1792,10 +1792,11 @@ class ServerToolsTest(ServerToolsTestBase):
             "def alpha(x):\n    return x + 1\n",
             "def alpha(x):\n    # alpha increments the input\n    return x + 1\n",
         )
-        sample_path = self.repo_path / "src" / "sample.py"
-        sample_path.write_text(after, encoding="utf-8")
-        diff_output = self.git("diff", "--", "src/sample.py").stdout
-        sample_path.write_text(before, encoding="utf-8")
+        replacement_output = (
+            "def alpha(x):\n"
+            "    # alpha increments the input\n"
+            "    return x + 1"
+        )
         planner_output = json.dumps(
             {
                 "action_type": "replace_region",
@@ -1821,7 +1822,7 @@ class ServerToolsTest(ServerToolsTestBase):
                     "backend": "fallback",
                     "model": "qwen2.5-coder:3b",
                     "ok": True,
-                    "output": diff_output,
+                    "output": replacement_output,
                 },
                 {
                     "schema": "local_infer.v1",
@@ -1854,6 +1855,8 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["final_validation"]["ok"])
         self.assertIn("tests/test_sample.py", out["final_validation"]["selected_tests"])
         self.assertFalse(out["steps"][0]["rolled_back"])
+        self.assertEqual(out["steps"][0]["execution"]["isolation"]["backend"], "git_worktree")
+        self.assertTrue(out["steps"][0]["execution"]["materialized"])
         self.assertTrue(out["memory_write"]["written"])
         self.assertTrue(out["memory_write"]["experience_write"]["written"])
         self.assertEqual(out["replay_summary"]["schema"], "execution_replay.summary.v1")
@@ -1864,13 +1867,142 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["state_machine"]["current_state"], "finish")
         self.assertEqual(out["state_machine"]["terminal_reason"], "single_step_complete")
 
+    def test_task_router_guided_edit_repairs_invalid_planner_output(self):
+        replacement_output = (
+            "def alpha(x):\n"
+            "    # alpha increments the input\n"
+            "    return x + 1"
+        )
+        repaired_planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "keep the change minimal",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "I would update src/sample.py with a tiny comment.",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": repaired_planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": replacement_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "agree", "confidence": 0.91, "reason": "repaired plan matches the diff"}
+                    ),
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="endpoint",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["steps"][0]["planner_attempts"]), 2)
+        self.assertEqual(out["steps"][0]["planner_attempts"][1]["kind"], "repair")
+        self.assertTrue(out["steps"][0]["planner_attempts"][1]["ok"])
+        self.assertIsNotNone(out["steps"][0]["repair_result"])
+        self.assertEqual(out["steps"][0]["execution"]["isolation"]["backend"], "git_worktree")
+        self.assertTrue(out["steps"][0]["execution"]["materialized"])
+
+    def test_task_router_guided_edit_repairs_invalid_edit_output(self):
+        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
+        repaired_output = (
+            "def alpha(x):\n"
+            "    # alpha increments the input\n"
+            "    return x + 1"
+        )
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "keep the change minimal",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": repaired_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "agree", "confidence": 0.94, "reason": "repaired diff matches the request"}
+                    ),
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="endpoint",
+                validation_profile="quick",
+            )
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["steps"][0]["execution"]["repair_used"])
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 2)
+        self.assertIsNotNone(out["steps"][0]["execution"]["repair_result"])
+
     def test_task_router_guided_edit_rolls_back_on_failed_validation(self):
         before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
-        after = before.replace("def alpha(x):\n", "def alpha(x)\n")
-        sample_path = self.repo_path / "src" / "sample.py"
-        sample_path.write_text(after, encoding="utf-8")
-        diff_output = self.git("diff", "--", "src/sample.py").stdout
-        sample_path.write_text(before, encoding="utf-8")
+        invalid_replacement_output = (
+            "def alpha(x)\n"
+            "    return x + 1"
+        )
         planner_output = json.dumps(
             {
                 "action_type": "replace_region",
@@ -1896,7 +2028,7 @@ class ServerToolsTest(ServerToolsTestBase):
                     "backend": "fallback",
                     "model": "qwen2.5-coder:3b",
                     "ok": True,
-                    "output": diff_output,
+                    "output": invalid_replacement_output,
                 },
                 {
                     "schema": "local_infer.v1",
@@ -1922,12 +2054,13 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["stopped_reason"], "validation_failed")
         self.assertEqual(out["final_validation"]["compile_error_count"], 1)
-        self.assertTrue(out["steps"][0]["rolled_back"])
+        self.assertFalse(out["steps"][0]["rolled_back"])
         self.assertEqual(
             (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
             before,
         )
         self.assertTrue(out["memory_write"]["written"])
+        self.assertFalse(out["steps"][0]["execution"].get("materialized", False))
         self.assertEqual(out["state_machine"]["current_state"], "validate")
         self.assertEqual(out["state_machine"]["terminal_reason"], "validation_failed")
 
@@ -1941,11 +2074,11 @@ class ServerToolsTest(ServerToolsTestBase):
                 "validation_scope": "standard",
             }
         )
-        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
-        sample_path = self.repo_path / "src" / "sample.py"
-        sample_path.write_text(before + "\n\ndef gamma(x):\n    return x * 2\n", encoding="utf-8")
-        diff_output = self.git("diff", "--", "src/sample.py").stdout
-        sample_path.write_text(before, encoding="utf-8")
+        broad_replacement_output = (
+            "def alpha(x):\n"
+            "    # over-broad change\n"
+            "    return x + 2"
+        )
         with patch.object(
             self.server,
             "local_infer",
@@ -1962,7 +2095,7 @@ class ServerToolsTest(ServerToolsTestBase):
                     "backend": "fallback",
                     "model": "qwen2.5-coder:3b",
                     "ok": True,
-                    "output": diff_output,
+                    "output": broad_replacement_output,
                 },
                 {
                     "schema": "local_infer.v1",
@@ -1971,6 +2104,22 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "disagree", "confidence": 0.95, "reason": "diff expands scope beyond the stated action"}
+                    ),
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": broad_replacement_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": json.dumps(
+                        {"verdict": "disagree", "confidence": 0.97, "reason": "repaired diff still expands scope beyond the stated action"}
                     ),
                 },
             ],
@@ -1986,8 +2135,126 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["stopped_reason"], "verifier_disagreement")
         self.assertFalse(out["steps"][0]["execution"]["applied"])
         self.assertTrue(out["steps"][0]["execution"]["verification"]["blocked"])
+        self.assertTrue(out["steps"][0]["execution"]["repair_used"])
         self.assertEqual(out["state_machine"]["current_state"], "execute")
         self.assertEqual(out["state_machine"]["terminal_reason"], "verifier_disagreement")
+
+    def test_task_router_guided_edit_returns_structured_failure_for_invalid_planner_output(self):
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Make a tiny edit in src/sample.py.",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini-reasoning:3.8b",
+                    "ok": True,
+                    "output": "still not json",
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="endpoint",
+                validation_profile="quick",
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["stopped_reason"], "planner_invalid")
+        self.assertEqual(out["failure_diagnosis"]["failure_stage"], "plan")
+        self.assertEqual(out["failure_diagnosis"]["reason"], "planner_invalid")
+        self.assertEqual(out["state_machine"]["current_state"], "plan")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "planner_invalid")
+
+    def test_task_router_guided_edit_returns_structured_failure_for_invalid_edit_output(self):
+        planner_output = json.dumps(
+            {
+                "action_type": "replace_region",
+                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
+                "goal": "add a short behavior comment",
+                "rationale": "keep the change minimal",
+                "validation_scope": "quick",
+            }
+        )
+        with patch.object(
+            self.server,
+            "local_infer",
+            side_effect=[
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": planner_output,
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "qwen2.5-coder:3b",
+                    "ok": True,
+                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
+                },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "endpoint",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
+                },
+            ],
+        ):
+            out = self.server.task_router(
+                mode="guided_edit",
+                prompt="Add a short behavior comment to src/sample.py.",
+                target_paths=["src/sample.py"],
+                backend="endpoint",
+                validation_profile="quick",
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["stopped_reason"], "edit_invalid")
+        self.assertEqual(out["failure_diagnosis"]["failure_stage"], "execute")
+        self.assertEqual(out["failure_diagnosis"]["reason"], "edit_invalid")
+        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 2)
+        self.assertTrue(out["steps"][0]["execution"]["repair_used"])
+        self.assertEqual(out["state_machine"]["current_state"], "execute")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "edit_invalid")
+
+    def test_guided_edit_parse_verification_accepts_word_confidence(self):
+        parsed = self.server._guided_edit_parse_verification(
+            json.dumps(
+                {
+                    "verdict": "disagree",
+                    "confidence": "high",
+                    "reason": "scope mismatch",
+                }
+            )
+        )
+        self.assertEqual(parsed["verdict"], "disagree")
+        self.assertEqual(parsed["confidence"], 0.9)
+
+    def test_guided_edit_output_to_diff_rejects_large_structured_expansion(self):
+        region = self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0)
+        with self.assertRaises(ValueError):
+            self.server._guided_edit_output_to_diff(
+                raw_output=(
+                    "def alpha(x):\n"
+                    "    # line one\n"
+                    "    # line two\n"
+                    "    # line three\n"
+                    "    return x + 1"
+                ),
+                target_region=region,
+                allow_raw_diff=False,
+                max_extra_lines=1,
+            )
 
     def test_task_router_guided_edit_blocks_unrelated_update_docs_diff(self):
         other_path = self.repo_path / "tests" / "test_smoke.py"
@@ -2026,6 +2293,13 @@ class ServerToolsTest(ServerToolsTestBase):
                     "ok": True,
                     "output": diff_output,
                 },
+                {
+                    "schema": "local_infer.v1",
+                    "backend": "fallback",
+                    "model": "phi4-mini:3.8b",
+                    "ok": True,
+                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
+                },
             ],
         ):
             out = self.server.task_router(
@@ -2036,11 +2310,11 @@ class ServerToolsTest(ServerToolsTestBase):
                 validation_profile="auto",
             )
         self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "watchdog_blocked")
-        self.assertTrue(out["steps"][0]["execution"]["watchdog"]["blocked"])
-        self.assertIn("out_of_scope_path:tests/test_smoke.py", out["steps"][0]["execution"]["watchdog"]["blocked_reasons"])
+        self.assertEqual(out["stopped_reason"], "edit_invalid")
+        self.assertFalse(out["steps"][0]["execution"]["watchdog"]["blocked"])
+        self.assertEqual(out["steps"][0]["execution"]["stopped_reason_hint"], "edit_invalid")
         self.assertEqual(out["state_machine"]["current_state"], "execute")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "watchdog_blocked")
+        self.assertEqual(out["state_machine"]["terminal_reason"], "edit_invalid")
 
     def test_task_router_guided_edit_planner_stop_uses_normalized_state_machine(self):
         planner_output = json.dumps(
