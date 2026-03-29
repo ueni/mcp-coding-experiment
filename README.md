@@ -278,7 +278,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 | `CODING_DEFAULT_MODEL` | `qwen2.5-coder:3b` | No | Ollama model ID | Primary coding model used by `coding_infer` and the default coding route. |
 | `CODING_MICRO_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Smaller coding model used for explicit `micro_coding` requests and short auto-routed coding prompts. |
 | `CODING_MICRO_MAX_PROMPT_CHARS` | `600` | No | Positive integer | Maximum normalized prompt size for automatic micro-coding selection. |
-| `CONTINUE_OLLAMA_MODELS` | `qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b` | No | Comma-separated model IDs (or empty) | Default Ollama model set expected to be embedded in the image and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
+| `CONTINUE_OLLAMA_MODELS` | `qwen2.5-coder:3b,qwen2.5-coder:1.5b,smollm2:360m,granite3.3:2b,deepseek-r1:1.5b,granite3.2-vision:2b` | No | Comma-separated model IDs (or empty) | Default Ollama model set expected to be embedded in the image and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
 | `OLLAMA_ALLOW_PULL` | `false` | No | `true`, `false` | Explicit opt-in for runtime `ollama pull` of missing models. Keep `false` for offline-only startup. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
 | `OLLAMA_STARTUP_TIMEOUT` | `30` | No | Integer seconds | Max wait time for Ollama readiness before fallback/failure logic. |

@@ -253,13 +253,10 @@ DEFAULT_CONTINUE_OLLAMA_MODELS = ",".join(
     (
         DEFAULT_CODING_MODEL,
         DEFAULT_CODING_MICRO_MODEL,
+        "smollm2:360m",
         "granite3.3:2b",
-        "phi4-mini:3.8b",
-        "phi4-mini-reasoning:3.8b",
         "deepseek-r1:1.5b",
-        "deepscaler:1.5b",
         "granite3.2-vision:2b",
-        "llama3.2:1b",
     )
 )
 CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-3b.yaml"
@@ -8437,8 +8434,8 @@ def _default_continue_model_routing() -> dict[str, Any]:
         'source': None,
         'loaded': False,
         'router': {
-            'model': 'granite3.3:2b',
-            'file': '.continue/models/router-granite3.3-2b.yaml',
+            'model': 'smollm2:360m',
+            'file': '.continue/models/router-smollm2-360m.yaml',
         },
         'routes': {
             'coding': {
@@ -8450,28 +8447,28 @@ def _default_continue_model_routing() -> dict[str, Any]:
                 'file': CODING_MICRO_MODEL_CONFIG_FILE,
             },
             'refactor': {
-                'model': 'phi4-mini:3.8b',
-                'file': '.continue/models/refactor-phi4-mini-3.8b.yaml',
+                'model': 'granite3.3:2b',
+                'file': '.continue/models/refactor-granite3.3-2b.yaml',
             },
             'review': {
-                'model': 'phi4-mini-reasoning:3.8b',
-                'file': '.continue/models/review-phi4-mini-reasoning-3.8b.yaml',
+                'model': 'granite3.3:2b',
+                'file': '.continue/models/review-granite3.3-2b.yaml',
             },
             'security': {
                 'model': 'deepseek-r1:1.5b',
                 'file': '.continue/models/security-deepseek-r1-1.5b.yaml',
             },
             'math': {
-                'model': 'deepscaler:1.5b',
-                'file': '.continue/models/math-deepscaler-1.5b.yaml',
+                'model': 'deepseek-r1:1.5b',
+                'file': '.continue/models/math-deepseek-r1-1.5b.yaml',
             },
             'vision': {
                 'model': 'granite3.2-vision:2b',
                 'file': '.continue/models/vision-granite3.2-vision-2b.yaml',
             },
             'research': {
-                'model': 'llama3.2:1b',
-                'file': '.continue/models/research-llama3.2-1b.yaml',
+                'model': 'granite3.3:2b',
+                'file': '.continue/models/research-granite3.3-2b.yaml',
             },
         },
     }

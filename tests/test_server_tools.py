@@ -475,7 +475,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "phi4-mini-reasoning:3.8b",
+            "model": "granite3.3:2b",
             "ok": True,
             "output": "review findings",
         }
@@ -524,7 +524,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "phi4-mini-reasoning:3.8b",
+            "model": "granite3.3:2b",
             "ok": True,
             "output": "review findings",
         }
@@ -637,7 +637,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.compact.v1",
             "backend": "fallback",
-            "model": "phi4-mini-reasoning:3.8b",
+            "model": "granite3.3:2b",
             "ok": True,
             "output": "review findings",
         }
@@ -651,10 +651,10 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "task_router.task.compact.v1")
         self.assertEqual(out["route"], "review")
-        self.assertEqual(out["model"], "phi4-mini-reasoning:3.8b")
+        self.assertEqual(out["model"], "granite3.3:2b")
         self.assertTrue(out["ok"])
         self.assertEqual(linf.call_args.kwargs["task"], "review")
-        self.assertEqual(linf.call_args.kwargs["model"], "phi4-mini-reasoning:3.8b")
+        self.assertEqual(linf.call_args.kwargs["model"], "granite3.3:2b")
 
     def test_task_router_task_auto_selects_micro_coding_model_for_short_prompt(self):
         infer_payload = {
@@ -1906,7 +1906,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "agree", "confidence": 0.93, "reason": "diff matches the bounded plan"}
@@ -1981,7 +1981,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": repaired_planner_output,
                 },
@@ -2009,7 +2009,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "agree", "confidence": 0.91, "reason": "repaired plan matches the diff"}
@@ -2066,7 +2066,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": repaired_planner_output,
                 },
@@ -2087,14 +2087,14 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "agree", "confidence": 0.92, "reason": "repaired planner action matches the request"}
@@ -2152,21 +2152,21 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": repaired_output,
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "agree", "confidence": 0.94, "reason": "repaired diff matches the request"}
@@ -2241,7 +2241,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "agree", "confidence": 0.88, "reason": "diff is syntactically scoped but invalid"}
@@ -2336,7 +2336,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"winner": "tie", "reason": "both candidates are similarly broad"}
@@ -2345,7 +2345,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"winner": "tie", "reason": "both candidates are similarly broad"}
@@ -2354,7 +2354,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"winner": "tie", "reason": "both candidates are similarly broad"}
@@ -2363,7 +2363,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "disagree", "confidence": 0.97, "reason": "repaired diff still expands scope beyond the stated action"}
@@ -2372,7 +2372,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "disagree", "confidence": 0.96, "reason": "alternate diff still expands scope beyond the stated action"}
@@ -2381,7 +2381,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"verdict": "disagree", "confidence": 0.97, "reason": "repair diff still expands scope beyond the stated action"}
@@ -2421,7 +2421,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "still not json",
                 },
@@ -2472,21 +2472,21 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "still invalid",
                 },
@@ -2578,21 +2578,21 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "still invalid",
                 },
@@ -2682,7 +2682,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps(
                         {"winner": "tie", "reason": "both candidates are similarly scoped before verification"}
@@ -2691,14 +2691,14 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps({"verdict": "disagree", "confidence": 0.9, "reason": "candidate changes behavior"}),
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps({"verdict": "agree", "confidence": 0.93, "reason": "candidate matches the bounded request"}),
                 },
@@ -2748,14 +2748,14 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps({"winner": "right", "reason": "right is the smaller valid edit"}),
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "fallback",
-                    "model": "phi4-mini-reasoning:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": json.dumps({"verdict": "agree", "confidence": 0.93, "reason": "candidate matches the bounded request"}),
                 },
@@ -2833,7 +2833,7 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertTrue(out["ok"])
         self.assertTrue(verifier_models)
-        self.assertTrue(all(model == "phi4-mini-reasoning:3.8b" for model in verifier_models))
+        self.assertTrue(all(model == "granite3.3:2b" for model in verifier_models))
 
     def test_guided_edit_output_to_diff_accepts_micro_edit(self):
         region = self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0)
@@ -2976,14 +2976,14 @@ class ServerToolsTest(ServerToolsTestBase):
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
                 },
                 {
                     "schema": "local_infer.v1",
                     "backend": "endpoint",
-                    "model": "phi4-mini:3.8b",
+                    "model": "granite3.3:2b",
                     "ok": True,
                     "output": "still invalid",
                 },
@@ -3069,7 +3069,7 @@ class ServerToolsTest(ServerToolsTestBase):
                     "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
                 }
             if prompt.startswith("Repair the bounded edit output for the target region."):
-                if model == "phi4-mini:3.8b":
+                if model == "granite3.3:2b":
                     return {
                         "schema": "local_infer.v1",
                         "backend": "fallback",
@@ -3106,7 +3106,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["generation_tier"], 2)
         self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "fallback")
         self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["generation_tier"], 2)
-        self.assertIn("phi4-mini:3.8b", models)
+        self.assertIn("granite3.3:2b", models)
 
     def test_guided_edit_replay_benchmark_report_tracks_thresholds(self):
         results = (

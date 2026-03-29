@@ -1,10 +1,10 @@
-name: refactor-phi4-mini-3.8b
+name: refactor-granite3.3-2b
 version: 0.0.1
 schema: v1
 models:
-  - name: Refactor - Phi4 Mini 3.8B
+  - name: Refactor - Granite 3.3 2B
     provider: ollama
-    model: phi4-mini:3.8b
+    model: granite3.3:2b
     apiBase: http://127.0.0.1:2345
     roles:
       - chat

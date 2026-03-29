@@ -153,9 +153,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             dockerfile,
         )
         full_default_models = (
-            "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,"
-            "phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,"
-            "granite3.2-vision:2b,llama3.2:1b"
+            "qwen2.5-coder:3b,qwen2.5-coder:1.5b,smollm2:360m,granite3.3:2b,"
+            "deepseek-r1:1.5b,granite3.2-vision:2b"
         )
         self.assertIn(f"CONTINUE_OLLAMA_MODELS={full_default_models}", dockerfile)
         self.assertIn(f'ARG OLLAMA_PRELOAD_MODELS="{full_default_models}"', dockerfile)
@@ -183,18 +182,25 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             REPO_ROOT / "source" / "defaults" / "continue" / "model-routing.yaml",
         ]:
             routing = routing_path.read_text(encoding="utf-8")
-            self.assertIn("model: granite3.3:2b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/router-granite3.3-2b.yaml", routing, str(routing_path))
+            self.assertIn("model: smollm2:360m", routing, str(routing_path))
+            self.assertIn("file: .continue/models/router-smollm2-360m.yaml", routing, str(routing_path))
             self.assertIn("model: qwen2.5-coder:3b", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen2.5-coder-3b.yaml", routing, str(routing_path))
             self.assertIn("model: qwen2.5-coder:1.5b", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen2.5-coder-1.5b.yaml", routing, str(routing_path))
-            self.assertIn("model: llama3.2:1b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/research-llama3.2-1b.yaml", routing, str(routing_path))
+            self.assertIn("model: granite3.3:2b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/refactor-granite3.3-2b.yaml", routing, str(routing_path))
+            self.assertIn("file: .continue/models/review-granite3.3-2b.yaml", routing, str(routing_path))
+            self.assertIn("file: .continue/models/research-granite3.3-2b.yaml", routing, str(routing_path))
+            self.assertIn("model: deepseek-r1:1.5b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/math-deepseek-r1-1.5b.yaml", routing, str(routing_path))
 
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "router-granite3.2-2b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "router-granite3.3-2b.yaml").exists())
         self.assertFalse((REPO_ROOT / ".continue" / "models" / "coding-qwen2.5-coder-7b.yaml").exists())
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "research-llama3.2-3b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "refactor-phi4-mini-3.8b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "review-phi4-mini-reasoning-3.8b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "math-deepscaler-1.5b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "research-llama3.2-1b.yaml").exists())
 
     def test_dockerfile_installs_vulkan_runtime_for_ollama(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
