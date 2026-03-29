@@ -198,7 +198,7 @@ The script finds the repository root by locating `.git` and creates only:
 When the devcontainer starts, the image applies default repository files if they
 are missing:
 
-- `.continue/models/*.yaml` (router + specialist model defaults, repo-owned)
+- `.continue/models/*.yaml` (agent + router + specialist model defaults, repo-owned)
 - `.continue/model-routing.yaml` (routing map for router/specialists)
 - `.continue/mcpServers/codebase-tooling-mcp.yaml`
 - `.config/labs/*.json`
@@ -292,6 +292,9 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
+- `.continue/models/agent-qwen2.5-coder-3b.yaml` is the repo-owned front-door Continue chat/agent model. Use that model in VS Code Continue Agent mode if you want the model to call MCP tools.
+- `task_router` is an MCP tool, not a Continue chat model. If Continue only prints JSON like `{"name":"codebase_tooling_mcp_task_router","arguments":{"mode":"task"}}`, the selected chat model is describing a tool call instead of emitting one Continue can execute.
+- The repo-owned agent model declares `capabilities: [tool_use]` so Continue can enable Agent mode and route MCP calls through the selected chat model.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
 - `source/Dockerfile` preloads the full default model set declared by `CONTINUE_OLLAMA_MODELS` into the image, and `source/entrypoint.sh` seeds those models into the runtime model directory before server startup.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.

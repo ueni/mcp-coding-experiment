@@ -29,6 +29,17 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertIn(f"apiBase: {NATIVE_OLLAMA_BASE}", text, str(path))
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
 
+    def test_continue_agent_model_declares_tool_use_capability(self):
+        for agent_path in [
+            REPO_ROOT / ".continue" / "models" / "agent-qwen2.5-coder-3b.yaml",
+            REPO_ROOT / "source" / "defaults" / "continue" / "models" / "agent-qwen2.5-coder-3b.yaml",
+        ]:
+            text = agent_path.read_text(encoding="utf-8")
+            self.assertIn("model: qwen2.5-coder:3b", text, str(agent_path))
+            self.assertIn("capabilities:", text, str(agent_path))
+            self.assertIn("- tool_use", text, str(agent_path))
+            self.assertIn("- chat", text, str(agent_path))
+
     def test_devcontainer_does_not_override_default_ollama_model_policy(self):
         config = json.loads(
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")

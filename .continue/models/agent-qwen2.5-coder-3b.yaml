@@ -1,0 +1,14 @@
+name: agent-qwen2.5-coder-3b
+version: 0.0.1
+schema: v1
+models:
+  - name: Agent - Qwen2.5 Coder 3B
+    provider: ollama
+    model: qwen2.5-coder:3b
+    apiBase: http://127.0.0.1:2345
+    roles:
+      - chat
+      - edit
+      - apply
+    capabilities:
+      - tool_use
