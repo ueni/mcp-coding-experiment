@@ -86,13 +86,15 @@ Because the task says to stop before a very large model download, the evaluation
 
 ## Blocker
 
-The host has a usable AMD integrated GPU through Vulkan/RADV, but no installed GPU-capable inference backend and no local Qwen3.6-35B-A3B model weights. GPU-backed inference could not be started without at least one large model download (~10.0-20.6 GiB for practical GGUF quantizations) and an installed/buildable Vulkan-capable runtime such as llama.cpp.
+The direct host shell has a usable AMD integrated GPU through Vulkan/RADV but no installed host-level inference backend and no local Qwen3.6-35B-A3B model weights. This is not a blocker for the official evaluation runtime because `source/Dockerfile` / `.devcontainer/devcontainer.json` now define the supported Docker GPU path with Ollama Vulkan.
+
+The remaining blocker is the absent Qwen3.6-35B-A3B weights. GPU-backed target inference cannot be started until ueni authorizes a specific large model download/pull (~10.0-20.6 GiB for practical GGUF quantizations) or provides the target model weights/cache.
 
 CPU fallback was not attempted because the clarified requirement says GPU must be used.
 
 ## Smallest fix needed
 
-1. Confirm the acceptable quantization and authorize the model download size, minimally `UD-IQ2_XXS` (~10.0 GiB) or preferably a higher-quality quant if storage/RAM are acceptable.
-2. Install or build a GPU-capable inference backend without changing GPU drivers, preferably llama.cpp with Vulkan support targeting RADV/Renoir.
+1. Confirm the acceptable quantization/model tag and authorize the model download size, minimally `UD-IQ2_XXS` (~10.0 GiB) or preferably a higher-quality quant if storage/RAM are acceptable, or provide a ready model cache/weights.
+2. Use the official Docker/devcontainer runtime documented in `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md`.
 3. Run on AC power; battery-only performance and thermal throttling would make throughput measurements less representative.
-4. Start the model with GPU offload enabled and rerun the scenario manifest, recording first-token latency, end-to-end latency, tokens/sec, RAM, and GPU observations.
+4. Start the target model with GPU offload enabled and rerun the scenario manifest, recording first-token latency, end-to-end latency, tokens/sec, RAM, and GPU observations.

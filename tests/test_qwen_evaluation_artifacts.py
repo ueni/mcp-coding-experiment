@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl"
 DOC = REPO_ROOT / "docs/evaluations/qwen3.6-35b-a3b-local.md"
 REPORT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/report-template.md"
+DOCKER_RUNTIME = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md"
 
 REQUIRED_CATEGORIES = {
     "c_cpp_embedded",
@@ -65,6 +66,7 @@ def test_qwen_scenarios_have_measurement_and_quality_contract() -> None:
 def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     doc = DOC.read_text()
     report = REPORT.read_text()
+    docker_runtime = DOCKER_RUNTIME.read_text()
 
     assert "Lenovo ThinkPad T14 Gen1 AMD" in doc
     assert "current orchestrator" in doc
@@ -72,6 +74,18 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "GitHub-hosted" in doc
     assert "evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl" in doc
     assert "evaluation/qwen3.6-35b-a3b/report-template.md" in doc
+    assert "evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md" in doc
+
+    for text in (doc, report, docker_runtime):
+        assert "source/Dockerfile" in text
+        assert ".devcontainer/devcontainer.json" in text
+        assert "--device=/dev/dri" in text
+        assert "OLLAMA_VULKAN=1" in text
+        assert "Qwen3.6-35B-A3B weights" in text
+
+    assert "qwen2.5-coder:1.5b" in docker_runtime
+    assert "29/29" in docker_runtime
+    assert "validates the Docker GPU/Ollama runtime only" in docker_runtime
 
     for recommendation in (
         "suitable for productive coding usage",
