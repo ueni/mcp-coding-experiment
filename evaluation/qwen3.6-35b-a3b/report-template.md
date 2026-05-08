@@ -20,7 +20,7 @@ This file is the canonical report for issue #1. It records the 2026-05-08 target
 - Backend/runtime: official path is Docker/devcontainer using `source/Dockerfile`; the image installs Ollama `0.18.2` plus Vulkan/Mesa tooling and `.devcontainer/devcontainer.json` passes `/dev/dri` with `OLLAMA_VULKAN=1`
 - Model source, revision, quantization, checksum: not downloaded; candidate checked via Hugging Face API as `unsloth/Qwen3.6-35B-A3B-GGUF` at SHA `a483e9e6cbd595906af30beda3187c2663a1118c`, gated `false`; no local checksum because no weight file was fetched
 - Reference comparison implementation: current orchestrator implementation in this repository; target-model runtime comparison not executed because Qwen3.6-35B-A3B weights are absent
-- Detailed evidence: `evaluation/qwen3.6-35b-a3b/host-gpu-probe-2026-05-08.md` and `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md`
+- Detailed evidence: `evaluation/qwen3.6-35b-a3b/host-gpu-probe-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md`, and `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md`
 
 ## Setup and startup
 
@@ -109,4 +109,4 @@ Choose exactly one:
 
 Selected recommendation: **not viable** for the current host state.
 
-Rationale: The target host has a usable AMD Renoir iGPU via Vulkan/RADV, and the repository Docker/devcontainer path has been verified with Ollama Vulkan using the bundled `qwen2.5-coder:1.5b` smoke model. However, the required GPU-backed Qwen3.6-35B-A3B run cannot be executed because the target model weights are absent. Since the model download is large enough to require explicit authorization before fetching, the acceptance criteria for measured throughput, latency, resource use, quality comparison, and final productive-use viability remain blocked. The smallest fix is to authorize a specific Qwen3.6-35B-A3B model pull/download or provide the target weights/cache, then rerun this report with real measurements.
+Rationale: The target host has a usable AMD Renoir iGPU via Vulkan/RADV, and the repository Docker/devcontainer path has been verified with Ollama Vulkan using the bundled `qwen2.5-coder:1.5b` smoke model. However, the required GPU-backed Qwen3.6-35B-A3B run cannot be executed because the target model weights are absent. Since the model download is large enough to require explicit authorization before fetching, the acceptance criteria for measured throughput, latency, resource use, quality comparison, and final productive-use viability remain blocked. The smallest fix is to choose one option from `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md`: authorize a specific Qwen3.6-35B-A3B model pull/download, provide the target weights/cache, or explicitly narrow PR #2 to artifact/runtime readiness only. If the benchmark remains in scope, rerun this report with real measurements after the model artifact is available.

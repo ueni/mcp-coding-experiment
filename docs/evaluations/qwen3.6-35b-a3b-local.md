@@ -27,6 +27,7 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Report template | `evaluation/qwen3.6-35b-a3b/report-template.md` |
 | Official local runtime | Docker image from `source/Dockerfile`, started by `.devcontainer/devcontainer.json` or equivalent `docker run` |
 | Docker GPU evidence | `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md` |
+| Model authorization blocker | `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md` |
 
 ## Evaluation scope
 
@@ -72,7 +73,7 @@ docker run --rm \
 
 Verifier confirmed this Docker GPU path on the target AMD host: RADV/Renoir was visible, Ollama Vulkan was active, and a `qwen2.5-coder:1.5b` smoke generation offloaded `29/29` layers to GPU. That smoke test is runtime validation only; it is not a target Qwen3.6-35B-A3B result.
 
-The remaining blocker is precise: Qwen3.6-35B-A3B weights are not present. The benchmark requires ueni to authorize a specific model pull/download or provide the target model weights/cache. Do not download large model weights without explicit approval.
+The remaining blocker is precise: Qwen3.6-35B-A3B weights are not present. The benchmark requires ueni to authorize a specific model pull/download or provide the target model weights/cache. The explicit authorization request is recorded in `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md`. Do not download large model weights without explicit approval.
 
 ## Reproducible setup
 
