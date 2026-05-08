@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
+name: Qwen Evaluation Artifacts
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: python -m pip install 'pytest>=8,<9'
+
+      - name: Validate Qwen evaluation artifacts
+        run: python -m pytest tests/test_qwen_evaluation_artifacts.py

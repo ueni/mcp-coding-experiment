@@ -11,6 +11,7 @@ This index lists documentation ownership and status.
 - [Repository Overview](../README.md) (`README.md`) - Status: `canonical`
 - [JSON Settings Files](./json-settings.md) (`docs/json-settings.md`) - Status: `canonical`
 - [MCP Fun Labs](./labs.md) (`docs/labs.md`) - Status: `lab/experimental`
+- [Qwen3.6-35B-A3B Local Coding Evaluation](./evaluations/qwen3.6-35b-a3b-local.md) (`docs/evaluations/qwen3.6-35b-a3b-local.md`) - Status: `evaluation plan`
 - [Tooling White Paper](./tooling-whitepaper.md) (`docs/tooling-whitepaper.md`) - Status: `canonical/strategy`
 - [Troubleshooting](./troubleshooting.md) (`docs/troubleshooting.md`) - Status: `operational runbook`
 - [Release Notes and Documentation Policy](./release-notes-policy.md) (`docs/release-notes-policy.md`) - Status: `canonical`
