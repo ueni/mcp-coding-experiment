@@ -33,7 +33,7 @@ import select
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 
 try:
     import tomllib
@@ -702,6 +702,49 @@ def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None
         _append_audit_event(tool_name, categories, False, arguments, "HTTP session not authorized")
         raise PermissionError(f"{tool_name} requires an authorized HTTP session")
     return categories
+
+
+def _tool_result_success(result: Any) -> bool:
+    if isinstance(result, dict) and isinstance(result.get("ok"), bool):
+        return bool(result["ok"])
+    return True
+
+
+def _tool_result_failure_reason(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    for key in ("error", "stderr", "message"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return _trim_text(value.strip(), max_chars=200)
+    if result.get("timeout") is True:
+        return "timeout"
+    return "tool returned ok=false"
+
+
+def _run_with_tool_security_audit(
+    tool_name: str,
+    arguments: dict[str, Any],
+    action: Callable[[], Any],
+) -> Any:
+    categories = _require_tool_security_gate(tool_name, arguments)
+    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+    try:
+        result = action()
+    except Exception as exc:
+        if sensitive:
+            _append_audit_event(tool_name, categories, False, arguments, type(exc).__name__)
+        raise
+    if sensitive:
+        success = _tool_result_success(result)
+        _append_audit_event(
+            tool_name,
+            categories,
+            success,
+            arguments,
+            "" if success else _tool_result_failure_reason(result),
+        )
+    return result
 
 
 class MCPHTTPAuthMiddleware:
@@ -4179,13 +4222,25 @@ def docker_router(
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
     """Docker CLI gateway. mode=status|run; run validates the command against the selected control profile."""
-    return _DOCKER_ROUTER_SERVICE.route(
-        mode=mode,
-        command=command,
-        cwd=cwd,
-        control_profile=control_profile,
-        timeout_seconds=timeout_seconds,
-        max_output_chars=max_output_chars,
+    arguments = {
+        "mode": mode,
+        "command": command,
+        "cwd": cwd,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+    }
+    return _run_with_tool_security_audit(
+        "docker_router",
+        arguments,
+        lambda: _DOCKER_ROUTER_SERVICE.route(
+            mode=mode,
+            command=command,
+            cwd=cwd,
+            control_profile=control_profile,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        ),
     )
 
 
@@ -4200,14 +4255,27 @@ def vscode_router(
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
     """VS Code task gateway. mode=list|run; list filters tasks.json and run executes one exact label."""
-    return _VSCODE_ROUTER_SERVICE.route(
-        mode=mode,
-        label=label,
-        tasks_path=tasks_path,
-        label_prefix=label_prefix,
-        control_profile=control_profile,
-        timeout_seconds=timeout_seconds,
-        max_output_chars=max_output_chars,
+    arguments = {
+        "mode": mode,
+        "label": label,
+        "tasks_path": tasks_path,
+        "label_prefix": label_prefix,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+    }
+    return _run_with_tool_security_audit(
+        "vscode_router",
+        arguments,
+        lambda: _VSCODE_ROUTER_SERVICE.route(
+            mode=mode,
+            label=label,
+            tasks_path=tasks_path,
+            label_prefix=label_prefix,
+            control_profile=control_profile,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        ),
     )
 
 
@@ -6259,31 +6327,36 @@ def apply_unified_diff(
     cached: bool = False,
 ) -> dict[str, Any]:
     """Apply a unified diff through git-apply with optional dry-run checks."""
-    _require_git_repo()
-    if not check_only:
-        _require_mutations()
+    arguments = {"diff_text": diff_text, "check_only": check_only, "cached": cached}
 
-    args = ["git", "-C", str(REPO_PATH), "apply"]
-    if check_only:
-        args.append("--check")
-    if cached:
-        args.append("--cached")
+    def _run() -> dict[str, Any]:
+        _require_git_repo()
+        if not check_only:
+            _require_mutations()
 
-    proc = subprocess.run(
-        args,
-        input=diff_text,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return {
-        "ok": proc.returncode == 0,
-        "check_only": check_only,
-        "cached": cached,
-        "exit_code": proc.returncode,
-        "stdout": _trim_text(proc.stdout.strip()),
-        "stderr": _trim_text(proc.stderr.strip()),
-    }
+        args = ["git", "-C", str(REPO_PATH), "apply"]
+        if check_only:
+            args.append("--check")
+        if cached:
+            args.append("--cached")
+
+        proc = subprocess.run(
+            args,
+            input=diff_text,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "check_only": check_only,
+            "cached": cached,
+            "exit_code": proc.returncode,
+            "stdout": _trim_text(proc.stdout.strip()),
+            "stderr": _trim_text(proc.stderr.strip()),
+        }
+
+    return _run_with_tool_security_audit("apply_unified_diff", arguments, _run)
 
 
 @mcp.tool()
@@ -6294,6 +6367,30 @@ def command_runner(
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
     """Strict command executor: MUST use a SAFE_COMMANDS binary, required command list, returns schema-stable stdout/stderr or explicit timeout/file-not-found error payload."""
+    arguments = {
+        "command": command,
+        "cwd": cwd,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+    }
+    return _run_with_tool_security_audit(
+        "command_runner",
+        arguments,
+        lambda: _command_runner_impl(
+            command=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        ),
+    )
+
+
+def _command_runner_impl(
+    command: list[str],
+    cwd: str = ".",
+    timeout_seconds: int = 30,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
     out_cap = _token_budget_apply_max(max_output_chars)

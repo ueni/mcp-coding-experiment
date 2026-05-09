@@ -40,6 +40,12 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
             headers.append((b"authorization", f"Bearer {token}".encode("ascii")))
         return {"type": "http", "path": "/mcp", "method": "POST", "headers": headers, "client": (client, 12345)}
 
+    def _audit_events(self):
+        return [
+            json.loads(line)
+            for line in self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8").splitlines()
+        ]
+
     def test_http_bearer_auth_scope_accepts_valid_token(self):
         self.server.MCP_HTTP_AUTH_MODE = "token"
         self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
@@ -140,6 +146,76 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
         self.assertNotIn("example-secret-token", audit_text)
         self.assertEqual(event["arguments"]["packages"], ["<redacted>"])
+
+    def test_direct_sensitive_tools_are_gated_for_unauthorized_http_sessions(self):
+        self.server.ALLOW_MUTATIONS = True
+        token = self.server._HTTP_REQUEST_AUTHORIZED.set(False)
+        calls = [
+            ("command_runner", lambda: self.server.command_runner(command=["cat", "README.md"])),
+            ("docker_router", lambda: self.server.docker_router(mode="status")),
+            ("vscode_router", lambda: self.server.vscode_router(mode="list")),
+            (
+                "apply_unified_diff",
+                lambda: self.server.apply_unified_diff(diff_text="not a patch", check_only=True),
+            ),
+        ]
+        try:
+            for _, call in calls:
+                with self.assertRaises(PermissionError):
+                    call()
+        finally:
+            self.server._HTTP_REQUEST_AUTHORIZED.reset(token)
+
+        events = self._audit_events()
+        self.assertEqual([event["tool_name"] for event in events], [name for name, _ in calls])
+        for event in events:
+            self.assertFalse(event["success"])
+            self.assertIn("HTTP session", event["reason"])
+
+    def test_direct_sensitive_tools_audit_success_and_failure(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.write_repo_text(
+            ".vscode/tasks.json",
+            '{"version":"2.0.0","tasks":[{"label":"noop","type":"shell","command":"echo ok"}]}',
+        )
+        valid_diff = """diff --git a/audit_added.txt b/audit_added.txt
+new file mode 100644
+index 0000000..257cc56
+--- /dev/null
++++ b/audit_added.txt
+@@ -0,0 +1 @@
++hello
+"""
+
+        success_calls = [
+            "command_runner",
+            "docker_router",
+            "vscode_router",
+            "apply_unified_diff",
+        ]
+        self.assertTrue(self.server.command_runner(command=["cat", "README.md"])["ok"])
+        self.assertEqual(self.server.docker_router(mode="status")["schema"], "docker_router.v1")
+        self.assertEqual(self.server.vscode_router(mode="list")["schema"], "vscode_router.v1")
+        self.assertTrue(self.server.apply_unified_diff(diff_text=valid_diff, check_only=True)["ok"])
+
+        self.assertFalse(self.server.command_runner(command=["cat", "missing-file"])["ok"])
+        self.assertFalse(self.server.apply_unified_diff(diff_text="not a patch", check_only=True)["ok"])
+        with self.assertRaises(ValueError):
+            self.server.docker_router(mode="invalid")
+        with self.assertRaises(ValueError):
+            self.server.vscode_router(mode="invalid")
+
+        events = self._audit_events()
+        self.assertEqual([event["tool_name"] for event in events[:4]], success_calls)
+        self.assertTrue(all(event["success"] for event in events[:4]))
+        failure_events = events[4:]
+        self.assertEqual(
+            [event["tool_name"] for event in failure_events],
+            ["command_runner", "apply_unified_diff", "docker_router", "vscode_router"],
+        )
+        self.assertTrue(all(not event["success"] for event in failure_events))
+        self.assertIn("shell/process", events[0]["categories"])
+        self.assertIn("git mutation", events[3]["categories"])
 
     def test_redacts_sensitive_audit_arguments(self):
         self.server._append_audit_event(
