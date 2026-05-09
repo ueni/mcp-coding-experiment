@@ -202,7 +202,7 @@ MODEL_CREATED
 }
 OLLAMA_LOG_TAIL
 Couldn't find '/home/app/.ollama/id_ed25519'. Generating new private key.
-Your new public key is: 
+Your new public key is:
 
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKjZUv+xhBezQsLcJeVgoVm1O4p+4Im8nR3UnXf8mf57
 
@@ -263,7 +263,7 @@ time=2026-05-09T11:41:00.017Z level=INFO source=server.go:1388 msg="llama runner
 [GIN] 2026/05/09 - 11:42:08 | 200 | 13.419820579s |       127.0.0.1 | POST     "/api/generate"
 [GIN] 2026/05/09 - 11:42:22 | 200 | 14.089970736s |       127.0.0.1 | POST     "/api/generate"
 [GIN] 2026/05/09 - 11:42:36 | 200 | 13.336128806s |       127.0.0.1 | POST     "/api/generate"
-	Command being timed: "docker run --rm --security-opt=seccomp=unconfined --security-opt=apparmor=unconfined --device=/dev/dri --device=/dev/kfd --group-add 109 --group-add 109 -e OLLAMA_VULKAN=1 -e OLLAMA_HOST=127.0.0.1:11434 -v /home/user/source/openclaw-worktrees/mcp-pr2-qwen-eval:/repo -v /home/user/source/openclaw-worktrees/mcp-pr2-qwen-eval/.qwen-eval-models:/models:ro codebase-tooling-mcp:qwen36-eval bash -lc 
+	Command being timed: "docker run --rm --security-opt=seccomp=unconfined --security-opt=apparmor=unconfined --device=/dev/dri --device=/dev/kfd --group-add 109 --group-add 109 -e OLLAMA_VULKAN=1 -e OLLAMA_HOST=127.0.0.1:11434 -v /home/user/source/openclaw-worktrees/mcp-pr2-qwen-eval:/repo -v /home/user/source/openclaw-worktrees/mcp-pr2-qwen-eval/.qwen-eval-models:/models:ro codebase-tooling-mcp:qwen36-eval bash -lc
     set -euo pipefail
     echo "DEVICE_ACCESS"
     id
