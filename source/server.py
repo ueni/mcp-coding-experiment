@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import contextvars
 import ast
 import json
 import os
@@ -16,6 +17,7 @@ import fnmatch
 import threading
 import uuid
 import hashlib
+import hmac
 import time
 import math
 import ssl
@@ -93,6 +95,7 @@ from pydantic import Field
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from starlette.types import ASGIApp
 from starlette.routing import Mount, Route
 
 REPO_PATH = Path(os.getenv("REPO_PATH", "/repo")).resolve()
@@ -110,6 +113,14 @@ MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "200000"))
 ALLOW_ORIGINS = [
     x.strip() for x in os.getenv("ALLOW_ORIGINS", "*").split(",") if x.strip()
 ]
+MCP_HTTP_AUTH_MODE = os.getenv("MCP_HTTP_AUTH_MODE", "token").strip().lower()
+MCP_HTTP_BEARER_TOKEN = os.getenv("MCP_HTTP_BEARER_TOKEN", "").strip()
+MCP_HTTP_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_REQUESTS", "120")))
+MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60")))
+MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TIMEOUT_SECONDS", "120")))
+MCP_AUDIT_LOG_FILE = Path(
+    os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
+)
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
 MEMORY_FILE = Path(".codebase-tooling-mcp/memory/context_memory.json")
@@ -136,6 +147,35 @@ COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
 }
+TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
+    "task_router": {
+        "categories": ["read-only"],
+        "mode_categories": {
+            "status": ["read-only"],
+            "task": ["read-only", "network"],
+            "embed": ["read-only"],
+            "rerank": ["read-only"],
+            "infer": ["read-only", "network"],
+            "parallel_infer": ["read-only", "network"],
+            "autocomplete": ["read-only", "network"],
+            "coding_infer": ["write", "shell/process", "network"],
+            "coding_check": ["shell/process"],
+            "coding_pip": ["write", "shell/process", "network"],
+            "coding_sandbox": ["write", "shell/process"],
+        },
+    },
+    "apply_unified_diff": {"categories": ["write", "git mutation"]},
+    "command_runner": {"categories": ["shell/process"]},
+    "docker_router": {"categories": ["shell/process"]},
+    "vscode_router": {"categories": ["shell/process"]},
+}
+SENSITIVE_TOOL_CATEGORIES = {"write", "git mutation", "shell/process", "network", "secret-sensitive"}
+MUTATION_TOOL_CATEGORIES = {"write", "git mutation"}
+_HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "http_request_authorized", default=None
+)
+_HTTP_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
+_HTTP_RATE_LIMIT_LOCK = threading.Lock()
 APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
@@ -472,6 +512,212 @@ _SSE_EVENT_HISTORY: deque[dict[str, Any]] = deque(maxlen=SSE_EVENT_HISTORY_MAX)
 _SSE_SUBSCRIBERS: dict[str, queue.Queue[dict[str, Any]]] = {}
 _SSE_LOCK = threading.Lock()
 _SSE_EVENT_SEQ = 0
+
+
+def _http_auth_required() -> bool:
+    return MCP_HTTP_AUTH_MODE in {"token", "bearer", "oauth-resource"}
+
+
+def _http_auth_insecure_local() -> bool:
+    return MCP_HTTP_AUTH_MODE in {"insecure-local", "local-insecure", "disabled", "off", "none"}
+
+
+def _client_is_loopback(scope: dict[str, Any]) -> bool:
+    client = scope.get("client") or ("", 0)
+    host = str(client[0] if client else "")
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+
+def _bearer_token_from_headers(headers: list[tuple[bytes, bytes]]) -> str:
+    for key, value in headers:
+        if key.lower() != b"authorization":
+            continue
+        raw = value.decode("latin-1", errors="replace").strip()
+        scheme, _, token = raw.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return token.strip()
+    return ""
+
+
+def _http_auth_discovery_payload() -> dict[str, Any]:
+    resource = os.getenv("MCP_HTTP_RESOURCE", "http://localhost:%s/mcp" % PORT)
+    return {
+        "resource": resource,
+        "authorization_servers": [],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["mcp:read", "mcp:mutate"],
+        "mcp_auth_mode": MCP_HTTP_AUTH_MODE,
+        "oauth_2_1_status": "deferred: bearer-token resource-server mode is implemented; full OAuth authorization-server integration is not bundled",
+    }
+
+
+def _http_authenticate_scope(scope: dict[str, Any]) -> tuple[bool, int, str]:
+    if _http_auth_insecure_local():
+        if _client_is_loopback(scope):
+            return True, 200, "explicit insecure local-only mode"
+        return False, 403, "MCP_HTTP_AUTH_MODE=insecure-local only accepts loopback clients"
+    if not _http_auth_required():
+        return False, 403, f"unsupported MCP_HTTP_AUTH_MODE={MCP_HTTP_AUTH_MODE!r}"
+    if not MCP_HTTP_BEARER_TOKEN:
+        return False, 403, "HTTP auth is enabled but MCP_HTTP_BEARER_TOKEN is not configured"
+    token = _bearer_token_from_headers(scope.get("headers", []))
+    if not token:
+        return False, 401, "missing bearer token"
+    if not hmac.compare_digest(token, MCP_HTTP_BEARER_TOKEN):
+        return False, 403, "invalid bearer token"
+    return True, 200, "authorized"
+
+
+def _http_rate_limit_key(scope: dict[str, Any]) -> str:
+    client = scope.get("client") or ("unknown", 0)
+    return str(client[0] if client else "unknown")
+
+
+def _http_rate_limit_allow(scope: dict[str, Any], now: float | None = None) -> tuple[bool, int]:
+    now = time.time() if now is None else now
+    key = _http_rate_limit_key(scope)
+    window_start = now - MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS
+    with _HTTP_RATE_LIMIT_LOCK:
+        bucket = _HTTP_RATE_LIMIT_BUCKETS.setdefault(key, deque())
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if len(bucket) >= MCP_HTTP_RATE_LIMIT_REQUESTS:
+            retry_after = max(1, int(math.ceil(bucket[0] + MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS - now)))
+            return False, retry_after
+        bucket.append(now)
+    return True, 0
+
+
+def _redact_audit_value(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return "<redacted-depth>"
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            if re.search(r"token|secret|password|credential|authorization|api[_-]?key", key_str, re.I):
+                redacted[key_str] = "<redacted>"
+            else:
+                redacted[key_str] = _redact_audit_value(item, depth + 1)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_audit_value(item, depth + 1) for item in value[:25]]
+    if isinstance(value, str) and len(value) > 500:
+        return value[:500] + "...[truncated]"
+    return value
+
+
+def _append_audit_event(
+    tool_name: str,
+    categories: list[str],
+    success: bool,
+    arguments: dict[str, Any] | None = None,
+    reason: str = "",
+) -> None:
+    event = {
+        "timestamp": _now_iso(),
+        "tool_name": tool_name,
+        "categories": categories,
+        "success": success,
+        "reason": reason,
+        "arguments": _redact_audit_value(arguments or {}),
+    }
+    try:
+        MCP_AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with MCP_AUDIT_LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, sort_keys=True, ensure_ascii=True) + "\n")
+    except OSError:
+        # Audit logging must not leak arguments through exception text or crash read-only calls.
+        pass
+
+
+def _tool_categories(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
+    metadata = TOOL_SECURITY_METADATA.get(tool_name, {"categories": ["read-only"]})
+    categories = list(metadata.get("categories", ["read-only"]))
+    mode_categories = metadata.get("mode_categories")
+    if isinstance(mode_categories, dict) and arguments:
+        mode = str(arguments.get("mode", "")).strip().lower()
+        if mode in mode_categories:
+            categories = list(mode_categories[mode])
+    return categories
+
+
+def _inside_http_request() -> bool:
+    return _HTTP_REQUEST_AUTHORIZED.get() is not None
+
+
+def _http_request_authorized_for_tools() -> bool:
+    authorized = _HTTP_REQUEST_AUTHORIZED.get()
+    return True if authorized is None else bool(authorized)
+
+
+def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
+    categories = _tool_categories(tool_name, arguments)
+    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+    mutating = bool(MUTATION_TOOL_CATEGORIES.intersection(categories))
+    if mutating and not ALLOW_MUTATIONS:
+        _append_audit_event(tool_name, categories, False, arguments, "mutations disabled")
+        raise PermissionError(
+            f"{tool_name} requires mutation permission; set ALLOW_MUTATIONS=true and use an authorized HTTP session."
+        )
+    if _inside_http_request() and sensitive and not _http_request_authorized_for_tools():
+        _append_audit_event(tool_name, categories, False, arguments, "HTTP session not authorized")
+        raise PermissionError(f"{tool_name} requires an authorized HTTP session")
+    return categories
+
+
+class MCPHTTPAuthMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        method = str(scope.get("method", "GET")).upper()
+        if method == "OPTIONS" or path in {"/", "/healthz"}:
+            await self.app(scope, receive, send)
+            return
+        if path == "/.well-known/oauth-protected-resource":
+            response = JSONResponse(_http_auth_discovery_payload())
+            await response(scope, receive, send)
+            return
+        allowed, retry_after = _http_rate_limit_allow(scope)
+        if not allowed:
+            response = JSONResponse(
+                {"error": "rate_limited", "detail": "Too many MCP HTTP requests"},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+            await response(scope, receive, send)
+            return
+        authorized, status_code, reason = _http_authenticate_scope(scope)
+        if not authorized:
+            _append_audit_event("http_request", ["network"], False, {"path": path}, reason)
+            headers = {"WWW-Authenticate": 'Bearer realm="mcp"'} if status_code == 401 else None
+            response = JSONResponse(
+                {"error": "unauthorized" if status_code == 401 else "forbidden", "detail": reason},
+                status_code=status_code,
+                headers=headers,
+            )
+            await response(scope, receive, send)
+            return
+        token = _HTTP_REQUEST_AUTHORIZED.set(True)
+        try:
+            if path == "/sse":
+                await self.app(scope, receive, send)
+            else:
+                await asyncio.wait_for(self.app(scope, receive, send), timeout=MCP_HTTP_REQUEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            _append_audit_event("http_request", ["network"], False, {"path": path}, "request timeout")
+            response = JSONResponse(
+                {"error": "timeout", "detail": "MCP HTTP request exceeded configured timeout"},
+                status_code=504,
+            )
+            await response(scope, receive, send)
+        finally:
+            _HTTP_REQUEST_AUTHORIZED.reset(token)
 
 
 def _trim_text(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
@@ -9844,43 +10090,65 @@ def task_router(
     ] = True,
 ) -> dict[str, Any]:
     """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
-    return _TASK_ROUTER_SERVICE.route(
-        mode=mode,
-        prompt=prompt,
-        task=task,
-        prefix=prefix,
-        suffix=suffix,
-        language=language,
-        texts=texts,
-        query=query,
-        candidates=candidates,
-        backend=backend,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system=system,
-        stop=stop,
-        normalize=normalize,
-        top_k=top_k,
-        output_profile=output_profile,
-        offset=offset,
-        limit=limit,
-        compress=compress,
-        store_result=store_result,
-        memory_session=memory_session,
-        check_profile=check_profile,
-        check_target=check_target,
-        check_timeout_seconds=check_timeout_seconds,
-        run_checks=run_checks,
-        packages=packages,
-        pip_upgrade=pip_upgrade,
-        sandbox_mode=sandbox_mode,
-        sandbox_id=sandbox_id,
-        sandbox_action=sandbox_action,
-        prompts=prompts,
-        max_parallel=max_parallel,
-        auto_parallel_when_possible=auto_parallel_when_possible,
-    )
+    audit_args = {
+        "mode": mode,
+        "task": task,
+        "backend": backend,
+        "model": model,
+        "check_profile": check_profile,
+        "check_target": check_target,
+        "run_checks": run_checks,
+        "packages": packages or [],
+        "sandbox_mode": sandbox_mode,
+        "sandbox_action": sandbox_action,
+    }
+    categories = _require_tool_security_gate("task_router", audit_args)
+    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+    try:
+        result = _TASK_ROUTER_SERVICE.route(
+            mode=mode,
+            prompt=prompt,
+            task=task,
+            prefix=prefix,
+            suffix=suffix,
+            language=language,
+            texts=texts,
+            query=query,
+            candidates=candidates,
+            backend=backend,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            stop=stop,
+            normalize=normalize,
+            top_k=top_k,
+            output_profile=output_profile,
+            offset=offset,
+            limit=limit,
+            compress=compress,
+            store_result=store_result,
+            memory_session=memory_session,
+            check_profile=check_profile,
+            check_target=check_target,
+            check_timeout_seconds=check_timeout_seconds,
+            run_checks=run_checks,
+            packages=packages,
+            pip_upgrade=pip_upgrade,
+            sandbox_mode=sandbox_mode,
+            sandbox_id=sandbox_id,
+            sandbox_action=sandbox_action,
+            prompts=prompts,
+            max_parallel=max_parallel,
+            auto_parallel_when_possible=auto_parallel_when_possible,
+        )
+    except Exception as exc:
+        if sensitive:
+            _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
+        raise
+    if sensitive:
+        _append_audit_event("task_router", categories, True, audit_args)
+    return result
 
 
 @mcp.tool()
@@ -14599,8 +14867,10 @@ starlette_app = Starlette(
     lifespan=lifespan,
 )
 
+authenticated_starlette_app = MCPHTTPAuthMiddleware(starlette_app)
+
 app = CORSMiddleware(
-    starlette_app,
+    authenticated_starlette_app,
     allow_origins=ALLOW_ORIGINS,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],

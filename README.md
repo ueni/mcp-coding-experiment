@@ -231,6 +231,24 @@ repository does not need a local `vscode/mcp-inline-autocomplete/` copy and VS C
 
 - MCP endpoint: `http://localhost:8000/mcp`
 - Health endpoint: `http://localhost:8000/healthz`
+- Authorization metadata: `http://localhost:8000/.well-known/oauth-protected-resource`
+
+HTTP mode requires bearer-token authorization by default. Start with a token and pass it in the standard header:
+
+```bash
+export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+python source/server.py
+
+curl -H "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN" http://localhost:8000/mcp
+```
+
+For throwaway local-only experiments, unauthenticated HTTP is still available only by explicit opt-in:
+
+```bash
+MCP_HTTP_AUTH_MODE=insecure-local HOST=127.0.0.1 python source/server.py
+```
+
+Do not use insecure-local mode with public interfaces, tunnels, shared devcontainers, or VS Code port forwarding.
 
 ## Example Claude Code registration
 
@@ -271,7 +289,13 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 | `MCP_TRANSPORT` | `http` | No | `http`, `stdio`, `direct`, `streamable-http`, `streamable_http` | Selects server transport mode. |
 | `REPO_PATH` | `/repo` | No | Absolute path | Root path tools may operate on. |
 | `ALLOW_MUTATIONS` | `false` (recommended default) | No | `true`, `false` | Enables/disables write and git-mutating operations. |
-| `HOST` | `0.0.0.0` | No | Host/IP string | Bind address for HTTP mode. |
+| `MCP_HTTP_AUTH_MODE` | `token` | No | `token`, `bearer`, `oauth-resource`, `insecure-local`, `disabled`, `off`, `none` | HTTP auth mode. Token/bearer modes require `Authorization: Bearer ...`; insecure modes are explicit local-only escapes. Stdio is unaffected. |
+| `MCP_HTTP_BEARER_TOKEN` | empty | Required for HTTP token modes | Secret string | Bearer token accepted by HTTP MCP/SSE requests. Missing token in token mode returns 403. |
+| `MCP_HTTP_RATE_LIMIT_REQUESTS` | `120` | No | Positive integer | Per-client HTTP request budget per window. Exceeded requests return 429 with `Retry-After`. |
+| `MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` | `60` | No | Positive integer seconds | Rate-limit window size. |
+| `MCP_HTTP_REQUEST_TIMEOUT_SECONDS` | `120` | No | Positive seconds | Non-SSE HTTP request timeout; exceeded requests return 504. |
+| `MCP_AUDIT_LOG_FILE` | `.codebase-tooling-mcp/audit/security_events.jsonl` | No | Path | Append-only JSONL audit events for sensitive tool calls and denied HTTP auth attempts. Arguments are redacted/truncated. |
+| `HOST` | `0.0.0.0` | No | Host/IP string | Bind address for HTTP mode. Prefer `127.0.0.1` for local development. |
 | `PORT` | `8000` | No | Integer port | HTTP listen port. |
 | `MAX_READ_BYTES` | `262144` | No | Positive integer | Max bytes read by file tools per request. |
 | `MAX_OUTPUT_CHARS` | `200000` | No | Positive integer | Output truncation limit for tool responses. |
@@ -303,7 +327,10 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 - Path traversal outside the mounted repository is blocked.
 - Read-only usage is the safest default: keep `ALLOW_MUTATIONS=false` unless changes are required.
-- Mutating operations (for example `write_file`, `delete_path`, `move_path`, Git writes) require `ALLOW_MUTATIONS=true`.
+- HTTP mode requires authorization by default (`MCP_HTTP_AUTH_MODE=token` plus `MCP_HTTP_BEARER_TOKEN`). Stdio-only use is not affected.
+- Mutating categories (`write`, `git mutation`) require both `ALLOW_MUTATIONS=true` and an authorized HTTP session when called over HTTP.
+- Sensitive categories (`shell/process`, `network`, `secret-sensitive`) require an authorized HTTP session and are audited.
+- `task_router` carries per-mode security categories: read/status modes are read-only; inference/autocomplete modes include `network`; coding check/package/sandbox modes include `shell/process`, and package/sandbox/coding-infer modes include `write` where applicable.
 - Git commits still require Git user identity in repo config or environment.
 - In stdio mode, avoid writing logs to stdout to preserve protocol framing.
 
