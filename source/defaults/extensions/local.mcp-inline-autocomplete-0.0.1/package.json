@@ -35,6 +35,11 @@
           "minimum": 200,
           "description": "Timeout for MCP requests in milliseconds."
         },
+        "mcpInlineAutocomplete.bearerTokenEnv": {
+          "type": "string",
+          "default": "MCP_HTTP_BEARER_TOKEN",
+          "description": "Environment variable containing the bearer token to send in Authorization. Set empty only for explicit insecure-local tests."
+        },
         "mcpInlineAutocomplete.maxTokens": {
           "type": "number",
           "default": 64,

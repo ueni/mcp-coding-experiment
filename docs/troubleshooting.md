@@ -71,17 +71,34 @@ git config user.name "Your Name"
 git config user.email "you@example.com"
 ```
 
-## Permission or mutation denied
+## Permission, authorization, or mutation denied
 
 Symptom:
 
-- Write or git mutation tools return permission/mutation errors.
+- HTTP `/mcp` or `/sse` returns 401/403.
+- Write, git mutation, command, package, or network-backed tools return permission/mutation errors.
 
 Checks:
 
-- Confirm `ALLOW_MUTATIONS=true` when mutation tools are required.
-- Keep it `false` for read-only sessions.
+- For HTTP mode, set `MCP_HTTP_BEARER_TOKEN` and send `Authorization: Bearer <token>`.
+- If unauthenticated HTTP is intentional for a throwaway local test, set `MCP_HTTP_AUTH_MODE=insecure-local` and bind `HOST=127.0.0.1`; do not forward that port from VS Code, a devcontainer, SSH, or a tunnel.
+- Confirm `ALLOW_MUTATIONS=true` when mutation tools are required. Mutating tool categories require both this flag and an authorized HTTP session.
+- Keep `ALLOW_MUTATIONS=false` for read-only sessions.
 - Confirm paths are inside the mounted repository root.
+- Check `.codebase-tooling-mcp/audit/security_events.jsonl` (or `MCP_AUDIT_LOG_FILE`) for denied auth attempts and sensitive tool call audit events.
+
+## HTTP rate limits or timeouts
+
+Symptom:
+
+- HTTP returns 429 with `Retry-After`.
+- HTTP returns 504 timeout.
+
+Checks:
+
+- Lower client concurrency or raise `MCP_HTTP_RATE_LIMIT_REQUESTS` / `MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` for trusted local automation.
+- Narrow long-running tool requests or raise `MCP_HTTP_REQUEST_TIMEOUT_SECONDS`.
+- SSE streams are exempt from the request timeout but still require authorization and count against rate limits.
 
 ## Default bootstrap files not created
 

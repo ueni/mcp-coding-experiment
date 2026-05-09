@@ -354,6 +354,7 @@ apply_repo_defaults() {
       printf '
 [mcp_servers."codebase-tooling-mcp"]
 url = "http://localhost:8000/mcp"
+bearer_token_env_var = "MCP_HTTP_BEARER_TOKEN"
 ' >> /home/app/.codex/config.toml
     fi
   fi

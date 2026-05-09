@@ -18,6 +18,7 @@
     "DOCKER_CONFIG": "/home/app/.docker",
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
+    "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "ALLOW_MUTATIONS": "true",
     "OLLAMA_VULKAN": "1",
     "OLLAMA_HOST": "0.0.0.0:2345",
