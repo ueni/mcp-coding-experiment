@@ -12,6 +12,7 @@ DOC = REPO_ROOT / "docs/evaluations/qwen3.6-35b-a3b-local.md"
 REPORT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/report-template.md"
 DOCKER_RUNTIME = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md"
 AUTH_REQUEST = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md"
+ACQUISITION_ATTEMPT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md"
 RUNNER = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py"
 
 REQUIRED_CATEGORIES = {
@@ -70,6 +71,7 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     report = REPORT.read_text()
     docker_runtime = DOCKER_RUNTIME.read_text()
     auth_request = AUTH_REQUEST.read_text()
+    acquisition_attempt = ACQUISITION_ATTEMPT.read_text()
 
     assert "Lenovo ThinkPad T14 Gen1 AMD" in doc
     assert "current orchestrator" in doc
@@ -79,10 +81,12 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "evaluation/qwen3.6-35b-a3b/report-template.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md" in doc
+    assert "evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py" in doc
+    assert ACQUISITION_ATTEMPT.exists()
     assert RUNNER.exists()
 
-    for text in (doc, report, docker_runtime, auth_request):
+    for text in (doc, report, docker_runtime, auth_request, acquisition_attempt):
         assert "source/Dockerfile" in text
         assert ".devcontainer/devcontainer.json" in text
         assert "--device=/dev/dri" in text
@@ -104,6 +108,10 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "must not close or claim issue #1" in auth_request
     assert "first-token latency" in auth_request
     assert "sustained tokens/sec" in auth_request
+
+    assert "Qwen3.6-35B-A3B-UD-IQ1_M.gguf" in acquisition_attempt
+    assert "Content-Length: 10047749088" in acquisition_attempt
+    assert "no Qwen3.6-35B-A3B inference result was produced" in acquisition_attempt
 
     for recommendation in (
         "suitable for productive coding usage",

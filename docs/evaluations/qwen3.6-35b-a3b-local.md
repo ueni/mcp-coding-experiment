@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Coding Evaluation
 
-Status: evaluation-artifact/runtime-readiness record only for `ueni/mcp-coding-experiment#1`. This PR deliberately does **not** close or satisfy the full issue #1 benchmark acceptance criteria: the Docker runtime path is covered, but the target Qwen3.6-35B-A3B benchmark remains blocked until model weights are authorized or provided.
+Status: blocked execution artifact and reproducibility/runtime-readiness record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria. The Docker runtime path is covered and the target public GGUF acquisition was attempted on 2026-05-09, but the Qwen3.6-35B-A3B benchmark could not be executed because the 10,047,749,088-byte target model artifact did not finish downloading in the available run window. No target-model results are claimed.
 
 ## Goal
 
@@ -28,6 +28,7 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Official local runtime | Docker image from `source/Dockerfile`, started by `.devcontainer/devcontainer.json` or equivalent `docker run` |
 | Docker GPU evidence | `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md` |
 | Model authorization blocker | `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md` |
+| Target model acquisition attempt | `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md` |
 | Scenario runner harness | `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` |
 
 ## Evaluation scope
@@ -74,7 +75,7 @@ docker run --rm \
 
 Verifier confirmed this Docker GPU path on the target AMD host: RADV/Renoir was visible, Ollama Vulkan was active, and a `qwen2.5-coder:1.5b` smoke generation offloaded `29/29` layers to GPU. That smoke test is runtime validation only; it is not a target Qwen3.6-35B-A3B result.
 
-The remaining blocker is precise: Qwen3.6-35B-A3B weights are not present. The benchmark requires ueni to authorize a specific model pull/download or provide the target model weights/cache. The explicit authorization request is recorded in `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md`. Do not download large model weights without explicit approval.
+The remaining blocker is precise: Qwen3.6-35B-A3B weights are not completely present in the runtime. On 2026-05-09, the public `unsloth/Qwen3.6-35B-A3B-GGUF` `Qwen3.6-35B-A3B-UD-IQ1_M.gguf` artifact was selected and acquisition was attempted. HEAD reported `Content-Length: 10047749088`; the local attempt did not complete, leaving an incomplete/sparse local cache artifact, so it was not imported into Ollama and no target-model result was recorded. The exact acquisition evidence and next Docker command are recorded in `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md`.
 
 ## Reproducible setup
 
