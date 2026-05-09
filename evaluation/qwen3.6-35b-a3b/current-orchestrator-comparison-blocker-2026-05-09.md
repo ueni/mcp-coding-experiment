@@ -4,19 +4,20 @@ SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 SPDX-License-Identifier: MIT
 -->
 
-# Current-Orchestrator Comparison Blocker: Qwen3.6-35B-A3B Evaluation
+# Historical Current-Orchestrator Comparison Blocker: Qwen3.6-35B-A3B Evaluation
 
 Date: 2026-05-09
 
-This note records why PR #2 still does not contain a current-orchestrator comparison result for issue #1. It is a blocker artifact, not a benchmark result.
+This note records the blocker that previously left PR #2 without a current-orchestrator comparison result for issue #1. It is now a historical blocker artifact: the PR includes `evaluation/qwen3.6-35b-a3b/run-current-orchestrator-eval.py` plus `evaluation/qwen3.6-35b-a3b/results/results-current-orchestrator-2026-05-09.json` as the checked-in comparison evidence.
 
 ## Current status
 
 - The local Qwen3.6-35B-A3B Docker/Ollama run completed all seven scenario categories with GPU offload and a median `8.056` sustained tokens/sec.
 - That median now meets the revised approximately `7` sustained tokens/sec throughput threshold.
-- The current-orchestrator comparison remains unavailable and must not be inferred from the local Qwen run.
+- The current-orchestrator comparison must not be inferred from the local Qwen run; it is now measured separately by the checked-in current-orchestrator harness.
+- The new harness records `current-orchestrator` as `7/7` harness invocations rather than the prior `0/7` and `not measured` placeholder.
 
-## What was checked
+## What was originally checked
 
 Repository inspection found no checked-in harness that maps `evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl` to the current orchestrator while producing the same measurement schema used by `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py`.
 
@@ -28,16 +29,21 @@ Relevant implementation details:
 - `_local_infer_via_endpoint` calls the Ollama `/api/generate` endpoint with `stream: false` and returns only text-like fields from the response, discarding timing/token metadata if the backend supplies it.
 - The Qwen Docker/Ollama harness measures the local model directly and writes the required latency/token/throughput fields, but it does not exercise the repository's task router/orchestrator flow.
 
-Because of that contract mismatch, filling the `current-orchestrator` rows in the report would require new comparison-harness work or a separately approved manual comparison protocol. This PR records `current-orchestrator` as `0/7` and `not measured` rather than fabricating comparable values.
+Because of that contract mismatch, the comparison harness now records the fields the task router can support without overstatement:
 
-## Safe unblock options
+- end-to-end latency from `time.perf_counter`;
+- estimated input/output token counts from whitespace word count x1.3, explicitly marked as estimates;
+- estimated output tokens/sec for the non-streaming fallback text, explicitly not equivalent to Ollama eval throughput;
+- process `ru_maxrss` delta for the harness invocation, not whole-host peak RAM;
+- first-token latency as `null` because the route is non-streaming;
+- route/backend/degraded state, output preview, failure diagnosis, workflow benchmark, and coarse quality verdict.
 
-1. Add a dedicated current-orchestrator comparison harness that:
-   - loads the same scenario manifest;
-   - invokes the intended current orchestrator route;
-   - captures first-token latency, end-to-end latency, input/output token counts, sustained tokens/sec, resource notes, outputs/transcripts, and quality verdicts;
-   - writes a JSON result file with the same aggregate/per-scenario shape as the local Qwen run.
-2. Define and document a manual comparison protocol if exact latency/token parity is not required.
-3. Explicitly change issue #1 acceptance criteria to remove or defer the current-orchestrator comparison.
+## Remaining interpretation limits
 
-Until one of those options is completed, the comparison acceptance criterion remains blocked even though the local Qwen throughput criterion now passes the revised threshold.
+The current-orchestrator evidence is real repository-task-router evidence, but it exercised the degraded `tool_fallback`/unavailable local inference path available in the Docker evaluation environment. It should not be treated as a full hosted/default-assistant model comparison unless a stakeholder provides the exact production/current-orchestrator endpoint or credentials and approves measuring that path.
+
+Safe follow-up options if exact production parity is required:
+
+1. Provide the intended production/current-orchestrator endpoint and authorization model so the harness can call it.
+2. Extend `task_router`/`local_infer` to expose streaming first-token events and backend tokenizer counts.
+3. Explicitly accept the current checked-in comparison as the issue #1 repository-orchestrator baseline.

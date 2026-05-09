@@ -21,6 +21,9 @@ BOUNDED_LOG = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-oll
 FULL_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json"
 FULL_LOG = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.log"
 ORCHESTRATOR_BLOCKER = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md"
+CURRENT_ORCHESTRATOR_RUNNER = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/run-current-orchestrator-eval.py"
+CURRENT_ORCHESTRATOR_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-current-orchestrator-2026-05-09.json"
+CURRENT_ORCHESTRATOR_LOG = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-current-orchestrator-2026-05-09.log"
 
 REQUIRED_CATEGORIES = {
     "c_cpp_embedded",
@@ -97,6 +100,8 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json" in doc
     assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json" in doc
     assert "evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md" in doc
+    assert "evaluation/qwen3.6-35b-a3b/run-current-orchestrator-eval.py" in doc
+    assert "evaluation/qwen3.6-35b-a3b/results/results-current-orchestrator-2026-05-09.json" in doc
     assert ACQUISITION_ATTEMPT.exists()
     assert RUNNER.exists()
     assert SMOKE.exists()
@@ -106,6 +111,9 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert FULL_RESULT.exists()
     assert FULL_LOG.exists()
     assert ORCHESTRATOR_BLOCKER.exists()
+    assert CURRENT_ORCHESTRATOR_RUNNER.exists()
+    assert CURRENT_ORCHESTRATOR_RESULT.exists()
+    assert CURRENT_ORCHESTRATOR_LOG.exists()
 
     for text in (doc, report, docker_runtime, auth_request, acquisition_attempt, smoke):
         assert "source/Dockerfile" in text
@@ -161,10 +169,21 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "Current target-model results are GPU-backed" in report
     assert "current-orchestrator comparison" in report
     assert "evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md" in report
+    assert "evaluation/qwen3.6-35b-a3b/results/results-current-orchestrator-2026-05-09.json" in report
     assert "must not be inferred from the local Qwen run" in orchestrator_blocker
-    assert "current-orchestrator` as `0/7` and `not measured`" in orchestrator_blocker
+    assert "7/7` harness invocations" in orchestrator_blocker
     assert "median `8.056` sustained tokens/sec" in orchestrator_blocker
     assert "approximately `7` sustained tokens/sec" in orchestrator_blocker
+
+    current_orchestrator_result = json.loads(CURRENT_ORCHESTRATOR_RESULT.read_text())
+    assert current_orchestrator_result["aggregate"]["completed"] == 7
+    assert current_orchestrator_result["aggregate"]["scenario_count"] == 7
+    assert current_orchestrator_result["aggregate"]["median_first_token_latency_s"] is None
+    assert "non-streaming task_router" in current_orchestrator_result["aggregate"]["first_token_latency_note"]
+    assert current_orchestrator_result["aggregate"]["max_peak_ram_mb_delta"] is not None
+    assert {result["category"] for result in current_orchestrator_result["results"]} == REQUIRED_CATEGORIES
+    assert all(result["backend"] == "current-orchestrator" for result in current_orchestrator_result["results"])
+    assert all("peak_ram_note" in result for result in current_orchestrator_result["results"])
 
     for recommendation in (
         "suitable for productive coding usage",

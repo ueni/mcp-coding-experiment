@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Coding Evaluation
 
-Status: GPU-backed target-runtime evaluation record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria because the current-orchestrator comparison remains unavailable and bounded target-model quality is below the expected default-assistant bar. The selected public GGUF is present/checksummed locally, Docker/Ollama can load it with Vulkan/RADV, and a full seven-scenario bounded target-model run completed on 2026-05-09 with `offloaded 41/41 layers to GPU`. The measured median `8.056` sustained tokens/sec now meets the revised approximately 7 sustained tokens/sec throughput threshold.
+Status: GPU-backed target-runtime evaluation record for `ueni/mcp-coding-experiment#1` with a checked-in current-orchestrator comparison harness and evidence. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria because bounded target-model quality is below the expected default-assistant bar and the current-orchestrator harness can only measure the repository task router's non-streaming, degraded `tool_fallback` path in this environment. The selected public GGUF is present/checksummed locally, Docker/Ollama can load it with Vulkan/RADV, and a full seven-scenario bounded target-model run completed on 2026-05-09 with `offloaded 41/41 layers to GPU`. The measured median `8.056` sustained tokens/sec now meets the revised approximately 7 sustained tokens/sec throughput threshold.
 
 ## Goal
 
@@ -33,7 +33,9 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Target model smoke result | `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md` and `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json` |
 | Verifier bounded expansion | `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json` and `.log` |
 | Full bounded target-model run | `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json` and `.log` |
-| Current-orchestrator comparison blocker | `evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md` |
+| Current-orchestrator comparison harness | `evaluation/qwen3.6-35b-a3b/run-current-orchestrator-eval.py` |
+| Current-orchestrator comparison result | `evaluation/qwen3.6-35b-a3b/results/results-current-orchestrator-2026-05-09.json` and `.log` |
+| Historical current-orchestrator blocker | `evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md` |
 
 ## Evaluation scope
 
@@ -42,7 +44,7 @@ Run every scenario in the manifest for both systems where possible:
 1. local Qwen3.6-35B-A3B candidate;
 2. current orchestrator implementation.
 
-The local candidate now has a seven-scenario GPU-backed bounded run. The current orchestrator comparison was not run: this repository does not expose a directly comparable checked-in benchmark harness that returns the same first-token latency, token counts, and sustained tokens/sec fields for the scenario manifest without adding new orchestration code. That comparison remains a documented blocker rather than fabricated evidence; see `evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md`.
+The local candidate now has a seven-scenario GPU-backed bounded run. The current orchestrator comparison is captured by `evaluation/qwen3.6-35b-a3b/run-current-orchestrator-eval.py`, which runs the same scenario manifest through the checked-in `task_router(mode="task")` path with persistence disabled and records end-to-end latency, estimated token counts, process RSS deltas, route/backend state, output previews, and coarse quality verdicts in `evaluation/qwen3.6-35b-a3b/results/results-current-orchestrator-2026-05-09.json`. The task router does not expose streaming first-token events or tokenizer counts, so those fields are explicitly marked as non-streaming/estimated instead of being fabricated.
 
 ## Official Docker runtime path
 
@@ -138,7 +140,7 @@ For each scenario, capture:
 - output file or transcript path;
 - pass/fail/partial judgment and reviewer notes.
 
-Use the report template for final results. `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` runs the scenario manifest against the Docker Ollama endpoint and writes machine-readable latency/throughput results.
+Use the report template for final results. `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` runs the scenario manifest against the Docker Ollama endpoint and writes machine-readable latency/throughput results. `evaluation/qwen3.6-35b-a3b/run-current-orchestrator-eval.py` runs the same manifest through the repository's current task orchestrator; its first-token latency is `null` because the task router is non-streaming, and its token counts are approximate because no tokenizer counts are exposed.
 
 ## Scenario set
 
@@ -164,7 +166,8 @@ The workflow `.github/workflows/qwen-evaluation-artifacts.yml` runs on `ubuntu-l
 - required scenario categories are present;
 - each scenario carries measurement fields needed for latency, throughput, resource usage, and quality comparison;
 - this documentation links the canonical manifest and report template;
-- committed GPU-backed result JSON covers all seven scenarios and does not contradict the current Vulkan offload evidence.
+- committed GPU-backed result JSON covers all seven scenarios and does not contradict the current Vulkan offload evidence;
+- committed current-orchestrator result JSON covers the same seven scenarios with explicit non-streaming/estimated measurement notes.
 
 This satisfies the GitHub-hosted CI path without depending on self-hosted hardware, private model caches, or non-default runners.
 
@@ -186,7 +189,7 @@ Use this minimum bar:
 
 Selected recommendation: **suitable only for limited/offline scenarios**.
 
-Rationale: the GPU-backed Docker/Ollama path is reproducible on the target laptop for the selected IQ1_M GGUF, and measured throughput exceeds the revised approximately 7 sustained tokens/sec expectation (`8.056` median tokens/sec in the seven-scenario bounded run). Quality is mixed under the 80-token cap: several scenarios pass, but C/C++ embedded and debugging are partial and strict structured JSON failed. The current orchestrator comparison is still blocked, so this is not sufficient to recommend replacing the repository's current assistant/orchestrator path.
+Rationale: the GPU-backed Docker/Ollama path is reproducible on the target laptop for the selected IQ1_M GGUF, and measured throughput exceeds the revised approximately 7 sustained tokens/sec expectation (`8.056` median tokens/sec in the seven-scenario bounded run). Quality is mixed under the 80-token cap: several scenarios pass, but C/C++ embedded and debugging are partial and strict structured JSON failed. The current-orchestrator harness completed all seven scenarios through the non-streaming `task_router` path, but it exercised a degraded `tool_fallback`/unavailable local inference path rather than a full default assistant model. This is not sufficient to recommend replacing the repository's current assistant/orchestrator path.
 
 ## Known limitations to document during execution
 
