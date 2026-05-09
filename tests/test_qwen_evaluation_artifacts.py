@@ -12,6 +12,7 @@ DOC = REPO_ROOT / "docs/evaluations/qwen3.6-35b-a3b-local.md"
 REPORT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/report-template.md"
 DOCKER_RUNTIME = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md"
 AUTH_REQUEST = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md"
+RUNNER = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py"
 
 REQUIRED_CATEGORIES = {
     "c_cpp_embedded",
@@ -78,6 +79,8 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "evaluation/qwen3.6-35b-a3b/report-template.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md" in doc
+    assert "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py" in doc
+    assert RUNNER.exists()
 
     for text in (doc, report, docker_runtime, auth_request):
         assert "source/Dockerfile" in text
@@ -96,6 +99,11 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "unsloth/Qwen3.6-35B-A3B-GGUF" in auth_request
     assert "a483e9e6cbd595906af30beda3187c2663a1118c" in auth_request
     assert "issue #1 acceptance criteria" in auth_request
+    assert "does **not** close or satisfy the full issue #1 benchmark acceptance criteria" in doc
+    assert "does **not** satisfy the full issue #1 benchmark acceptance criteria" in report
+    assert "must not close or claim issue #1" in auth_request
+    assert "first-token latency" in auth_request
+    assert "sustained tokens/sec" in auth_request
 
     for recommendation in (
         "suitable for productive coding usage",

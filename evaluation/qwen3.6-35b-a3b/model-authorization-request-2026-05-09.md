@@ -43,7 +43,7 @@ Revision checked: `a483e9e6cbd595906af30beda3187c2663a1118c`
 
 ## Benchmark work remaining after authorization
 
-After the model artifact is authorized/provided, run the seven scenario categories from `evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl` inside the verified Docker runtime and update `evaluation/qwen3.6-35b-a3b/report-template.md` with:
+After the model artifact is authorized/provided, run the seven scenario categories from `evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl` inside the verified Docker runtime. The checked-in `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` harness can collect Ollama first-token latency, end-to-end latency, token counts, and sustained tokens/sec into JSON for the report. Then update `evaluation/qwen3.6-35b-a3b/report-template.md` with:
 
 - model source, revision, quantization, checksum, and startup command;
 - first-token latency, end-to-end latency, sustained tokens/sec, input/output tokens;
@@ -51,4 +51,4 @@ After the model artifact is authorized/provided, run the seven scenario categori
 - current-orchestrator comparison outputs and quality/usability judgments;
 - known limitations, operational costs, and final viability recommendation.
 
-Until that decision is made, the issue #1 acceptance criteria for the actual Qwen3.6-35B-A3B run and measurements remain blocked. PR #2 should be treated as evaluation-artifact/runtime-readiness evidence only unless option 1 or 2 above is completed and this report is rerun with real model outputs.
+Until that decision is made, the issue #1 acceptance criteria for the actual Qwen3.6-35B-A3B run and measurements remain blocked. PR #2 is scoped as evaluation-artifact/runtime-readiness evidence only and must not close or claim issue #1 unless option 1 or 2 above is completed and this report is rerun with real model outputs.

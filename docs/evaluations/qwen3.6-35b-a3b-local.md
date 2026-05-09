@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Coding Evaluation
 
-Status: blocked evaluation artifact and reproducibility/runtime-readiness record for `ueni/mcp-coding-experiment#1`. The Docker runtime path is covered, but the target Qwen3.6-35B-A3B benchmark remains blocked until model weights are authorized or provided.
+Status: evaluation-artifact/runtime-readiness record only for `ueni/mcp-coding-experiment#1`. This PR deliberately does **not** close or satisfy the full issue #1 benchmark acceptance criteria: the Docker runtime path is covered, but the target Qwen3.6-35B-A3B benchmark remains blocked until model weights are authorized or provided.
 
 ## Goal
 
@@ -28,6 +28,7 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Official local runtime | Docker image from `source/Dockerfile`, started by `.devcontainer/devcontainer.json` or equivalent `docker run` |
 | Docker GPU evidence | `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md` |
 | Model authorization blocker | `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md` |
+| Scenario runner harness | `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` |
 
 ## Evaluation scope
 
@@ -128,7 +129,7 @@ For each scenario, capture:
 - output file or transcript path;
 - pass/fail/partial judgment and reviewer notes.
 
-Use the report template for final results.
+Use the report template for final results. After a model artifact is authorized or provided, `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` can run the scenario manifest against the Docker Ollama endpoint and write machine-readable latency/throughput results.
 
 ## Scenario set
 

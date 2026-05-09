@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Evaluation Report
 
-This file is the canonical report for issue #1. It records the 2026-05-08 target-host attempt, the verified Docker GPU runtime path, and the exact remaining blocker. No target-model quality or throughput numbers are fabricated.
+This file is an evaluation-artifact/runtime-readiness report related to issue #1. It records the 2026-05-08 target-host attempt, the verified Docker GPU runtime path, and the exact remaining blocker. It does **not** satisfy the full issue #1 benchmark acceptance criteria because the Qwen3.6-35B-A3B target run and real measurements are still blocked. No target-model quality or throughput numbers are fabricated.
 
 ## Run metadata
 
