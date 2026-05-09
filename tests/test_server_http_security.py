@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self._orig_token = self.server.MCP_HTTP_BEARER_TOKEN
         self._orig_rate_requests = self.server.MCP_HTTP_RATE_LIMIT_REQUESTS
         self._orig_rate_window = self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS
+        self._orig_request_timeout = self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS
         self._orig_audit_file = self.server.MCP_AUDIT_LOG_FILE
         self.server._HTTP_RATE_LIMIT_BUCKETS.clear()
         self.audit_tmp = tempfile.TemporaryDirectory()
@@ -26,6 +28,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.server.MCP_HTTP_BEARER_TOKEN = self._orig_token
         self.server.MCP_HTTP_RATE_LIMIT_REQUESTS = self._orig_rate_requests
         self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = self._orig_rate_window
+        self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS = self._orig_request_timeout
         self.server.MCP_AUDIT_LOG_FILE = self._orig_audit_file
         self.server._HTTP_RATE_LIMIT_BUCKETS.clear()
         self.audit_tmp.cleanup()
@@ -64,6 +67,38 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         allowed, retry_after = self.server._http_rate_limit_allow(scope, now=102.0)
         self.assertFalse(allowed)
         self.assertGreaterEqual(retry_after, 1)
+
+    def test_http_middleware_timeout_returns_504_and_audits(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS = 0.01
+        messages = []
+
+        async def slow_app(scope, receive, send):
+            await asyncio.sleep(1)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        scope = self._scope("secret-token")
+
+        asyncio.run(self.server.MCPHTTPAuthMiddleware(slow_app)(scope, receive, send))
+
+        self.assertEqual(messages[0]["type"], "http.response.start")
+        self.assertEqual(messages[0]["status"], 504)
+        self.assertEqual(messages[1]["type"], "http.response.body")
+        self.assertIn(b"timeout", messages[1]["body"])
+
+        rows = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rows), 1)
+        event = json.loads(rows[0])
+        self.assertEqual(event["tool_name"], "http_request")
+        self.assertFalse(event["success"])
+        self.assertEqual(event["reason"], "request timeout")
+        self.assertEqual(event["arguments"], {"path": "/mcp"})
 
     def test_read_only_tool_path_is_allowed_without_http_auth_context(self):
         self.server.ALLOW_MUTATIONS = False
