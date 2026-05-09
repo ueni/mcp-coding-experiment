@@ -298,7 +298,7 @@ class ServerCoverageBurnDownTest(ServerToolsTestBase):
             self.assertIn("ok", self.server.git_pull(remote="origin", branch="main", rebase=True))
             self.assertIn("ok", self.server.git_push(remote="origin", branch="main", set_upstream=True))
 
-    def test_commit_lint_tag_and_artifact_memory(self):
+    def test_commit_lint_tag_artifact_memory_and_spec_to_tests(self):
         bad = self.server.commit_lint_tag(
             message="release pipeline update",
             include_diff_hints=False,
@@ -328,6 +328,25 @@ class ServerCoverageBurnDownTest(ServerToolsTestBase):
         self.assertGreaterEqual(read["count"], 1)
         self.assertEqual(queried["count"], 1)
         self.assertEqual(added["added"], "docs/a.md")
+
+        generated = self.server.spec_to_tests(
+            spec_text="- system must authenticate users\n- API should reject invalid tokens\n",
+            framework="unittest",
+            mode="generate",
+        )
+        written = self.server.spec_to_tests(
+            spec_text="- service must be fast\n",
+            framework="pytest",
+            mode="write",
+            output_path="tests/generated_spec_test.py",
+        )
+        self.assertIn("class SpecTests", generated["test_code"])
+        self.assertTrue((self.repo_path / "tests" / "generated_spec_test.py").is_file())
+        self.assertEqual(written["output_path"], "tests/generated_spec_test.py")
+        with self.assertRaises(ValueError):
+            self.server.spec_to_tests(spec_text="x", framework="nose")
+        with self.assertRaises(ValueError):
+            self.server.spec_to_tests(spec_text="x", mode="append")
 
     def test_license_monitor_browse_web_read_document_and_lab_wrappers(self):
         def fake_run_reuse(args, timeout_seconds=120):

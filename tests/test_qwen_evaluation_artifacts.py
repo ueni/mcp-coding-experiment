@@ -126,15 +126,15 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "29/29" in docker_runtime
     assert "validates the Docker GPU/Ollama runtime only" in docker_runtime
 
-    assert "explicit blocked evaluation artifact" in auth_request
+    assert "historical authorization-blocker artifact" in auth_request
     assert "external/non-code blocker" in auth_request
     assert "Authorize exactly one" in auth_request
     assert "unsloth/Qwen3.6-35B-A3B-GGUF" in auth_request
     assert "a483e9e6cbd595906af30beda3187c2663a1118c" in auth_request
     assert "issue #1 acceptance criteria" in auth_request
-    assert "does **not** close or satisfy the full issue #1 benchmark acceptance criteria" in doc
-    assert "does **not** satisfy the full issue #1 benchmark acceptance criteria" in report
-    assert "must not close or claim issue #1" in auth_request
+    assert "satisfy the reproducibility, scenario coverage, measurement, GitHub-hosted artifact-validation" in doc
+    assert "satisfy the issue #1 evaluation acceptance criteria for a **limited/offline** viability recommendation" in report
+    assert "Historical status: this blocker applied before the selected GGUF was available locally" in auth_request
     assert "first-token latency" in auth_request
     assert "sustained tokens/sec" in auth_request
 

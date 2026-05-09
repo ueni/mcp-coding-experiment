@@ -3,8 +3,8 @@
 
 import asyncio
 import contextlib
+import contextvars
 import ast
-import difflib
 import json
 import os
 import queue
@@ -17,6 +17,7 @@ import fnmatch
 import threading
 import uuid
 import hashlib
+import hmac
 import time
 import math
 import ssl
@@ -25,7 +26,6 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import html
-import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 import pty
@@ -101,6 +101,7 @@ from source.tool_output_schemas import (
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from starlette.types import ASGIApp
 from starlette.routing import Mount, Route
 
 REPO_PATH = Path(os.getenv("REPO_PATH", "/repo")).resolve()
@@ -118,6 +119,14 @@ MAX_OUTPUT_CHARS = int(os.getenv("MAX_OUTPUT_CHARS", "200000"))
 ALLOW_ORIGINS = [
     x.strip() for x in os.getenv("ALLOW_ORIGINS", "*").split(",") if x.strip()
 ]
+MCP_HTTP_AUTH_MODE = os.getenv("MCP_HTTP_AUTH_MODE", "token").strip().lower()
+MCP_HTTP_BEARER_TOKEN = os.getenv("MCP_HTTP_BEARER_TOKEN", "").strip()
+MCP_HTTP_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_REQUESTS", "120")))
+MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60")))
+MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TIMEOUT_SECONDS", "120")))
+MCP_AUDIT_LOG_FILE = Path(
+    os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
+)
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
 MEMORY_FILE = Path(".codebase-tooling-mcp/memory/context_memory.json")
@@ -139,113 +148,7 @@ EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
 ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
 TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.json")
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
-WORKFLOW_BENCHMARK_FILE = Path(".codebase-tooling-mcp/reports/WORKFLOW_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
-SKILL_PACK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/SKILL_PACK_LINT.json")
-GUIDED_EDIT_REGRESSION_FILE = Path(".codebase-tooling-mcp/reports/GUIDED_EDIT_REGRESSIONS.json")
-GUIDED_EDIT_EXAMPLE_FILE = Path(".codebase-tooling-mcp/reports/GUIDED_EDIT_EXAMPLES.json")
-GUIDED_EDIT_REPLAY_BENCHMARK_FILE = Path(".codebase-tooling-mcp/reports/GUIDED_EDIT_REPLAY_BENCHMARK.json")
-REPO_HISTORY_MEMORY_MAX_COMMITS = max(
-    10, int(os.getenv("REPO_HISTORY_MEMORY_MAX_COMMITS", "40"))
-)
-REPO_HISTORY_MEMORY_MAX_FILES = max(
-    4, int(os.getenv("REPO_HISTORY_MEMORY_MAX_FILES", "12"))
-)
-REPO_HISTORY_MEMORY_MAX_ENTRIES = max(
-    2, int(os.getenv("REPO_HISTORY_MEMORY_MAX_ENTRIES", "6"))
-)
-MEMORY_TRUST_LEVELS = {"low", "medium", "high"}
-GUIDED_EDIT_REPLAY_GLOBAL_THRESHOLDS = {
-    "applied_success_rate": 0.95,
-    "safe_outcome_rate": 0.99,
-}
-GUIDED_EDIT_REPLAY_BUCKET_THRESHOLDS = {
-    "tiny_anchored": {"applied_success_rate": 0.99, "safe_outcome_rate": 0.99},
-    "bounded_semantic": {"applied_success_rate": 0.95, "safe_outcome_rate": 0.99},
-    "structural": {"applied_success_rate": 0.90, "safe_outcome_rate": 0.99},
-}
-CURATED_TASK_SKILL_PACKS: dict[str, list[dict[str, str]]] = {
-    "coding": [
-        {
-            "id": "scoped_edit",
-            "title": "Scoped Edit",
-            "summary": "Change only the named files or symbols and keep the patch minimal.",
-        },
-        {
-            "id": "compile_then_tests",
-            "title": "Compile Then Tests",
-            "summary": "Validate syntax first, then run impacted tests before expanding scope.",
-        },
-        {
-            "id": "api_docs_sync",
-            "title": "API And Docs Sync",
-            "summary": "If behavior changes, update docs or public API notes in the same edit.",
-        },
-    ],
-    "review": [
-        {
-            "id": "evidence_first",
-            "title": "Evidence First",
-            "summary": "Cite concrete files, symbols, diffs, or outputs before making a claim.",
-        },
-        {
-            "id": "severity_order",
-            "title": "Severity Order",
-            "summary": "Report behavioral regressions and correctness risks before style issues.",
-        },
-        {
-            "id": "missing_tests",
-            "title": "Missing Tests",
-            "summary": "Call out missing tests when behavior changed without validation coverage.",
-        },
-    ],
-    "security": [
-        {
-            "id": "trust_boundaries",
-            "title": "Trust Boundaries",
-            "summary": "Inspect auth, secrets, untrusted input, and state-changing boundaries first.",
-        },
-        {
-            "id": "evidence_first",
-            "title": "Evidence First",
-            "summary": "Ground findings in reachable code paths and concrete repository evidence.",
-        },
-        {
-            "id": "safe_abstain",
-            "title": "Safe Abstain",
-            "summary": "If proof is weak, downgrade confidence instead of overstating impact.",
-        },
-    ],
-    "research": [
-        {
-            "id": "task_scoped_context",
-            "title": "Task Scoped Context",
-            "summary": "Prefer short task-specific snippets over broad repository-wide guidance.",
-        },
-        {
-            "id": "artifact_memory",
-            "title": "Artifact Memory",
-            "summary": "Use reports, baselines, and snapshots when they directly answer the request.",
-        },
-        {
-            "id": "compare_sources",
-            "title": "Compare Sources",
-            "summary": "When multiple repo sources disagree, surface the mismatch explicitly.",
-        },
-    ],
-    "general": [
-        {
-            "id": "compact_answer",
-            "title": "Compact Answer",
-            "summary": "Prefer a short direct answer unless code or repository grounding is required.",
-        },
-        {
-            "id": "repo_grounding",
-            "title": "Repo Grounding",
-            "summary": "If the request mentions repo paths or symbols, ground the answer in them.",
-        },
-    ],
-}
 # Keep the external MCP contract focused: task_router remains the normal entrypoint,
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
@@ -253,11 +156,6 @@ PUBLIC_MCP_TOOL_NAMES = {
     "tool_output_contracts",
     *SCHEMA_BACKED_TOOL_NAMES,
 }
-ENABLE_PUBLIC_MCP_RESOURCES = os.getenv(
-    "ENABLE_PUBLIC_MCP_RESOURCES", "false"
-).strip().lower() in {"1", "true", "yes", "on"}
-PUBLIC_MCP_RESOURCE_URIS: set[str] = set()
-PUBLIC_MCP_RESOURCE_TEMPLATES: set[str] = set()
 OUTPUT_SCHEMA_BY_TOOL = TOOL_OUTPUT_SCHEMAS
 
 
@@ -265,6 +163,49 @@ class _AnyToolOutput(RootModel[Any]):
     root: Any
 
 
+TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
+    "task_router": {
+        "categories": ["read-only"],
+        "mode_categories": {
+            "status": ["read-only"],
+            "task": ["read-only", "network"],
+            "embed": ["read-only"],
+            "rerank": ["read-only"],
+            "infer": ["read-only", "network"],
+            "parallel_infer": ["read-only", "network"],
+            "autocomplete": ["read-only", "network"],
+            "coding_infer": ["write", "shell/process", "network"],
+            "coding_check": ["shell/process"],
+            "coding_pip": ["write", "shell/process", "network"],
+            "coding_sandbox": ["write", "shell/process"],
+        },
+    },
+    "apply_unified_diff": {"categories": ["write", "git mutation"]},
+    "command_runner": {"categories": ["shell/process"]},
+    "docker_router": {"categories": ["shell/process"]},
+    "vscode_router": {"categories": ["shell/process"]},
+}
+SENSITIVE_TOOL_CATEGORIES = {"write", "git mutation", "shell/process", "network", "secret-sensitive"}
+MUTATION_TOOL_CATEGORIES = {"write", "git mutation"}
+SENSITIVE_AUDIT_KEY_RE = re.compile(
+    r"token|secret|password|credential|authorization|api[_-]?key", re.IGNORECASE
+)
+SENSITIVE_AUDIT_VALUE_RE = re.compile(
+    r"("
+    r"\b(?:bearer|token|secret|password|credential|authorization|api[_-]?key)\b\s*[:= ]\s*\S+"
+    r"|\b[A-Za-z0-9._%+-]+-secret-[A-Za-z0-9._%+-]+\b"
+    r"|\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{12,}\b"
+    r"|\bsk-[A-Za-z0-9_-]{16,}\b"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
+    r")",
+    re.IGNORECASE,
+)
+_HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "http_request_authorized", default=None
+)
+_HTTP_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
+_HTTP_RATE_LIMIT_LOCK = threading.Lock()
 APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
@@ -275,10 +216,13 @@ DEFAULT_CONTINUE_OLLAMA_MODELS = ",".join(
     (
         DEFAULT_CODING_MODEL,
         DEFAULT_CODING_MICRO_MODEL,
-        "smollm2:360m",
         "granite3.3:2b",
+        "phi4-mini:3.8b",
+        "phi4-mini-reasoning:3.8b",
         "deepseek-r1:1.5b",
+        "deepscaler:1.5b",
         "granite3.2-vision:2b",
+        "llama3.2:1b",
     )
 )
 CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-3b.yaml"
@@ -522,57 +466,15 @@ TASK_ROUTE_ALIASES = {
     "search": "research",
 }
 TASK_ROUTE_SYSTEM_PROMPTS = {
-    "general": "Interpret compact JSON input. q is the request, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Answer directly and concisely.",
-    "coding": "Interpret compact JSON input. q is a coding task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return implementation-focused output only.",
-    "refactor": "Interpret compact JSON input. q is a refactor task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Focus on cleaner structure with minimal churn.",
-    "review": "Interpret compact JSON input. q is a review task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return concise findings first with file and line when possible.",
-    "security": "Interpret compact JSON input. q is a security task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Prioritize concrete vulnerabilities, exploitability, and fixes.",
-    "math": "Interpret compact JSON input. q is a math task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return exact reasoning and the final result.",
-    "vision": "Interpret compact JSON input. q is a vision task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Focus on visible evidence only.",
-    "research": "Interpret compact JSON input. q is a research task, i is structured intent when present, m is compact task memory when present, and k is retrieved repository context when present. Return a concise factual synthesis.",
+    "general": "Interpret compact JSON input. q is the request, m is compact task memory when present, and k is retrieved repository context when present. Answer directly and concisely.",
+    "coding": "Interpret compact JSON input. q is a coding task, m is compact task memory when present, and k is retrieved repository context when present. Return implementation-focused output only.",
+    "refactor": "Interpret compact JSON input. q is a refactor task, m is compact task memory when present, and k is retrieved repository context when present. Focus on cleaner structure with minimal churn.",
+    "review": "Interpret compact JSON input. q is a review task, m is compact task memory when present, and k is retrieved repository context when present. Return concise findings first with file and line when possible.",
+    "security": "Interpret compact JSON input. q is a security task, m is compact task memory when present, and k is retrieved repository context when present. Prioritize concrete vulnerabilities, exploitability, and fixes.",
+    "math": "Interpret compact JSON input. q is a math task, m is compact task memory when present, and k is retrieved repository context when present. Return exact reasoning and the final result.",
+    "vision": "Interpret compact JSON input. q is a vision task, m is compact task memory when present, and k is retrieved repository context when present. Focus on visible evidence only.",
+    "research": "Interpret compact JSON input. q is a research task, m is compact task memory when present, and k is retrieved repository context when present. Return a concise factual synthesis.",
 }
-TASK_INTENT_MUTATION_KEYWORDS = {
-    "add",
-    "change",
-    "create",
-    "delete",
-    "edit",
-    "fix",
-    "implement",
-    "modify",
-    "patch",
-    "refactor",
-    "rename",
-    "replace",
-    "rewrite",
-    "update",
-}
-TASK_INTENT_CONSTRAINT_MARKERS = (
-    "only",
-    "without",
-    "do not",
-    "don't",
-    "keep",
-    "minimal",
-    "minimize",
-    "concise",
-    "focused",
-    "bounded",
-    "avoid",
-)
-WATCHDOG_PROMPT_MARKERS = (
-    "ignore previous instructions",
-    "ignore prior instructions",
-    "reveal the system prompt",
-    "show the developer prompt",
-    "disclose hidden instructions",
-    "bypass the guardrails",
-)
-WATCHDOG_BLOCKED_PATH_PREFIXES = (
-    ".codebase-tooling-mcp/",
-    ".continue/",
-    ".git/",
-)
 TASK_RETRIEVAL_STOPWORDS = {
     "a",
     "about",
@@ -624,7 +526,6 @@ mcp = FastMCP(
     "git-repo-manager",
     instructions=(
         "Expose exactly one public MCP tool: `task_router`. "
-        "Do not expose public MCP resources or templates unless explicitly enabled by runtime configuration. "
         "All other server functions remain internal call targets and are not part of the external MCP contract. "
         "LLM agents should start with `task_router()` for almost every natural-language request because its default "
         "`mode='task'` classifies the request, injects compact task/session memory, and dispatches to the right "
@@ -641,6 +542,263 @@ _SSE_EVENT_HISTORY: deque[dict[str, Any]] = deque(maxlen=SSE_EVENT_HISTORY_MAX)
 _SSE_SUBSCRIBERS: dict[str, queue.Queue[dict[str, Any]]] = {}
 _SSE_LOCK = threading.Lock()
 _SSE_EVENT_SEQ = 0
+
+
+def _http_auth_required() -> bool:
+    return MCP_HTTP_AUTH_MODE in {"token", "bearer", "oauth-resource"}
+
+
+def _http_auth_insecure_local() -> bool:
+    return MCP_HTTP_AUTH_MODE in {"insecure-local", "local-insecure", "disabled", "off", "none"}
+
+
+def _client_is_loopback(scope: dict[str, Any]) -> bool:
+    client = scope.get("client") or ("", 0)
+    host = str(client[0] if client else "")
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+
+def _bearer_token_from_headers(headers: list[tuple[bytes, bytes]]) -> str:
+    for key, value in headers:
+        if key.lower() != b"authorization":
+            continue
+        raw = value.decode("latin-1", errors="replace").strip()
+        scheme, _, token = raw.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return token.strip()
+    return ""
+
+
+def _http_auth_discovery_payload() -> dict[str, Any]:
+    resource = os.getenv("MCP_HTTP_RESOURCE", "http://localhost:%s/mcp" % PORT)
+    return {
+        "resource": resource,
+        "authorization_servers": [],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["mcp:read", "mcp:mutate"],
+        "mcp_auth_mode": MCP_HTTP_AUTH_MODE,
+        "oauth_2_1_status": "deferred: bearer-token resource-server mode is implemented; full OAuth authorization-server integration is not bundled",
+    }
+
+
+def _http_authenticate_scope(scope: dict[str, Any]) -> tuple[bool, int, str]:
+    if _http_auth_insecure_local():
+        if _client_is_loopback(scope):
+            return True, 200, "explicit insecure local-only mode"
+        return False, 403, "MCP_HTTP_AUTH_MODE=insecure-local only accepts loopback clients"
+    if not _http_auth_required():
+        return False, 403, f"unsupported MCP_HTTP_AUTH_MODE={MCP_HTTP_AUTH_MODE!r}"
+    if not MCP_HTTP_BEARER_TOKEN:
+        return False, 403, "HTTP auth is enabled but MCP_HTTP_BEARER_TOKEN is not configured"
+    token = _bearer_token_from_headers(scope.get("headers", []))
+    if not token:
+        return False, 401, "missing bearer token"
+    if not hmac.compare_digest(token, MCP_HTTP_BEARER_TOKEN):
+        return False, 403, "invalid bearer token"
+    return True, 200, "authorized"
+
+
+def _http_rate_limit_key(scope: dict[str, Any]) -> str:
+    client = scope.get("client") or ("unknown", 0)
+    return str(client[0] if client else "unknown")
+
+
+def _http_rate_limit_allow(scope: dict[str, Any], now: float | None = None) -> tuple[bool, int]:
+    now = time.time() if now is None else now
+    key = _http_rate_limit_key(scope)
+    window_start = now - MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS
+    with _HTTP_RATE_LIMIT_LOCK:
+        bucket = _HTTP_RATE_LIMIT_BUCKETS.setdefault(key, deque())
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if len(bucket) >= MCP_HTTP_RATE_LIMIT_REQUESTS:
+            retry_after = max(1, int(math.ceil(bucket[0] + MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS - now)))
+            return False, retry_after
+        bucket.append(now)
+    return True, 0
+
+
+def _redact_audit_string(value: str) -> str:
+    if SENSITIVE_AUDIT_VALUE_RE.search(value):
+        return "<redacted>"
+    if len(value) > 500:
+        return value[:500] + "...[truncated]"
+    return value
+
+
+def _redact_audit_value(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return "<redacted-depth>"
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            if SENSITIVE_AUDIT_KEY_RE.search(key_str):
+                redacted[key_str] = "<redacted>"
+            else:
+                redacted[key_str] = _redact_audit_value(item, depth + 1)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_audit_value(item, depth + 1) for item in value[:25]]
+    if isinstance(value, str):
+        return _redact_audit_string(value)
+    return value
+
+
+def _append_audit_event(
+    tool_name: str,
+    categories: list[str],
+    success: bool,
+    arguments: dict[str, Any] | None = None,
+    reason: str = "",
+) -> None:
+    event = {
+        "timestamp": _now_iso(),
+        "tool_name": tool_name,
+        "categories": categories,
+        "success": success,
+        "reason": _redact_audit_string(reason),
+        "arguments": _redact_audit_value(arguments or {}),
+    }
+    try:
+        MCP_AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with MCP_AUDIT_LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, sort_keys=True, ensure_ascii=True) + "\n")
+    except OSError:
+        # Audit logging must not leak arguments through exception text or crash read-only calls.
+        pass
+
+
+def _tool_categories(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
+    metadata = TOOL_SECURITY_METADATA.get(tool_name, {"categories": ["read-only"]})
+    categories = list(metadata.get("categories", ["read-only"]))
+    mode_categories = metadata.get("mode_categories")
+    if isinstance(mode_categories, dict) and arguments:
+        mode = str(arguments.get("mode", "")).strip().lower()
+        if mode in mode_categories:
+            categories = list(mode_categories[mode])
+    return categories
+
+
+def _inside_http_request() -> bool:
+    return _HTTP_REQUEST_AUTHORIZED.get() is not None
+
+
+def _http_request_authorized_for_tools() -> bool:
+    authorized = _HTTP_REQUEST_AUTHORIZED.get()
+    return True if authorized is None else bool(authorized)
+
+
+def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
+    categories = _tool_categories(tool_name, arguments)
+    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+    mutating = bool(MUTATION_TOOL_CATEGORIES.intersection(categories))
+    if mutating and not ALLOW_MUTATIONS:
+        _append_audit_event(tool_name, categories, False, arguments, "mutations disabled")
+        raise PermissionError(
+            f"{tool_name} requires mutation permission; set ALLOW_MUTATIONS=true and use an authorized HTTP session."
+        )
+    if _inside_http_request() and sensitive and not _http_request_authorized_for_tools():
+        _append_audit_event(tool_name, categories, False, arguments, "HTTP session not authorized")
+        raise PermissionError(f"{tool_name} requires an authorized HTTP session")
+    return categories
+
+
+def _tool_result_success(result: Any) -> bool:
+    if isinstance(result, dict) and isinstance(result.get("ok"), bool):
+        return bool(result["ok"])
+    return True
+
+
+def _tool_result_failure_reason(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    for key in ("error", "stderr", "message"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return _trim_text(value.strip(), max_chars=200)
+    if result.get("timeout") is True:
+        return "timeout"
+    return "tool returned ok=false"
+
+
+def _run_with_tool_security_audit(
+    tool_name: str,
+    arguments: dict[str, Any],
+    action: Callable[[], Any],
+) -> Any:
+    categories = _require_tool_security_gate(tool_name, arguments)
+    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+    try:
+        result = action()
+    except Exception as exc:
+        if sensitive:
+            _append_audit_event(tool_name, categories, False, arguments, type(exc).__name__)
+        raise
+    if sensitive:
+        success = _tool_result_success(result)
+        _append_audit_event(
+            tool_name,
+            categories,
+            success,
+            arguments,
+            "" if success else _tool_result_failure_reason(result),
+        )
+    return result
+
+
+class MCPHTTPAuthMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        method = str(scope.get("method", "GET")).upper()
+        if method == "OPTIONS" or path in {"/", "/healthz"}:
+            await self.app(scope, receive, send)
+            return
+        if path == "/.well-known/oauth-protected-resource":
+            response = JSONResponse(_http_auth_discovery_payload())
+            await response(scope, receive, send)
+            return
+        allowed, retry_after = _http_rate_limit_allow(scope)
+        if not allowed:
+            response = JSONResponse(
+                {"error": "rate_limited", "detail": "Too many MCP HTTP requests"},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+            await response(scope, receive, send)
+            return
+        authorized, status_code, reason = _http_authenticate_scope(scope)
+        if not authorized:
+            _append_audit_event("http_request", ["network"], False, {"path": path}, reason)
+            headers = {"WWW-Authenticate": 'Bearer realm="mcp"'} if status_code == 401 else None
+            response = JSONResponse(
+                {"error": "unauthorized" if status_code == 401 else "forbidden", "detail": reason},
+                status_code=status_code,
+                headers=headers,
+            )
+            await response(scope, receive, send)
+            return
+        token = _HTTP_REQUEST_AUTHORIZED.set(True)
+        try:
+            if path == "/sse":
+                await self.app(scope, receive, send)
+            else:
+                await asyncio.wait_for(self.app(scope, receive, send), timeout=MCP_HTTP_REQUEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            _append_audit_event("http_request", ["network"], False, {"path": path}, "request timeout")
+            response = JSONResponse(
+                {"error": "timeout", "detail": "MCP HTTP request exceeded configured timeout"},
+                status_code=504,
+            )
+            await response(scope, receive, send)
+        finally:
+            _HTTP_REQUEST_AUTHORIZED.reset(token)
 
 
 def _trim_text(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
@@ -896,17 +1054,13 @@ def _decode_resource_path(path: str) -> str:
     return urllib.parse.unquote(path)
 
 
-def _normalize_public_resource_path(path: str) -> str:
-    decoded_path = _decode_resource_path(path).strip()
-    normalized = decoded_path or "."
-    resolved = _resolve_repo_path(normalized)
-    rel = resolved.relative_to(REPO_PATH)
-    if _is_hidden_rel_path(rel):
-        raise ValueError("path is not exposed via public MCP resources")
-    return str(rel).replace("\\", "/") or "."
-
-
-def _repo_summary_resource_contents() -> str:
+@mcp.resource(
+    "repo://summary",
+    name="repo_summary_resource",
+    description="Repository summary and basic server capability flags.",
+    mime_type="application/json",
+)
+def repo_summary_resource() -> str:
     _ensure_repo_path_exists()
     branch = ""
     head = ""
@@ -927,12 +1081,24 @@ def _repo_summary_resource_contents() -> str:
     return _mcp_resource_json(payload)
 
 
-def _repo_file_resource_contents(path: str) -> str:
-    return read_file(path=_normalize_public_resource_path(path))
+@mcp.resource(
+    "repo://file/{path}",
+    name="repo_file_resource",
+    description="Read a UTF-8 file from the repository by relative path.",
+    mime_type="text/plain",
+)
+def repo_file_resource(path: str) -> str:
+    return read_file(path=_decode_resource_path(path))
 
 
-def _repo_tree_resource_contents(path: str) -> str:
-    decoded_path = _normalize_public_resource_path(path)
+@mcp.resource(
+    "repo://tree/{path}",
+    name="repo_tree_resource",
+    description="List repository entries under a relative path.",
+    mime_type="application/json",
+)
+def repo_tree_resource(path: str) -> str:
+    decoded_path = _decode_resource_path(path)
     entries = list_files(path=decoded_path, recursive=True, include_hidden=False, max_entries=1000)
     payload = {
         "schema": "resource.repo_tree.v1",
@@ -941,40 +1107,6 @@ def _repo_tree_resource_contents(path: str) -> str:
         "count": len(entries),
     }
     return _mcp_resource_json(payload)
-
-
-if ENABLE_PUBLIC_MCP_RESOURCES:
-    PUBLIC_MCP_RESOURCE_URIS.add("repo://summary")
-    PUBLIC_MCP_RESOURCE_TEMPLATES.update({"repo://file/{path}", "repo://tree/{path}"})
-
-    @mcp.resource(
-        "repo://summary",
-        name="repo_summary_resource",
-        description="Repository summary and basic server capability flags.",
-        mime_type="application/json",
-    )
-    def repo_summary_resource() -> str:
-        return _repo_summary_resource_contents()
-
-
-    @mcp.resource(
-        "repo://file/{path}",
-        name="repo_file_resource",
-        description="Read a UTF-8 file from the repository by relative path.",
-        mime_type="text/plain",
-    )
-    def repo_file_resource(path: str) -> str:
-        return _repo_file_resource_contents(path)
-
-
-    @mcp.resource(
-        "repo://tree/{path}",
-        name="repo_tree_resource",
-        description="List repository entries under a relative path.",
-        mime_type="application/json",
-    )
-    def repo_tree_resource(path: str) -> str:
-        return _repo_tree_resource_contents(path)
 
 
 def _is_git_repo() -> bool:
@@ -1014,14 +1146,10 @@ def _resolve_repo_path(rel_path: str = ".") -> Path:
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return _git_at(REPO_PATH, *args, check=check)
-
-
-def _git_at(repo_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     _ensure_repo_path_exists()
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_root), *args],
+            ["git", "-C", str(REPO_PATH), *args],
             check=False,
             capture_output=True,
             text=True,
@@ -1615,139 +1743,6 @@ def _memory_entry_rank(entry: dict[str, Any]) -> tuple[float, float]:
     return confidence, epoch
 
 
-def _normalize_memory_trust_level(trust_level: str | None) -> str:
-    normalized = str(trust_level or "").strip().lower()
-    if normalized not in MEMORY_TRUST_LEVELS:
-        return "medium"
-    return normalized
-
-
-def _normalize_memory_provenance(provenance: str | None) -> str:
-    normalized = _trim_task_inline_text(provenance or "agent", max_chars=80)
-    return normalized or "agent"
-
-
-def _memory_row_quarantined(row: dict[str, Any]) -> bool:
-    return bool(row.get("quarantined", False))
-
-
-def _memory_row_allowed_for_context(row: dict[str, Any]) -> bool:
-    if _memory_row_quarantined(row):
-        return False
-    return _normalize_memory_trust_level(str(row.get("trust_level", "medium") or "medium")) != "low"
-
-
-def _normalize_memory_evidence(evidence: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    if not isinstance(evidence, list):
-        return []
-    normalized: list[dict[str, Any]] = []
-    for row in evidence[:8]:
-        if not isinstance(row, dict):
-            continue
-        item: dict[str, Any] = {}
-        for key in (
-            "kind",
-            "path",
-            "result_id",
-            "replay_id",
-            "diff_id",
-            "validation_id",
-            "summary",
-            "backend",
-            "provenance",
-            "trust_level",
-        ):
-            value = row.get(key)
-            if value is None:
-                continue
-            text = str(value).strip()
-            if text:
-                item[key] = _trim_task_inline_text(text, max_chars=180)
-        if "ok" in row:
-            item["ok"] = bool(row.get("ok"))
-        if "count" in row:
-            with contextlib.suppress(Exception):
-                item["count"] = int(row.get("count", 0) or 0)
-        if "quarantined" in row:
-            item["quarantined"] = bool(row.get("quarantined", False))
-        if item:
-            normalized.append(item)
-    return normalized
-
-
-def _memory_apply_metadata(
-    row: dict[str, Any],
-    *,
-    provenance: str,
-    trust_level: str,
-    quarantined: bool,
-) -> None:
-    row["provenance"] = _normalize_memory_provenance(provenance)
-    row["trust_level"] = _normalize_memory_trust_level(trust_level)
-    row["quarantined"] = bool(quarantined)
-
-
-def _memory_summary_upsert_in_payload(
-    payload: dict[str, Any],
-    *,
-    namespace: str,
-    focus: str,
-    summary: str,
-    ttl_days: int | None = None,
-    confidence: float = 1.0,
-    source: str = "agent",
-    tags: list[str] | None = None,
-    evidence: list[dict[str, Any]] | None = None,
-    provenance: str = "agent",
-    trust_level: str = "medium",
-    quarantined: bool = False,
-) -> None:
-    summaries = payload.get("summaries", [])
-    if not isinstance(summaries, list):
-        summaries = []
-        payload["summaries"] = summaries
-    now_iso = _now_iso()
-    expires_at = _to_iso_expiry(ttl_days)
-    normalized_evidence = _normalize_memory_evidence(evidence)
-    for row in summaries:
-        if row.get("namespace") == namespace and row.get("focus") == focus:
-            row["summary"] = summary
-            row["confidence"] = confidence
-            row["source"] = source
-            row["tags"] = tags or []
-            row["updated_at"] = now_iso
-            row["expires_at"] = expires_at
-            if normalized_evidence:
-                row["evidence"] = normalized_evidence
-            _memory_apply_metadata(
-                row,
-                provenance=provenance,
-                trust_level=trust_level,
-                quarantined=quarantined,
-            )
-            return
-    row = {
-        "namespace": namespace,
-        "focus": focus,
-        "summary": summary,
-        "confidence": confidence,
-        "source": source,
-        "tags": tags or [],
-        "created_at": now_iso,
-        "updated_at": now_iso,
-        "expires_at": expires_at,
-    }
-    if normalized_evidence:
-        row["evidence"] = normalized_evidence
-    _memory_apply_metadata(
-        row,
-        provenance=provenance,
-        trust_level=trust_level,
-        quarantined=quarantined,
-    )
-    summaries.append(row)
-
-
 def memory_auto_compact(
     namespace: str | None = None,
     threshold_entries: int = 80,
@@ -1756,7 +1751,7 @@ def memory_auto_compact(
     summary_max_chars: int = 1200,
     drop_expired: bool = False,
 ) -> dict[str, Any]:
-    """Compact persisted memory by pruning scoped entries and updating a retained summary."""
+    """Compact memory when size thresholds are exceeded by writing/updating summary records."""
     if threshold_entries < 1:
         raise ValueError("threshold_entries must be >= 1")
     if threshold_chars < 256:
@@ -1768,114 +1763,72 @@ def memory_auto_compact(
 
     payload = _memory_load()
     now = datetime.now(timezone.utc)
-    preserved_entries: list[dict[str, Any]] = []
-    scoped_entries: list[dict[str, Any]] = []
-    expired_removed = 0
+    entries = []
     for row in payload["entries"]:
         if namespace is not None and row.get("namespace") != namespace:
-            preserved_entries.append(row)
             continue
-        if _is_expired(row.get("expires_at"), now):
-            if drop_expired:
-                expired_removed += 1
-                continue
-            preserved_entries.append(row)
+        if _is_expired(row.get("expires_at"), now) and not drop_expired:
             continue
-        scoped_entries.append(row)
-    entries_sorted = sorted(scoped_entries, key=_memory_entry_rank, reverse=True)
+        entries.append(row)
+    entries_sorted = sorted(entries, key=_memory_entry_rank, reverse=True)
     serialized = json.dumps(entries_sorted, ensure_ascii=False)
     over_threshold = len(entries_sorted) > threshold_entries or len(serialized) > threshold_chars
-    removed_entries = max(0, len(entries_sorted) - min(keep_entries, len(entries_sorted))) if over_threshold else 0
-    if (over_threshold or expired_removed > 0) and not ALLOW_MUTATIONS:
+    if not over_threshold:
         return {
             "schema": "memory_auto_compact.v1",
             "compacted": False,
             "namespace": namespace,
             "entry_count": len(entries_sorted),
             "entry_chars": len(serialized),
-            "entry_count_after": len(entries_sorted),
-            "entry_chars_after": len(serialized),
-            "kept_entries": len(entries_sorted) if not over_threshold else min(keep_entries, len(entries_sorted)),
-            "removed_entries": removed_entries,
-            "expired_removed": expired_removed,
             "threshold_entries": threshold_entries,
             "threshold_chars": threshold_chars,
-            "skipped_due_to_mutations": True,
-            "reason": "mutations_disabled",
         }
-    if not over_threshold and expired_removed == 0:
+    if not ALLOW_MUTATIONS:
         return {
             "schema": "memory_auto_compact.v1",
             "compacted": False,
             "namespace": namespace,
             "entry_count": len(entries_sorted),
             "entry_chars": len(serialized),
-            "entry_count_after": len(entries_sorted),
-            "entry_chars_after": len(serialized),
-            "kept_entries": len(entries_sorted),
-            "removed_entries": 0,
-            "expired_removed": 0,
             "threshold_entries": threshold_entries,
             "threshold_chars": threshold_chars,
-            "skipped_due_to_mutations": False,
+            "reason": "mutations_disabled",
         }
 
     focus_ns = namespace or "global"
-    kept_entries = entries_sorted
-    summary_focus = None
-    if over_threshold:
-        kept_entries = entries_sorted[:keep_entries]
-        pruned_entries = entries_sorted[keep_entries:]
-        lines = []
-        for row in pruned_entries[: min(len(pruned_entries), keep_entries)]:
-            key = str(row.get("key", ""))[:64]
-            val = row.get("value")
-            val_txt = _trim_text(json.dumps(val, ensure_ascii=False), max_chars=180)
-            lines.append(f"- {key}: {val_txt}")
-        summary_text = _trim_text(
-            (
-                f"Auto-compact summary for namespace={focus_ns}. "
-                f"Retained {len(kept_entries)} high-rank entries and summarized {len(pruned_entries)} pruned entries.\n"
-                + "\n".join(lines)
-            ).rstrip(),
-            max_chars=summary_max_chars,
-        )
-        _memory_summary_upsert_in_payload(
-            payload,
-            namespace=focus_ns,
-            focus="auto_compact",
-            summary=summary_text,
-            ttl_days=60,
-            confidence=0.9,
-            source="memory.auto_compact",
-            tags=["auto", "compact", "summary"],
-            provenance="memory.auto_compact",
-            trust_level="high",
-        )
-        summary_focus = "auto_compact"
-        _memory_stats_record("summary_upsert")
-
-    payload["entries"] = preserved_entries + kept_entries
-    _memory_save(payload)
-    if removed_entries or expired_removed:
-        _memory_stats_record("compact")
-
-    after_serialized = json.dumps(kept_entries, ensure_ascii=False)
+    top = entries_sorted[:keep_entries]
+    lines = []
+    for row in top:
+        key = str(row.get("key", ""))[:64]
+        val = row.get("value")
+        val_txt = _trim_text(json.dumps(val, ensure_ascii=False), max_chars=180)
+        lines.append(f"- {key}: {val_txt}")
+    summary_text = _trim_text(
+        f"Auto-compact summary for namespace={focus_ns}. Kept top {len(top)} of {len(entries_sorted)} entries.\n"
+        + "\n".join(lines),
+        max_chars=summary_max_chars,
+    )
+    memory_summary_upsert(
+        namespace=focus_ns,
+        focus="auto_compact",
+        summary=summary_text,
+        ttl_days=60,
+        confidence=0.9,
+        source="memory.auto_compact",
+        tags=["auto", "compact", "summary"],
+    )
+    _memory_stats_record("compact")
+    _memory_stats_record("summary_upsert")
     return {
         "schema": "memory_auto_compact.v1",
-        "compacted": bool(removed_entries or expired_removed),
+        "compacted": True,
         "namespace": namespace,
         "entry_count": len(entries_sorted),
         "entry_chars": len(serialized),
-        "entry_count_after": len(kept_entries),
-        "entry_chars_after": len(after_serialized),
-        "kept_entries": len(kept_entries),
-        "removed_entries": removed_entries,
-        "expired_removed": expired_removed,
+        "kept_entries": len(top),
         "threshold_entries": threshold_entries,
         "threshold_chars": threshold_chars,
-        "skipped_due_to_mutations": False,
-        "summary_focus": summary_focus,
+        "summary_focus": "auto_compact",
     }
 
 
@@ -3391,14 +3344,6 @@ def _server_tool_names() -> set[str]:
     return set(PUBLIC_MCP_TOOL_NAMES)
 
 
-def _server_resource_uris() -> set[str]:
-    return set(PUBLIC_MCP_RESOURCE_URIS)
-
-
-def _server_resource_templates() -> set[str]:
-    return set(PUBLIC_MCP_RESOURCE_TEMPLATES)
-
-
 def _lossless_blob_store_load(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {"schema": "lossless_blob_store.v1", "blobs": {}}
@@ -4186,6 +4131,152 @@ def docker_cli_run(
         "build_log_tail": _trim_text(build_log_tail, max_chars=out_cap),
         "proposals": proposals,
     }
+
+
+class DockerRouterService:
+    """Application service for Docker CLI routing."""
+
+    def route(
+        self,
+        mode: str = "status",
+        command: list[str] | None = None,
+        cwd: str = ".",
+        control_profile: str = "build",
+        timeout_seconds: int = 1800,
+        max_output_chars: int | None = None,
+    ) -> dict[str, Any]:
+        if mode not in {"status", "run"}:
+            raise ValueError("mode must be one of: status, run")
+        if mode == "status":
+            return {
+                "schema": "docker_router.v1",
+                "mode": mode,
+                "result": docker_cli_status(),
+            }
+        if not command:
+            raise ValueError("command is required for run mode")
+        return {
+            "schema": "docker_router.v1",
+            "mode": mode,
+            "result": docker_cli_run(
+                command=command,
+                cwd=cwd,
+                control_profile=control_profile,
+                timeout_seconds=timeout_seconds,
+                max_output_chars=max_output_chars,
+            ),
+        }
+
+
+class VSCodeRouterService:
+    """Application service for VS Code tasks routing."""
+
+    def route(
+        self,
+        mode: str = "list",
+        label: str = "",
+        tasks_path: str = ".vscode/tasks.json",
+        label_prefix: str = "",
+        control_profile: str = "build",
+        timeout_seconds: int = 1800,
+        max_output_chars: int | None = None,
+    ) -> dict[str, Any]:
+        if mode not in {"list", "run"}:
+            raise ValueError("mode must be one of: list, run")
+        if mode == "list":
+            return {
+                "schema": "vscode_router.v1",
+                "mode": mode,
+                "result": vscode_tasks_list(
+                    tasks_path=tasks_path,
+                    label_prefix=label_prefix,
+                    control_profile=control_profile,
+                ),
+            }
+        if not label.strip():
+            raise ValueError("label is required for run mode")
+        return {
+            "schema": "vscode_router.v1",
+            "mode": mode,
+            "result": vscode_task_run(
+                label=label,
+                tasks_path=tasks_path,
+                control_profile=control_profile,
+                timeout_seconds=timeout_seconds,
+                max_output_chars=max_output_chars,
+            ),
+        }
+
+
+_DOCKER_ROUTER_SERVICE = DockerRouterService()
+_VSCODE_ROUTER_SERVICE = VSCodeRouterService()
+
+
+@mcp.tool()
+def docker_router(
+    mode: str = "status",
+    command: list[str] | None = None,
+    cwd: str = ".",
+    control_profile: str = "build",
+    timeout_seconds: int = 1800,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
+    """Docker CLI gateway. mode=status|run; run validates the command against the selected control profile."""
+    arguments = {
+        "mode": mode,
+        "command": command,
+        "cwd": cwd,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+    }
+    return _run_with_tool_security_audit(
+        "docker_router",
+        arguments,
+        lambda: _DOCKER_ROUTER_SERVICE.route(
+            mode=mode,
+            command=command,
+            cwd=cwd,
+            control_profile=control_profile,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        ),
+    )
+
+
+@mcp.tool()
+def vscode_router(
+    mode: str = "list",
+    label: str = "",
+    tasks_path: str = ".vscode/tasks.json",
+    label_prefix: str = "",
+    control_profile: str = "build",
+    timeout_seconds: int = 1800,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
+    """VS Code task gateway. mode=list|run; list filters tasks.json and run executes one exact label."""
+    arguments = {
+        "mode": mode,
+        "label": label,
+        "tasks_path": tasks_path,
+        "label_prefix": label_prefix,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+    }
+    return _run_with_tool_security_audit(
+        "vscode_router",
+        arguments,
+        lambda: _VSCODE_ROUTER_SERVICE.route(
+            mode=mode,
+            label=label,
+            tasks_path=tasks_path,
+            label_prefix=label_prefix,
+            control_profile=control_profile,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        ),
+    )
 
 
 def vscode_tasks_list(
@@ -5701,24 +5792,14 @@ def semantic_find(
     if not root.exists():
         raise FileNotFoundError(path)
 
-    quick_mode = summary_mode == "quick"
     terms = [t.lower() for t in re.split(r"\s+", query.strip()) if t]
     candidates: dict[str, dict[str, Any]] = {}
-    path_scan_limit = 5000
-    grep_match_limit = 200
-    include_symbol_candidates = True
-    if quick_mode:
-        path_scan_limit = min(1200, max(200, max_results * 80))
-        grep_match_limit = min(80, max(16, max_results * 4))
-        # Full symbol indexing walks every Python file and is too expensive for
-        # interactive quick summaries such as task_router retrieval.
-        include_symbol_candidates = False
 
     for rel in find_paths(
         path=path,
         recursive=True,
         include_hidden=False,
-        max_entries=path_scan_limit,
+        max_entries=5000,
         output_profile="compact",
         file_type="file",
     ):
@@ -5736,7 +5817,7 @@ def semantic_find(
             candidates[f"path:{rel}"]["reasons"].append("path_term_match")
 
     symbol_term = "|".join(re.escape(t) for t in terms if t)
-    if symbol_term and include_symbol_candidates:
+    if symbol_term:
         for sym in symbol_index(
             path=path,
             include_private=include_private_symbols,
@@ -5769,7 +5850,7 @@ def semantic_find(
             path=path,
             recursive=True,
             case_insensitive=True,
-            max_matches=grep_match_limit,
+            max_matches=200,
             output_profile="compact",
         )
         for m in matches:
@@ -5821,12 +5902,11 @@ def semantic_find(
         "count": len(ranked),
         "results": ranked,
     }
-    if quick_mode:
+    if summary_mode == "quick":
         result = {
             "schema": "semantic_find.quick.v1",
             "query": query,
             "count": len(ranked),
-            "results": ranked[: min(len(ranked), 12)],
             "top_paths": [r.get("path") for r in ranked[:20] if isinstance(r, dict)],
         }
     if compress and isinstance(result.get("results"), list):
@@ -6245,35 +6325,38 @@ def apply_unified_diff(
     diff_text: str,
     check_only: bool = True,
     cached: bool = False,
-    repo_root: Path | None = None,
 ) -> dict[str, Any]:
     """Apply a unified diff through git-apply with optional dry-run checks."""
-    _require_git_repo()
-    if not check_only:
-        _require_mutations()
-    target_root = repo_root or REPO_PATH
+    arguments = {"diff_text": diff_text, "check_only": check_only, "cached": cached}
 
-    args = ["git", "-C", str(target_root), "apply"]
-    if check_only:
-        args.append("--check")
-    if cached:
-        args.append("--cached")
+    def _run() -> dict[str, Any]:
+        _require_git_repo()
+        if not check_only:
+            _require_mutations()
 
-    proc = subprocess.run(
-        args,
-        input=diff_text,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return {
-        "ok": proc.returncode == 0,
-        "check_only": check_only,
-        "cached": cached,
-        "exit_code": proc.returncode,
-        "stdout": _trim_text(proc.stdout.strip()),
-        "stderr": _trim_text(proc.stderr.strip()),
-    }
+        args = ["git", "-C", str(REPO_PATH), "apply"]
+        if check_only:
+            args.append("--check")
+        if cached:
+            args.append("--cached")
+
+        proc = subprocess.run(
+            args,
+            input=diff_text,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "check_only": check_only,
+            "cached": cached,
+            "exit_code": proc.returncode,
+            "stdout": _trim_text(proc.stdout.strip()),
+            "stderr": _trim_text(proc.stderr.strip()),
+        }
+
+    return _run_with_tool_security_audit("apply_unified_diff", arguments, _run)
 
 
 @mcp.tool()
@@ -6284,6 +6367,30 @@ def command_runner(
     max_output_chars: int | None = None,
 ) -> dict[str, Any]:
     """Strict command executor: MUST use a SAFE_COMMANDS binary, required command list, returns schema-stable stdout/stderr or explicit timeout/file-not-found error payload."""
+    arguments = {
+        "command": command,
+        "cwd": cwd,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+    }
+    return _run_with_tool_security_audit(
+        "command_runner",
+        arguments,
+        lambda: _command_runner_impl(
+            command=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        ),
+    )
+
+
+def _command_runner_impl(
+    command: list[str],
+    cwd: str = ".",
+    timeout_seconds: int = 30,
+    max_output_chars: int | None = None,
+) -> dict[str, Any]:
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
     out_cap = _token_budget_apply_max(max_output_chars)
@@ -6941,7 +7048,11 @@ def tool_prompt_score(
             continue
         if scope == "core" and name not in {
             "task_router",
+            "memory_router",
+            "code_index_router",
             "workspace_transaction",
+            "docker_router",
+            "vscode_router",
             "command_runner",
             "self_test",
             "prompt_optimize",
@@ -8220,11 +8331,6 @@ def local_infer(
         selected = LOCAL_INFER_BACKEND or "endpoint"
     model_name = model or LOCAL_INFER_MODEL or "local-default"
 
-    text = ""
-    backend_name = "unavailable"
-    degraded = False
-    degraded_reason: str | None = None
-
     if selected == "endpoint":
         try:
             text = _local_infer_via_endpoint(
@@ -8234,7 +8340,6 @@ def local_infer(
                 temperature=temperature,
                 system=system,
             )
-            backend_name = "endpoint"
         except Exception as exc:
             _failure_record(
                 command=["local_infer", "endpoint"],
@@ -8242,41 +8347,28 @@ def local_infer(
                 category="local_infer",
                 suggestion="Ensure local inference endpoint is running and reachable.",
             )
-            degraded = True
-            degraded_reason = "endpoint_unavailable"
-
-    if backend_name != "endpoint":
-        tool_text = _tool_assisted_infer(prompt=prompt, max_tokens=max_tokens)
-        if tool_text:
-            text = tool_text
-            backend_name = "tool_fallback"
-            degraded = True
-            if degraded_reason is None:
-                degraded_reason = "requested_tool_fallback"
-        else:
-            backend_name = "unavailable"
-            degraded = True
-            if degraded_reason is None:
-                degraded_reason = "no_grounded_fallback_available"
-
+            text = ""
+            selected = "fallback"
+    if selected in {"fallback", "rule", "hash"}:
+        optimized = prompt_optimize(
+            prompt=prompt,
+            mode=_prompt_optimize_mode_for_task(task),
+        )
+        text = optimized["optimized_prompt"][:max_tokens * 6]
     result = {
         "schema": "local_infer.v1",
-        "backend": backend_name,
+        "backend": selected,
         "model": model_name,
         "task": task,
         "output": _trim_text(text),
         "ok": bool(text),
-        "degraded": degraded,
-        "degraded_reason": degraded_reason,
     }
     if profile == "compact":
         result = {
             "schema": "local_infer.compact.v1",
-            "backend": backend_name,
+            "backend": selected,
             "model": model_name,
             "ok": bool(text),
-            "degraded": degraded,
-            "degraded_reason": degraded_reason,
             "output": _trim_text(text, max_chars=1200),
         }
     if store_result:
@@ -8284,6 +8376,7 @@ def local_infer(
     return result
 
 
+@mcp.tool()
 def autocomplete(
     prefix: str,
     suffix: str = "",
@@ -8296,7 +8389,7 @@ def autocomplete(
     output_profile: str | None = None,
     store_result: bool = False,
 ) -> dict[str, Any]:
-    """Internal autocomplete helper. Use task_router(mode='autocomplete') for MCP callers."""
+    """Compatibility autocomplete endpoint. Prefer task_router(mode='autocomplete') for new integrations."""
     if not prefix:
         raise ValueError("prefix must not be empty")
     if max_tokens < 1:
@@ -8310,9 +8403,6 @@ def autocomplete(
     model_name = model or LOCAL_INFER_MODEL or "local-default"
 
     completion = ""
-    backend_name = "unavailable"
-    degraded = False
-    degraded_reason: str | None = None
     if selected == "endpoint":
         try:
             completion = _local_infer_via_endpoint(
@@ -8326,7 +8416,6 @@ def autocomplete(
                 ),
                 stop=stop,
             )
-            backend_name = "endpoint"
         except Exception as exc:
             _failure_record(
                 command=["autocomplete", "endpoint"],
@@ -8334,20 +8423,9 @@ def autocomplete(
                 category="autocomplete",
                 suggestion="Ensure local inference endpoint is running and reachable.",
             )
-            degraded = True
-            degraded_reason = "endpoint_unavailable"
-    if backend_name != "endpoint":
+            selected = "fallback"
+    if selected in {"fallback", "rule", "hash"}:
         completion = _autocomplete_fallback(prefix=prefix, suffix=suffix)
-        if completion:
-            backend_name = "heuristic_fallback"
-            degraded = True
-            if degraded_reason is None:
-                degraded_reason = "requested_heuristic_fallback"
-        else:
-            backend_name = "unavailable"
-            degraded = True
-            if degraded_reason is None:
-                degraded_reason = "no_heuristic_fallback_available"
 
     completion = _autocomplete_strip_wrappers(completion)
     completion = _autocomplete_apply_stops(completion, stop=stop)
@@ -8355,7 +8433,7 @@ def autocomplete(
 
     result: dict[str, Any] = {
         "schema": "autocomplete.v1",
-        "backend": backend_name,
+        "backend": selected,
         "model": model_name,
         "language": language.strip(),
         "prefix_chars": len(prefix),
@@ -8363,17 +8441,13 @@ def autocomplete(
         "max_tokens": max_tokens,
         "completion": completion,
         "ok": bool(completion),
-        "degraded": degraded,
-        "degraded_reason": degraded_reason,
     }
     if profile == "compact":
         result = {
             "schema": "autocomplete.compact.v1",
-            "backend": backend_name,
+            "backend": selected,
             "model": model_name,
             "ok": bool(completion),
-            "degraded": degraded,
-            "degraded_reason": degraded_reason,
             "completion": completion,
         }
     if store_result:
@@ -8469,8 +8543,8 @@ def _default_continue_model_routing() -> dict[str, Any]:
         'source': None,
         'loaded': False,
         'router': {
-            'model': 'smollm2:360m',
-            'file': '.continue/models/router-smollm2-360m.yaml',
+            'model': 'granite3.3:2b',
+            'file': '.continue/models/router-granite3.3-2b.yaml',
         },
         'routes': {
             'coding': {
@@ -8482,28 +8556,28 @@ def _default_continue_model_routing() -> dict[str, Any]:
                 'file': CODING_MICRO_MODEL_CONFIG_FILE,
             },
             'refactor': {
-                'model': 'granite3.3:2b',
-                'file': '.continue/models/refactor-granite3.3-2b.yaml',
+                'model': 'phi4-mini:3.8b',
+                'file': '.continue/models/refactor-phi4-mini-3.8b.yaml',
             },
             'review': {
-                'model': 'granite3.3:2b',
-                'file': '.continue/models/review-granite3.3-2b.yaml',
+                'model': 'phi4-mini-reasoning:3.8b',
+                'file': '.continue/models/review-phi4-mini-reasoning-3.8b.yaml',
             },
             'security': {
                 'model': 'deepseek-r1:1.5b',
                 'file': '.continue/models/security-deepseek-r1-1.5b.yaml',
             },
             'math': {
-                'model': 'deepseek-r1:1.5b',
-                'file': '.continue/models/math-deepseek-r1-1.5b.yaml',
+                'model': 'deepscaler:1.5b',
+                'file': '.continue/models/math-deepscaler-1.5b.yaml',
             },
             'vision': {
                 'model': 'granite3.2-vision:2b',
                 'file': '.continue/models/vision-granite3.2-vision-2b.yaml',
             },
             'research': {
-                'model': 'granite3.3:2b',
-                'file': '.continue/models/research-granite3.3-2b.yaml',
+                'model': 'llama3.2:1b',
+                'file': '.continue/models/research-llama3.2-1b.yaml',
             },
         },
     }
@@ -8695,16 +8769,12 @@ def _encode_task_prompt_packet(
     memory_session: str = '',
     memory_context: str = '',
     retrieval_context: str = '',
-    task_context: str = '',
-    intent_packet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = re.sub(r'\s+', ' ', prompt.strip())
     task_norm = task.strip().lower()
     session_norm = _normalize_task_memory_session(memory_session)
     memory_text = _trim_task_inline_text(memory_context, max_chars=900)
     retrieval_text = _trim_task_context_block(retrieval_context, max_chars=1400)
-    task_context_text = _trim_task_inline_text(task_context, max_chars=420)
-    compact_intent = intent_packet.get('compact', {}) if isinstance(intent_packet, dict) else {}
     packet = {
         'r': TASK_ROUTE_CODE_MAP.get(route, 'G'),
         'q': normalized,
@@ -8716,13 +8786,9 @@ def _encode_task_prompt_packet(
         packet['m'] = memory_text
     if retrieval_text:
         packet['k'] = retrieval_text
-    if task_context_text:
-        packet['x'] = task_context_text
-    if compact_intent:
-        packet['i'] = compact_intent
     encoded_prompt = json.dumps(packet, ensure_ascii=True, separators=(',', ':'))
     return {
-        'schema': 'task_prompt_packet.v2',
+        'schema': 'task_prompt_packet.v1',
         'codec': 'compact_json_v1',
         'route': route,
         'route_code': packet['r'],
@@ -8730,260 +8796,10 @@ def _encode_task_prompt_packet(
         'normalized_chars': len(normalized),
         'memory_chars': len(memory_text),
         'retrieval_chars': len(retrieval_text),
-        'task_context_chars': len(task_context_text),
-        'intent_chars': len(json.dumps(compact_intent, ensure_ascii=True, separators=(',', ':'))) if compact_intent else 0,
         'encoded_chars': len(encoded_prompt),
         'char_saving_vs_original': len(prompt) - len(encoded_prompt),
         'char_saving_vs_normalized': len(normalized) - len(encoded_prompt),
         'encoded_prompt': encoded_prompt,
-    }
-
-
-def _extract_task_constraints(prompt: str, max_items: int = 4) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    text = " ".join(str(prompt or "").split())
-    if not text:
-        return out
-    pieces = re.split(r"(?<=[.;!?])\s+|,\s+", text)
-    for piece in pieces:
-        normalized = piece.strip()
-        if not normalized:
-            continue
-        low = normalized.lower()
-        if not any(marker in low for marker in TASK_INTENT_CONSTRAINT_MARKERS):
-            continue
-        item = _trim_task_inline_text(normalized, max_chars=120)
-        if not item:
-            continue
-        key = item.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(item)
-        if len(out) >= max_items:
-            break
-    return out
-
-
-def _infer_task_deliverable(route: str, prompt: str) -> str:
-    low = str(prompt or "").lower()
-    if route in {"review", "security"} or any(token in low for token in ("review", "audit", "finding", "findings")):
-        return "findings"
-    if route in {"coding", "refactor"} or any(
-        token in low for token in ("implement", "fix", "edit", "patch", "refactor", "rename", "update code")
-    ):
-        return "code_change"
-    if any(token in low for token in ("plan", "roadmap", "steps", "strategy")):
-        return "plan"
-    if route == "research" or any(token in low for token in ("summarize", "summary", "compare", "explain")):
-        return "summary"
-    return "answer"
-
-
-def _task_risk_level(
-    route: str,
-    prompt: str,
-    *,
-    target_paths: list[str] | None = None,
-    mutation_intent: bool = False,
-) -> str:
-    score = 0
-    low = str(prompt or "").lower()
-    if route in {"security", "review"}:
-        score += 2
-    if route in {"coding", "refactor"} or mutation_intent:
-        score += 1
-    if target_paths:
-        score += 1
-    if any(token in low for token in ("all files", "entire repo", "whole repo", "production", "authentication")):
-        score += 1
-    if score >= 3:
-        return "high"
-    if score >= 1:
-        return "medium"
-    return "low"
-
-
-def _build_task_intent_packet(
-    *,
-    prompt: str,
-    route: str,
-    task: str = "general",
-    target_paths: list[str] | None = None,
-    retrieval_info: dict[str, Any] | None = None,
-    validation_profile: str = "",
-    max_steps: int = 0,
-) -> dict[str, Any]:
-    normalized = re.sub(r"\s+", " ", str(prompt or "").strip())
-    targets = [str(path).replace("\\", "/") for path in (target_paths or _extract_prompt_file_paths(prompt, max_paths=4)) if str(path).strip()]
-    mutation_intent = route in {"coding", "refactor"} or any(
-        token in normalized.lower() for token in TASK_INTENT_MUTATION_KEYWORDS
-    )
-    constraints = _extract_task_constraints(prompt, max_items=4)
-    deliverable = _infer_task_deliverable(route, prompt)
-    risk_level = _task_risk_level(
-        route,
-        prompt,
-        target_paths=targets,
-        mutation_intent=mutation_intent,
-    )
-    validation = validation_profile.strip().lower() if validation_profile.strip() else "repo_grounded"
-    if validation == "repo_grounded" and route in {"review", "security"}:
-        validation = "evidence_first"
-    if validation == "repo_grounded" and mutation_intent:
-        validation = "compile_or_tests"
-    if validation == "repo_grounded" and deliverable == "summary":
-        validation = "grounded_summary"
-    goal = _trim_task_inline_text(normalized, max_chars=180)
-    retrieval_items = int(retrieval_info.get("item_count", 0) or 0) if isinstance(retrieval_info, dict) else 0
-    compact = {
-        "g": goal,
-        "d": deliverable,
-        "r": risk_level[:1].upper(),
-        "u": mutation_intent,
-        "v": validation,
-    }
-    if targets:
-        compact["p"] = targets[:3]
-    if constraints:
-        compact["c"] = constraints[:3]
-    if retrieval_items:
-        compact["k"] = retrieval_items
-    if max_steps > 0:
-        compact["n"] = int(max_steps)
-    return {
-        "schema": "task_intent.v1",
-        "route": route,
-        "task": str(task or "general").strip().lower() or "general",
-        "goal": goal,
-        "deliverable": deliverable,
-        "risk_level": risk_level,
-        "mutation_intent": mutation_intent,
-        "target_paths": targets[:4],
-        "constraints": constraints,
-        "validation": validation,
-        "retrieval_item_count": retrieval_items,
-        "compact": compact,
-    }
-
-
-def _build_task_cost_plan(
-    *,
-    route: str,
-    prompt: str,
-    retrieval_info: dict[str, Any] | None,
-    repo_memory_info: dict[str, Any] | None,
-    intent: dict[str, Any],
-    max_tokens: int,
-) -> dict[str, Any]:
-    requested = max(1, int(max_tokens))
-    score = 0
-    reasons: list[str] = []
-    normalized = re.sub(r"\s+", " ", str(prompt or "").strip())
-    retrieval_count = int(retrieval_info.get("item_count", 0) or 0) if isinstance(retrieval_info, dict) else 0
-    repo_memory_count = int(repo_memory_info.get("entry_count", 0) or 0) if isinstance(repo_memory_info, dict) else 0
-    target_count = len(intent.get("target_paths", [])) if isinstance(intent.get("target_paths"), list) else 0
-    if len(normalized) > 180:
-        score += 1
-        reasons.append("long_prompt")
-    if retrieval_count >= 2:
-        score += 1
-        reasons.append("multiple_retrieval_items")
-    if route == "security":
-        score += 2
-        reasons.append("route:security")
-    elif route in {"review", "research"}:
-        score += 1
-        reasons.append(f"route:{route}")
-    if bool(intent.get("mutation_intent")):
-        score += 1
-        reasons.append("mutation_intent")
-    if target_count >= 1:
-        score += 1
-        reasons.append("explicit_targets")
-    if repo_memory_count >= 1:
-        score += 1
-        reasons.append("repo_history_memory")
-    if score <= 1:
-        effort = "low"
-        effective_max_tokens = min(requested, 256)
-        verifier_mode = "off"
-        validation = "quick"
-    elif score <= 3:
-        effort = "medium"
-        effective_max_tokens = min(requested, 640)
-        verifier_mode = "light"
-        validation = "standard"
-    else:
-        effort = "high"
-        effective_max_tokens = min(requested, 1024)
-        verifier_mode = "strict"
-        validation = "standard"
-    return {
-        "schema": "task_cost_plan.v1",
-        "requested_max_tokens": requested,
-        "effective_max_tokens": effective_max_tokens,
-        "effort": effort,
-        "score": score,
-        "reasons": reasons,
-        "verifier_mode": verifier_mode,
-        "validation_profile": validation,
-        "escalated": effective_max_tokens != requested or verifier_mode != "off",
-    }
-
-
-def _watchdog_path_blocked(path: str) -> bool:
-    rel = str(path or "").strip().replace("\\", "/").lstrip("./")
-    if not rel:
-        return False
-    return rel in {".git", ".continue", ".codebase-tooling-mcp"} or rel.startswith(WATCHDOG_BLOCKED_PATH_PREFIXES)
-
-
-def _watchdog_scan(
-    *,
-    prompt: str = "",
-    action: dict[str, Any] | None = None,
-    diff_text: str = "",
-    allowed_paths: list[str] | None = None,
-) -> dict[str, Any]:
-    flags: list[str] = []
-    blocked_reasons: list[str] = []
-    low_prompt = str(prompt or "").lower()
-    for marker in WATCHDOG_PROMPT_MARKERS:
-        if marker in low_prompt:
-            flags.append(f"prompt:{marker}")
-            blocked_reasons.append(f"prompt_marker:{marker}")
-    candidate_paths: list[str] = []
-    if isinstance(action, dict):
-        target = action.get("target", {})
-        if isinstance(target, dict):
-            target_path = str(target.get("path", "") or "").strip()
-            if target_path:
-                candidate_paths.append(target_path)
-    if diff_text:
-        candidate_paths.extend(_guided_edit_changed_paths(diff_text))
-    normalized_allowed = {
-        str(path).replace("\\", "/").lstrip("./")
-        for path in (allowed_paths or [])
-        if str(path).strip()
-    }
-    for path in candidate_paths:
-        normalized = str(path).replace("\\", "/").lstrip("./")
-        if _watchdog_path_blocked(normalized):
-            blocked_reasons.append(f"blocked_path:{normalized}")
-        if normalized_allowed and normalized not in normalized_allowed:
-            blocked_reasons.append(f"out_of_scope_path:{normalized}")
-    if diff_text:
-        touched = _guided_edit_changed_paths(diff_text)
-        if len(touched) > max(3, len(normalized_allowed) or 1):
-            flags.append("wide_diff_surface")
-    return {
-        "schema": "watchdog_scan.v1",
-        "ok": not blocked_reasons,
-        "blocked": bool(blocked_reasons),
-        "flags": sorted(set(flags)),
-        "blocked_reasons": sorted(set(blocked_reasons)),
     }
 
 
@@ -8993,8 +8809,6 @@ def _resolve_task_model_route(
     requested_model: str = '',
     prompt: str = '',
     task_hint: str = '',
-    retrieval_info: dict[str, Any] | None = None,
-    repo_memory_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     explicit_model = requested_model.strip()
     if explicit_model:
@@ -9009,8 +8823,6 @@ def _resolve_task_model_route(
         hint_norm = str(task_hint or '').strip().lower()
         selected_micro = hint_norm in MICRO_CODING_TASK_HINTS
         selected_source = 'task_hint:micro_coding'
-        retrieval_count = int(retrieval_info.get("item_count", 0) or 0) if isinstance(retrieval_info, dict) else 0
-        repo_memory_count = int(repo_memory_info.get("entry_count", 0) or 0) if isinstance(repo_memory_info, dict) else 0
         if not selected_micro:
             normalized_prompt = re.sub(r'\s+', ' ', str(prompt or '').strip())
             selected_micro = (
@@ -9021,16 +8833,6 @@ def _resolve_task_model_route(
             )
             if selected_micro:
                 selected_source = 'auto:short_coding_prompt'
-        if not selected_micro:
-            normalized_prompt = re.sub(r'\s+', ' ', str(prompt or '').strip())
-            selected_micro = (
-                bool(normalized_prompt)
-                and len(normalized_prompt) <= max(CODING_MICRO_MAX_PROMPT_CHARS, 1000)
-                and retrieval_count >= 1
-                and repo_memory_count >= 1
-            )
-            if selected_micro:
-                selected_source = 'auto:repo_specialist_grounded'
         if selected_micro:
             routes_cfg = routing.get('routes', {}) if isinstance(routing.get('routes', {}), dict) else {}
             selected = routes_cfg.get(CODING_MICRO_ROUTE, {}) if isinstance(routes_cfg.get(CODING_MICRO_ROUTE, {}), dict) else {}
@@ -9172,8 +8974,6 @@ def _task_namespace_memory_context(
     for row in payload.get('summaries', []):
         if row.get('namespace') != namespace:
             continue
-        if not _memory_row_allowed_for_context(row):
-            continue
         if _is_expired(row.get('expires_at'), now):
             continue
         summaries.append(dict(row))
@@ -9205,8 +9005,6 @@ def _task_namespace_memory_context(
     entries = []
     for row in payload.get('entries', []):
         if row.get('namespace') != namespace:
-            continue
-        if not _memory_row_allowed_for_context(row):
             continue
         if _is_expired(row.get('expires_at'), now):
             continue
@@ -9288,53 +9086,6 @@ def _summarize_task_response(infer: dict[str, Any], max_chars: int = 260) -> str
     return 'inference reported no output'
 
 
-def _task_memory_evidence(
-    *,
-    prompt: str,
-    retrieval_info: dict[str, Any],
-    repo_memory_info: dict[str, Any],
-    infer: dict[str, Any],
-    result_id: str = "",
-) -> list[dict[str, Any]]:
-    evidence: list[dict[str, Any]] = []
-    for path in _extract_prompt_file_paths(prompt, max_paths=3):
-        evidence.append({"kind": "prompt_path", "path": path})
-    for item in retrieval_info.get("items", []) if isinstance(retrieval_info, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        path = str(item.get("path", "") or "").strip()
-        if not path:
-            continue
-        evidence.append(
-            {
-                "kind": str(item.get("source", "retrieval") or "retrieval"),
-                "path": path,
-                "summary": _trim_task_inline_text(item.get("content", ""), max_chars=120),
-            }
-        )
-    for row in repo_memory_info.get("entries", [])[:3] if isinstance(repo_memory_info, dict) else []:
-        if not isinstance(row, dict):
-            continue
-        commit_id = str(row.get("commit", "") or "").strip()
-        subject = str(row.get("subject", "") or "").strip()
-        if commit_id or subject:
-            evidence.append(
-                {
-                    "kind": "repo_history",
-                    "result_id": commit_id[:12] if commit_id else "",
-                    "summary": _trim_task_inline_text(subject, max_chars=120),
-                    "provenance": "git_history",
-                    "trust_level": "high",
-                }
-            )
-    if result_id and evidence:
-        evidence.append({"kind": "result", "result_id": result_id})
-    backend = str(infer.get("backend", "") or "").strip()
-    if backend and evidence:
-        evidence.append({"kind": "inference", "backend": backend, "ok": bool(infer.get("ok", False))})
-    return _normalize_memory_evidence(evidence)
-
-
 def _persist_task_memory(
     *,
     prompt: str,
@@ -9343,8 +9094,6 @@ def _persist_task_memory(
     encoded: dict[str, Any],
     infer: dict[str, Any],
     memory_info: dict[str, Any],
-    retrieval_info: dict[str, Any],
-    repo_memory_info: dict[str, Any],
     result_id: str = '',
 ) -> dict[str, Any]:
     route = str(classification.get('route') or resolved.get('route') or 'general')
@@ -9353,37 +9102,11 @@ def _persist_task_memory(
     response_summary = _summarize_task_response(infer)
     session_namespace = str(memory_info.get('session_namespace') or _task_session_namespace('default'))
     route_namespace = str(memory_info.get('route_namespace') or _task_route_namespace(route))
-    evidence = _task_memory_evidence(
-        prompt=prompt,
-        retrieval_info=retrieval_info,
-        repo_memory_info=repo_memory_info,
-        infer=infer,
-        result_id=result_id,
-    )
-    session_evidence = list(evidence)
-    memory_session_name = str(memory_info.get('memory_session') or 'default')
-    if not session_evidence and memory_session_name != 'default':
-        synthetic_session_evidence: list[dict[str, Any]] = [
-            {
-                'kind': 'session',
-                'summary': memory_session_name,
-            }
-        ]
-        if result_id:
-            synthetic_session_evidence.append({'kind': 'result', 'result_id': result_id})
-        backend = str(infer.get('backend', '') or '').strip()
-        if backend:
-            synthetic_session_evidence.append(
-                {'kind': 'inference', 'backend': backend, 'ok': bool(infer.get('ok', False))}
-            )
-        session_evidence = _normalize_memory_evidence(synthetic_session_evidence)
     state: dict[str, Any] = {
         'session_write': {'written': False},
         'route_summary_write': {'written': False},
         'session_compaction': {'compacted': False},
         'failure_recorded': False,
-        'evidence_count': len(evidence),
-        'session_evidence_count': len(session_evidence),
     }
     session_value = {
         'route': route,
@@ -9399,49 +9122,37 @@ def _persist_task_memory(
         session_value['result_id'] = result_id
 
     if ALLOW_MUTATIONS:
-        if session_evidence:
-            try:
-                session_write = memory_upsert(
-                    namespace=session_namespace,
-                    key=f"call:{_now_iso()}",
-                    value=session_value,
-                    ttl_days=7,
-                    confidence=float(classification.get('confidence', 0.0) or 0.0),
-                    source='task_router.task.auto',
-                    tags=['task', 'session', route],
-                    evidence=session_evidence,
-                    provenance='task_router.session',
-                    trust_level='high',
-                )
-                state['session_write'] = {**session_write, 'written': True}
-            except Exception as exc:
-                state['session_write'] = {'written': False, 'error': str(exc)}
-        else:
-            state['session_write'] = {'written': False, 'reason': 'no_evidence'}
-
-        if evidence:
-            route_summary = _trim_task_inline_text(
-                f"model={resolved.get('model', '')} ok={task_ok} req={request_summary} resp={response_summary}",
-                max_chars=600,
+        try:
+            session_write = memory_upsert(
+                namespace=session_namespace,
+                key=f"call:{_now_iso()}",
+                value=session_value,
+                ttl_days=7,
+                confidence=float(classification.get('confidence', 0.0) or 0.0),
+                source='task_router.task.auto',
+                tags=['task', 'session', route],
             )
-            try:
-                route_write = memory_summary_upsert(
-                    namespace=route_namespace,
-                    focus='recent_activity',
-                    summary=route_summary,
-                    ttl_days=30,
-                    confidence=float(classification.get('confidence', 0.0) or 0.0),
-                    source='task_router.task.auto',
-                    tags=['task', 'route', route],
-                    evidence=evidence,
-                    provenance='task_router.route',
-                    trust_level='high',
-                )
-                state['route_summary_write'] = {**route_write, 'written': True}
-            except Exception as exc:
-                state['route_summary_write'] = {'written': False, 'error': str(exc)}
-        else:
-            state['route_summary_write'] = {'written': False, 'reason': 'no_evidence'}
+            state['session_write'] = {**session_write, 'written': True}
+        except Exception as exc:
+            state['session_write'] = {'written': False, 'error': str(exc)}
+
+        route_summary = _trim_task_inline_text(
+            f"model={resolved.get('model', '')} ok={task_ok} req={request_summary} resp={response_summary}",
+            max_chars=600,
+        )
+        try:
+            route_write = memory_summary_upsert(
+                namespace=route_namespace,
+                focus='recent_activity',
+                summary=route_summary,
+                ttl_days=30,
+                confidence=float(classification.get('confidence', 0.0) or 0.0),
+                source='task_router.task.auto',
+                tags=['task', 'route', route],
+            )
+            state['route_summary_write'] = {**route_write, 'written': True}
+        except Exception as exc:
+            state['route_summary_write'] = {'written': False, 'error': str(exc)}
 
         try:
             state['session_compaction'] = memory_auto_compact(
@@ -9637,497 +9348,6 @@ def _task_artifact_candidates(terms: list[str], max_items: int = 3) -> list[dict
     return scored[:max_items]
 
 
-def _summarize_task_retrieval_item(item: dict[str, Any], max_chars: int = 140) -> str:
-    path = str(item.get("path", "") or "").strip()
-    content = str(item.get("content", "") or "")
-    snippet = ""
-    for line in content.splitlines():
-        trimmed = line.strip()
-        if trimmed:
-            snippet = trimmed
-            break
-    summary = f"{path}: {snippet}" if path and snippet else path or snippet
-    return _trim_task_inline_text(summary, max_chars=max_chars)
-
-
-def _lint_skill_pack(pack: list[dict[str, Any]], max_modules: int = 3) -> dict[str, Any]:
-    module_ids: list[str] = []
-    duplicates: list[str] = []
-    seen: set[str] = set()
-    summary_chars = 0
-    for row in pack:
-        if not isinstance(row, dict):
-            continue
-        module_id = str(row.get("id", "") or "").strip().lower()
-        if not module_id:
-            continue
-        if module_id in seen and module_id not in duplicates:
-            duplicates.append(module_id)
-        seen.add(module_id)
-        module_ids.append(module_id)
-        summary_chars += len(str(row.get("summary", "") or ""))
-    return {
-        "schema": "skill_pack_lint.v1",
-        "module_count": len(module_ids),
-        "duplicates": duplicates,
-        "max_modules": max_modules,
-        "summary_chars": summary_chars,
-        "ok": len(module_ids) <= max_modules and not duplicates and summary_chars <= 420,
-    }
-
-
-@mcp.tool()
-def skill_pack_lint(
-    route: str = "general",
-    pack: list[dict[str, Any]] | None = None,
-    max_modules: int = 3,
-) -> dict[str, Any]:
-    """Lint small curated skill packs used by task_router context assembly."""
-    if max_modules < 1:
-        raise ValueError("max_modules must be >= 1")
-    selected = pack if isinstance(pack, list) else CURATED_TASK_SKILL_PACKS.get(route, CURATED_TASK_SKILL_PACKS["general"])
-    rows: list[dict[str, Any]] = []
-    for row in selected[: max_modules + 2]:
-        if not isinstance(row, dict):
-            continue
-        rows.append(
-            {
-                "id": _trim_task_inline_text(row.get("id", ""), max_chars=40),
-                "title": _trim_task_inline_text(row.get("title", ""), max_chars=48),
-                "summary": _trim_task_inline_text(row.get("summary", ""), max_chars=160),
-            }
-        )
-    lint = _lint_skill_pack(rows, max_modules=max_modules)
-    if ALLOW_MUTATIONS:
-        report = {
-            "schema": "skill_pack_lint.report.v1",
-            "route": route,
-            "generated_at": _now_iso(),
-            "pack": rows,
-            "lint": lint,
-        }
-        path = _resolve_repo_path(str(SKILL_PACK_REPORT_FILE))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    return {
-        "schema": "skill_pack_lint.v1",
-        "route": route,
-        "pack": rows,
-        "lint": lint,
-    }
-
-
-def _select_curated_skill_pack(
-    *,
-    route: str,
-    intent: dict[str, Any] | None = None,
-    retrieval_info: dict[str, Any] | None = None,
-    repo_memory: dict[str, Any] | None = None,
-    max_modules: int = 3,
-) -> dict[str, Any]:
-    route_norm = str(route or "general").strip().lower() or "general"
-    base_rows = CURATED_TASK_SKILL_PACKS.get(route_norm, CURATED_TASK_SKILL_PACKS["general"])
-    selected: list[dict[str, str]] = []
-    mutation_intent = bool((intent or {}).get("mutation_intent", False))
-    retrieval_count = int((retrieval_info or {}).get("item_count", 0) or 0)
-    repo_hits = int((repo_memory or {}).get("entry_count", 0) or 0)
-    for row in base_rows:
-        if not isinstance(row, dict):
-            continue
-        module_id = str(row.get("id", "") or "").strip().lower()
-        if route_norm == "general" and mutation_intent and module_id == "compact_answer":
-            continue
-        if route_norm in {"review", "security"} and retrieval_count <= 0 and module_id == "missing_tests":
-            continue
-        if route_norm == "research" and repo_hits <= 0 and module_id == "artifact_memory":
-            continue
-        selected.append(
-            {
-                "id": module_id,
-                "title": _trim_task_inline_text(row.get("title", ""), max_chars=48),
-                "summary": _trim_task_inline_text(row.get("summary", ""), max_chars=160),
-            }
-        )
-        if len(selected) >= max_modules:
-            break
-    lint = _lint_skill_pack(selected, max_modules=max_modules)
-    if not lint["ok"]:
-        selected = selected[:max_modules]
-        lint = _lint_skill_pack(selected, max_modules=max_modules)
-    return {
-        "schema": "task_skill_pack.v1",
-        "route": route_norm,
-        "module_count": len(selected),
-        "modules": selected,
-        "lint": lint,
-    }
-
-
-def _parse_git_log_records(raw: str) -> list[dict[str, Any]]:
-    commits: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    for line in str(raw or "").splitlines():
-        if "\x1f" in line:
-            parts = line.split("\x1f")
-            commit = parts[0].strip()
-            current = {
-                "commit": commit,
-                "date": parts[1].strip() if len(parts) > 1 else "",
-                "subject": parts[2].strip() if len(parts) > 2 else "",
-                "files": [],
-            }
-            commits.append(current)
-            continue
-        if current is None:
-            continue
-        candidate = line.strip()
-        if not candidate:
-            continue
-        current["files"].append(candidate.replace("\\", "/"))
-    return commits
-
-
-def _repo_history_matches_scope(path: str, scope_prefixes: list[str] | None) -> bool:
-    if not scope_prefixes:
-        return True
-    normalized = str(path or "").strip().replace("\\", "/").strip("/")
-    if not normalized:
-        return False
-    for prefix in scope_prefixes:
-        scoped = str(prefix or "").strip().replace("\\", "/").strip("/")
-        if not scoped or scoped == ".":
-            return True
-        if normalized == scoped or normalized.startswith(scoped + "/"):
-            return True
-    return False
-
-
-def _repo_history_filter_snapshot(
-    snapshot: dict[str, Any] | None,
-    *,
-    target_paths: list[str] | None = None,
-    terms: list[str] | None = None,
-    max_entries: int = REPO_HISTORY_MEMORY_MAX_ENTRIES,
-) -> dict[str, Any]:
-    base = snapshot if isinstance(snapshot, dict) else {}
-    targets = [str(path).replace("\\", "/") for path in (target_paths or []) if str(path).strip()]
-    search_terms = [str(term).strip().lower() for term in (terms or []) if str(term).strip()]
-    entries_in = base.get("entries", [])
-    hot_in = base.get("hot_paths", [])
-    if not isinstance(entries_in, list):
-        entries_in = []
-    if not isinstance(hot_in, list):
-        hot_in = []
-    if not targets and not search_terms:
-        return {
-            **base,
-            "entry_count": min(len(entries_in), max_entries),
-            "entries": entries_in[:max_entries],
-            "hot_path_count": len(hot_in),
-            "hot_paths": hot_in,
-        } if isinstance(base, dict) and base else {
-            "schema": "repo_history_memory.v1",
-            "enabled": False,
-            "entry_count": 0,
-            "entries": [],
-            "hot_path_count": 0,
-            "hot_paths": [],
-            "context": "",
-        }
-
-    filtered_entries: list[dict[str, Any]] = []
-    for row in entries_in:
-        if not isinstance(row, dict):
-            continue
-        files = [str(path).replace("\\", "/") for path in row.get("files", []) if str(path).strip()]
-        subject_low = str(row.get("subject", "") or "").lower()
-        target_match = not targets or any(path in targets for path in files)
-        term_match = (
-            not search_terms
-            or any(term in subject_low or any(term in path.lower() for path in files) for term in search_terms)
-        )
-        if target_match and term_match:
-            filtered_entries.append(dict(row))
-    filtered_hot: list[dict[str, Any]] = []
-    for row in hot_in:
-        if not isinstance(row, dict):
-            continue
-        path = str(row.get("path", "") or "").strip().replace("\\", "/")
-        if targets and path not in targets:
-            continue
-        if search_terms and not any(term in path.lower() for term in search_terms):
-            continue
-        filtered_hot.append(dict(row))
-    parts: list[str] = []
-    if filtered_hot:
-        parts.append(
-            "hot="
-            + ", ".join(f"{row.get('path', '')}({row.get('count', 0)})" for row in filtered_hot[:4])
-        )
-    if filtered_entries:
-        parts.append(
-            "recent="
-            + " | ".join(
-                _trim_task_inline_text(
-                    f"{row.get('commit', '')} {row.get('subject', '')} [{', '.join(row.get('files', [])[:2])}]",
-                    max_chars=140,
-                )
-                for row in filtered_entries[:3]
-            )
-        )
-    return {
-        "schema": "repo_history_memory.v1",
-        "enabled": bool(base.get("enabled", False)),
-        "target_paths": targets[:8],
-        "terms": search_terms[:8],
-        "entry_count": min(len(filtered_entries), max_entries),
-        "entries": filtered_entries[:max_entries],
-        "hot_path_count": len(filtered_hot),
-        "hot_paths": filtered_hot,
-        "context": _trim_task_inline_text(" ; ".join(parts), max_chars=420),
-    }
-
-
-def _repo_history_memory_snapshot(
-    *,
-    target_paths: list[str] | None = None,
-    terms: list[str] | None = None,
-    max_commits: int = REPO_HISTORY_MEMORY_MAX_COMMITS,
-    max_entries: int = REPO_HISTORY_MEMORY_MAX_ENTRIES,
-    scope_prefixes: list[str] | None = None,
-) -> dict[str, Any]:
-    if not _is_git_repo():
-        return {
-            "schema": "repo_history_memory.v1",
-            "enabled": False,
-            "entry_count": 0,
-            "entries": [],
-            "hot_paths": [],
-            "context": "",
-        }
-    target_list = [str(path).replace("\\", "/") for path in (target_paths or []) if str(path).strip()]
-    search_terms = [str(term).strip().lower() for term in (terms or []) if str(term).strip()]
-    args = ["log", "--date=short", f"-n{max_commits}", "--format=%H%x1f%ad%x1f%s", "--name-only"]
-    if target_list:
-        args.extend(["--", *target_list[:8]])
-    result = _git(*args, check=False)
-    commits = _parse_git_log_records(result.stdout)
-    if not commits and not target_list:
-        return {
-            "schema": "repo_history_memory.v1",
-            "enabled": True,
-            "entry_count": 0,
-            "entries": [],
-            "hot_paths": [],
-            "context": "",
-        }
-    scored: list[tuple[float, dict[str, Any]]] = []
-    hot_counts: dict[str, int] = {}
-    for row in commits:
-        files = [
-            str(path).replace("\\", "/")
-            for path in row.get("files", [])
-            if str(path).strip() and _repo_history_matches_scope(str(path), scope_prefixes)
-        ]
-        if scope_prefixes and not files:
-            continue
-        for rel in files:
-            hot_counts[rel] = hot_counts.get(rel, 0) + 1
-        score = 0.0
-        subject_low = str(row.get("subject", "") or "").lower()
-        if target_list:
-            score += 3.0 if any(rel in target_list for rel in files) else 0.0
-        for term in search_terms:
-            if term and (term in subject_low or any(term in rel.lower() for rel in files)):
-                score += 1.0
-        if score <= 0 and not target_list and search_terms:
-            continue
-        files_preview = files[:4]
-        scored.append(
-            (
-                score,
-                {
-                    "commit": str(row.get("commit", "") or "")[:12],
-                    "date": str(row.get("date", "") or ""),
-                    "subject": _trim_task_inline_text(row.get("subject", ""), max_chars=140),
-                    "files": files_preview,
-                    "score": round(score, 2),
-                },
-            )
-        )
-    scored.sort(key=lambda item: (item[0], item[1].get("date", ""), item[1].get("commit", "")), reverse=True)
-    entries = [row for _, row in scored[:max_entries]]
-    hot_paths = [
-        {"path": path, "count": count}
-        for path, count in sorted(hot_counts.items(), key=lambda item: (item[1], item[0]), reverse=True)[:REPO_HISTORY_MEMORY_MAX_FILES]
-    ]
-    parts: list[str] = []
-    if hot_paths:
-        parts.append(
-            "hot="
-            + ", ".join(f"{row['path']}({row['count']})" for row in hot_paths[:4])
-        )
-    if entries:
-        parts.append(
-            "recent="
-            + " | ".join(
-                _trim_task_inline_text(
-                    f"{row['commit']} {row['subject']} [{', '.join(row['files'][:2])}]",
-                    max_chars=140,
-                )
-                for row in entries[:3]
-            )
-        )
-    return {
-        "schema": "repo_history_memory.v1",
-        "enabled": True,
-        "scope_prefixes": [str(prefix).replace("\\", "/") for prefix in (scope_prefixes or []) if str(prefix).strip()],
-        "target_paths": target_list[:8],
-        "terms": search_terms[:8],
-        "entry_count": len(entries),
-        "entries": entries,
-        "hot_path_count": len(hot_paths),
-        "hot_paths": hot_paths,
-        "context": _trim_task_inline_text(" ; ".join(parts), max_chars=420),
-    }
-
-
-def _load_repo_history_memory_snapshot() -> dict[str, Any] | None:
-    index_path = _resolve_repo_path(str(REPO_INDEX_FILE))
-    if not index_path.is_file():
-        return None
-    try:
-        payload = json.loads(index_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    history_memory = payload.get("history_memory")
-    return history_memory if isinstance(history_memory, dict) else None
-
-
-def _repo_memory_lookup(
-    *,
-    prompt: str,
-    target_paths: list[str] | None = None,
-    retrieval_info: dict[str, Any] | None = None,
-    max_entries: int = REPO_HISTORY_MEMORY_MAX_ENTRIES,
-) -> dict[str, Any]:
-    base_snapshot = _load_repo_history_memory_snapshot()
-    targets = [str(path).replace("\\", "/") for path in (target_paths or []) if str(path).strip()]
-    if not targets:
-        targets.extend(_extract_prompt_file_paths(prompt, max_paths=4))
-    terms = _task_retrieval_terms(prompt, max_terms=6)
-    if isinstance(retrieval_info, dict):
-        for item in retrieval_info.get("items", [])[:4]:
-            if not isinstance(item, dict):
-                continue
-            path = str(item.get("path", "") or "").strip()
-            if path and path not in targets:
-                targets.append(path)
-    snapshot = _repo_history_filter_snapshot(
-        base_snapshot if isinstance(base_snapshot, dict) else None,
-        target_paths=targets[:8],
-        terms=terms,
-        max_entries=max_entries,
-    )
-    if (not isinstance(snapshot, dict) or (targets or terms) and not snapshot.get("entries") and not snapshot.get("hot_paths")) and not isinstance(base_snapshot, dict):
-        snapshot = _repo_history_memory_snapshot(
-            target_paths=targets[:8],
-            terms=terms,
-            max_entries=max_entries,
-        )
-    if not isinstance(snapshot, dict):
-        snapshot = {
-            "schema": "repo_history_memory.v1",
-            "enabled": False,
-            "entry_count": 0,
-            "hot_path_count": 0,
-            "entries": [],
-            "hot_paths": [],
-            "context": "",
-        }
-    return snapshot
-
-
-def _build_task_context_packet(
-    *,
-    prompt: str,
-    route: str,
-    intent: dict[str, Any],
-    retrieval_info: dict[str, Any],
-    repo_memory: dict[str, Any],
-    skill_pack: dict[str, Any],
-    max_chars: int = 1400,
-) -> dict[str, Any]:
-    parts: list[str] = []
-    goal = _trim_task_inline_text(intent.get("goal", prompt), max_chars=180)
-    if goal:
-        _append_task_context_piece(parts, f"goal={goal}", max_chars=max_chars)
-    targets = [str(path) for path in intent.get("target_paths", [])[:3]] if isinstance(intent.get("target_paths"), list) else []
-    if targets:
-        _append_task_context_piece(parts, f"targets={', '.join(targets)}", max_chars=max_chars)
-    constraints = [str(item) for item in intent.get("constraints", [])[:3]] if isinstance(intent.get("constraints"), list) else []
-    if constraints:
-        _append_task_context_piece(parts, f"constraints={'; '.join(constraints)}", max_chars=max_chars)
-    retrieval_items = []
-    for item in retrieval_info.get("items", [])[:3] if isinstance(retrieval_info, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        summary = _summarize_task_retrieval_item(item, max_chars=140)
-        if summary:
-            retrieval_items.append(summary)
-    if retrieval_items:
-        _append_task_context_piece(parts, f"retrieval={' | '.join(retrieval_items)}", max_chars=max_chars)
-    repo_bits: list[str] = []
-    for row in repo_memory.get("entries", [])[:2] if isinstance(repo_memory, dict) else []:
-        if not isinstance(row, dict):
-            continue
-        repo_bits.append(
-            _trim_task_inline_text(
-                f"{row.get('commit', '')} {row.get('subject', '')}",
-                max_chars=96,
-            )
-        )
-    if not repo_bits:
-        for row in repo_memory.get("hot_paths", [])[:3] if isinstance(repo_memory, dict) else []:
-            if not isinstance(row, dict):
-                continue
-            repo_bits.append(f"{row.get('path', '')}({row.get('count', 0)})")
-    if repo_bits:
-        _append_task_context_piece(parts, f"history={' | '.join(repo_bits)}", max_chars=max_chars)
-    skill_summaries = []
-    for row in skill_pack.get("modules", [])[:3] if isinstance(skill_pack, dict) else []:
-        if not isinstance(row, dict):
-            continue
-        skill_summaries.append(_trim_task_inline_text(row.get("summary", ""), max_chars=96))
-    if skill_summaries:
-        _append_task_context_piece(parts, f"skills={' | '.join(skill_summaries)}", max_chars=max_chars)
-    context = " | ".join(parts)
-    return {
-        "schema": "task_context_packet.v1",
-        "route": route,
-        "chars": len(context),
-        "sections": len(parts),
-        "context": context,
-    }
-
-
-GUIDED_EDIT_STATE_SEQUENCE = ["start", "plan", "execute", "validate", "finish"]
-
-
-def _guided_edit_state_machine(current_state: str, terminal_reason: str = "") -> dict[str, Any]:
-    state = str(current_state or "").strip().lower() or "finish"
-    if state not in GUIDED_EDIT_STATE_SEQUENCE:
-        state = "finish"
-    payload = {
-        "schema": "guided_edit.state_machine.v1",
-        "current_state": state,
-        "states": list(GUIDED_EDIT_STATE_SEQUENCE),
-    }
-    if terminal_reason:
-        payload["terminal_reason"] = str(terminal_reason)
-    return payload
-
-
 def _build_task_retrieval_context(
     prompt: str,
     route: str,
@@ -10144,14 +9364,6 @@ def _build_task_retrieval_context(
             'context': '',
             'sources': {},
             'items': [],
-            'selected_paths': [],
-            'telemetry': {
-                'query_terms': [],
-                'explored_candidates': 0,
-                'selected_items': 0,
-                'wasted_candidates': 0,
-                'wasted_ratio': 0.0,
-            },
             'errors': [],
         }
 
@@ -10160,7 +9372,6 @@ def _build_task_retrieval_context(
     items: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     seen: set[tuple[str, Any, Any]] = set()
-    explored_candidates = 0
 
     def add_item(item: dict[str, Any] | None) -> None:
         if not item or len(items) >= max_items:
@@ -10172,7 +9383,6 @@ def _build_task_retrieval_context(
         items.append(item)
 
     for path in _extract_prompt_file_paths(prompt, max_paths=2):
-        explored_candidates += 1
         add_item(_task_retrieval_preview_from_path(path=path, source='explicit_path', max_chars=420))
 
     if len(items) < max_items and query:
@@ -10186,31 +9396,12 @@ def _build_task_retrieval_context(
                 use_local_rerank=True,
                 local_rerank_top_k=max(8, max_items * 3),
             )
-            search_rows = search.get('results', []) if isinstance(search, dict) else []
-            if isinstance(search_rows, list) and search_rows:
-                explored_candidates += len(search_rows)
-                for row in search_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    add_item(_task_retrieval_preview_from_search_row(row=row, max_chars=420))
-                    if len(items) >= max_items:
-                        break
-            elif isinstance(search, dict):
-                top_paths = search.get('top_paths', [])
-                if isinstance(top_paths, list):
-                    explored_candidates += len(top_paths)
-                    for candidate_path in top_paths:
-                        if not isinstance(candidate_path, str) or not candidate_path.strip():
-                            continue
-                        add_item(
-                            _task_retrieval_preview_from_path(
-                                path=candidate_path,
-                                source='code_search',
-                                max_chars=420,
-                            )
-                        )
-                        if len(items) >= max_items:
-                            break
+            for row in search.get('results', []) if isinstance(search, dict) else []:
+                if not isinstance(row, dict):
+                    continue
+                add_item(_task_retrieval_preview_from_search_row(row=row, max_chars=420))
+                if len(items) >= max_items:
+                    break
         except Exception as exc:
             errors.append({'source': 'semantic_find', 'error': str(exc)})
 
@@ -10218,9 +9409,7 @@ def _build_task_retrieval_context(
         needle in prompt.lower() for needle in ('report', 'artifact', 'baseline', 'snapshot', '.codebase-tooling-mcp')
     )
     if wants_artifacts and len(items) < max_items:
-        artifact_rows = _task_artifact_candidates(terms, max_items=max_items * 2)
-        explored_candidates += len(artifact_rows)
-        for row in artifact_rows:
+        for row in _task_artifact_candidates(terms, max_items=max_items * 2):
             item = _task_retrieval_preview_from_path(path=row['path'], source='artifact_index', max_chars=360)
             if item is None:
                 continue
@@ -10251,14 +9440,6 @@ def _build_task_retrieval_context(
         'context': context,
         'sources': source_counts,
         'items': items,
-        'selected_paths': [str(item.get('path', '') or '') for item in items],
-        'telemetry': {
-            'query_terms': terms,
-            'explored_candidates': explored_candidates,
-            'selected_items': len(items),
-            'wasted_candidates': max(0, explored_candidates - len(items)),
-            'wasted_ratio': round(max(0, explored_candidates - len(items)) / max(1, explored_candidates), 4),
-        },
         'errors': errors[:4],
     }
 
@@ -10277,10 +9458,16 @@ def _task_infer(
 ) -> dict[str, Any]:
     if not prompt.strip():
         raise ValueError('prompt must not be empty')
-    t0 = time.perf_counter()
     profile = _default_output_profile(output_profile)
     classification = _classify_task_prompt(prompt=prompt, task=task)
     routing = _load_continue_model_routing()
+    resolved = _resolve_task_model_route(
+        route=str(classification['route']),
+        routing=routing,
+        requested_model=model,
+        prompt=prompt,
+        task_hint=task,
+    )
     memory_info = _build_task_memory_context(
         route=str(classification['route']),
         memory_session=memory_session,
@@ -10289,58 +9476,13 @@ def _task_infer(
         prompt=prompt,
         route=str(classification['route']),
     )
-    repo_memory = _repo_memory_lookup(
-        prompt=prompt,
-        target_paths=list(classification.get("file_hints", []) or []),
-        retrieval_info=retrieval_info,
-    )
-    intent = _build_task_intent_packet(
-        prompt=prompt,
-        route=str(classification['route']),
-        task=task,
-        retrieval_info=retrieval_info,
-    )
-    skill_pack = _select_curated_skill_pack(
-        route=str(classification["route"]),
-        intent=intent,
-        retrieval_info=retrieval_info,
-        repo_memory=repo_memory,
-    )
-    context_packet = _build_task_context_packet(
-        prompt=prompt,
-        route=str(classification["route"]),
-        intent=intent,
-        retrieval_info=retrieval_info,
-        repo_memory=repo_memory,
-        skill_pack=skill_pack,
-    )
-    resolved = _resolve_task_model_route(
-        route=str(classification['route']),
-        routing=routing,
-        requested_model=model,
-        prompt=prompt,
-        task_hint=task,
-        retrieval_info=retrieval_info,
-        repo_memory_info=repo_memory,
-    )
-    cost_plan = _build_task_cost_plan(
-        route=str(classification['route']),
-        prompt=prompt,
-        retrieval_info=retrieval_info,
-        repo_memory_info=repo_memory,
-        intent=intent,
-        max_tokens=max_tokens,
-    )
-    watchdog = _watchdog_scan(prompt=prompt)
     encoded = _encode_task_prompt_packet(
         prompt=prompt,
         route=str(classification['route']),
         task=task,
         memory_session=str(memory_info['memory_session']),
         memory_context=str(memory_info['context']),
-        retrieval_context=str(retrieval_info.get('context', '') or ''),
-        task_context=str(context_packet['context']),
-        intent_packet=intent,
+        retrieval_context=str(retrieval_info['context']),
     )
     effective_system = system or TASK_ROUTE_SYSTEM_PROMPTS.get(
         str(classification['route']),
@@ -10351,7 +9493,7 @@ def _task_infer(
         task=str(classification['route']),
         backend=backend,
         model=str(resolved['model']),
-        max_tokens=int(cost_plan['effective_max_tokens']),
+        max_tokens=max_tokens,
         temperature=temperature,
         system=effective_system,
         output_profile=output_profile,
@@ -10375,13 +9517,7 @@ def _task_infer(
             **memory_info,
             'forced': True,
         },
-        'intent': intent,
-        'cost_plan': cost_plan,
-        'watchdog': watchdog,
         'retrieval': retrieval_info,
-        'context_packet': context_packet,
-        'repo_memory': repo_memory,
-        'skill_pack': skill_pack,
         'infer': infer,
     }
     if profile == 'compact':
@@ -10396,13 +9532,7 @@ def _task_infer(
             'memory_session': memory_info['memory_session'],
             'memory_chars': memory_info['context_chars'],
             'retrieval_count': retrieval_info['item_count'],
-            'retrieval_chars': context_packet['chars'],
-            'deliverable': intent['deliverable'],
-            'risk_level': intent['risk_level'],
-            'effort': cost_plan['effort'],
-            'watchdog_blocked': watchdog['blocked'],
-            'repo_memory_count': repo_memory.get('entry_count', 0),
-            'skill_count': skill_pack.get('module_count', 0),
+            'retrieval_chars': retrieval_info['context_chars'],
             'ok': task_ok,
             'output': infer.get('output', ''),
         }
@@ -10417,55 +9547,12 @@ def _task_infer(
         encoded=encoded,
         infer=infer,
         memory_info=memory_info,
-        retrieval_info=retrieval_info,
-        repo_memory_info=repo_memory,
         result_id=task_result_id or str(infer.get('result_id') or ''),
-    )
-    failure_diagnosis: dict[str, Any] = {
-        "schema": "task_failure_diagnosis.v1",
-        "failed": not task_ok,
-        "failure_stage": "",
-        "reason": "",
-    }
-    if not task_ok:
-        reason = "model_unavailable" if not bool(infer.get("ok", False)) else "empty_output"
-        if bool(watchdog.get("blocked", False)):
-            reason = "prompt_watchdog_blocked"
-        elif int(retrieval_info.get("item_count", 0) or 0) == 0 and intent.get("mutation_intent", False):
-            reason = "missing_repo_context"
-        failure_diagnosis = {
-            "schema": "task_failure_diagnosis.v1",
-            "failed": True,
-            "failure_stage": "infer",
-            "reason": reason,
-            "retrieval_count": int(retrieval_info.get("item_count", 0) or 0),
-            "repo_memory_count": int(repo_memory.get("entry_count", 0) or 0),
-            "watchdog_blocked": bool(watchdog.get("blocked", False)),
-        }
-    benchmark = _workflow_benchmark_record(
-        "task_router.task",
-        {
-            "ok": task_ok,
-            "route": str(classification.get("route") or ""),
-            "backend": str(infer.get("backend") or ""),
-            "degraded": bool(infer.get("degraded", False)),
-            "retrieval_count": int(retrieval_info.get("item_count", 0) or 0),
-            "retrieval_explored": int(retrieval_info.get("telemetry", {}).get("explored_candidates", 0) or 0),
-            "repo_memory_count": int(repo_memory.get("entry_count", 0) or 0),
-            "skill_count": int(skill_pack.get("module_count", 0) or 0),
-            "evidence_count": int(persisted.get("evidence_count", 0) or 0),
-            "watchdog_blocked": bool(watchdog.get("blocked", False)),
-            "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-        },
     )
     if 'memory' in result and isinstance(result['memory'], dict):
         result['memory'].update(persisted)
-    if isinstance(result, dict):
-        result["failure_diagnosis"] = failure_diagnosis
-        result["workflow_benchmark"] = benchmark
     else:
         result['memory_write'] = persisted
-    result['workflow_benchmark'] = benchmark
     return result
 
 
@@ -10686,6 +9773,30 @@ def _parallel_infer_one(
     output_profile: str | None,
     store_result: bool,
 ) -> dict[str, Any]:
+    selected = backend.strip().lower()
+    if selected in {"auto", "fallback", "rule", "hash"}:
+        tool_text = _tool_assisted_infer(prompt=prompt, max_tokens=max_tokens)
+        if tool_text:
+            profile = _default_output_profile(output_profile)
+            out = {
+                "schema": "local_infer.v1",
+                "backend": "tool_fallback",
+                "model": model or LOCAL_INFER_MODEL or "local-default",
+                "task": task,
+                "output": tool_text,
+                "ok": True,
+            }
+            if profile == "compact":
+                out = {
+                    "schema": "local_infer.compact.v1",
+                    "backend": "tool_fallback",
+                    "model": model or LOCAL_INFER_MODEL or "local-default",
+                    "ok": True,
+                    "output": _trim_text(tool_text, max_chars=1200),
+                }
+            if store_result:
+                out["result_id"] = _result_store_put("local_infer", out)
+            return out
     return local_infer(
         prompt=prompt,
         task=task,
@@ -10697,4127 +9808,6 @@ def _parallel_infer_one(
         output_profile=output_profile,
         store_result=store_result,
     )
-
-
-def _guided_edit_strip_wrappers(text: str) -> str:
-    raw = str(text or "").strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if len(lines) >= 2 and lines[-1].strip() == "```":
-            raw = "\n".join(lines[1:-1]).strip()
-    return raw.strip()
-
-
-def _guided_edit_select_targets(
-    prompt: str,
-    target_paths: list[str] | None = None,
-    max_targets: int = 3,
-) -> list[str]:
-    if max_targets < 1:
-        return []
-    selected: list[str] = []
-    seen: set[str] = set()
-
-    def add_path(raw: str) -> None:
-        candidate = str(raw or "").strip().replace("\\", "/")
-        if not candidate or candidate in seen:
-            return
-        try:
-            resolved = _resolve_repo_path(candidate)
-        except Exception:
-            return
-        if not resolved.is_file():
-            return
-        rel = str(resolved.relative_to(REPO_PATH)).replace("\\", "/")
-        if rel in seen:
-            return
-        seen.add(rel)
-        selected.append(rel)
-
-    for path in target_paths or []:
-        add_path(path)
-        if len(selected) >= max_targets:
-            return selected
-
-    for path in _extract_prompt_file_paths(prompt, max_paths=max_targets * 2):
-        add_path(path)
-        if len(selected) >= max_targets:
-            return selected
-
-    if len(selected) >= max_targets or not prompt.strip():
-        return selected
-
-    with contextlib.suppress(Exception):
-        search = semantic_find(
-            query=prompt,
-            path=".",
-            max_results=max(6, max_targets * 3),
-            output_profile="normal",
-            summary_mode="full",
-            use_local_rerank=True,
-            local_rerank_top_k=max(8, max_targets * 3),
-        )
-        for row in search.get("results", []) if isinstance(search, dict) else []:
-            if not isinstance(row, dict):
-                continue
-            add_path(str(row.get("path", "")))
-            if len(selected) >= max_targets:
-                break
-
-    return selected
-
-
-def _guided_edit_preview_path(path: str, max_lines: int = 120, max_chars: int = 2400) -> str:
-    file_path = _resolve_repo_path(path)
-    text = file_path.read_text(encoding="utf-8", errors="replace")
-    preview_lines = text.splitlines()[:max_lines]
-    numbered = "\n".join(f"{idx + 1}: {line}" for idx, line in enumerate(preview_lines))
-    return _trim_text(numbered, max_chars=max_chars)
-
-
-def _guided_edit_parse_action(raw_output: str, fallback_paths: list[str]) -> dict[str, Any]:
-    cleaned = _guided_edit_strip_wrappers(raw_output)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("planner output did not contain a JSON object")
-    payload = json.loads(cleaned[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("planner output JSON must be an object")
-
-    supported_actions = {
-        "replace_region",
-        "extract_helper",
-        "add_test",
-        "update_docs",
-        "run_validation",
-        "stop",
-    }
-    action_type = str(payload.get("action_type", "") or "").strip().lower()
-    if action_type not in supported_actions:
-        raise ValueError(f"unsupported guided_edit action_type: {action_type}")
-
-    raw_target = payload.get("target", {})
-    if not isinstance(raw_target, dict):
-        raw_target = {}
-    path = str(raw_target.get("path", "") or "").strip().replace("\\", "/")
-    if not path and fallback_paths:
-        path = fallback_paths[0]
-    if path:
-        try:
-            resolved = _resolve_repo_path(path)
-            if resolved.is_file():
-                path = str(resolved.relative_to(REPO_PATH)).replace("\\", "/")
-        except Exception:
-            if fallback_paths:
-                path = fallback_paths[0]
-    start_line = raw_target.get("start_line", 1)
-    end_line = raw_target.get("end_line", start_line)
-    if not isinstance(start_line, int) or start_line < 1:
-        start_line = 1
-    if not isinstance(end_line, int) or end_line < start_line:
-        end_line = start_line
-
-    raw_validation_scope = payload.get("validation_scope", "quick")
-    if isinstance(raw_validation_scope, list):
-        validation_scope = next(
-            (
-                str(item).strip().lower()
-                for item in raw_validation_scope
-                if str(item).strip().lower() in {"quick", "standard", "auto"}
-            ),
-            "quick",
-        )
-    else:
-        validation_scope = str(raw_validation_scope or "quick").strip().lower() or "quick"
-    if validation_scope not in {"quick", "standard", "auto"}:
-        validation_scope = "quick"
-    raw_postconditions = payload.get("postconditions", {})
-    if not isinstance(raw_postconditions, dict):
-        raw_postconditions = {}
-
-    def _string_list(value: Any, *, limit: int = 8) -> list[str]:
-        if isinstance(value, str):
-            items = [value]
-        elif isinstance(value, list):
-            items = value
-        else:
-            items = []
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in items:
-            text = str(item or "").strip()
-            if not text:
-                continue
-            key = text.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(text[:160])
-            if len(out) >= limit:
-                break
-        return out
-
-    raw_require_symbol = raw_postconditions.get("require_symbol", "")
-    if isinstance(raw_require_symbol, list):
-        require_symbol = next((str(item or "").strip() for item in raw_require_symbol if str(item or "").strip()), "")
-    else:
-        require_symbol = str(raw_require_symbol or "").strip()
-
-    postconditions = {
-        "must_include": _string_list(raw_postconditions.get("must_include")),
-        "must_preserve": _string_list(raw_postconditions.get("must_preserve")),
-        "require_symbol": require_symbol[:160],
-        "max_line_delta": None,
-    }
-    raw_max_line_delta = raw_postconditions.get("max_line_delta")
-    if isinstance(raw_max_line_delta, int):
-        postconditions["max_line_delta"] = max(0, raw_max_line_delta)
-    elif isinstance(raw_max_line_delta, str) and raw_max_line_delta.strip().isdigit():
-        postconditions["max_line_delta"] = max(0, int(raw_max_line_delta.strip()))
-    return {
-        "schema": "guided_edit.action.v1",
-        "action_type": action_type,
-        "target": {
-            "path": path,
-            "start_line": start_line,
-            "end_line": end_line,
-            "symbol": str(raw_target.get("symbol", "") or "").strip(),
-        },
-        "goal": str(payload.get("goal", "") or "").strip(),
-        "rationale": str(payload.get("rationale", "") or "").strip(),
-        "validation_scope": validation_scope,
-        "postconditions": postconditions,
-        "edit_kind": str(payload.get("edit_kind", "") or "").strip(),
-        "anchor": str(payload.get("anchor", "") or "").strip(),
-        "anchor_kind": str(payload.get("anchor_kind", "") or "").strip(),
-        "insert_text": str(payload.get("insert_text", "") or ""),
-        "replacement_text": str(payload.get("replacement_text", "") or ""),
-        "expected_old_text": str(payload.get("expected_old_text", "") or ""),
-    }
-
-
-def _guided_edit_parse_micro_edit(raw_output: str) -> dict[str, Any]:
-    cleaned = _guided_edit_strip_wrappers(raw_output)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("edit output did not contain micro-edit JSON")
-    payload = json.loads(cleaned[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("micro-edit output must be a JSON object")
-    op = str(payload.get("op", "") or "").strip().lower()
-    supported_ops = {"insert_before", "insert_after", "replace_line", "replace_region"}
-    if op not in supported_ops:
-        raise ValueError(f"unsupported micro-edit op: {op}")
-    text = str(payload.get("text", "") or "").replace("\r\n", "\n")
-    if not text.strip():
-        raise ValueError("micro-edit text must not be empty")
-    anchor = str(payload.get("anchor", "") or "").strip()
-    line_number = payload.get("line")
-    if line_number is not None and (not isinstance(line_number, int) or line_number < 1):
-        raise ValueError("micro-edit line must be a positive integer")
-    if op != "replace_region" and not anchor and line_number is None:
-        raise ValueError("micro-edit requires anchor or line for non-region operations")
-    return {
-        "schema": "guided_edit.micro_edit.v1",
-        "op": op,
-        "anchor": anchor,
-        "line": line_number,
-        "text": text,
-    }
-
-
-def _guided_edit_parse_diff(raw_output: str) -> str:
-    cleaned = _guided_edit_strip_wrappers(raw_output)
-    lines = cleaned.splitlines()
-    start_idx = 0
-    for idx, line in enumerate(lines):
-        if line.startswith("diff --git ") or line.startswith("--- "):
-            start_idx = idx
-            break
-    diff_text = "\n".join(lines[start_idx:])
-    if not diff_text:
-        raise ValueError("edit model did not return a unified diff")
-    if "--- " not in diff_text or "+++ " not in diff_text:
-        raise ValueError("edit model output was not a unified diff")
-    if not diff_text.endswith("\n"):
-        diff_text += "\n"
-    return diff_text
-
-
-def _guided_edit_parse_replacement_text(raw_output: str) -> str:
-    cleaned = _guided_edit_strip_wrappers(raw_output).replace("\r\n", "\n")
-    if "BEGIN_REPLACEMENT" in cleaned and "END_REPLACEMENT" in cleaned:
-        start = cleaned.find("BEGIN_REPLACEMENT")
-        end = cleaned.rfind("END_REPLACEMENT")
-        if start >= 0 and end > start:
-            cleaned = cleaned[start + len("BEGIN_REPLACEMENT") : end]
-    lowered = cleaned.lower()
-    for marker in (
-        "recent repository history:",
-        "curated skills:",
-        "user request:",
-        "planned action json:",
-        "target snippet:",
-        "target region:",
-        "surrounding context:",
-    ):
-        if marker in lowered:
-            raise ValueError("edit output echoed prompt context instead of replacement text")
-    if cleaned.lstrip().startswith(("diff --git ", "--- ")):
-        raise ValueError("edit output was a diff")
-    normalized = cleaned.strip("\n")
-    if not normalized.strip():
-        raise ValueError("edit model did not return replacement text")
-    return normalized
-
-
-def _guided_edit_apply_micro_edit(
-    *,
-    target_region: dict[str, Any],
-    micro_edit: dict[str, Any],
-) -> dict[str, Any]:
-    op = str(micro_edit.get("op", "") or "").strip().lower()
-    text = str(micro_edit.get("text", "") or "").replace("\r\n", "\n")
-    if text and not text.endswith("\n"):
-        text += "\n"
-    region_lines = str(target_region.get("region_text", "") or "").splitlines(keepends=True)
-    if not region_lines:
-        raise ValueError("micro-edit target region is empty")
-    anchor = str(micro_edit.get("anchor", "") or "").strip()
-    line_number = micro_edit.get("line")
-    target_idx: int | None = None
-    if isinstance(line_number, int):
-        relative = line_number - int(target_region.get("start_line", 1) or 1)
-        if 0 <= relative < len(region_lines):
-            target_idx = relative
-        else:
-            raise ValueError("micro-edit line is outside target region")
-    elif anchor:
-        anchor_norm = anchor.strip()
-        for idx, raw in enumerate(region_lines):
-            if anchor_norm in raw:
-                target_idx = idx
-                break
-        if target_idx is None:
-            raise ValueError("micro-edit anchor not found in target region")
-    updated_lines = list(region_lines)
-    if op == "replace_region":
-        replacement_text = text
-    elif op == "replace_line":
-        if target_idx is None:
-            raise ValueError("micro-edit replace_line requires anchor or line")
-        updated_lines[target_idx : target_idx + 1] = [text]
-        replacement_text = "".join(updated_lines)
-    elif op == "insert_before":
-        if target_idx is None:
-            raise ValueError("micro-edit insert_before requires anchor or line")
-        updated_lines[target_idx:target_idx] = [text]
-        replacement_text = "".join(updated_lines)
-    elif op == "insert_after":
-        if target_idx is None:
-            raise ValueError("micro-edit insert_after requires anchor or line")
-        updated_lines[target_idx + 1 : target_idx + 1] = [text]
-        replacement_text = "".join(updated_lines)
-    else:
-        raise ValueError(f"unsupported micro-edit op: {op}")
-    return {
-        "replacement_text": replacement_text.rstrip("\n"),
-        "micro_edit": micro_edit,
-    }
-
-
-def _guided_edit_target_region(
-    path: str,
-    start_line: int,
-    end_line: int,
-    *,
-    context_before: int = 4,
-    context_after: int = 4,
-    encoding: str = "utf-8",
-    repo_root: Path | None = None,
-) -> dict[str, Any]:
-    if repo_root is None:
-        file_path = _resolve_repo_path(path)
-    else:
-        file_path = (repo_root / path).resolve()
-    original_text = file_path.read_text(encoding=encoding, errors="replace")
-    original_lines = original_text.splitlines(keepends=True)
-    if not original_lines:
-        raise ValueError("guided_edit target file is empty")
-    normalized_start = max(1, min(int(start_line), len(original_lines)))
-    normalized_end = max(normalized_start, min(int(end_line), len(original_lines)))
-    context_start = max(1, normalized_start - max(0, int(context_before)))
-    context_end = min(len(original_lines), normalized_end + max(0, int(context_after)))
-    return {
-        "path": path,
-        "original_text": original_text,
-        "original_lines": original_lines,
-        "start_line": normalized_start,
-        "end_line": normalized_end,
-        "region_text": "".join(original_lines[normalized_start - 1 : normalized_end]),
-        "context_before_text": "".join(original_lines[context_start - 1 : normalized_start - 1]),
-        "context_after_text": "".join(original_lines[normalized_end:context_end]),
-    }
-
-
-def _guided_edit_render_structured_update(
-    *,
-    target_region: dict[str, Any],
-    replacement_text: str,
-    max_extra_lines: int | None = None,
-) -> dict[str, Any]:
-    original_text = str(target_region.get("original_text", "") or "")
-    original_lines = list(target_region.get("original_lines", []) or [])
-    start_line = int(target_region.get("start_line", 1) or 1)
-    end_line = int(target_region.get("end_line", start_line) or start_line)
-    region_text = str(target_region.get("region_text", "") or "")
-
-    normalized = replacement_text.replace("\r\n", "\n")
-    if region_text.endswith("\n") and normalized and not normalized.endswith("\n"):
-        normalized += "\n"
-    original_line_count = len(region_text.splitlines())
-    replacement_line_count = len(normalized.splitlines())
-    line_delta = replacement_line_count - original_line_count
-    if (
-        max_extra_lines is not None
-        and replacement_line_count > original_line_count + max(0, int(max_extra_lines))
-    ):
-        raise ValueError("structured replacement expanded beyond the allowed line delta")
-    replacement_lines = normalized.splitlines(keepends=True)
-    updated_lines = (
-        original_lines[: start_line - 1]
-        + replacement_lines
-        + original_lines[end_line:]
-    )
-    updated_text = "".join(updated_lines)
-    if updated_text == original_text:
-        raise ValueError("structured replacement did not change the file")
-    return {
-        "normalized_replacement": normalized,
-        "replacement_lines": replacement_lines,
-        "replacement_line_count": replacement_line_count,
-        "original_line_count": original_line_count,
-        "line_delta": line_delta,
-        "updated_text": updated_text,
-        "updated_lines": updated_lines,
-    }
-
-
-def _guided_edit_build_local_diff(
-    *,
-    target_region: dict[str, Any],
-    replacement_text: str,
-    max_extra_lines: int | None = None,
-) -> str:
-    target_path = str(target_region.get("path", "") or "").strip()
-    original_text = str(target_region.get("original_text", "") or "")
-    rendered = _guided_edit_render_structured_update(
-        target_region=target_region,
-        replacement_text=replacement_text,
-        max_extra_lines=max_extra_lines,
-    )
-    updated_text = str(rendered["updated_text"])
-    diff_lines = list(
-        difflib.unified_diff(
-            original_text.splitlines(keepends=True),
-            updated_text.splitlines(keepends=True),
-            fromfile=f"a/{target_path}",
-            tofile=f"b/{target_path}",
-        )
-    )
-    diff_text = "".join(diff_lines)
-    if not diff_text:
-        raise ValueError("could not build a diff from the structured replacement")
-    if not diff_text.endswith("\n"):
-        diff_text += "\n"
-    return diff_text
-
-
-def _guided_edit_output_to_diff(
-    *,
-    raw_output: str,
-    target_region: dict[str, Any],
-    allow_raw_diff: bool = True,
-    allow_micro_edit: bool = False,
-    max_extra_lines: int | None = None,
-) -> dict[str, Any]:
-    if allow_micro_edit:
-        try:
-            micro_edit = _guided_edit_parse_micro_edit(raw_output)
-            micro_rendered = _guided_edit_apply_micro_edit(
-                target_region=target_region,
-                micro_edit=micro_edit,
-            )
-            replacement_text = str(micro_rendered["replacement_text"])
-            return {
-                "mode": "micro_edit",
-                "micro_edit": micro_edit,
-                "replacement_text": replacement_text,
-                "diff_text": _guided_edit_build_local_diff(
-                    target_region=target_region,
-                    replacement_text=replacement_text,
-                    max_extra_lines=max_extra_lines,
-                ),
-            }
-        except Exception:
-            pass
-    if allow_raw_diff:
-        try:
-            return {
-                "mode": "raw_diff",
-                "diff_text": _guided_edit_parse_diff(raw_output),
-            }
-        except Exception as diff_exc:
-            try:
-                replacement_text = _guided_edit_parse_replacement_text(raw_output)
-                return {
-                    "mode": "replacement_text",
-                    "replacement_text": replacement_text,
-                    "diff_text": _guided_edit_build_local_diff(
-                        target_region=target_region,
-                        replacement_text=replacement_text,
-                        max_extra_lines=max_extra_lines,
-                    ),
-                }
-            except Exception as replacement_exc:
-                raise ValueError(str(replacement_exc) or str(diff_exc)) from replacement_exc
-    replacement_text = _guided_edit_parse_replacement_text(raw_output)
-    return {
-        "mode": "replacement_text",
-        "replacement_text": replacement_text,
-        "diff_text": _guided_edit_build_local_diff(
-            target_region=target_region,
-            replacement_text=replacement_text,
-            max_extra_lines=max_extra_lines,
-        ),
-    }
-
-
-def _guided_edit_prefers_structured_rewrite(action_type: str) -> bool:
-    return action_type in {"replace_region", "update_docs"}
-
-
-def _guided_edit_current_overlay() -> dict[str, Any]:
-    tracked = _git("diff", "--name-status", "HEAD", "--", ".", ":(exclude).codebase-tooling-mcp/**")
-    untracked = _git(
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-        "--",
-        ".",
-        ":(exclude).codebase-tooling-mcp/**",
-    )
-    return {
-        "tracked": tracked.stdout,
-        "untracked": untracked.stdout,
-    }
-
-
-def _guided_edit_sync_overlay_to_worktree(worktree_root: Path, overlay: dict[str, Any]) -> None:
-    tracked_raw = str(overlay.get("tracked", "") or "")
-    for line in tracked_raw.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        status = parts[0].strip()
-        code = status[:1]
-        if code in {"R", "C"} and len(parts) >= 3:
-            old_rel = parts[1].strip()
-            new_rel = parts[2].strip()
-            if code == "R":
-                old_path = worktree_root / old_rel
-                if old_path.exists():
-                    if old_path.is_dir():
-                        shutil.rmtree(old_path)
-                    else:
-                        old_path.unlink()
-            src = _resolve_repo_path(new_rel)
-            dst = worktree_root / new_rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.exists():
-                shutil.copy2(src, dst)
-            continue
-        if len(parts) < 2:
-            continue
-        rel = parts[1].strip()
-        if not rel:
-            continue
-        dst = worktree_root / rel
-        src = _resolve_repo_path(rel)
-        if code == "D":
-            if dst.exists():
-                if dst.is_dir():
-                    shutil.rmtree(dst)
-                else:
-                    dst.unlink()
-            continue
-        if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-    untracked_raw = str(overlay.get("untracked", "") or "")
-    for rel in [item for item in untracked_raw.split("\0") if item]:
-        src = _resolve_repo_path(rel)
-        dst = worktree_root / rel
-        if src.is_file():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-
-
-def _guided_edit_create_temp_worktree() -> dict[str, Any]:
-    _require_git_repo()
-    temp_dir = Path(tempfile.mkdtemp(prefix="codebase-tooling-guided-edit-"))
-    worktree_root = temp_dir / "repo"
-    base_head = _git("rev-parse", "HEAD").stdout.strip()
-    _git("worktree", "add", "--detach", str(worktree_root), base_head)
-    overlay = _guided_edit_current_overlay()
-    _guided_edit_sync_overlay_to_worktree(worktree_root, overlay)
-    return {
-        "schema": "guided_edit.worktree.v1",
-        "backend": "git_worktree",
-        "base_head": base_head,
-        "temp_dir": str(temp_dir),
-        "worktree_root": str(worktree_root),
-    }
-
-
-def _guided_edit_remove_temp_worktree(worktree_info: dict[str, Any]) -> None:
-    worktree_root = Path(str(worktree_info.get("worktree_root", "") or "")).resolve()
-    temp_dir = Path(str(worktree_info.get("temp_dir", "") or "")).resolve()
-    if worktree_root.exists():
-        with contextlib.suppress(Exception):
-            _git("worktree", "remove", "--force", str(worktree_root))
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    with contextlib.suppress(Exception):
-        _git("worktree", "prune", check=False)
-
-
-def _guided_edit_materialize_from_worktree(worktree_root: Path, changed_paths: list[str]) -> dict[str, Any]:
-    _require_mutations()
-    copied: list[str] = []
-    for rel in changed_paths:
-        src = worktree_root / rel
-        dst = _resolve_repo_path(rel)
-        if src.is_file():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            copied.append(rel)
-    return {
-        "schema": "guided_edit.materialize.v1",
-        "ok": True,
-        "copied_paths": copied,
-    }
-
-
-def _guided_edit_changed_paths(diff_text: str) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
-    for line in diff_text.splitlines():
-        if not line.startswith(("+++ ", "--- ")):
-            continue
-        candidate = line[4:].strip()
-        if candidate == "/dev/null":
-            continue
-        if candidate.startswith(("a/", "b/")):
-            candidate = candidate[2:]
-        candidate = candidate.strip()
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        paths.append(candidate)
-    return paths
-
-
-def _guided_edit_suggest_tests(
-    changed_paths: list[str],
-    max_tests: int = 8,
-    repo_root: Path | None = None,
-) -> list[str]:
-    selected: list[str] = []
-    seen: set[str] = set()
-    effective_root = repo_root or REPO_PATH
-    for rel in changed_paths:
-        path = Path(rel)
-        candidates: list[str] = []
-        if "test" in path.name.lower() and path.suffix == ".py":
-            candidates.append(rel)
-        elif path.suffix == ".py":
-            candidates.extend((f"tests/test_{path.stem}.py", f"tests/{path.stem}_test.py"))
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            resolved = (effective_root / candidate).resolve()
-            if not resolved.is_file():
-                continue
-            seen.add(candidate)
-            selected.append(candidate)
-            if len(selected) >= max_tests:
-                return selected
-    return selected
-
-
-def _guided_edit_allowed_paths(action: dict[str, Any], selected_targets: list[str]) -> list[str]:
-    allowed: set[str] = {str(path).replace("\\", "/") for path in selected_targets if str(path).strip()}
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    if isinstance(target, dict):
-        path = str(target.get("path", "") or "").strip().replace("\\", "/")
-        if path:
-            allowed.add(path)
-            if action_type == "add_test":
-                allowed.update(_guided_edit_suggest_tests([path], max_tests=6))
-    if action_type == "update_docs":
-        readme = _resolve_repo_path("README.md")
-        if readme.is_file():
-            allowed.add("README.md")
-        docs_root = _resolve_repo_path("docs")
-        if docs_root.is_dir():
-            doc_count = 0
-            for candidate in docs_root.rglob("*"):
-                if doc_count >= 24 or not candidate.is_file():
-                    continue
-                rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
-                if _is_hidden_rel_path(Path(rel)):
-                    continue
-                if _semantic_role_for_path(rel) != "doc":
-                    continue
-                allowed.add(rel)
-                doc_count += 1
-    return sorted(allowed)
-
-
-def _guided_edit_prompt_profile(prompt: str, selected_targets: list[str] | None = None) -> dict[str, Any]:
-    lowered = f" {str(prompt or '').lower()} "
-    target_list = [str(path).replace("\\", "/") for path in (selected_targets or []) if str(path).strip()]
-    doc_targets = [path for path in target_list if _semantic_role_for_path(path) == "doc"]
-    test_targets = [path for path in target_list if _guided_edit_is_test_path(path)]
-    explicit_tests = bool(re.search(r"\b(test|tests|unit test|regression test|pytest|spec)\b", lowered))
-    explicit_docs = bool(re.search(r"\b(doc|docs|readme|document|documentation|commentary)\b", lowered))
-    comment_only = bool(re.search(r"\b(comment|docstring|annotation|note)\b", lowered))
-    insert_only = bool(re.search(r"\b(insert|add|prepend|append)\b", lowered))
-    tiny_edit = bool(re.search(r"\b(exactly one line|one comment line|single comment line|insert exactly one)\b", lowered))
-    if comment_only and insert_only:
-        tiny_edit = True
-    preferred_actions: list[str] = []
-    discouraged_actions: list[str] = []
-    if explicit_tests or test_targets:
-        preferred_actions.append("add_test")
-    if explicit_docs or doc_targets:
-        preferred_actions.append("update_docs")
-    if comment_only or tiny_edit or insert_only:
-        preferred_actions.append("replace_region")
-        discouraged_actions.extend(["add_test"])
-    exact_request = _guided_edit_prompt_exact_edit_request(prompt)
-    if exact_request:
-        preferred_actions = ["update_docs" if explicit_docs or doc_targets else "replace_region", *preferred_actions]
-        discouraged_actions.extend(["add_test", "extract_helper"])
-    if not preferred_actions:
-        preferred_actions.append("replace_region")
-    if doc_targets and "replace_region" in preferred_actions and "update_docs" not in preferred_actions:
-        preferred_actions.insert(0, "update_docs")
-    return {
-        "preferred_actions": list(dict.fromkeys(preferred_actions)),
-        "discouraged_actions": list(dict.fromkeys(discouraged_actions)),
-        "comment_only": comment_only,
-        "explicit_tests": explicit_tests,
-        "explicit_docs": explicit_docs,
-        "tiny_edit": tiny_edit,
-        "insert_only": insert_only,
-        "exact_request": exact_request,
-        "exact_anchored": bool(exact_request),
-    }
-
-
-def _guided_edit_prompt_exact_edit_request(prompt: str) -> dict[str, Any]:
-    text = str(prompt or "").strip()
-    if not text:
-        return {}
-    patterns = [
-        (
-            r"(?is)\b(?:add|insert)(?:\s+this)?(?:\s+exact)?\s+line\s*:?\s*(?P<q1>['\"`])(?P<text>.+?)(?P=q1)\s+(?P<position>before|after)\s+(?P<q2>['\"`])(?P<anchor>.+?)(?P=q2)",
-            "insert_anchor",
-        ),
-        (
-            r"(?is)\b(?:add|insert)(?:\s+this)?(?:\s+exact)?\s+line\s*:?\s*(?P<q1>['\"`])(?P<text>.+?)(?P=q1)\s+(?P<position>before|after)\s+line\s+(?P<line>\d+)",
-            "insert_line",
-        ),
-        (
-            r"(?is)\breplace\s+(?P<q1>['\"`])(?P<old>.+?)(?P=q1)\s+with\s+(?P<q2>['\"`])(?P<new>.+?)(?P=q2)",
-            "replace",
-        ),
-    ]
-    for pattern, kind in patterns:
-        match = re.search(pattern, text)
-        if not match:
-            continue
-        payload = {key: str(value or "") for key, value in match.groupdict().items()}
-        if kind == "insert_anchor":
-            position = payload.get("position", "").strip().lower()
-            return {
-                "edit_kind": "micro_insert_before" if position == "before" else "micro_insert_after",
-                "anchor": payload.get("anchor", "").strip(),
-                "anchor_kind": "contains",
-                "insert_text": payload.get("text", "").replace("\r\n", "\n").strip("\n"),
-                "expected_old_text": "",
-                "replacement_text": "",
-            }
-        if kind == "insert_line":
-            position = payload.get("position", "").strip().lower()
-            return {
-                "edit_kind": "micro_insert_before" if position == "before" else "micro_insert_after",
-                "anchor": payload.get("line", "").strip(),
-                "anchor_kind": "line_number",
-                "insert_text": payload.get("text", "").replace("\r\n", "\n").strip("\n"),
-                "expected_old_text": "",
-                "replacement_text": "",
-            }
-        old_text = payload.get("old", "").replace("\r\n", "\n").strip("\n")
-        new_text = payload.get("new", "").replace("\r\n", "\n").strip("\n")
-        return {
-            "edit_kind": "micro_replace_region" if ("\n" in old_text or "\n" in new_text) else "micro_replace_line",
-            "anchor": old_text,
-            "anchor_kind": "contains",
-            "insert_text": "",
-            "expected_old_text": old_text,
-            "replacement_text": new_text,
-        }
-    return {}
-
-
-def _guided_edit_find_anchor_line(
-    *,
-    path: str,
-    anchor: str = "",
-    anchor_kind: str = "contains",
-    line_hint: int | None = None,
-) -> int | None:
-    file_path = _resolve_repo_path(path)
-    if not file_path.is_file():
-        return None
-    try:
-        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
-        return None
-    if anchor_kind == "line_number" and isinstance(line_hint, int):
-        if 1 <= line_hint <= len(lines):
-            return line_hint
-        return None
-    normalized_anchor = str(anchor or "").strip()
-    if not normalized_anchor:
-        return None
-    for index, raw in enumerate(lines, start=1):
-        if normalized_anchor in raw:
-            return index
-    return None
-
-
-def _guided_edit_normalize_action_intent(
-    prompt: str,
-    action: dict[str, Any],
-    prompt_profile: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    profile = prompt_profile or _guided_edit_prompt_profile(prompt)
-    exact_request = (
-        profile.get("exact_request")
-        if isinstance(profile.get("exact_request"), dict)
-        else _guided_edit_prompt_exact_edit_request(prompt)
-    )
-    normalized = dict(action)
-    target = normalized.get("target", {})
-    if not isinstance(target, dict):
-        target = {}
-    if exact_request:
-        preferred_action = "update_docs" if profile.get("explicit_docs") else "replace_region"
-        if str(normalized.get("action_type", "") or "").strip().lower() not in {"replace_region", "update_docs"}:
-            normalized["action_type"] = preferred_action
-        for key in (
-            "edit_kind",
-            "anchor",
-            "anchor_kind",
-            "insert_text",
-            "replacement_text",
-            "expected_old_text",
-        ):
-            if exact_request.get(key):
-                normalized[key] = exact_request.get(key)
-        normalized.setdefault("validation_scope", "quick")
-        if "goal" not in normalized or not str(normalized.get("goal", "") or "").strip():
-            normalized["goal"] = _trim_task_inline_text(prompt, max_chars=160)
-        if "rationale" not in normalized or not str(normalized.get("rationale", "") or "").strip():
-            normalized["rationale"] = "exact anchored request should use a deterministic bounded edit"
-    normalized["target"] = target
-    return normalized
-
-
-def _guided_edit_build_deterministic_action(
-    *,
-    prompt: str,
-    selected_targets: list[str],
-) -> dict[str, Any] | None:
-    if not selected_targets:
-        return None
-    exact_request = _guided_edit_prompt_exact_edit_request(prompt)
-    if not exact_request:
-        return None
-    target_path = str(selected_targets[0]).replace("\\", "/")
-    prompt_profile = _guided_edit_prompt_profile(prompt, selected_targets)
-    anchor_kind = str(exact_request.get("anchor_kind", "") or "")
-    line_hint: int | None = None
-    if anchor_kind == "line_number":
-        with contextlib.suppress(Exception):
-            line_hint = int(str(exact_request.get("anchor", "") or "").strip())
-    anchor_line = _guided_edit_find_anchor_line(
-        path=target_path,
-        anchor=str(exact_request.get("anchor", "") or ""),
-        anchor_kind=anchor_kind,
-        line_hint=line_hint,
-    )
-    if anchor_line is None:
-        return None
-    action = {
-        "action_type": "update_docs"
-        if (prompt_profile.get("explicit_docs") or _semantic_role_for_path(target_path) == "doc")
-        else "replace_region",
-        "target": {
-            "path": target_path,
-            "start_line": anchor_line,
-            "end_line": anchor_line,
-        },
-        "goal": _trim_task_inline_text(prompt, max_chars=160),
-        "rationale": "deterministic micro-edit inferred from exact anchored request",
-        "validation_scope": "quick",
-        "postconditions": {},
-        **exact_request,
-    }
-    return _guided_edit_normalize_action_intent(prompt, action, prompt_profile)
-
-
-def _guided_edit_build_parsed_edit_from_intent(
-    *,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-    max_extra_lines: int | None = None,
-) -> dict[str, Any]:
-    edit_kind = str(action.get("edit_kind", "") or "").strip().lower()
-    anchor = str(action.get("anchor", "") or "").strip()
-    anchor_kind = str(action.get("anchor_kind", "") or "").strip().lower()
-    insert_text = str(action.get("insert_text", "") or "")
-    expected_old_text = str(action.get("expected_old_text", "") or "")
-    replacement_text = str(action.get("replacement_text", "") or "")
-    line_number: int | None = None
-    if anchor_kind == "line_number":
-        with contextlib.suppress(Exception):
-            line_number = int(anchor)
-    if edit_kind in {"micro_insert_before", "micro_insert_after"}:
-        micro_edit = {
-            "op": "insert_before" if edit_kind.endswith("before") else "insert_after",
-            "text": insert_text,
-        }
-        if line_number is not None:
-            micro_edit["line"] = line_number
-        elif anchor:
-            micro_edit["anchor"] = anchor
-        rendered = _guided_edit_apply_micro_edit(target_region=target_region, micro_edit=micro_edit)
-        replacement = str(rendered.get("replacement_text", "") or "")
-        return {
-            "mode": "micro_edit",
-            "micro_edit": micro_edit,
-            "replacement_text": replacement,
-            "diff_text": _guided_edit_build_local_diff(
-                target_region=target_region,
-                replacement_text=replacement,
-                max_extra_lines=max_extra_lines,
-            ),
-        }
-    if edit_kind == "micro_replace_line":
-        region_lines = str(target_region.get("region_text", "") or "").splitlines()
-        if not region_lines:
-            raise ValueError("micro_replace_line target region is empty")
-        line_text = region_lines[0]
-        updated_line = replacement_text
-        if expected_old_text and expected_old_text in line_text and replacement_text:
-            updated_line = line_text.replace(expected_old_text, replacement_text, 1)
-        micro_edit = {"op": "replace_line", "text": updated_line}
-        if line_number is not None:
-            micro_edit["line"] = line_number
-        elif anchor:
-            micro_edit["anchor"] = anchor
-        rendered = _guided_edit_apply_micro_edit(target_region=target_region, micro_edit=micro_edit)
-        replacement = str(rendered.get("replacement_text", "") or "")
-        return {
-            "mode": "micro_edit",
-            "micro_edit": micro_edit,
-            "replacement_text": replacement,
-            "diff_text": _guided_edit_build_local_diff(
-                target_region=target_region,
-                replacement_text=replacement,
-                max_extra_lines=max_extra_lines,
-            ),
-        }
-    if edit_kind == "micro_replace_region":
-        replacement = replacement_text
-        if expected_old_text and replacement_text:
-            replacement = str(target_region.get("region_text", "") or "").replace(expected_old_text, replacement_text, 1)
-        return {
-            "mode": "replacement_text",
-            "replacement_text": replacement,
-            "diff_text": _guided_edit_build_local_diff(
-                target_region=target_region,
-                replacement_text=replacement,
-                max_extra_lines=max_extra_lines,
-            ),
-        }
-    raise ValueError("action does not contain a deterministic micro intent")
-
-
-def _guided_edit_local_repair_candidate(
-    *,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-    parsed_edit: dict[str, Any],
-    acceptance: dict[str, Any],
-) -> dict[str, Any] | None:
-    if str(target_region.get("path", "") or "").strip().endswith(".py"):
-        failures = set(str(item) for item in list(acceptance.get("hard_failures", []) or []))
-        if "python_parse_failed" in failures:
-            replacement_text = str(parsed_edit.get("replacement_text", "") or "")
-            original_lines = str(target_region.get("region_text", "") or "").splitlines()
-            replacement_lines = replacement_text.splitlines()
-            if replacement_lines and len(replacement_lines) == len(original_lines):
-                repaired_lines: list[str] = []
-                for original_line, replacement_line in zip(original_lines, replacement_lines):
-                    if replacement_line.strip() == original_line.strip() and original_line.startswith((" ", "\t")):
-                        repaired_lines.append(original_line)
-                    else:
-                        repaired_lines.append(replacement_line)
-                repaired_text = "\n".join(repaired_lines)
-                if replacement_text.endswith("\n"):
-                    repaired_text += "\n"
-                try:
-                    ast.parse(repaired_text)
-                    return {
-                        "mode": "replacement_text",
-                        "replacement_text": repaired_text.rstrip("\n"),
-                        "diff_text": _guided_edit_build_local_diff(
-                            target_region=target_region,
-                            replacement_text=repaired_text.rstrip("\n"),
-                            max_extra_lines=int(
-                                (
-                                    acceptance.get("postconditions", {})
-                                    if isinstance(acceptance.get("postconditions"), dict)
-                                    else {}
-                                ).get("max_line_delta", 0)
-                                or 0
-                            ),
-                        ),
-                    }
-                except Exception:
-                    return None
-    if str(action.get("edit_kind", "") or "").strip().lower().startswith("micro_"):
-        with contextlib.suppress(Exception):
-            return _guided_edit_build_parsed_edit_from_intent(
-                action=action,
-                target_region=target_region,
-                max_extra_lines=int(
-                    (
-                        acceptance.get("postconditions", {})
-                        if isinstance(acceptance.get("postconditions"), dict)
-                        else {}
-                    ).get("max_line_delta", 0)
-                    or 0
-                ),
-            )
-    return None
-
-
-def _guided_edit_prior_violation(
-    *,
-    action: dict[str, Any],
-    prompt_profile: dict[str, Any],
-    selected_targets: list[str],
-) -> str:
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    preferred = set(prompt_profile.get("preferred_actions", []) or [])
-    discouraged = set(prompt_profile.get("discouraged_actions", []) or [])
-    if action_type in discouraged:
-        return f"action_type {action_type} is discouraged for this request"
-    if prompt_profile.get("comment_only") and action_type == "add_test":
-        return "comment-only requests should not plan add_test"
-    if prompt_profile.get("explicit_docs") and action_type == "add_test":
-        return "documentation requests should not plan add_test"
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    target_path = str(target.get("path", "") or "").strip().replace("\\", "/") if isinstance(target, dict) else ""
-    if action_type == "add_test" and target_path and not _guided_edit_is_test_path(target_path) and not prompt_profile.get("explicit_tests"):
-        return "add_test planned against a non-test target without explicit test intent"
-    if preferred and action_type not in preferred and prompt_profile.get("tiny_edit") and action_type in {"extract_helper", "add_test"}:
-        return f"tiny edit requests should prefer {', '.join(sorted(preferred))}"
-    if prompt_profile.get("exact_anchored"):
-        if action_type not in {"replace_region", "update_docs"}:
-            return "exact anchored requests must use replace_region or update_docs"
-        if not str(action.get("edit_kind", "") or "").strip():
-            return "exact anchored requests must preserve deterministic edit intent"
-    return ""
-
-
-def _guided_edit_postcondition_noise(text: str) -> bool:
-    stripped = str(text or "").strip()
-    if not stripped:
-        return True
-    if re.match(r"^\d+:\s", stripped):
-        return True
-    if "/" in stripped and "." in stripped:
-        return True
-    if stripped.startswith("[") and stripped.endswith("]"):
-        return True
-    return False
-
-
-def _guided_edit_postcondition_list(value: Any, *, limit: int = 8) -> list[str]:
-    if isinstance(value, str):
-        items = [value]
-    elif isinstance(value, list):
-        items = value
-    else:
-        items = []
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        text = str(item or "").strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(text[:160])
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _guided_edit_destructive_request(*parts: Any) -> bool:
-    lowered = " ".join(str(part or "") for part in parts).lower()
-    return bool(re.search(r"\b(rename|rewrite|replace|remove|delete)\b", lowered))
-
-
-def _guided_edit_extract_required_phrases(prompt: str) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for match in re.finditer(r"['\"`]{1}([^'\"`]{2,120})['\"`]{1}", str(prompt or "")):
-        text = str(match.group(1) or "").strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(text)
-        if len(out) >= 6:
-            break
-    return out
-
-
-def _guided_edit_substantive_lines(text: str) -> list[str]:
-    out: list[str] = []
-    for raw in str(text or "").splitlines():
-        normalized = re.sub(r"\s+", " ", raw.strip())
-        if not normalized:
-            continue
-        if not re.search(r"[A-Za-z0-9_]", normalized):
-            continue
-        out.append(normalized)
-    return out
-
-
-def _guided_edit_markdown_headings(text: str) -> list[str]:
-    headings: list[str] = []
-    for raw in str(text or "").splitlines():
-        stripped = raw.strip()
-        if not stripped.startswith("#"):
-            continue
-        if not re.match(r"^#{1,6}\s+\S", stripped):
-            continue
-        headings.append(stripped)
-    return headings
-
-
-def _guided_edit_similarity_ratio(left: str, right: str) -> float:
-    a = re.sub(r"\s+", " ", str(left or "").strip())
-    b = re.sub(r"\s+", " ", str(right or "").strip())
-    if not a and not b:
-        return 1.0
-    if not a or not b:
-        return 0.0
-    return round(difflib.SequenceMatcher(a=a, b=b).ratio(), 4)
-
-
-def _guided_edit_changed_line_count(diff_text: str) -> int:
-    count = 0
-    for line in str(diff_text or "").splitlines():
-        if line.startswith(("+++", "---", "@@")):
-            continue
-        if line.startswith(("+", "-")):
-            count += 1
-    return count
-
-
-def _guided_edit_is_test_path(path: str) -> bool:
-    rel = str(path or "").replace("\\", "/").strip().lower()
-    return (
-        rel.startswith("tests/")
-        or rel.startswith("test/")
-        or "/tests/" in rel
-        or Path(rel).name.startswith("test_")
-        or Path(rel).name.endswith("_test.py")
-    )
-
-
-def _guided_edit_extract_helper_symbol(action: dict[str, Any]) -> str:
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    if isinstance(target, dict):
-        symbol = str(target.get("symbol", "") or "").strip()
-        if symbol:
-            return symbol
-    combined = " ".join(
-        [
-            str(action.get("goal", "") or ""),
-            str(action.get("rationale", "") or ""),
-        ]
-    )
-    for match in re.finditer(r"\b(?:helper|function|method|symbol)\s+([A-Za-z_][A-Za-z0-9_]*)\b", combined):
-        symbol = str(match.group(1) or "").strip()
-        if symbol:
-            return symbol
-    return ""
-
-
-def _guided_edit_normalize_postconditions(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-) -> dict[str, Any]:
-    raw = action.get("postconditions", {}) if isinstance(action, dict) else {}
-    if not isinstance(raw, dict):
-        raw = {}
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    target_path = str(target.get("path", "") or "").strip().replace("\\", "/") if isinstance(target, dict) else ""
-    must_include = [
-        item
-        for item in _guided_edit_postcondition_list(raw.get("must_include"))
-        if not _guided_edit_postcondition_noise(item)
-    ]
-    for phrase in _guided_edit_extract_required_phrases(prompt):
-        if phrase.lower() not in {item.lower() for item in must_include}:
-            must_include.append(phrase)
-    must_preserve = [
-        item
-        for item in _guided_edit_postcondition_list(raw.get("must_preserve"))
-        if not _guided_edit_postcondition_noise(item)
-    ]
-    destructive = _guided_edit_destructive_request(prompt, action.get("goal", ""), action.get("rationale", ""))
-    if action_type == "replace_region" and not destructive:
-        substantive = _guided_edit_substantive_lines(target_region.get("region_text", ""))
-        if substantive:
-            for line in substantive[:2]:
-                if line.lower() not in {item.lower() for item in must_preserve}:
-                    must_preserve.append(line)
-    if action_type == "update_docs":
-        for heading in _guided_edit_markdown_headings(target_region.get("region_text", "")):
-            if heading.lower() not in {item.lower() for item in must_preserve}:
-                must_preserve.append(heading)
-    raw_require_symbol = raw.get("require_symbol", "")
-    if isinstance(raw_require_symbol, list):
-        require_symbol = next((str(item or "").strip() for item in raw_require_symbol if str(item or "").strip()), "")
-    else:
-        require_symbol = str(raw_require_symbol or "").strip()
-    if _guided_edit_postcondition_noise(require_symbol):
-        require_symbol = ""
-    if not require_symbol and action_type == "extract_helper":
-        require_symbol = _guided_edit_extract_helper_symbol(action)
-    max_line_delta = raw.get("max_line_delta")
-    if isinstance(max_line_delta, int):
-        normalized_max_line_delta = max(0, max_line_delta)
-    elif isinstance(max_line_delta, str) and max_line_delta.strip().isdigit():
-        normalized_max_line_delta = max(0, int(max_line_delta.strip()))
-    elif action_type in {"replace_region", "update_docs"}:
-        normalized_max_line_delta = 2
-    elif action_type == "add_test":
-        normalized_max_line_delta = 24
-    else:
-        normalized_max_line_delta = 12
-    return {
-        "must_include": must_include[:8],
-        "must_preserve": must_preserve[:8],
-        "require_symbol": require_symbol[:160],
-        "max_line_delta": normalized_max_line_delta,
-        "target_path": target_path,
-    }
-
-
-def _guided_edit_acceptance(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-    parsed_edit: dict[str, Any],
-    allowed_paths: list[str],
-) -> dict[str, Any]:
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    normalized = _guided_edit_normalize_postconditions(
-        prompt=prompt,
-        action=action,
-        target_region=target_region,
-    )
-    diff_text = str(parsed_edit.get("diff_text", "") or "")
-    mode = str(parsed_edit.get("mode", "") or "")
-    replacement_text = str(parsed_edit.get("replacement_text", "") or "")
-    target_path = str(normalized.get("target_path", "") or "")
-    changed_paths = _guided_edit_changed_paths(diff_text)
-    changed_path_set = {str(path).replace("\\", "/").strip() for path in changed_paths if str(path).strip()}
-    allowed = {str(path).replace("\\", "/").strip() for path in allowed_paths if str(path).strip()}
-    hard_failures: list[str] = []
-    soft_flags: list[str] = []
-    edit_kind = str(action.get("edit_kind", "") or "").strip().lower()
-    exact_insert_text = str(action.get("insert_text", "") or "")
-    exact_replacement_text = str(action.get("replacement_text", "") or "")
-    if not diff_text:
-        hard_failures.append("missing_diff")
-    if not changed_path_set:
-        hard_failures.append("no_changed_paths")
-    for path in sorted(changed_path_set):
-        if _watchdog_path_blocked(path):
-            hard_failures.append(f"blocked_path:{path}")
-        if allowed and path not in allowed:
-            hard_failures.append(f"out_of_scope_path:{path}")
-    if action_type in {"replace_region", "update_docs"}:
-        if mode not in {"replacement_text", "micro_edit"}:
-            hard_failures.append("structured_only_action_requires_replacement_text")
-        if target_path and changed_path_set != {target_path}:
-            hard_failures.append("structured_only_action_must_change_target_file_only")
-    line_delta = 0
-    updated_text = ""
-    if mode in {"replacement_text", "micro_edit"}:
-        with contextlib.suppress(Exception):
-            rendered = _guided_edit_render_structured_update(
-                target_region=target_region,
-                replacement_text=replacement_text,
-                max_extra_lines=int(normalized.get("max_line_delta", 0) or 0),
-            )
-            line_delta = int(rendered.get("line_delta", 0) or 0)
-            updated_text = str(rendered.get("updated_text", "") or "")
-    if abs(line_delta) > int(normalized.get("max_line_delta", 0) or 0):
-        hard_failures.append("line_delta_exceeded")
-
-    original_region_text = str(target_region.get("region_text", "") or "")
-    original_substantive = _guided_edit_substantive_lines(original_region_text)
-    replacement_substantive = _guided_edit_substantive_lines(replacement_text or updated_text)
-    preserved_lines = [
-        line for line in original_substantive
-        if line in set(replacement_substantive)
-    ]
-    destructive = _guided_edit_destructive_request(prompt, action.get("goal", ""), action.get("rationale", ""))
-    if action_type == "replace_region" and original_substantive and not destructive and not preserved_lines:
-        hard_failures.append("replace_region_must_preserve_one_substantive_line")
-    must_include = list(normalized.get("must_include", []) or [])
-    must_include_hits = [
-        phrase
-        for phrase in must_include
-        if phrase.lower() in (replacement_text or updated_text).lower()
-    ]
-    if edit_kind in {"micro_insert_before", "micro_insert_after"} and exact_insert_text:
-        if exact_insert_text not in (replacement_text or updated_text):
-            hard_failures.append("missing_exact_insert_text")
-    if edit_kind in {"micro_replace_line", "micro_replace_region"} and exact_replacement_text:
-        if exact_replacement_text not in (replacement_text or updated_text):
-            hard_failures.append("missing_exact_replacement_text")
-    if action_type == "update_docs":
-        original_headings = _guided_edit_markdown_headings(original_region_text)
-        replacement_headings = _guided_edit_markdown_headings(replacement_text or updated_text)
-        if original_headings and not destructive:
-            missing_headings = [
-                heading for heading in original_headings
-                if heading.lower() not in {item.lower() for item in replacement_headings}
-            ]
-            if missing_headings:
-                hard_failures.append("update_docs_missing_required_heading")
-        if must_include and len(must_include_hits) < len(must_include):
-            hard_failures.append("update_docs_missing_required_phrase")
-    if action_type == "add_test":
-        if not changed_paths or not all(_guided_edit_is_test_path(path) for path in changed_paths):
-            hard_failures.append("add_test_must_change_test_paths")
-        selected_tests = _guided_edit_suggest_tests(changed_paths, max_tests=8)
-        for path in changed_paths:
-            if _guided_edit_is_test_path(path) and path not in selected_tests:
-                hard_failures.append("add_test_selected_tests_missing_changed_test")
-                break
-        if "def test_" not in diff_text and "class Test" not in diff_text:
-            soft_flags.append("missing_explicit_test_symbol")
-    if action_type == "extract_helper":
-        required_symbol = str(normalized.get("require_symbol", "") or "").strip()
-        if required_symbol:
-            if f"def {required_symbol}" not in diff_text and f"class {required_symbol}" not in diff_text:
-                hard_failures.append("extract_helper_missing_helper_symbol")
-            if required_symbol not in diff_text:
-                hard_failures.append("extract_helper_missing_helper_reference")
-        else:
-            soft_flags.append("extract_helper_symbol_unknown")
-    if target_path.endswith(".py") and updated_text:
-        try:
-            ast.parse(updated_text)
-        except SyntaxError:
-            hard_failures.append("python_parse_failed")
-
-    similarity = _guided_edit_similarity_ratio(original_region_text, replacement_text or updated_text)
-    phrase_coverage = round(len(must_include_hits) / max(1, len(must_include)), 4) if must_include else 1.0
-    preserved_anchor_count = 0
-    for block in (
-        str(target_region.get("context_before_text", "") or ""),
-        str(target_region.get("context_after_text", "") or ""),
-    ):
-        for raw in reversed(block.splitlines()):
-            text = raw.strip()
-            if text:
-                if text in updated_text:
-                    preserved_anchor_count += 1
-                break
-    score = round(
-        max(0.0, similarity) * 0.45
-        + phrase_coverage * 0.25
-        + (1.0 if not hard_failures else 0.0) * 0.2
-        + min(1.0, preserved_anchor_count / 2.0) * 0.1,
-        4,
-    )
-    if similarity < 0.2:
-        soft_flags.append("low_similarity")
-    return {
-        "schema": "guided_edit.acceptance.v1",
-        "ok": not hard_failures,
-        "score": score,
-        "hard_failures": sorted(set(hard_failures)),
-        "soft_flags": sorted(set(soft_flags)),
-        "similarity": similarity,
-        "phrase_coverage": phrase_coverage,
-        "changed_path_count": len(changed_paths),
-        "changed_line_count": _guided_edit_changed_line_count(diff_text),
-        "diff_length": len(diff_text),
-        "line_delta": line_delta,
-        "preserved_anchor_count": preserved_anchor_count,
-        "preserved_substantive_count": len(preserved_lines),
-        "postconditions": normalized,
-    }
-
-
-def _guided_edit_candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
-    acceptance = candidate.get("acceptance", {}) if isinstance(candidate.get("acceptance"), dict) else {}
-    hard_failures = list(acceptance.get("hard_failures", []) or [])
-    return (
-        0 if candidate.get("parse_ok", False) else 1,
-        0 if not hard_failures else 1,
-        -int(candidate.get("pairwise_score", 0) or 0),
-        -float(acceptance.get("score", 0.0) or 0.0),
-        -float(acceptance.get("phrase_coverage", 0.0) or 0.0),
-        abs(int(acceptance.get("line_delta", 0) or 0)),
-        int(acceptance.get("diff_length", 0) or 0),
-        int(candidate.get("strategy_rank", 99) or 99),
-    )
-
-
-def _guided_edit_prefers_micro_edit(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-) -> bool:
-    profile = _guided_edit_prompt_profile(prompt, [str(action.get("target", {}).get("path", "") or "")])
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    region_line_count = len(str(target_region.get("region_text", "") or "").splitlines())
-    return bool(
-        action_type in {"replace_region", "update_docs"}
-        and profile.get("tiny_edit")
-        and region_line_count <= 6
-    )
-
-
-def _guided_edit_regression_load() -> dict[str, Any]:
-    payload = _json_file_load(
-        GUIDED_EDIT_REGRESSION_FILE,
-        {"schema": "guided_edit.regressions.v1", "entries": []},
-    )
-    entries = payload.get("entries", [])
-    if not isinstance(entries, list):
-        entries = []
-    payload["entries"] = entries
-    return payload
-
-
-def _guided_edit_regression_context(
-    *,
-    prompt: str,
-    target_paths: list[str],
-    max_entries: int = 3,
-) -> dict[str, Any]:
-    payload = _guided_edit_regression_load()
-    lowered = str(prompt or "").lower()
-    terms = {term for term in re.split(r"\W+", lowered) if len(term) > 3}
-    targets = {str(path).replace("\\", "/") for path in target_paths if str(path).strip()}
-    ranked: list[tuple[int, dict[str, Any]]] = []
-    for row in payload.get("entries", []):
-        if not isinstance(row, dict):
-            continue
-        score = 0
-        row_target = str(row.get("target_path", "") or "").replace("\\", "/")
-        if row_target and row_target in targets:
-            score += 3
-        row_text = f"{row.get('prompt_summary', '')} {row.get('failure_reason', '')}".lower()
-        score += sum(1 for term in terms if term in row_text)
-        if score <= 0:
-            continue
-        ranked.append((score, row))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    entries = [row for _, row in ranked[:max_entries]]
-    context_lines = [
-        _trim_task_inline_text(
-            f"{row.get('action_type', '')} failed={row.get('stopped_reason', '')} reason={row.get('failure_reason', '')}",
-            max_chars=180,
-        )
-        for row in entries
-    ]
-    return {
-        "schema": "guided_edit.regression_context.v1",
-        "entry_count": len(entries),
-        "entries": entries,
-        "context": "\n".join(context_lines),
-    }
-
-
-def _guided_edit_regression_record(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    execution: dict[str, Any],
-    stopped_reason: str,
-    replay_id: str,
-) -> dict[str, Any]:
-    if not ALLOW_MUTATIONS:
-        return {"written": False, "reason": "mutations_disabled"}
-    payload = _guided_edit_regression_load()
-    entries = payload.get("entries", [])
-    if not isinstance(entries, list):
-        entries = []
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    entry = {
-        "ts": _now_iso(),
-        "prompt_summary": _trim_task_inline_text(prompt, max_chars=180),
-        "edit_class": _guided_edit_edit_class(prompt, action),
-        "action_type": str(action.get("action_type", "") or ""),
-        "target_path": str(target.get("path", "") or "").strip() if isinstance(target, dict) else "",
-        "stopped_reason": stopped_reason,
-        "failure_reason": str(execution.get("failure_reason", "") or stopped_reason),
-        "candidate_stop_reasons": [str(row.get("stop_reason", "") or "") for row in list(execution.get("candidates", []) or [])[:4]],
-        "acceptance_failures": int(execution.get("acceptance_failures", 0) or 0),
-        "replay_id": replay_id,
-    }
-    entries.append(entry)
-    payload["entries"] = entries[-100:]
-    payload["updated_at"] = _now_iso()
-    _json_file_save(GUIDED_EDIT_REGRESSION_FILE, payload)
-    return {"written": True, "entry": entry, "count": len(payload["entries"])}
-
-
-def _guided_edit_edit_class(prompt: str, action: dict[str, Any]) -> str:
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    edit_kind = str(action.get("edit_kind", "") or "").strip().lower()
-    profile = _guided_edit_prompt_profile(prompt, [str(action.get("target", {}).get("path", "") or "")])
-    if edit_kind.startswith("micro_") or profile.get("exact_anchored") or profile.get("tiny_edit"):
-        return "tiny_anchored"
-    if action_type in {"update_docs", "add_test", "extract_helper"}:
-        return "structural"
-    return "bounded_semantic"
-
-
-def _guided_edit_example_load() -> dict[str, Any]:
-    payload = _json_file_load(
-        GUIDED_EDIT_EXAMPLE_FILE,
-        {"schema": "guided_edit.examples.v1", "entries": []},
-    )
-    entries = payload.get("entries", [])
-    if not isinstance(entries, list):
-        entries = []
-    payload["entries"] = entries
-    return payload
-
-
-def _guided_edit_example_context(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    target_paths: list[str],
-    max_entries: int = 1,
-) -> dict[str, Any]:
-    example_payload = _guided_edit_example_load()
-    regression_payload = _guided_edit_regression_load()
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    edit_class = _guided_edit_edit_class(prompt, action)
-    targets = {str(path).replace("\\", "/") for path in target_paths if str(path).strip()}
-    prompt_terms = {term for term in re.split(r"\W+", str(prompt or "").lower()) if len(term) > 3}
-
-    def rank_entry(row: dict[str, Any], *, expect_ok: bool) -> int:
-        score = 0
-        if str(row.get("edit_class", "") or "") == edit_class:
-            score += 4
-        if str(row.get("action_type", "") or "") == action_type:
-            score += 3
-        target_path = str(row.get("target_path", "") or "").replace("\\", "/")
-        if target_path and target_path in targets:
-            score += 3
-        row_text = f"{row.get('prompt_summary', '')} {row.get('failure_reason', '')} {row.get('goal', '')}".lower()
-        score += sum(1 for term in prompt_terms if term in row_text)
-        if expect_ok == bool(row.get("ok", False)):
-            score += 1
-        return score
-
-    success_rows = [
-        row for row in example_payload.get("entries", [])
-        if isinstance(row, dict) and bool(row.get("ok", False))
-    ]
-    failure_rows = [
-        row for row in regression_payload.get("entries", [])
-        if isinstance(row, dict)
-    ]
-    success_rows.sort(key=lambda row: rank_entry(row, expect_ok=True), reverse=True)
-    failure_rows.sort(key=lambda row: rank_entry(row, expect_ok=False), reverse=True)
-    selected_success = success_rows[:max_entries]
-    selected_failure = failure_rows[:max_entries]
-    success_context = "\n".join(
-        _trim_task_inline_text(
-            f"success {row.get('edit_class', '')} strategy={row.get('candidate_strategy', '')} target={row.get('target_path', '')} goal={row.get('goal', '')}",
-            max_chars=180,
-        )
-        for row in selected_success
-    )
-    failure_context = "\n".join(
-        _trim_task_inline_text(
-            f"failure {row.get('action_type', '')} stopped={row.get('stopped_reason', '')} reason={row.get('failure_reason', '')}",
-            max_chars=180,
-        )
-        for row in selected_failure
-    )
-    return {
-        "schema": "guided_edit.example_context.v1",
-        "success_entries": selected_success,
-        "failure_entries": selected_failure,
-        "success_context": success_context,
-        "failure_context": failure_context,
-    }
-
-
-def _guided_edit_example_record(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    execution: dict[str, Any],
-    validation: dict[str, Any],
-    stopped_reason: str,
-    replay_id: str,
-) -> dict[str, Any]:
-    if not ALLOW_MUTATIONS:
-        return {"written": False, "reason": "mutations_disabled"}
-    payload = _guided_edit_example_load()
-    entries = payload.get("entries", [])
-    if not isinstance(entries, list):
-        entries = []
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    selected_candidate = execution.get("selected_candidate", {}) if isinstance(execution.get("selected_candidate"), dict) else {}
-    entry = {
-        "ts": _now_iso(),
-        "prompt_summary": _trim_task_inline_text(prompt, max_chars=180),
-        "edit_class": _guided_edit_edit_class(prompt, action),
-        "action_type": str(action.get("action_type", "") or ""),
-        "target_path": str(target.get("path", "") or "").strip() if isinstance(target, dict) else "",
-        "goal": str(action.get("goal", "") or ""),
-        "ok": bool(validation.get("ok", execution.get("applied", False))),
-        "stopped_reason": stopped_reason,
-        "candidate_strategy": str(selected_candidate.get("strategy", "") or ""),
-        "generation_tier": int(execution.get("generation_tier", 0) or 0),
-        "acceptance_score": float(execution.get("acceptance", {}).get("score", 0.0) or 0.0),
-        "replay_id": replay_id,
-    }
-    entries.append(entry)
-    payload["entries"] = entries[-200:]
-    payload["updated_at"] = _now_iso()
-    _json_file_save(GUIDED_EDIT_EXAMPLE_FILE, payload)
-    return {"written": True, "entry": entry, "count": len(payload["entries"])}
-
-
-def _guided_edit_replay_benchmark_cases(min_cases: int = 200) -> list[dict[str, Any]]:
-    min_cases = max(1, int(min_cases or 200))
-    examples = [
-        row for row in list(_guided_edit_example_load().get("entries", []) or [])
-        if isinstance(row, dict)
-    ]
-    regressions = [
-        row for row in list(_guided_edit_regression_load().get("entries", []) or [])
-        if isinstance(row, dict)
-    ]
-    cases: list[dict[str, Any]] = []
-    for row in examples:
-        cases.append(
-            {
-                "bucket": str(row.get("edit_class", "") or "bounded_semantic"),
-                "applied_success": bool(row.get("ok", False)),
-                "safe_outcome": bool(row.get("ok", False)),
-                "source": "example",
-            }
-        )
-    for row in regressions:
-        bucket = _guided_edit_edit_class(str(row.get("prompt_summary", "") or ""), {"action_type": row.get("action_type", "")})
-        cases.append(
-            {
-                "bucket": bucket,
-                "applied_success": False,
-                "safe_outcome": True,
-                "source": "regression",
-            }
-        )
-    target_counts = {
-        "tiny_anchored": max(1, round(min_cases * 0.40)),
-        "bounded_semantic": max(1, round(min_cases * 0.35)),
-        "structural": max(1, min_cases - round(min_cases * 0.40) - round(min_cases * 0.35)),
-    }
-    for bucket, count in target_counts.items():
-        existing = sum(1 for row in cases if str(row.get("bucket", "") or "") == bucket)
-        for _ in range(max(0, count - existing)):
-            cases.append(
-                {
-                    "bucket": bucket,
-                    "applied_success": False,
-                    "safe_outcome": True,
-                    "source": "synthetic_placeholder",
-                }
-            )
-    return cases[:max(min_cases, len(cases))]
-
-
-def _guided_edit_replay_benchmark_report(
-    *,
-    results: list[dict[str, Any]] | None = None,
-    min_cases: int = 200,
-    write: bool = False,
-) -> dict[str, Any]:
-    rows = list(results or _guided_edit_replay_benchmark_cases(min_cases=min_cases))
-    min_cases = max(1, int(min_cases or 200))
-
-    def bucket_metrics(bucket_rows: list[dict[str, Any]]) -> dict[str, Any]:
-        total = len(bucket_rows)
-        applied = sum(1 for row in bucket_rows if bool(row.get("applied_success", False)))
-        safe = sum(1 for row in bucket_rows if bool(row.get("safe_outcome", False)))
-        return {
-            "count": total,
-            "applied_success_rate": round(applied / total, 4) if total else 0.0,
-            "safe_outcome_rate": round(safe / total, 4) if total else 0.0,
-        }
-
-    overall = bucket_metrics(rows)
-    buckets = {
-        bucket: bucket_metrics([row for row in rows if str(row.get("bucket", "") or "") == bucket])
-        for bucket in ("tiny_anchored", "bounded_semantic", "structural")
-    }
-    thresholds_met = (
-        len(rows) >= min_cases
-        and overall["applied_success_rate"] >= GUIDED_EDIT_REPLAY_GLOBAL_THRESHOLDS["applied_success_rate"]
-        and overall["safe_outcome_rate"] >= GUIDED_EDIT_REPLAY_GLOBAL_THRESHOLDS["safe_outcome_rate"]
-        and all(
-            buckets[name]["count"] > 0
-            and buckets[name]["applied_success_rate"] >= GUIDED_EDIT_REPLAY_BUCKET_THRESHOLDS[name]["applied_success_rate"]
-            and buckets[name]["safe_outcome_rate"] >= GUIDED_EDIT_REPLAY_BUCKET_THRESHOLDS[name]["safe_outcome_rate"]
-            for name in GUIDED_EDIT_REPLAY_BUCKET_THRESHOLDS
-        )
-    )
-    report = {
-        "schema": "guided_edit.replay_benchmark.v1",
-        "case_count": len(rows),
-        "min_case_target": min_cases,
-        "insufficient_cases": len(rows) < min_cases,
-        "overall": overall,
-        "bucket_metrics": buckets,
-        "thresholds": {
-            "overall": GUIDED_EDIT_REPLAY_GLOBAL_THRESHOLDS,
-            "buckets": GUIDED_EDIT_REPLAY_BUCKET_THRESHOLDS,
-        },
-        "thresholds_met": thresholds_met,
-    }
-    if write and ALLOW_MUTATIONS:
-        _json_file_save(GUIDED_EDIT_REPLAY_BENCHMARK_FILE, report)
-    return report
-
-
-def _guided_edit_parse_verification(raw_output: str) -> dict[str, Any]:
-    cleaned = _guided_edit_strip_wrappers(raw_output)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end < start:
-        return {
-            "schema": "guided_edit.verification.v1",
-            "verdict": "unavailable",
-            "confidence": 0.0,
-            "reason": "verifier output did not contain JSON",
-        }
-    payload = json.loads(cleaned[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("guided_edit verifier output must be a JSON object")
-    verdict = str(payload.get("verdict", "unclear") or "unclear").strip().lower()
-    if verdict not in {"agree", "disagree", "unclear"}:
-        verdict = "unclear"
-    raw_confidence = payload.get("confidence", 0.0)
-    if isinstance(raw_confidence, str):
-        normalized_confidence = raw_confidence.strip().lower()
-        confidence_map = {
-            "high": 0.9,
-            "medium": 0.6,
-            "low": 0.3,
-        }
-        if normalized_confidence in confidence_map:
-            confidence = confidence_map[normalized_confidence]
-        else:
-            confidence = float(normalized_confidence or 0.0)
-    else:
-        confidence = float(raw_confidence or 0.0)
-    confidence = max(0.0, min(1.0, confidence))
-    return {
-        "schema": "guided_edit.verification.v1",
-        "verdict": verdict,
-        "confidence": confidence,
-        "reason": _trim_task_inline_text(payload.get("reason", ""), max_chars=220),
-    }
-
-
-def _guided_edit_repair_action_output(
-    *,
-    prompt: str,
-    raw_output: str,
-    selected_targets: list[str],
-    prompt_profile: dict[str, Any] | None = None,
-    failure_reason: str = "",
-    backend: str,
-    temperature: float,
-    system: str,
-) -> dict[str, Any]:
-    routing = _load_continue_model_routing()
-    resolved = _resolve_task_model_route(
-        route="review",
-        routing=routing,
-        requested_model="",
-        prompt=prompt,
-        task_hint="review",
-    )
-    repair_prompt = (
-        "Rewrite the planner output as one strict JSON object only.\n"
-        "Do not include markdown fences or commentary.\n"
-        "Required keys: action_type, target, goal, rationale, validation_scope.\n"
-        "Optional keys: postconditions with must_include, must_preserve, require_symbol, max_line_delta.\n"
-        "For exact anchored requests, you may also include edit_kind, anchor, anchor_kind, insert_text, replacement_text, expected_old_text.\n"
-        "Allowed action_type values: replace_region, extract_helper, add_test, update_docs, run_validation, stop.\n"
-        "target.path must be one of these files when possible:\n"
-        f"{chr(10).join(selected_targets) or 'none'}\n"
-        "validation_scope must be exactly one of: quick, standard, auto.\n\n"
-        f"User request:\n{prompt.strip()}\n\n"
-        f"Action priors:\n{json.dumps(prompt_profile or {}, ensure_ascii=True, sort_keys=True)}\n\n"
-        f"Repair reason:\n{failure_reason or 'planner output violated the contract'}\n\n"
-        f"Original planner output:\n{raw_output}"
-    )
-    infer = local_infer(
-        prompt=repair_prompt,
-        task="review",
-        backend=backend,
-        model=resolved["model"],
-        max_tokens=220,
-        temperature=min(float(temperature), 0.1),
-        system=system or "You normalize planner output into strict JSON. Return JSON only.",
-        output_profile="normal",
-        store_result=False,
-    )
-    if not bool(infer.get("ok", False)):
-        return {
-            "ok": False,
-            "infer": infer,
-            "routing": {
-                "selected_route": resolved["route"],
-                "selected_model": resolved["model"],
-                "selected_model_file": resolved["file"],
-                "selected_by": resolved["source"],
-                "routing_loaded": routing.get("loaded", False),
-                "routing_source": routing.get("source"),
-            },
-            "error": "planner repair model did not produce output",
-        }
-    try:
-        action = _guided_edit_parse_action(str(infer.get("output", "") or ""), fallback_paths=selected_targets)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "infer": infer,
-            "routing": {
-                "selected_route": resolved["route"],
-                "selected_model": resolved["model"],
-                "selected_model_file": resolved["file"],
-                "selected_by": resolved["source"],
-                "routing_loaded": routing.get("loaded", False),
-                "routing_source": routing.get("source"),
-            },
-            "error": str(exc),
-        }
-    return {
-        "ok": True,
-        "infer": infer,
-        "routing": {
-            "selected_route": resolved["route"],
-            "selected_model": resolved["model"],
-            "selected_model_file": resolved["file"],
-            "selected_by": resolved["source"],
-            "routing_loaded": routing.get("loaded", False),
-            "routing_source": routing.get("source"),
-        },
-        "action": action,
-    }
-
-
-def _guided_edit_repair_diff_output(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-    allow_raw_diff: bool,
-    allow_micro_edit: bool,
-    previous_output: str,
-    failure_diagnostics: dict[str, Any],
-    backend: str,
-    temperature: float,
-    system: str,
-    route: str = "refactor",
-    requested_model: str = "",
-    example_context: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    target_path = str(target.get("path", "") or "").strip().replace("\\", "/")
-    max_extra_lines = 2 if not allow_raw_diff else None
-    routing = _load_continue_model_routing()
-    resolved = _resolve_task_model_route(
-        route=route,
-        routing=routing,
-        requested_model=requested_model,
-        prompt=prompt,
-        task_hint="refactor" if route == "refactor" else "coding",
-    )
-    repair_mode_instructions = (
-        "Return only the replacement text for the target region.\n"
-        if not allow_raw_diff
-        else (
-            "Preferred output: return only the replacement text for the target region.\n"
-            "Acceptable fallback: return one valid git-compatible unified diff for the target file only.\n"
-        )
-    )
-    diff_header_instructions = (
-        ""
-        if not allow_raw_diff
-        else (
-            "If you return a diff, use file headers with the repository-relative path exactly as:\n"
-            f"--- a/{target_path}\n+++ b/{target_path}\n\n"
-        )
-    )
-    repair_prompt = (
-        "Repair the bounded edit output for the target region.\n"
-        f"{repair_mode_instructions}"
-        + (
-            (
-                "Preferred structured format for tiny edits: return JSON like "
-                '{"op":"insert_before","anchor":"return x + 1","text":"    # comment"}.\n'
-            )
-            if allow_micro_edit
-            else ""
-        )
-        + "Do not include markdown fences or explanation.\n"
-        f"Only modify this file: {target_path or 'unknown'}\n"
-        f"{diff_header_instructions}"
-        f"User request:\n{prompt.strip()}\n\n"
-        f"Planned action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
-        "Replace only this target region:\n"
-        "<BEGIN_TARGET_REGION>\n"
-        f"{str(target_region.get('region_text', '') or '')}\n"
-        "<END_TARGET_REGION>\n\n"
-        "Surrounding context:\n"
-        "<CONTEXT_BEFORE>\n"
-        f"{str(target_region.get('context_before_text', '') or '')}\n"
-        "<END_CONTEXT_BEFORE>\n"
-        "<CONTEXT_AFTER>\n"
-        f"{str(target_region.get('context_after_text', '') or '')}\n"
-        "<END_CONTEXT_AFTER>\n\n"
-        f"Failure diagnostics JSON:\n{json.dumps(failure_diagnostics, ensure_ascii=True, sort_keys=True)}\n\n"
-        f"Matched success examples:\n{str((example_context or {}).get('success_context', '') or 'none')}\n\n"
-        f"Matched failure examples:\n{str((example_context or {}).get('failure_context', '') or 'none')}\n\n"
-        f"Previous model output:\n{previous_output}"
-    )
-    infer = local_infer(
-        prompt=repair_prompt,
-        task="coding",
-        backend=backend,
-        model=resolved["model"],
-        max_tokens=320,
-        temperature=min(float(temperature), 0.1),
-        system=system
-        or (
-            "You repair edit outputs into exact replacement text for the target region. Return replacement text only."
-            if not allow_raw_diff
-            else "You repair edit outputs into exact replacement text for the target region or a valid unified diff."
-        ),
-        output_profile="normal",
-        store_result=False,
-    )
-    if not bool(infer.get("ok", False)):
-        return {
-            "ok": False,
-            "infer": infer,
-            "routing": {
-                "selected_route": resolved["route"],
-                "selected_model": resolved["model"],
-                "selected_model_file": resolved["file"],
-                "selected_by": resolved["source"],
-                "routing_loaded": routing.get("loaded", False),
-                "routing_source": routing.get("source"),
-            },
-            "error": "edit repair model did not produce output",
-        }
-    try:
-        parsed = _guided_edit_output_to_diff(
-            raw_output=str(infer.get("output", "") or ""),
-            target_region=target_region,
-            allow_raw_diff=allow_raw_diff,
-            allow_micro_edit=allow_micro_edit,
-            max_extra_lines=max_extra_lines,
-        )
-    except Exception as exc:
-        return {
-            "ok": False,
-            "infer": infer,
-            "routing": {
-                "selected_route": resolved["route"],
-                "selected_model": resolved["model"],
-                "selected_model_file": resolved["file"],
-                "selected_by": resolved["source"],
-                "routing_loaded": routing.get("loaded", False),
-                "routing_source": routing.get("source"),
-            },
-            "error": str(exc),
-        }
-    return {
-        "ok": True,
-        "infer": infer,
-        "routing": {
-            "selected_route": resolved["route"],
-            "selected_model": resolved["model"],
-            "selected_model_file": resolved["file"],
-            "selected_by": resolved["source"],
-            "routing_loaded": routing.get("loaded", False),
-            "routing_source": routing.get("source"),
-        },
-        "parsed_edit": parsed,
-        "diff_text": str(parsed["diff_text"]),
-        "mode": str(parsed.get("mode", "") or ""),
-        "replacement_text": str(parsed.get("replacement_text", "") or ""),
-    }
-
-
-def _guided_edit_verify_step(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-    rewritten_text: str,
-    acceptance: dict[str, Any],
-    diff_text: str,
-    backend: str,
-    temperature: float,
-    system: str,
-    verifier_mode: str,
-) -> dict[str, Any]:
-    if verifier_mode == "off":
-        return {
-            "schema": "guided_edit.verification.v1",
-            "run": False,
-            "ok": True,
-            "blocked": False,
-            "verdict": "skipped",
-            "confidence": 0.0,
-            "reason": "verifier disabled by adaptive plan",
-        }
-    routing = _load_continue_model_routing()
-    resolved = _resolve_task_model_route(
-        route="review",
-        routing=routing,
-        prompt=prompt,
-        task_hint="review",
-    )
-    verify_prompt = (
-        "Review this bounded edit candidate.\n"
-        "Return strict JSON with keys: verdict, confidence, reason.\n"
-        "verdict must be one of agree, disagree, unclear.\n"
-        "Treat your decision as veto-only.\n"
-        "Disagree when the candidate violates the postconditions, changes the wrong scope, or looks semantically wrong.\n\n"
-        f"User request:\n{prompt.strip()}\n\n"
-        f"Action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
-        f"Normalized postconditions:\n{json.dumps(acceptance.get('postconditions', {}), ensure_ascii=True, sort_keys=True)}\n\n"
-        "Original target region:\n"
-        "<BEGIN_ORIGINAL_REGION>\n"
-        f"{str(target_region.get('region_text', '') or '')}\n"
-        "<END_ORIGINAL_REGION>\n\n"
-        "Rewritten target region:\n"
-        "<BEGIN_REWRITTEN_REGION>\n"
-        f"{rewritten_text}\n"
-        "<END_REWRITTEN_REGION>\n\n"
-        "Surrounding context:\n"
-        "<CONTEXT_BEFORE>\n"
-        f"{str(target_region.get('context_before_text', '') or '')}\n"
-        "<END_CONTEXT_BEFORE>\n"
-        "<CONTEXT_AFTER>\n"
-        f"{str(target_region.get('context_after_text', '') or '')}\n"
-        "<END_CONTEXT_AFTER>\n\n"
-        f"Unified diff:\n{diff_text}"
-    )
-    infer = local_infer(
-        prompt=verify_prompt,
-        task="review",
-        backend=backend,
-        model=resolved["model"],
-        max_tokens=220 if verifier_mode == "light" else 320,
-        temperature=temperature,
-        system=system or "You are a strict edit verifier. Return JSON only.",
-        output_profile="normal",
-        store_result=False,
-    )
-    if not bool(infer.get("ok", False)):
-        return {
-            "schema": "guided_edit.verification.v1",
-            "run": True,
-            "ok": True,
-            "blocked": False,
-            "verdict": "unavailable",
-            "confidence": 0.0,
-            "reason": "verifier unavailable",
-            "infer": infer,
-        }
-    parsed = _guided_edit_parse_verification(str(infer.get("output", "") or ""))
-    blocked = parsed["verdict"] == "disagree" and float(parsed["confidence"]) >= 0.5
-    return {
-        **parsed,
-        "run": True,
-        "ok": not blocked,
-        "blocked": blocked,
-        "infer": infer,
-    }
-
-
-def _guided_edit_pairwise_compare(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    target_region: dict[str, Any],
-    left: dict[str, Any],
-    right: dict[str, Any],
-    backend: str,
-    system: str,
-) -> dict[str, Any]:
-    routing = _load_continue_model_routing()
-    resolved = _resolve_task_model_route(
-        route="review",
-        routing=routing,
-        prompt=prompt,
-        task_hint="review",
-    )
-    compare_prompt = (
-        "Compare two bounded edit candidates for the same request.\n"
-        "Return strict JSON with keys: winner, reason.\n"
-        "winner must be one of: left, right, tie.\n"
-        "Prefer the candidate that better satisfies the user request, preserves behavior, and keeps the edit minimal.\n\n"
-        f"User request:\n{prompt.strip()}\n\n"
-        f"Action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
-        "Original target region:\n"
-        "<BEGIN_ORIGINAL_REGION>\n"
-        f"{str(target_region.get('region_text', '') or '')}\n"
-        "<END_ORIGINAL_REGION>\n\n"
-        f"Left candidate acceptance:\n{json.dumps(left.get('acceptance', {}), ensure_ascii=True, sort_keys=True)}\n"
-        f"Left rewritten region:\n{str(left.get('rewritten_text', '') or '')}\n\n"
-        f"Right candidate acceptance:\n{json.dumps(right.get('acceptance', {}), ensure_ascii=True, sort_keys=True)}\n"
-        f"Right rewritten region:\n{str(right.get('rewritten_text', '') or '')}\n"
-    )
-    infer = local_infer(
-        prompt=compare_prompt,
-        task="review",
-        backend=backend,
-        model=resolved["model"],
-        max_tokens=180,
-        temperature=0.0,
-        system=system or "You are a strict pairwise edit ranker. Return JSON only.",
-        output_profile="normal",
-        store_result=False,
-    )
-    if not bool(infer.get("ok", False)):
-        return {"winner": "tie", "reason": "pairwise_unavailable", "infer": infer}
-    cleaned = _guided_edit_strip_wrappers(str(infer.get("output", "") or ""))
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end < start:
-        return {"winner": "tie", "reason": "pairwise_invalid_json", "infer": infer}
-    payload = json.loads(cleaned[start : end + 1])
-    if not isinstance(payload, dict):
-        return {"winner": "tie", "reason": "pairwise_invalid_payload", "infer": infer}
-    winner = str(payload.get("winner", "tie") or "tie").strip().lower()
-    if winner not in {"left", "right", "tie"}:
-        winner = "tie"
-    return {
-        "winner": winner,
-        "reason": _trim_task_inline_text(payload.get("reason", ""), max_chars=220),
-        "infer": infer,
-    }
-
-
-def _guided_edit_risk_summary(changed_paths: list[str]) -> dict[str, Any]:
-    score = 0
-    reasons: list[str] = []
-    normalized = [str(path).replace("\\", "/") for path in changed_paths]
-    if len(normalized) > 2:
-        score += 1
-        reasons.append("multiple_files")
-    if any(path.startswith(("source/", "src/")) for path in normalized):
-        score += 1
-        reasons.append("source_changes")
-    if any("server.py" in path or "Dockerfile" in path or path.startswith(".github/") for path in normalized):
-        score += 1
-        reasons.append("sensitive_paths")
-    level = "high" if score >= 3 else "medium" if score >= 1 else "low"
-    return {
-        "risk_score": score,
-        "risk_level": level,
-        "reasons": reasons,
-    }
-
-
-def _guided_edit_memory_evidence(
-    *,
-    action: dict[str, Any],
-    execution: dict[str, Any],
-    validation: dict[str, Any],
-    snapshot_id: str,
-    replay_id: str,
-) -> list[dict[str, Any]]:
-    evidence: list[dict[str, Any]] = []
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    if isinstance(target, dict):
-        path = str(target.get("path", "") or "").strip()
-        if path:
-            evidence.append({"kind": "target_path", "path": path})
-    for path in list(execution.get("changed_paths", []) or [])[:4]:
-        evidence.append({"kind": "changed_path", "path": str(path)})
-    diff_text = str(execution.get("diff_text", "") or "")
-    if diff_text:
-        evidence.append(
-            {
-                "kind": "diff",
-                "diff_id": hashlib.sha256(diff_text.encode("utf-8")).hexdigest()[:16],
-                "summary": _trim_task_inline_text(diff_text, max_chars=120),
-            }
-        )
-    selected_candidate = execution.get("selected_candidate", {}) if isinstance(execution.get("selected_candidate"), dict) else {}
-    if selected_candidate:
-        evidence.append(
-            {
-                "kind": "candidate",
-                "strategy": str(selected_candidate.get("strategy", "") or ""),
-                "score": float(selected_candidate.get("acceptance", {}).get("score", 0.0) or 0.0),
-            }
-        )
-        acceptance = selected_candidate.get("acceptance", {}) if isinstance(selected_candidate.get("acceptance"), dict) else {}
-        evidence.append(
-            {
-                "kind": "acceptance",
-                "ok": bool(acceptance.get("ok", False)),
-                "score": float(acceptance.get("score", 0.0) or 0.0),
-                "summary": ",".join(list(acceptance.get("hard_failures", []) or [])[:3]) or "accepted",
-            }
-        )
-    selected_tests = list(validation.get("selected_tests", []) or [])
-    if selected_tests:
-        evidence.append({"kind": "tests", "count": len(selected_tests), "summary": ", ".join(selected_tests[:4])})
-    if validation:
-        evidence.append(
-            {
-                "kind": "validation",
-                "ok": bool(validation.get("ok", False)),
-                "validation_id": hashlib.sha256(
-                    json.dumps(validation, sort_keys=True, ensure_ascii=True).encode("utf-8")
-                ).hexdigest()[:16],
-            }
-        )
-    if snapshot_id:
-        evidence.append({"kind": "snapshot", "result_id": snapshot_id})
-    if replay_id:
-        evidence.append({"kind": "replay", "replay_id": replay_id})
-    return _normalize_memory_evidence(evidence)
-
-
-def _guided_edit_persist_memory(
-    *,
-    prompt: str,
-    action: dict[str, Any],
-    execution: dict[str, Any],
-    validation: dict[str, Any],
-    stopped_reason: str,
-    snapshot_id: str,
-    replay_id: str,
-) -> dict[str, Any]:
-    evidence = _guided_edit_memory_evidence(
-        action=action,
-        execution=execution,
-        validation=validation,
-        snapshot_id=snapshot_id,
-        replay_id=replay_id,
-    )
-    if not ALLOW_MUTATIONS:
-        return {"written": False, "reason": "mutations_disabled", "evidence_count": len(evidence)}
-    if not evidence:
-        return {"written": False, "reason": "no_evidence", "evidence_count": 0}
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    target_path = str(target.get("path", "") or "").strip() if isinstance(target, dict) else ""
-    namespace = f"guided_edit/targets/{target_path or 'unknown'}"
-    selected_candidate = execution.get("selected_candidate", {}) if isinstance(execution.get("selected_candidate"), dict) else {}
-    value = {
-        "action_type": str(action.get("action_type", "") or ""),
-        "goal": str(action.get("goal", "") or ""),
-        "stopped_reason": stopped_reason,
-        "ok": bool(validation.get("ok", execution.get("applied", False))),
-        "request_summary": _trim_task_inline_text(prompt, max_chars=160),
-        "candidate_strategy": str(selected_candidate.get("strategy", "") or ""),
-        "acceptance_score": float(execution.get("acceptance", {}).get("score", 0.0) or 0.0),
-    }
-    write = memory_upsert(
-        namespace=namespace,
-        key=f"edit:{_now_iso()}",
-        value=value,
-        ttl_days=14,
-        confidence=0.9 if value["ok"] else 0.6,
-        source="guided_edit.auto",
-        tags=["guided_edit", str(action.get("action_type", "") or "unknown")],
-        evidence=evidence,
-        provenance="guided_edit.target",
-        trust_level="high",
-    )
-    summary = memory_summary_upsert(
-        namespace=namespace,
-        focus="recent_edit",
-        summary=_trim_task_inline_text(
-            f"{action.get('action_type', '')} stopped={stopped_reason} ok={value['ok']} goal={value['goal']}",
-            max_chars=220,
-        ),
-        ttl_days=21,
-        confidence=0.8 if value["ok"] else 0.5,
-        source="guided_edit.auto",
-        tags=["guided_edit", "summary"],
-        evidence=evidence,
-        provenance="guided_edit.summary",
-        trust_level="high",
-    )
-    experience_write = {"written": False}
-    if value["ok"]:
-        experience_namespace = f"guided_edit/experience/{str(action.get('action_type', '') or 'unknown')}"
-        experience_value = {
-            "target_path": target_path,
-            "goal": value["goal"],
-            "changed_paths": list(execution.get("changed_paths", []) or [])[:8],
-            "selected_tests": list(validation.get("selected_tests", []) or [])[:8],
-            "replay_id": replay_id,
-            "snapshot_id": snapshot_id,
-            "candidate_strategy": value["candidate_strategy"],
-            "acceptance_score": value["acceptance_score"],
-        }
-        exp_write = memory_upsert(
-            namespace=experience_namespace,
-            key=f"experience:{_now_iso()}",
-            value=experience_value,
-            ttl_days=30,
-            confidence=0.92,
-            source="guided_edit.experience.auto",
-            tags=["guided_edit", "experience", str(action.get("action_type", "") or "unknown")],
-            evidence=evidence,
-            provenance="guided_edit.experience",
-            trust_level="high",
-        )
-        exp_summary = memory_summary_upsert(
-            namespace=experience_namespace,
-            focus="recent_success",
-            summary=_trim_task_inline_text(
-                f"{action.get('action_type', '')} target={target_path} tests={', '.join(experience_value['selected_tests'][:3]) or 'none'}",
-                max_chars=220,
-            ),
-            ttl_days=45,
-            confidence=0.88,
-            source="guided_edit.experience.auto",
-            tags=["guided_edit", "experience", "summary"],
-            evidence=evidence,
-            provenance="guided_edit.experience",
-            trust_level="high",
-        )
-        experience_write = {
-            "written": True,
-            "namespace": experience_namespace,
-            "entry": exp_write,
-            "summary": exp_summary,
-        }
-    return {
-        "written": True,
-        "namespace": namespace,
-        "entry": write,
-        "summary": summary,
-        "evidence_count": len(evidence),
-        "experience_write": experience_write,
-    }
-
-
-def _guided_edit_record_verifier_false_positive(
-    *,
-    action: dict[str, Any],
-    execution: dict[str, Any],
-    replay_id: str,
-) -> dict[str, Any]:
-    count = int(execution.get("verifier_false_positive_count", 0) or 0)
-    if count < 1:
-        return {"written": False, "count": 0}
-    if not ALLOW_MUTATIONS:
-        return {"written": False, "count": count, "reason": "mutations_disabled"}
-    target = action.get("target", {}) if isinstance(action, dict) else {}
-    target_path = str(target.get("path", "") or "").strip() if isinstance(target, dict) else ""
-    selected = execution.get("selected_candidate", {}) if isinstance(execution.get("selected_candidate"), dict) else {}
-    command = ["guided_edit", str(action.get("action_type", "") or "unknown"), target_path or "unknown"]
-    _failure_record(
-        command=command,
-        stderr=f"verifier_false_positive count={count} replay_id={replay_id or 'none'}",
-        stdout=json.dumps(
-            {
-                "replay_id": replay_id,
-                "candidate_strategy": str(selected.get("strategy", "") or ""),
-                "changed_paths": list(execution.get("changed_paths", []) or [])[:8],
-                "stopped_reason": str(execution.get("stopped_reason_hint", "") or ""),
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-        ),
-        category="guided_edit_verifier",
-        suggestion="Strengthen guided_edit postconditions or review-route verification for this edit pattern.",
-    )
-    return {"written": True, "count": count}
-
-
-def _guided_edit_validate_step(
-    changed_paths: list[str],
-    validation_profile: str = "quick",
-    timeout_seconds: int = 120,
-    repo_root: Path | None = None,
-) -> dict[str, Any]:
-    profile = str(validation_profile or "quick").strip().lower() or "quick"
-    if profile not in {"quick", "standard"}:
-        raise ValueError("validation_profile must be one of: quick, standard")
-    effective_root = repo_root or REPO_PATH
-
-    compile_errors: list[dict[str, Any]] = []
-    py_files = [
-        rel
-        for rel in changed_paths
-        if rel.endswith(".py") and (effective_root / rel).is_file()
-    ]
-    for rel in py_files[:200]:
-        proc = subprocess.run(
-            [sys.executable, "-m", "py_compile", str((effective_root / rel).resolve())],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            compile_errors.append({"path": rel, "stderr": _trim_text(proc.stderr)})
-
-    tests = _guided_edit_suggest_tests(changed_paths, repo_root=effective_root)
-    test_result: dict[str, Any] | None = None
-    if tests and not compile_errors:
-        cmd = ["pytest", "-q", *tests]
-        env = os.environ.copy()
-        existing_pythonpath = str(env.get("PYTHONPATH", "") or "").strip()
-        env["PYTHONPATH"] = (
-            f"{effective_root}{os.pathsep}{existing_pythonpath}"
-            if existing_pythonpath
-            else str(effective_root)
-        )
-        out_cap = _token_budget_apply_max(None)
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(effective_root),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                env=env,
-            )
-            test_result = {
-                "ok": proc.returncode == 0,
-                "exit_code": proc.returncode,
-                "command": cmd,
-                "cwd": ".",
-                "stdout": _trim_text(proc.stdout, max_chars=out_cap),
-                "stderr": _trim_text(proc.stderr, max_chars=out_cap),
-                "timeout": False,
-            }
-        except subprocess.TimeoutExpired as exc:
-            test_result = {
-                "ok": False,
-                "exit_code": None,
-                "command": cmd,
-                "cwd": ".",
-                "stdout": _trim_text(
-                    (exc.stdout or "") if isinstance(exc.stdout, str) else "",
-                    max_chars=out_cap,
-                ),
-                "stderr": _trim_text(
-                    (exc.stderr or "") if isinstance(exc.stderr, str) else "",
-                    max_chars=out_cap,
-                ),
-                "timeout": True,
-            }
-
-    ok = not compile_errors and (test_result is None or bool(test_result.get("ok", False)))
-    result = {
-        "schema": "guided_edit.validation.v1",
-        "profile": profile,
-        "ok": ok,
-        "changed_paths": changed_paths,
-        "python_files_checked": len(py_files[:200]),
-        "compile_error_count": len(compile_errors),
-        "compile_errors": compile_errors,
-        "selected_tests": tests,
-        "test_execution": test_result,
-    }
-    if profile == "standard":
-        result["risk"] = _guided_edit_risk_summary(changed_paths)
-    return result
-
-
-def _guided_edit_plan_step(
-    prompt: str,
-    task: str,
-    target_paths: list[str] | None,
-    backend: str,
-    model: str,
-    max_tokens: int,
-    temperature: float,
-    system: str,
-) -> dict[str, Any]:
-    selected_targets = _guided_edit_select_targets(prompt=prompt, target_paths=target_paths)
-    prompt_profile = _guided_edit_prompt_profile(prompt, selected_targets)
-    if not selected_targets:
-        return {
-            "ok": False,
-            "stopped_reason": "planner_failed",
-            "error": "guided_edit could not identify target files; pass target_paths or mention a file path in the prompt",
-            "routing": {},
-            "selected_targets": [],
-            "repo_memory": {"schema": "repo_history_memory.v1", "enabled": False, "entry_count": 0, "entries": [], "hot_paths": [], "context": ""},
-            "skill_pack": {"schema": "task_skill_pack.v1", "route": "coding", "module_count": 0, "modules": [], "lint": {}},
-            "planner_result": {},
-            "planner_attempts": [],
-            "repair_result": None,
-        }
-
-    repo_memory = _repo_memory_lookup(
-        prompt=prompt,
-        target_paths=selected_targets,
-        retrieval_info={"items": [{"path": path} for path in selected_targets]},
-    )
-    skill_pack = _select_curated_skill_pack(
-        route="coding",
-        intent={
-            "mutation_intent": True,
-            "target_paths": selected_targets,
-            "goal": _trim_task_inline_text(prompt, max_chars=180),
-        },
-        retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
-        repo_memory=repo_memory,
-    )
-    regression_context = _guided_edit_regression_context(
-        prompt=prompt,
-        target_paths=selected_targets,
-        max_entries=3,
-    )
-
-    routing = _load_continue_model_routing()
-    resolved = _resolve_task_model_route(
-        route="coding",
-        routing=routing,
-        requested_model=model,
-        prompt=prompt,
-        task_hint=task,
-        retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
-        repo_memory_info=repo_memory,
-    )
-    previews = []
-    for path in selected_targets[:2]:
-        with contextlib.suppress(Exception):
-            previews.append(f"[target] {path}\n{_guided_edit_preview_path(path)}")
-    repo_history_lines = [
-        _trim_task_inline_text(
-            f"{row.get('commit', '')} {row.get('subject', '')} [{', '.join(row.get('files', [])[:2])}]",
-            max_chars=140,
-        )
-        for row in repo_memory.get("entries", [])[:3]
-        if isinstance(row, dict)
-    ]
-    skill_lines = [
-        _trim_task_inline_text(
-            f"{row.get('title', '')}: {row.get('summary', '')}",
-            max_chars=140,
-        )
-        for row in skill_pack.get("modules", [])[:3]
-        if isinstance(row, dict)
-    ]
-    planner_prompt = (
-        "Plan exactly one bounded repository edit step.\n"
-        "Return only JSON with keys: action_type, target, goal, rationale, validation_scope.\n"
-        "You may also include postconditions with keys: must_include, must_preserve, require_symbol, max_line_delta.\n"
-        "For exact anchored or exact-text requests, also include edit_kind, anchor, anchor_kind, insert_text, replacement_text, and expected_old_text when applicable.\n"
-        "Allowed action_type values: replace_region, extract_helper, add_test, update_docs, run_validation, stop.\n"
-        "Use target.path plus optional start_line/end_line and symbol.\n"
-        "Prefer deterministic micro-edit intents for exact anchored requests.\n"
-        "Prefer the smallest useful step.\n\n"
-        f"User request:\n{prompt.strip()}\n\n"
-        f"Action priors:\n{json.dumps(prompt_profile, ensure_ascii=True, sort_keys=True)}\n\n"
-        f"Candidate targets:\n{chr(10).join(selected_targets)}\n\n"
-        f"Target previews:\n{chr(10).join(previews)}\n\n"
-        f"Recent repository history:\n{chr(10).join(repo_history_lines) or 'none'}\n\n"
-        f"Curated skills:\n{chr(10).join(skill_lines) or 'none'}\n\n"
-        f"Recent guided_edit regressions:\n{regression_context.get('context', '') or 'none'}"
-    )
-    infer = local_infer(
-        prompt=planner_prompt,
-        task="coding",
-        backend=backend,
-        model=resolved["model"],
-        max_tokens=max(160, int(max_tokens)),
-        temperature=temperature,
-        system=system or (
-            "You are a careful coding planner. Return one minimal, high-confidence edit step as strict JSON only."
-        ),
-        output_profile="normal",
-        store_result=False,
-    )
-    planner_attempts = [
-        {
-            "attempt": 1,
-            "kind": "initial",
-            "model": resolved["model"],
-            "ok": bool(infer.get("ok", False)),
-        }
-    ]
-    if not bool(infer.get("ok", False)):
-        return {
-            "ok": False,
-            "stopped_reason": "planner_failed",
-            "error": "guided_edit planner did not produce output",
-            "routing": {
-                "selected_route": resolved["route"],
-                "selected_model": resolved["model"],
-                "selected_model_file": resolved["file"],
-                "selected_by": resolved["source"],
-                "routing_loaded": routing.get("loaded", False),
-                "routing_source": routing.get("source"),
-            },
-            "selected_targets": selected_targets,
-            "repo_memory": repo_memory,
-            "skill_pack": skill_pack,
-            "planner_result": infer,
-            "planner_attempts": planner_attempts,
-            "repair_result": None,
-        }
-    repair_result = None
-    try:
-        action = _guided_edit_parse_action(str(infer.get("output", "") or ""), fallback_paths=selected_targets)
-    except Exception as exc:
-        repair_result = _guided_edit_repair_action_output(
-            prompt=prompt,
-            raw_output=str(infer.get("output", "") or ""),
-            selected_targets=selected_targets,
-            prompt_profile=prompt_profile,
-            failure_reason=str(exc),
-            backend=backend,
-            temperature=temperature,
-            system=system,
-        )
-        planner_attempts.append(
-            {
-                "attempt": 2,
-                "kind": "repair",
-                "model": str(repair_result.get("routing", {}).get("selected_model", "") or ""),
-                "ok": bool(repair_result.get("ok", False)),
-                "reason": str(exc),
-            }
-        )
-        if not repair_result.get("ok", False):
-            return {
-                "ok": False,
-                "stopped_reason": "planner_invalid",
-                "error": str(repair_result.get("error", "") or str(exc)),
-                "routing": {
-                    "selected_route": resolved["route"],
-                    "selected_model": resolved["model"],
-                    "selected_model_file": resolved["file"],
-                    "selected_by": resolved["source"],
-                    "routing_loaded": routing.get("loaded", False),
-                    "routing_source": routing.get("source"),
-                },
-                "selected_targets": selected_targets,
-                "repo_memory": repo_memory,
-                "skill_pack": skill_pack,
-                "planner_result": infer,
-                "planner_attempts": planner_attempts,
-                "repair_result": repair_result.get("infer"),
-            }
-        action = dict(repair_result["action"])
-    action = _guided_edit_normalize_action_intent(prompt, action, prompt_profile)
-    prior_violation = _guided_edit_prior_violation(
-        action=action,
-        prompt_profile=prompt_profile,
-        selected_targets=selected_targets,
-    )
-    if prior_violation:
-        repair_result = _guided_edit_repair_action_output(
-            prompt=prompt,
-            raw_output=json.dumps(action, ensure_ascii=True, sort_keys=True),
-            selected_targets=selected_targets,
-            prompt_profile=prompt_profile,
-            failure_reason=prior_violation,
-            backend=backend,
-            temperature=temperature,
-            system=system,
-        )
-        planner_attempts.append(
-            {
-                "attempt": len(planner_attempts) + 1,
-                "kind": "repair",
-                "model": str(repair_result.get("routing", {}).get("selected_model", "") or ""),
-                "ok": bool(repair_result.get("ok", False)),
-                "reason": prior_violation,
-            }
-        )
-        if repair_result.get("ok", False):
-            action = _guided_edit_normalize_action_intent(prompt, dict(repair_result["action"]), prompt_profile)
-    return {
-        "ok": True,
-        "routing": {
-            "selected_route": resolved["route"],
-            "selected_model": resolved["model"],
-            "selected_model_file": resolved["file"],
-            "selected_by": resolved["source"],
-            "routing_loaded": routing.get("loaded", False),
-            "routing_source": routing.get("source"),
-        },
-        "selected_targets": selected_targets,
-        "repo_memory": repo_memory,
-        "skill_pack": skill_pack,
-        "planner_result": infer,
-        "planner_attempts": planner_attempts,
-        "repair_result": repair_result.get("infer") if isinstance(repair_result, dict) else None,
-        "action": action,
-    }
-
-
-def _guided_edit_execute_step(
-    prompt: str,
-    task: str,
-    action: dict[str, Any],
-    selected_targets: list[str],
-    backend: str,
-    model: str,
-    max_tokens: int,
-    temperature: float,
-    system: str,
-    verifier_mode: str,
-    validation_profile: str,
-    repo_memory_info: dict[str, Any] | None = None,
-    skill_pack: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    action_type = str(action.get("action_type", "") or "").strip().lower()
-    verification_skipped = {
-        "schema": "guided_edit.verification.v1",
-        "run": False,
-        "ok": True,
-        "blocked": False,
-        "verdict": "skipped",
-        "confidence": 0.0,
-        "reason": "",
-    }
-    if action_type == "stop":
-        return {
-            "schema": "guided_edit.execution.v1",
-            "applied": False,
-            "stopped": True,
-            "abstained": False,
-            "abstain_reason": "",
-            "generation_tier": 0,
-            "changed_paths": [],
-            "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-            "verification": {**verification_skipped, "reason": "stop action"},
-            "acceptance": {"schema": "guided_edit.acceptance.v1", "ok": True, "score": 1.0, "hard_failures": [], "soft_flags": []},
-            "candidates": [],
-            "selected_candidate": None,
-        }
-    if action_type == "run_validation":
-        return {
-            "schema": "guided_edit.execution.v1",
-            "applied": False,
-            "validation_only": True,
-            "abstained": False,
-            "abstain_reason": "",
-            "generation_tier": 0,
-            "changed_paths": [],
-            "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-            "verification": {**verification_skipped, "reason": "validation only"},
-            "acceptance": {"schema": "guided_edit.acceptance.v1", "ok": True, "score": 1.0, "hard_failures": [], "soft_flags": []},
-            "candidates": [],
-            "selected_candidate": None,
-        }
-
-    target = action.get("target", {})
-    if not isinstance(target, dict):
-        raise ValueError("guided_edit action target must be an object")
-    target_path = str(target.get("path", "") or "").strip()
-    if not target_path:
-        raise ValueError("guided_edit action target.path must not be empty")
-    structured_only = _guided_edit_prefers_structured_rewrite(action_type)
-    edit_kind = str(action.get("edit_kind", "") or "").strip().lower()
-    start_line = int(target.get("start_line", 1) or 1)
-    end_line = int(target.get("end_line", start_line) or start_line)
-    if edit_kind.startswith("micro_"):
-        anchor = str(action.get("anchor", "") or "").strip()
-        anchor_kind = str(action.get("anchor_kind", "") or "").strip().lower()
-        line_hint: int | None = None
-        if anchor_kind == "line_number":
-            with contextlib.suppress(Exception):
-                line_hint = int(anchor)
-        resolved_line = _guided_edit_find_anchor_line(
-            path=target_path,
-            anchor=anchor,
-            anchor_kind=anchor_kind,
-            line_hint=line_hint,
-        )
-        if isinstance(resolved_line, int) and resolved_line > 0:
-            start_line = resolved_line
-            end_line = resolved_line
-            target = {**target, "start_line": start_line, "end_line": end_line}
-            action = {**action, "target": target}
-    target_region = _guided_edit_target_region(
-        target_path,
-        start_line,
-        end_line,
-        context_before=1 if edit_kind.startswith("micro_") else 4,
-        context_after=1 if edit_kind.startswith("micro_") else 4,
-    )
-    normalized_postconditions = _guided_edit_normalize_postconditions(
-        prompt=prompt,
-        action=action,
-        target_region=target_region,
-    )
-    action = {**action, "postconditions": normalized_postconditions}
-    prompt_profile = _guided_edit_prompt_profile(prompt, selected_targets)
-    regression_context = _guided_edit_regression_context(
-        prompt=prompt,
-        target_paths=selected_targets,
-        max_entries=3,
-    )
-    example_context = _guided_edit_example_context(
-        prompt=prompt,
-        action=action,
-        target_paths=selected_targets,
-        max_entries=1,
-    )
-    allow_micro_edit = structured_only and (
-        edit_kind.startswith("micro_")
-        or _guided_edit_prefers_micro_edit(
-            prompt=prompt,
-            action=action,
-            target_region=target_region,
-        )
-    )
-    repo_history_lines = [
-        _trim_task_inline_text(
-            f"{row.get('commit', '')} {row.get('subject', '')} [{', '.join(row.get('files', [])[:2])}]",
-            max_chars=140,
-        )
-        for row in list((repo_memory_info or {}).get("entries", []) or [])[:3]
-        if isinstance(row, dict)
-    ]
-    skill_lines = [
-        _trim_task_inline_text(
-            f"{row.get('title', '')}: {row.get('summary', '')}",
-            max_chars=140,
-        )
-        for row in list((skill_pack or {}).get("modules", []) or [])[:3]
-        if isinstance(row, dict)
-    ]
-
-    routing = _load_continue_model_routing()
-    resolved_primary = _resolve_task_model_route(
-        route="coding",
-        routing=routing,
-        requested_model=model,
-        prompt=prompt,
-        task_hint=task,
-        retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
-        repo_memory_info=repo_memory_info,
-    )
-    resolved_fallback = _resolve_task_model_route(
-        route="refactor",
-        routing=routing,
-        requested_model="",
-        prompt=prompt,
-        task_hint="refactor",
-        retrieval_info={"item_count": len(selected_targets), "items": [{"path": path} for path in selected_targets]},
-        repo_memory_info=repo_memory_info,
-    )
-    allowed_paths = _guided_edit_allowed_paths(action, selected_targets)
-    base_system = system or (
-        "You are a precise code editing engine. Return only the smallest legal bounded edit."
-        if structured_only
-        else "You are a precise code editing engine. Return only the smallest legal bounded edit or a valid unified diff."
-    )
-
-    def candidate_prompt(
-        *,
-        strategy: str,
-        tier: int,
-        previous_output: str = "",
-        failure_reason: str = "",
-        failure_diagnostics: dict[str, Any] | None = None,
-    ) -> str:
-        if structured_only and allow_micro_edit:
-            edit_mode_instructions = (
-                "Preferred output for exact or tiny edits: return JSON with keys op, anchor or line, and text.\n"
-                "Supported ops: insert_before, insert_after, replace_line, replace_region.\n"
-                "Fallback only if necessary: return only the replacement text for the target region.\n"
-            )
-        elif structured_only:
-            edit_mode_instructions = "Return only the replacement text for the target region.\n"
-        else:
-            edit_mode_instructions = (
-                "Preferred output: return only the replacement text for the target region.\n"
-                "Fallback only if necessary: return one git-compatible unified diff for only the target file.\n"
-            )
-        diff_header_instructions = (
-            ""
-            if structured_only
-            else (
-                "If you return a diff, use repository-relative file headers exactly as:\n"
-                f"--- a/{target_path}\n+++ b/{target_path}\n\n"
-            )
-        )
-        strategy_instruction = {
-            "initial": "Produce the highest-confidence minimal bounded edit.",
-            "alternate": "Produce an alternate minimal bounded edit that preserves more original text.",
-            "repair": "Repair the prior candidate using structured failure diagnostics.",
-            "fallback": "Produce the strongest higher-capacity bounded edit only because the cheaper route exhausted acceptance.",
-        }.get(strategy, "Produce a minimal bounded edit.")
-        extra = ""
-        if previous_output:
-            extra += f"\nPrevious output:\n{previous_output}"
-        if failure_reason:
-            extra += f"\nFailure reason:\n{failure_reason}"
-        if failure_diagnostics:
-            extra += f"\nFailure diagnostics JSON:\n{json.dumps(failure_diagnostics, ensure_ascii=True, sort_keys=True)}"
-        return (
-            "Apply exactly one bounded edit to the target region.\n"
-            f"{edit_mode_instructions}"
-            "Do not include explanation or markdown fences.\n"
-            "Make the smallest legal change that satisfies the request.\n"
-            f"Only change the target file: {target_path}\n"
-            f"{diff_header_instructions}"
-            f"Target line range: {target_region['start_line']}-{target_region['end_line']}\n"
-            f"Generation tier: {tier}\n"
-            f"Strategy: {strategy_instruction}\n\n"
-            f"User request:\n{prompt.strip()}\n\n"
-            f"Planned action JSON:\n{json.dumps(action, ensure_ascii=True, sort_keys=True)}\n\n"
-            "Rewrite only this target region:\n"
-            "<BEGIN_TARGET_REGION>\n"
-            f"{target_region['region_text']}\n"
-            "<END_TARGET_REGION>\n\n"
-            "Surrounding context:\n"
-            "<CONTEXT_BEFORE>\n"
-            f"{target_region['context_before_text']}\n"
-            "<END_CONTEXT_BEFORE>\n"
-            "<CONTEXT_AFTER>\n"
-            f"{target_region['context_after_text']}\n"
-            "<END_CONTEXT_AFTER>\n\n"
-            f"Normalized postconditions:\n{json.dumps(normalized_postconditions, ensure_ascii=True, sort_keys=True)}\n"
-            f"Action priors:\n{json.dumps(prompt_profile, ensure_ascii=True, sort_keys=True)}\n"
-            f"Recent repository history:\n{chr(10).join(repo_history_lines) or 'none'}\n"
-            f"Curated skills:\n{chr(10).join(skill_lines) or 'none'}\n"
-            f"Matched success examples:\n{example_context.get('success_context', '') or 'none'}\n"
-            f"Matched failure examples:\n{example_context.get('failure_context', '') or 'none'}\n"
-            f"Recent guided_edit regressions:\n{regression_context.get('context', '') or 'none'}\n"
-            f"{extra}\n\n"
-            "Keep the edit minimal and preserve valid syntax."
-        )
-
-    def strategy_temperature(strategy: str, tier: int) -> float:
-        if tier == 0:
-            return 0.0
-        if strategy == "initial" and structured_only:
-            return 0.0
-        if strategy == "alternate":
-            return min(float(temperature), 0.2)
-        if strategy in {"repair", "fallback"}:
-            return 0.1
-        return float(temperature)
-
-    def candidate_failure_diagnostics(candidate: dict[str, Any]) -> dict[str, Any]:
-        acceptance = candidate.get("acceptance", {}) if isinstance(candidate.get("acceptance"), dict) else {}
-        hard_failures = [str(item) for item in list(acceptance.get("hard_failures", []) or [])]
-        categories = [
-            category
-            for category in (
-                "line_delta_exceeded",
-                "python_parse_failed",
-                "replace_region_must_preserve_one_substantive_line",
-                "out_of_scope_path",
-                "update_docs_missing_required_phrase",
-                "missing_exact_insert_text",
-                "missing_exact_replacement_text",
-            )
-            if any(category in item for item in hard_failures)
-        ]
-        if not categories and hard_failures:
-            categories = hard_failures[:4]
-        return {
-            "strategy": str(candidate.get("strategy", "") or ""),
-            "generation_tier": int(candidate.get("generation_tier", 0) or 0),
-            "stop_reason": str(candidate.get("stop_reason", "") or ""),
-            "failure_reason": str(candidate.get("failure_reason", "") or ""),
-            "categories": categories,
-            "parse_ok": bool(candidate.get("parse_ok", False)),
-            "parse_mode": str(candidate.get("parse_mode", "") or ""),
-            "acceptance": acceptance,
-            "changed_paths": list(candidate.get("changed_paths", []) or []),
-            "action_priors": prompt_profile,
-        }
-
-    def run_candidate(
-        *,
-        strategy: str,
-        strategy_rank: int,
-        generation_tier: int,
-        resolved_model: dict[str, Any],
-        previous_output: str = "",
-        failure_reason: str = "",
-        failure_diagnostics: dict[str, Any] | None = None,
-        deterministic_parsed: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        candidate: dict[str, Any] = {
-            "strategy": strategy,
-            "strategy_rank": strategy_rank,
-            "generation_tier": generation_tier,
-            "temperature": strategy_temperature(strategy, generation_tier),
-            "model": str(resolved_model.get("model", "") or ""),
-            "infer": {},
-            "parse_ok": False,
-            "parse_mode": "",
-            "diff_hash": "",
-            "diff_text": "",
-            "rewritten_text": "",
-            "changed_paths": [],
-            "pairwise_score": 0,
-            "pairwise_comparisons": [],
-            "acceptance": {
-                "schema": "guided_edit.acceptance.v1",
-                "ok": False,
-                "score": 0.0,
-                "hard_failures": ["parse_error"],
-                "soft_flags": [],
-                "postconditions": normalized_postconditions,
-            },
-            "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-            "diff_check": None,
-            "diff_apply": None,
-            "verification": {**verification_skipped, "reason": "candidate not evaluated"},
-            "validation": {},
-            "stop_reason": "",
-            "failure_reason": "",
-            "duplicate_of": None,
-            "verifier_false_positive": False,
-        }
-        parsed_edit: dict[str, Any]
-        if deterministic_parsed is not None:
-            candidate["infer"] = {
-                "schema": "guided_edit.deterministic_candidate.v1",
-                "ok": True,
-                "backend": "deterministic",
-                "output": deterministic_parsed.get("replacement_text", deterministic_parsed.get("diff_text", "")),
-            }
-            parsed_edit = deterministic_parsed
-            candidate["model"] = "deterministic"
-        elif strategy in {"repair", "fallback"}:
-            repair = _guided_edit_repair_diff_output(
-                prompt=prompt,
-                action=action,
-                target_region=target_region,
-                allow_raw_diff=not structured_only,
-                allow_micro_edit=allow_micro_edit,
-                previous_output=previous_output,
-                failure_diagnostics=failure_diagnostics or {},
-                backend=backend,
-                temperature=temperature,
-                system=system,
-                route="refactor" if strategy == "fallback" else "coding",
-                requested_model="" if strategy == "fallback" else model,
-                example_context=example_context,
-            )
-            candidate["infer"] = repair.get("infer", {})
-            candidate["model"] = str(repair.get("routing", {}).get("selected_model", "") or resolved_model.get("model", ""))
-            if not bool(repair.get("ok", False)):
-                candidate["stop_reason"] = "edit_failed" if not bool(candidate["infer"].get("ok", False)) else "edit_invalid"
-                candidate["failure_reason"] = str(repair.get("error", "") or "guided_edit repair did not produce usable output")
-                return candidate
-            parsed = repair.get("parsed_edit", {})
-            parsed_edit = parsed if isinstance(parsed, dict) else {}
-        else:
-            prompt_text = candidate_prompt(
-                strategy=strategy,
-                tier=generation_tier,
-                previous_output=previous_output,
-                failure_reason=failure_reason,
-                failure_diagnostics=failure_diagnostics,
-            )
-            infer = local_infer(
-                prompt=prompt_text,
-                task="coding",
-                backend=backend,
-                model=str(resolved_model.get("model", "") or ""),
-                max_tokens=max(256, int(max_tokens)),
-                temperature=strategy_temperature(strategy, generation_tier),
-                system=base_system,
-                output_profile="normal",
-                store_result=False,
-            )
-            candidate["infer"] = infer
-            if not bool(infer.get("ok", False)):
-                candidate["stop_reason"] = "edit_failed"
-                candidate["failure_reason"] = "guided_edit edit model did not produce output"
-                return candidate
-            try:
-                parsed_edit = _guided_edit_output_to_diff(
-                    raw_output=str(infer.get("output", "") or ""),
-                    target_region=target_region,
-                    allow_raw_diff=not structured_only,
-                    allow_micro_edit=allow_micro_edit,
-                    max_extra_lines=int(normalized_postconditions.get("max_line_delta", 0) or 0),
-                )
-            except Exception as exc:
-                candidate["stop_reason"] = "edit_invalid"
-                candidate["failure_reason"] = str(exc)
-                return candidate
-        candidate["parse_ok"] = True
-        candidate["parse_mode"] = str(parsed_edit.get("mode", "") or "")
-        candidate["diff_text"] = str(parsed_edit.get("diff_text", "") or "")
-        candidate["diff_hash"] = hashlib.sha256(candidate["diff_text"].encode("utf-8")).hexdigest()[:16]
-        candidate["changed_paths"] = _guided_edit_changed_paths(candidate["diff_text"])
-        candidate["rewritten_text"] = str(parsed_edit.get("replacement_text", "") or target_region.get("region_text", "") or "")
-        candidate["acceptance"] = _guided_edit_acceptance(
-            prompt=prompt,
-            action=action,
-            target_region=target_region,
-            parsed_edit=parsed_edit,
-            allowed_paths=allowed_paths,
-        )
-        if not bool(candidate["acceptance"].get("ok", False)):
-            local_repaired = _guided_edit_local_repair_candidate(
-                action=action,
-                target_region=target_region,
-                parsed_edit=parsed_edit,
-                acceptance=candidate["acceptance"],
-            )
-            if isinstance(local_repaired, dict):
-                parsed_edit = local_repaired
-                candidate["parse_mode"] = f"local_repair:{str(parsed_edit.get('mode', '') or '')}"
-                candidate["diff_text"] = str(parsed_edit.get("diff_text", "") or "")
-                candidate["diff_hash"] = hashlib.sha256(candidate["diff_text"].encode("utf-8")).hexdigest()[:16]
-                candidate["changed_paths"] = _guided_edit_changed_paths(candidate["diff_text"])
-                candidate["rewritten_text"] = str(parsed_edit.get("replacement_text", "") or candidate["rewritten_text"])
-                candidate["acceptance"] = _guided_edit_acceptance(
-                    prompt=prompt,
-                    action=action,
-                    target_region=target_region,
-                    parsed_edit=parsed_edit,
-                    allowed_paths=allowed_paths,
-                )
-        if not candidate["acceptance"].get("ok", False):
-            candidate["stop_reason"] = "acceptance_failed"
-            candidate["failure_reason"] = "; ".join(candidate["acceptance"].get("hard_failures", []) or [])
-        return candidate
-
-    def has_acceptance_candidate(rows: list[dict[str, Any]]) -> bool:
-        return any(
-            bool(row.get("parse_ok", False)) and bool(row.get("acceptance", {}).get("ok", False))
-            for row in rows
-        )
-
-    candidates: list[dict[str, Any]] = []
-    if edit_kind.startswith("micro_"):
-        try:
-            deterministic_parsed = _guided_edit_build_parsed_edit_from_intent(
-                action=action,
-                target_region=target_region,
-                max_extra_lines=int(normalized_postconditions.get("max_line_delta", 0) or 0),
-            )
-            candidates.append(
-                run_candidate(
-                    strategy="deterministic",
-                    strategy_rank=1,
-                    generation_tier=0,
-                    resolved_model={"model": "deterministic"},
-                    deterministic_parsed=deterministic_parsed,
-                )
-            )
-        except Exception as exc:
-            candidates.append(
-                {
-                    "strategy": "deterministic",
-                    "strategy_rank": 1,
-                    "generation_tier": 0,
-                    "temperature": 0.0,
-                    "model": "deterministic",
-                    "infer": {},
-                    "parse_ok": False,
-                    "parse_mode": "",
-                    "diff_hash": "",
-                    "diff_text": "",
-                    "rewritten_text": "",
-                    "changed_paths": [],
-                    "pairwise_score": 0,
-                    "pairwise_comparisons": [],
-                    "acceptance": {
-                        "schema": "guided_edit.acceptance.v1",
-                        "ok": False,
-                        "score": 0.0,
-                        "hard_failures": ["parse_error"],
-                        "soft_flags": [],
-                        "postconditions": normalized_postconditions,
-                    },
-                    "watchdog": {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-                    "diff_check": None,
-                    "diff_apply": None,
-                    "verification": {**verification_skipped, "reason": "candidate not evaluated"},
-                    "validation": {},
-                    "stop_reason": "edit_invalid",
-                    "failure_reason": str(exc),
-                    "duplicate_of": None,
-                    "verifier_false_positive": False,
-                }
-            )
-
-    if not has_acceptance_candidate(candidates):
-        tier1_start = len(candidates) + 1
-        tier1_strategies = ["initial", "alternate"] if structured_only else ["initial"]
-        for offset, strategy in enumerate(tier1_strategies, start=0):
-            candidates.append(
-                run_candidate(
-                    strategy=strategy,
-                    strategy_rank=tier1_start + offset,
-                    generation_tier=1,
-                    resolved_model=resolved_primary,
-                )
-            )
-        if candidates:
-            prior = sorted(candidates, key=_guided_edit_candidate_sort_key)[0]
-            candidates.append(
-                run_candidate(
-                    strategy="repair",
-                    strategy_rank=len(candidates) + 1,
-                    generation_tier=1,
-                    resolved_model=resolved_primary,
-                    previous_output=str(prior.get("infer", {}).get("output", "") or ""),
-                    failure_reason=str(prior.get("failure_reason", "") or "candidate failed acceptance or parsing"),
-                    failure_diagnostics=candidate_failure_diagnostics(prior),
-                )
-            )
-
-    if not has_acceptance_candidate(candidates):
-        prior = sorted(candidates, key=_guided_edit_candidate_sort_key)[0] if candidates else {}
-        candidates.append(
-            run_candidate(
-                strategy="fallback",
-                strategy_rank=len(candidates) + 1,
-                generation_tier=2,
-                resolved_model=resolved_fallback,
-                previous_output=str((prior.get("infer", {}) if isinstance(prior, dict) else {}).get("output", "") or ""),
-                failure_reason=str((prior.get("failure_reason", "") if isinstance(prior, dict) else "") or "tier1 exhausted acceptance"),
-                failure_diagnostics=candidate_failure_diagnostics(prior) if isinstance(prior, dict) else {"categories": ["low_confidence_abstain"]},
-            )
-        )
-
-    seen_hashes: dict[str, int] = {}
-    ranked_input: list[dict[str, Any]] = []
-    for idx, candidate in enumerate(candidates, start=1):
-        candidate["index"] = idx
-        if candidate.get("parse_ok", False):
-            diff_hash = str(candidate.get("diff_hash", "") or "")
-            if diff_hash and diff_hash in seen_hashes:
-                candidate["duplicate_of"] = seen_hashes[diff_hash]
-                candidate["stop_reason"] = "duplicate_candidate"
-                candidate["failure_reason"] = f"duplicate_of:{seen_hashes[diff_hash]}"
-            elif diff_hash:
-                seen_hashes[diff_hash] = idx
-                ranked_input.append(candidate)
-        else:
-            ranked_input.append(candidate)
-
-    pairwise_candidates = [
-        candidate
-        for candidate in ranked_input
-        if candidate.get("parse_ok", False)
-        and not candidate.get("duplicate_of")
-        and bool(candidate.get("acceptance", {}).get("ok", False))
-    ]
-    for left_index in range(len(pairwise_candidates)):
-        left = pairwise_candidates[left_index]
-        for right_index in range(left_index + 1, len(pairwise_candidates)):
-            right = pairwise_candidates[right_index]
-            comparison = _guided_edit_pairwise_compare(
-                prompt=prompt,
-                action=action,
-                target_region=target_region,
-                left=left,
-                right=right,
-                backend=backend,
-                system=system,
-            )
-            winner = str(comparison.get("winner", "tie") or "tie")
-            left["pairwise_comparisons"].append(
-                {
-                    "against": int(right.get("index", 0) or 0),
-                    "winner": winner,
-                    "reason": str(comparison.get("reason", "") or ""),
-                }
-            )
-            right["pairwise_comparisons"].append(
-                {
-                    "against": int(left.get("index", 0) or 0),
-                    "winner": "left" if winner == "right" else "right" if winner == "left" else "tie",
-                    "reason": str(comparison.get("reason", "") or ""),
-                }
-            )
-            if winner == "left":
-                left["pairwise_score"] = int(left.get("pairwise_score", 0) or 0) + 1
-                right["pairwise_score"] = int(right.get("pairwise_score", 0) or 0) - 1
-            elif winner == "right":
-                left["pairwise_score"] = int(left.get("pairwise_score", 0) or 0) - 1
-                right["pairwise_score"] = int(right.get("pairwise_score", 0) or 0) + 1
-    ranked_candidates = sorted(ranked_input, key=_guided_edit_candidate_sort_key)
-    for rank, candidate in enumerate(ranked_candidates, start=1):
-        candidate["rank"] = rank
-
-    selected_candidate: dict[str, Any] | None = None
-    selected_worktree: dict[str, Any] | None = None
-
-    def public_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "index": int(candidate.get("index", 0) or 0),
-            "rank": int(candidate.get("rank", 0) or 0),
-            "strategy": str(candidate.get("strategy", "") or ""),
-            "generation_tier": int(candidate.get("generation_tier", 0) or 0),
-            "model": str(candidate.get("model", "") or ""),
-            "temperature": float(candidate.get("temperature", 0.0) or 0.0),
-            "parse_ok": bool(candidate.get("parse_ok", False)),
-            "parse_mode": str(candidate.get("parse_mode", "") or ""),
-            "pairwise_score": int(candidate.get("pairwise_score", 0) or 0),
-            "pairwise_comparisons": list(candidate.get("pairwise_comparisons", []) or []),
-            "acceptance": candidate.get("acceptance", {}),
-            "watchdog": candidate.get("watchdog", {}),
-            "verification": candidate.get("verification", {}),
-            "diff_check": candidate.get("diff_check"),
-            "diff_apply": candidate.get("diff_apply"),
-            "validation": candidate.get("validation", {}),
-            "changed_paths": list(candidate.get("changed_paths", []) or []),
-            "stop_reason": str(candidate.get("stop_reason", "") or ""),
-            "failure_reason": str(candidate.get("failure_reason", "") or ""),
-            "verifier_false_positive": bool(candidate.get("verifier_false_positive", False)),
-            "duplicate_of": candidate.get("duplicate_of"),
-        }
-
-    for candidate in ranked_candidates:
-        if not candidate.get("parse_ok", False):
-            continue
-        if candidate.get("duplicate_of"):
-            continue
-        if not bool(candidate.get("acceptance", {}).get("ok", False)):
-            continue
-        candidate["watchdog"] = _watchdog_scan(
-            prompt=prompt,
-            action=action,
-            diff_text=str(candidate.get("diff_text", "") or ""),
-            allowed_paths=allowed_paths,
-        )
-        if candidate["watchdog"].get("blocked", False):
-            candidate["stop_reason"] = "watchdog_blocked"
-            candidate["failure_reason"] = "watchdog blocked candidate diff"
-            continue
-        worktree_info = _guided_edit_create_temp_worktree()
-        worktree_root = Path(str(worktree_info.get("worktree_root", "") or ""))
-        keep_worktree = False
-        try:
-            candidate["diff_check"] = apply_unified_diff(
-                diff_text=str(candidate.get("diff_text", "") or ""),
-                check_only=True,
-                repo_root=worktree_root,
-            )
-            if not bool(candidate["diff_check"].get("ok", False)):
-                candidate["stop_reason"] = "apply_failed"
-                candidate["failure_reason"] = _trim_task_inline_text(
-                    candidate["diff_check"].get("stderr", "") or "diff did not apply cleanly",
-                    max_chars=220,
-                )
-                if str(candidate.get("strategy", "") or "") != "fallback":
-                    continue
-                continue
-            candidate["diff_apply"] = apply_unified_diff(
-                diff_text=str(candidate.get("diff_text", "") or ""),
-                check_only=False,
-                repo_root=worktree_root,
-            )
-            if not bool(candidate["diff_apply"].get("ok", False)):
-                candidate["stop_reason"] = "apply_failed"
-                candidate["failure_reason"] = _trim_task_inline_text(
-                    candidate["diff_apply"].get("stderr", "") or "diff did not apply cleanly",
-                    max_chars=220,
-                )
-                continue
-            rewritten_region = _guided_edit_target_region(
-                target_path,
-                start_line,
-                end_line,
-                context_before=1 if edit_kind.startswith("micro_") else 4,
-                context_after=1 if edit_kind.startswith("micro_") else 4,
-                repo_root=worktree_root,
-            )
-            candidate["rewritten_text"] = str(rewritten_region.get("region_text", "") or candidate.get("rewritten_text", "") or "")
-            candidate["verification"] = _guided_edit_verify_step(
-                prompt=prompt,
-                action=action,
-                target_region=target_region,
-                rewritten_text=str(candidate.get("rewritten_text", "") or ""),
-                acceptance=candidate.get("acceptance", {}),
-                diff_text=str(candidate.get("diff_text", "") or ""),
-                backend=backend,
-                temperature=temperature,
-                system=system,
-                verifier_mode=verifier_mode,
-            )
-            if bool(candidate["verification"].get("blocked", False)):
-                candidate["stop_reason"] = "verifier_disagreement"
-                candidate["failure_reason"] = str(candidate["verification"].get("reason", "") or "verifier blocked candidate")
-                continue
-            candidate["validation"] = _guided_edit_validate_step(
-                changed_paths=list(candidate.get("changed_paths", []) or []),
-                validation_profile=validation_profile,
-                repo_root=worktree_root,
-            )
-            if not bool(candidate["validation"].get("ok", False)):
-                candidate["stop_reason"] = "validation_failed"
-                candidate["failure_reason"] = "validation failed in isolated worktree"
-                if str(candidate["verification"].get("verdict", "") or "") in {"agree", "unclear"}:
-                    candidate["verifier_false_positive"] = True
-                continue
-            keep_worktree = True
-            candidate["stop_reason"] = "selected"
-            selected_candidate = candidate
-            selected_worktree = worktree_info
-            candidate["isolation"] = worktree_info
-            break
-        finally:
-            if not keep_worktree:
-                _guided_edit_remove_temp_worktree(worktree_info)
-
-    public_candidates = [public_candidate(candidate) for candidate in sorted(candidates, key=lambda row: int(row.get("index", 0) or 0))]
-    best_candidate = selected_candidate or (sorted(candidates, key=_guided_edit_candidate_sort_key)[0] if candidates else None)
-    selected_public = public_candidate(selected_candidate) if selected_candidate else None
-    repair_candidates = [
-        candidate
-        for candidate in candidates
-        if str(candidate.get("strategy", "") or "") in {"repair", "fallback"}
-    ]
-    selected_repair = repair_candidates[-1]["infer"] if repair_candidates else None
-    edit_attempts = [
-        {
-            "attempt": int(candidate.get("index", 0) or 0),
-            "kind": str(candidate.get("strategy", "") or ""),
-            "generation_tier": int(candidate.get("generation_tier", 0) or 0),
-            "model": str(candidate.get("model", "") or ""),
-            "ok": bool(candidate.get("parse_ok", False)) and bool(candidate.get("acceptance", {}).get("ok", False)),
-            "reason": str(candidate.get("failure_reason", "") or ""),
-        }
-        for candidate in sorted(candidates, key=lambda row: int(row.get("index", 0) or 0))
-    ]
-
-    if selected_candidate is None:
-        abstain_reason = "low_confidence_abstain"
-        failure_reason = "guided_edit abstained because no candidate safely satisfied the bounded edit contract"
-        if any(str(candidate.get("stop_reason", "") or "") == "validation_failed" for candidate in candidates):
-            abstain_reason = "validation_abstain"
-            failure_reason = "all acceptable candidates failed validation"
-        elif any(str(candidate.get("stop_reason", "") or "") == "verifier_disagreement" for candidate in candidates):
-            abstain_reason = "verifier_veto_abstain"
-            failure_reason = "verifier blocked all acceptable candidates"
-        elif any(str(candidate.get("stop_reason", "") or "") == "apply_failed" for candidate in candidates):
-            abstain_reason = "apply_check_abstain"
-            failure_reason = "all acceptable candidates failed apply checks"
-        elif any(str(candidate.get("stop_reason", "") or "") == "watchdog_blocked" for candidate in candidates):
-            abstain_reason = "watchdog_abstain"
-            failure_reason = "watchdog blocked all acceptable candidates"
-        return {
-            "schema": "guided_edit.execution.v1",
-            "applied": False,
-            "abstained": True,
-            "abstain_reason": abstain_reason,
-            "generation_tier": max([int(candidate.get("generation_tier", 0) or 0) for candidate in candidates] or [0]),
-            "diff_text": str(best_candidate.get("diff_text", "") or "") if isinstance(best_candidate, dict) else "",
-            "diff_check": best_candidate.get("diff_check") if isinstance(best_candidate, dict) else None,
-            "diff_apply": best_candidate.get("diff_apply") if isinstance(best_candidate, dict) else None,
-            "changed_paths": list(best_candidate.get("changed_paths", []) or []) if isinstance(best_candidate, dict) else [],
-            "edit_result": best_candidate.get("infer", {}) if isinstance(best_candidate, dict) else {},
-            "watchdog": best_candidate.get("watchdog", {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []}) if isinstance(best_candidate, dict) else {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []},
-            "verification": best_candidate.get("verification", {**verification_skipped, "reason": "no candidate selected"}) if isinstance(best_candidate, dict) else {**verification_skipped, "reason": "no candidate selected"},
-            "acceptance": best_candidate.get("acceptance", {"schema": "guided_edit.acceptance.v1", "ok": False, "score": 0.0, "hard_failures": ["no_candidate"], "soft_flags": []}) if isinstance(best_candidate, dict) else {"schema": "guided_edit.acceptance.v1", "ok": False, "score": 0.0, "hard_failures": ["no_candidate"], "soft_flags": []},
-            "repair_result": selected_repair,
-            "repair_used": bool(repair_candidates),
-            "attempt_count": len(edit_attempts),
-            "edit_attempts": edit_attempts,
-            "stopped_reason_hint": "low_confidence_abstain",
-            "failure_reason": failure_reason,
-            "structured_only": structured_only,
-            "isolation": {"backend": "git_worktree"},
-            "validation": best_candidate.get("validation", {}) if isinstance(best_candidate, dict) else {},
-            "candidates": public_candidates,
-            "selected_candidate": None,
-            "acceptance_failures": sum(1 for candidate in candidates if not bool(candidate.get("acceptance", {}).get("ok", False))),
-            "verifier_false_positive_count": sum(1 for candidate in candidates if bool(candidate.get("verifier_false_positive", False))),
-        }
-
-    return {
-        "schema": "guided_edit.execution.v1",
-        "applied": True,
-        "abstained": False,
-        "abstain_reason": "",
-        "generation_tier": int(selected_candidate.get("generation_tier", 0) or 0),
-        "diff_text": str(selected_candidate.get("diff_text", "") or ""),
-        "diff_check": selected_candidate.get("diff_check"),
-        "diff_apply": selected_candidate.get("diff_apply"),
-        "changed_paths": list(selected_candidate.get("changed_paths", []) or []),
-        "edit_result": selected_candidate.get("infer", {}),
-        "watchdog": selected_candidate.get("watchdog", {"schema": "watchdog_scan.v1", "ok": True, "blocked": False, "flags": [], "blocked_reasons": []}),
-        "verification": selected_candidate.get("verification", verification_skipped),
-        "acceptance": selected_candidate.get("acceptance", {"schema": "guided_edit.acceptance.v1", "ok": True, "score": 1.0, "hard_failures": [], "soft_flags": []}),
-        "repair_result": selected_repair,
-        "repair_used": bool(repair_candidates),
-        "attempt_count": len(edit_attempts),
-        "edit_attempts": edit_attempts,
-        "stopped_reason_hint": "" if bool(selected_candidate.get("validation", {}).get("ok", False)) else "validation_failed",
-        "failure_reason": "",
-        "structured_only": structured_only,
-        "isolation": selected_worktree or {"backend": "git_worktree"},
-        "validation": selected_candidate.get("validation", {}),
-        "candidates": public_candidates,
-        "selected_candidate": selected_public,
-        "materialized": False,
-        "acceptance_failures": sum(1 for candidate in candidates if not bool(candidate.get("acceptance", {}).get("ok", False))),
-        "verifier_false_positive_count": sum(1 for candidate in candidates if bool(candidate.get("verifier_false_positive", False))),
-    }
-
-
-def _guided_edit_run(
-    prompt: str,
-    task: str = "general",
-    target_paths: list[str] | None = None,
-    backend: str = "auto",
-    model: str = "",
-    max_tokens: int = 768,
-    temperature: float = 0.2,
-    system: str = "",
-    max_steps: int = 1,
-    validation_profile: str = "quick",
-    rollback_on_failure: bool = True,
-    snapshot_before_edit: bool = True,
-    store_result: bool = False,
-) -> dict[str, Any]:
-    if not prompt.strip():
-        raise ValueError("prompt must not be empty")
-    if max_steps < 1:
-        raise ValueError("max_steps must be >= 1")
-    profile = str(validation_profile or "quick").strip().lower() or "quick"
-    if profile not in {"quick", "standard", "auto"}:
-        raise ValueError("validation_profile must be one of: quick, standard, auto")
-    t0 = time.perf_counter()
-    repo_memory_seed = _repo_memory_lookup(
-        prompt=prompt,
-        target_paths=target_paths,
-        retrieval_info={},
-    )
-    intent = _build_task_intent_packet(
-        prompt=prompt,
-        route="coding",
-        task=task,
-        target_paths=target_paths,
-        validation_profile=profile,
-        max_steps=max_steps,
-    )
-    cost_plan = _build_task_cost_plan(
-        route="coding",
-        prompt=prompt,
-        retrieval_info={},
-        repo_memory_info=repo_memory_seed,
-        intent=intent,
-        max_tokens=max_tokens,
-    )
-    skill_pack_seed = _select_curated_skill_pack(
-        route="coding",
-        intent=intent,
-        retrieval_info={},
-        repo_memory=repo_memory_seed,
-    )
-    prompt_watchdog = _watchdog_scan(prompt=prompt)
-    replay_id = ""
-    if ALLOW_MUTATIONS:
-        with contextlib.suppress(Exception):
-            replay = execution_replay(mode="start")
-            replay_id = str(replay.get("replay_id", "") or "")
-            if replay_id:
-                execution_replay(
-                    mode="log",
-                    replay_id=replay_id,
-                    event={
-                        "stage": "start",
-                        "prompt_summary": _trim_task_inline_text(prompt, max_chars=180),
-                        "intent": intent,
-                        "repo_memory_count": int(repo_memory_seed.get("entry_count", 0) or 0),
-                        "skill_count": int(skill_pack_seed.get("module_count", 0) or 0),
-                    },
-                )
-                execution_replay(
-                    mode="log",
-                    replay_id=replay_id,
-                    event={"stage": "prompt_watchdog", "watchdog": prompt_watchdog},
-                )
-
-    def _finish(result: dict[str, Any]) -> dict[str, Any]:
-        if replay_id:
-            with contextlib.suppress(Exception):
-                execution_replay(
-                    mode="log",
-                    replay_id=replay_id,
-                    event={
-                        "stage": "finish",
-                        "ok": bool(result.get("ok", False)),
-                        "stopped_reason": str(result.get("stopped_reason", "") or ""),
-                    },
-                )
-                execution_replay(mode="finish", replay_id=replay_id)
-                result["replay_summary"] = execution_replay(mode="summarize", replay_id=replay_id)
-                result["replay_diagnosis"] = execution_replay(mode="diagnose", replay_id=replay_id)
-        if store_result:
-            result["result_id"] = _result_store_put("task_router_guided_edit", result)
-        return result
-
-    if prompt_watchdog.get("blocked", False):
-        return _finish(
-            {
-                "schema": "task_router.guided_edit.v1",
-                "ok": False,
-                "step_count": 0,
-                "requested_max_steps": max_steps,
-                "stopped_reason": "watchdog_blocked",
-                "generation_tier": 0,
-                "abstained": False,
-                "abstain_reason": "",
-                "snapshot_id": "",
-                "replay_id": replay_id,
-                "intent": intent,
-                "repo_memory": repo_memory_seed,
-                "skill_pack": skill_pack_seed,
-                "cost_plan": cost_plan,
-                "watchdog": prompt_watchdog,
-                "routing": {},
-                "steps": [],
-                "final_validation": {},
-                "state_machine": _guided_edit_state_machine("start", "watchdog_blocked"),
-            }
-        )
-
-    selected_targets = _guided_edit_select_targets(prompt=prompt, target_paths=target_paths)
-    deterministic_action = _guided_edit_build_deterministic_action(
-        prompt=prompt,
-        selected_targets=selected_targets,
-    )
-    if deterministic_action is not None:
-        plan_info = {
-            "ok": True,
-            "routing": {
-                "selected_route": "deterministic_micro",
-                "selected_model": "deterministic",
-                "selected_model_file": "",
-                "selected_by": "exact_prompt",
-                "routing_loaded": True,
-                "routing_source": "guided_edit.intent",
-            },
-            "selected_targets": selected_targets,
-            "repo_memory": repo_memory_seed,
-            "skill_pack": skill_pack_seed,
-            "planner_result": {
-                "schema": "guided_edit.plan_step.v1",
-                "backend": "deterministic",
-                "ok": True,
-                "output": json.dumps(deterministic_action, ensure_ascii=True, sort_keys=True),
-            },
-            "planner_attempts": [
-                {
-                    "attempt": 1,
-                    "kind": "deterministic",
-                    "model": "deterministic",
-                    "ok": True,
-                }
-            ],
-            "repair_result": None,
-            "action": deterministic_action,
-        }
-    else:
-        plan_info = _guided_edit_plan_step(
-            prompt=prompt,
-            task=task,
-            target_paths=target_paths,
-            backend=backend,
-            model=model,
-            max_tokens=max(200, min(int(cost_plan["effective_max_tokens"]), 384)),
-            temperature=temperature,
-            system=system,
-        )
-    if replay_id:
-        with contextlib.suppress(Exception):
-            execution_replay(
-                mode="log",
-                replay_id=replay_id,
-                event={"stage": "plan", "action": plan_info.get("action"), "targets": plan_info.get("selected_targets")},
-            )
-    if not bool(plan_info.get("ok", False)):
-        return _finish(
-            {
-                "schema": "task_router.guided_edit.v1",
-                "ok": False,
-                "step_count": 0,
-                "requested_max_steps": max_steps,
-                "stopped_reason": str(plan_info.get("stopped_reason", "") or "planner_failed"),
-                "generation_tier": 0,
-                "abstained": False,
-                "abstain_reason": "",
-                "snapshot_id": "",
-                "replay_id": replay_id,
-                "intent": intent,
-                "repo_memory": plan_info.get("repo_memory", repo_memory_seed),
-                "skill_pack": plan_info.get("skill_pack", skill_pack_seed),
-                "cost_plan": cost_plan,
-                "watchdog": prompt_watchdog,
-                "routing": plan_info.get("routing", {}),
-                "steps": [
-                    {
-                        "index": 1,
-                        "selected_targets": plan_info.get("selected_targets", []),
-                        "planner_result": plan_info.get("planner_result", {}),
-                        "planner_attempts": plan_info.get("planner_attempts", []),
-                        "repair_result": plan_info.get("repair_result"),
-                        "error": plan_info.get("error", ""),
-                    }
-                ],
-                "final_validation": {},
-                "failure_diagnosis": {
-                    "schema": "guided_edit.failure_diagnosis.v1",
-                    "failed": True,
-                    "failure_stage": "plan",
-                    "reason": str(plan_info.get("stopped_reason", "") or "planner_failed"),
-                    "detail": str(plan_info.get("error", "") or ""),
-                },
-                "state_machine": _guided_edit_state_machine("plan", str(plan_info.get("stopped_reason", "") or "planner_failed")),
-            }
-        )
-    action = plan_info["action"]
-    planning_watchdog = _watchdog_scan(
-        prompt=prompt,
-        action=action,
-        allowed_paths=_guided_edit_allowed_paths(action, plan_info["selected_targets"]),
-    )
-    if planning_watchdog.get("blocked", False):
-        return _finish(
-            {
-                "schema": "task_router.guided_edit.v1",
-                "ok": False,
-                "step_count": 0,
-                "requested_max_steps": max_steps,
-                "stopped_reason": "watchdog_blocked",
-                "generation_tier": 0,
-                "abstained": False,
-                "abstain_reason": "",
-                "snapshot_id": "",
-                "replay_id": replay_id,
-                "intent": intent,
-                "repo_memory": plan_info.get("repo_memory", repo_memory_seed),
-                "skill_pack": plan_info.get("skill_pack", skill_pack_seed),
-                "cost_plan": cost_plan,
-                "watchdog": prompt_watchdog,
-                "routing": plan_info["routing"],
-                "steps": [
-                    {
-                        "index": 1,
-                        "selected_targets": plan_info["selected_targets"],
-                        "plan": action,
-                        "planner_result": plan_info["planner_result"],
-                        "planner_attempts": plan_info.get("planner_attempts", []),
-                        "repair_result": plan_info.get("repair_result"),
-                        "planning_watchdog": planning_watchdog,
-                    }
-                ],
-                "final_validation": {},
-                "state_machine": _guided_edit_state_machine("plan", "watchdog_blocked"),
-            }
-        )
-    if action["action_type"] == "stop":
-        return _finish(
-            {
-                "schema": "task_router.guided_edit.v1",
-                "ok": True,
-                "step_count": 0,
-                "requested_max_steps": max_steps,
-                "stopped_reason": "planner_stop",
-                "generation_tier": 0,
-                "abstained": False,
-                "abstain_reason": "",
-                "snapshot_id": "",
-                "replay_id": replay_id,
-                "intent": intent,
-                "repo_memory": plan_info.get("repo_memory", repo_memory_seed),
-                "skill_pack": plan_info.get("skill_pack", skill_pack_seed),
-                "cost_plan": cost_plan,
-                "watchdog": prompt_watchdog,
-                "routing": plan_info["routing"],
-                "steps": [
-                    {
-                        "index": 1,
-                        "selected_targets": plan_info["selected_targets"],
-                        "plan": action,
-                        "planner_result": plan_info["planner_result"],
-                        "planner_attempts": plan_info.get("planner_attempts", []),
-                        "repair_result": plan_info.get("repair_result"),
-                        "planning_watchdog": planning_watchdog,
-                    }
-                ],
-                "final_validation": {},
-                "state_machine": _guided_edit_state_machine("plan", "planner_stop"),
-            }
-        )
-
-    snapshot_id = ""
-    if snapshot_before_edit:
-        snapshot = state_snapshot(label="guided-edit", include_build_dir=False)
-        snapshot_id = str(snapshot.get("snapshot_id", "") or "")
-
-    effective_profile = profile
-    if effective_profile == "auto":
-        candidate = str(action.get("validation_scope", "") or cost_plan.get("validation_profile", "quick")).strip().lower()
-        effective_profile = candidate if candidate in {"quick", "standard"} else "quick"
-
-    execution = _guided_edit_execute_step(
-        prompt=prompt,
-        task=task,
-        action=action,
-        selected_targets=plan_info["selected_targets"],
-        backend=backend,
-        model=model,
-        max_tokens=max(320, int(cost_plan["effective_max_tokens"])),
-        temperature=temperature,
-        system=system,
-        verifier_mode=str(cost_plan.get("verifier_mode", "light") or "light"),
-        validation_profile=effective_profile,
-        repo_memory_info=plan_info.get("repo_memory"),
-        skill_pack=plan_info.get("skill_pack"),
-    )
-    if replay_id:
-        with contextlib.suppress(Exception):
-            execution_replay(
-                mode="log",
-                replay_id=replay_id,
-                event={
-                    "stage": "candidate_selection",
-                    "candidate_count": len(list(execution.get("candidates", []) or [])),
-                    "selected_candidate": execution.get("selected_candidate"),
-                    "candidates": execution.get("candidates", []),
-                },
-            )
-    if replay_id:
-        with contextlib.suppress(Exception):
-            execution_replay(
-                mode="log",
-                replay_id=replay_id,
-                event={
-                    "stage": "execution",
-                    "applied": execution.get("applied", False),
-                    "changed_paths": execution.get("changed_paths", []),
-                    "watchdog": execution.get("watchdog", {}),
-                    "verification": execution.get("verification", {}),
-                },
-            )
-    validation = dict(execution.get("validation", {}) or {})
-    if replay_id and validation:
-        with contextlib.suppress(Exception):
-            execution_replay(
-                mode="log",
-                replay_id=replay_id,
-                event={"stage": "validation", "validation": validation},
-            )
-
-    rolled_back = False
-    stopped_reason = "single_step_complete"
-    ok = bool(execution.get("applied", False))
-    materialize_result: dict[str, Any] = {"written": False}
-    if not execution.get("applied", False):
-        if bool(execution.get("abstained", False)):
-            stopped_reason = "low_confidence_abstain"
-        elif str(execution.get("stopped_reason_hint", "") or "").strip():
-            stopped_reason = str(execution.get("stopped_reason_hint", "") or "").strip()
-        elif bool(execution.get("watchdog", {}).get("blocked", False)):
-            stopped_reason = "watchdog_blocked"
-        elif bool(execution.get("verification", {}).get("blocked", False)):
-            stopped_reason = "verifier_disagreement"
-        else:
-            stopped_reason = "apply_failed"
-    elif not validation.get("ok", False):
-        ok = False
-        stopped_reason = "validation_failed"
-    else:
-        isolation = execution.get("isolation", {}) if isinstance(execution.get("isolation"), dict) else {}
-        worktree_root = Path(str(isolation.get("worktree_root", "") or ""))
-        try:
-            if worktree_root:
-                materialize_result = _guided_edit_materialize_from_worktree(
-                    worktree_root=worktree_root,
-                    changed_paths=list(execution.get("changed_paths", []) or []),
-                )
-                execution["materialize"] = materialize_result
-                execution["materialized"] = bool(materialize_result.get("ok", False))
-            else:
-                materialize_result = {"written": False, "reason": "no_worktree_root"}
-                execution["materialize"] = materialize_result
-                execution["materialized"] = False
-            ok = bool(execution.get("materialized", False))
-            if not ok:
-                stopped_reason = "apply_failed"
-        except Exception as exc:
-            ok = False
-            stopped_reason = "apply_failed"
-            execution["materialize"] = {
-                "schema": "guided_edit.materialize.v1",
-                "ok": False,
-                "error": str(exc),
-            }
-            execution["materialized"] = False
-            execution["failure_reason"] = _trim_task_inline_text(str(exc), max_chars=220)
-            if rollback_on_failure and snapshot_id:
-                state_restore(snapshot_id=snapshot_id)
-                rolled_back = True
-                if replay_id:
-                    with contextlib.suppress(Exception):
-                        execution_replay(
-                            mode="log",
-                            replay_id=replay_id,
-                            event={"stage": "rollback", "snapshot_id": snapshot_id},
-                        )
-        finally:
-            if worktree_root:
-                _guided_edit_remove_temp_worktree(isolation)
-    step = {
-        "index": 1,
-        "selected_targets": plan_info["selected_targets"],
-        "plan": action,
-        "planner_result": plan_info["planner_result"],
-        "planner_attempts": plan_info.get("planner_attempts", []),
-        "repair_result": plan_info.get("repair_result"),
-        "planning_watchdog": planning_watchdog,
-        "execution": execution,
-        "validation": validation,
-        "materialize": materialize_result,
-        "rolled_back": rolled_back,
-    }
-    verifier_false_positive_write = _guided_edit_record_verifier_false_positive(
-        action=action,
-        execution=execution,
-        replay_id=replay_id,
-    )
-    memory_write = _guided_edit_persist_memory(
-        prompt=prompt,
-        action=action,
-        execution=execution,
-        validation=validation,
-        stopped_reason=stopped_reason,
-        snapshot_id=snapshot_id,
-        replay_id=replay_id,
-    )
-    regression_write = {"written": False}
-    if not ok:
-        regression_write = _guided_edit_regression_record(
-            prompt=prompt,
-            action=action,
-            execution=execution,
-            stopped_reason=stopped_reason,
-            replay_id=replay_id,
-        )
-    example_write = {"written": False}
-    if ok:
-        example_write = _guided_edit_example_record(
-            prompt=prompt,
-            action=action,
-            execution=execution,
-            validation=validation,
-            stopped_reason=stopped_reason,
-            replay_id=replay_id,
-        )
-    benchmark = _workflow_benchmark_record(
-        "task_router.guided_edit",
-        {
-            "ok": ok,
-            "stopped_reason": stopped_reason,
-            "generation_tier": int(execution.get("generation_tier", 0) or 0),
-            "abstained": bool(execution.get("abstained", False)),
-            "abstain_reason": str(execution.get("abstain_reason", "") or ""),
-            "action_type": str(action.get("action_type", "") or ""),
-            "changed_path_count": len(list(execution.get("changed_paths", []) or [])),
-            "repo_memory_count": int(plan_info.get("repo_memory", {}).get("entry_count", 0) or 0),
-            "skill_count": int(plan_info.get("skill_pack", {}).get("module_count", 0) or 0),
-            "verification_blocked": bool(execution.get("verification", {}).get("blocked", False)),
-            "watchdog_blocked": bool(execution.get("watchdog", {}).get("blocked", False)) or bool(prompt_watchdog.get("blocked", False)),
-            "evidence_count": int(memory_write.get("evidence_count", 0) or 0),
-            "candidate_count": len(list(execution.get("candidates", []) or [])),
-            "selected_candidate_index": int(
-                (
-                    execution.get("selected_candidate", {})
-                    if isinstance(execution.get("selected_candidate"), dict)
-                    else {}
-                ).get("index", 0)
-                or 0
-            ),
-            "acceptance_failures": int(execution.get("acceptance_failures", 0) or 0),
-            "verifier_false_positive": int(execution.get("verifier_false_positive_count", 0) or 0),
-            "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-        },
-    )
-    replay_benchmark = _guided_edit_replay_benchmark_report(write=ALLOW_MUTATIONS)
-    failure_diagnosis = {
-        "schema": "guided_edit.failure_diagnosis.v1",
-        "failed": not ok,
-        "failure_stage": "",
-        "reason": "",
-    }
-    if not ok:
-        if stopped_reason == "low_confidence_abstain":
-            failure_diagnosis = {
-                "schema": "guided_edit.failure_diagnosis.v1",
-                "failed": True,
-                "failure_stage": "validate"
-                if str(execution.get("abstain_reason", "") or "") == "validation_abstain"
-                else "execute",
-                "reason": str(execution.get("abstain_reason", "") or "low_confidence_abstain"),
-                "detail": str(execution.get("failure_reason", "") or ""),
-            }
-        elif stopped_reason == "watchdog_blocked":
-            failure_diagnosis = {
-                "schema": "guided_edit.failure_diagnosis.v1",
-                "failed": True,
-                "failure_stage": "execute" if execution.get("watchdog", {}).get("blocked", False) else "start",
-                "reason": "watchdog_blocked",
-            }
-        elif stopped_reason == "verifier_disagreement":
-            failure_diagnosis = {
-                "schema": "guided_edit.failure_diagnosis.v1",
-                "failed": True,
-                "failure_stage": "execute",
-                "reason": "verifier_disagreement",
-            }
-        elif stopped_reason == "validation_failed":
-            failure_diagnosis = {
-                "schema": "guided_edit.failure_diagnosis.v1",
-                "failed": True,
-                "failure_stage": "validate",
-                "reason": "validation_failed",
-                "compile_error_count": int(validation.get("compile_error_count", 0) or 0),
-            }
-        elif stopped_reason in {"edit_invalid", "edit_failed"}:
-            failure_diagnosis = {
-                "schema": "guided_edit.failure_diagnosis.v1",
-                "failed": True,
-                "failure_stage": "execute",
-                "reason": stopped_reason,
-                "detail": str(execution.get("failure_reason", "") or ""),
-            }
-        else:
-            failure_diagnosis = {
-                "schema": "guided_edit.failure_diagnosis.v1",
-                "failed": True,
-                "failure_stage": "execute",
-                "reason": "apply_failed",
-            }
-    result = {
-        "schema": "task_router.guided_edit.v1",
-        "ok": ok,
-        "step_count": 1,
-        "requested_max_steps": max_steps,
-        "stopped_reason": stopped_reason,
-        "snapshot_id": snapshot_id,
-        "replay_id": replay_id,
-        "intent": intent,
-        "repo_memory": plan_info.get("repo_memory", repo_memory_seed),
-        "skill_pack": plan_info.get("skill_pack", skill_pack_seed),
-        "cost_plan": cost_plan,
-        "watchdog": prompt_watchdog,
-        "routing": plan_info["routing"],
-        "steps": [step],
-        "final_validation": validation,
-        "effective_validation_profile": effective_profile,
-        "generation_tier": int(execution.get("generation_tier", 0) or 0),
-        "abstained": bool(execution.get("abstained", False)),
-        "abstain_reason": str(execution.get("abstain_reason", "") or ""),
-        "memory_write": memory_write,
-        "example_write": example_write,
-        "regression_write": regression_write,
-        "verifier_false_positive_write": verifier_false_positive_write,
-        "workflow_benchmark": benchmark,
-        "replay_benchmark": replay_benchmark,
-        "failure_diagnosis": failure_diagnosis,
-        "state_machine": _guided_edit_state_machine(
-            "validate"
-            if stopped_reason == "validation_failed"
-            or str(execution.get("abstain_reason", "") or "") == "validation_abstain"
-            else "execute" if not ok else "finish",
-            stopped_reason,
-        ),
-    }
-    return _finish(result)
 
 
 def _infer_batch_from_prompt(prompt: str) -> list[str]:
@@ -14859,7 +9849,6 @@ class TaskRouterService:
         mode: str = "task",
         prompt: str = "",
         task: str = "general",
-        target_paths: list[str] | None = None,
         prefix: str = "",
         suffix: str = "",
         language: str = "",
@@ -14892,10 +9881,6 @@ class TaskRouterService:
         prompts: list[str] | None = None,
         max_parallel: int = 4,
         auto_parallel_when_possible: bool = True,
-        max_steps: int = 1,
-        validation_profile: str = "quick",
-        rollback_on_failure: bool = True,
-        snapshot_before_edit: bool = True,
     ) -> dict[str, Any]:
         mode = str(mode or "task").strip().lower() or "task"
         if mode not in {
@@ -14910,10 +9895,9 @@ class TaskRouterService:
             "coding_check",
             "coding_pip",
             "coding_sandbox",
-            "guided_edit",
         }:
             raise ValueError(
-                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, guided_edit"
+                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
             )
         if mode == "status":
             return local_model_status()
@@ -15083,22 +10067,6 @@ class TaskRouterService:
             return result
         if mode == "coding_sandbox":
             return _coding_sandbox_manage(action=sandbox_action, sandbox_id=sandbox_id)
-        if mode == "guided_edit":
-            return _guided_edit_run(
-                prompt=prompt,
-                task=task,
-                target_paths=target_paths,
-                backend=backend,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system,
-                max_steps=max_steps,
-                validation_profile=validation_profile,
-                rollback_on_failure=rollback_on_failure,
-                snapshot_before_edit=snapshot_before_edit,
-                store_result=store_result,
-            )
         if mode == "autocomplete":
             return autocomplete(
                 prefix=prefix,
@@ -15129,21 +10097,17 @@ def task_router(
     mode: Annotated[
         str,
         Field(
-            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, guided edit, or coding sandbox/check/package behavior."
+            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
         ),
     ] = "task",
     prompt: Annotated[
         str,
-        Field(description="Primary request text for the default `task` flow, `infer`, `coding_infer`, and `guided_edit`."),
+        Field(description="Primary request text for the default `task` flow, `infer`, and `coding_infer`."),
     ] = "",
     task: Annotated[
         str,
         Field(description="Task hint such as `general`, `coding`, `micro_coding`, `review`, or `security`; used for routing and fallback prompt shaping."),
     ] = "general",
-    target_paths: Annotated[
-        list[str] | None,
-        Field(description="Optional explicit repository-relative file targets for `mode='guided_edit'`."),
-    ] = None,
     prefix: Annotated[
         str,
         Field(description="Autocomplete prefix text when `mode='autocomplete'`."),
@@ -15272,66 +10236,67 @@ def task_router(
         bool,
         Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
     ] = True,
-    max_steps: Annotated[
-        int,
-        Field(description="Maximum guided edit steps requested for `mode='guided_edit'`. The current implementation executes one bounded step and records replay/benchmark data for that step."),
-    ] = 1,
-    validation_profile: Annotated[
-        str,
-        Field(description="Validation profile for `mode='guided_edit'`. Use `quick`, `standard`, or `auto` to let the adaptive planner choose."),
-    ] = "quick",
-    rollback_on_failure: Annotated[
-        bool,
-        Field(description="Whether `mode='guided_edit'` should restore the pre-edit snapshot when validation fails."),
-    ] = True,
-    snapshot_before_edit: Annotated[
-        bool,
-        Field(description="Whether `mode='guided_edit'` should capture a git-backed snapshot before applying its planned diff."),
-    ] = True,
 ) -> dict[str, Any]:
-    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|guided_edit|coding_infer|coding_check|coding_pip|coding_sandbox."""
-    return _TASK_ROUTER_SERVICE.route(
-        mode=mode,
-        prompt=prompt,
-        task=task,
-        target_paths=target_paths,
-        prefix=prefix,
-        suffix=suffix,
-        language=language,
-        texts=texts,
-        query=query,
-        candidates=candidates,
-        backend=backend,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system=system,
-        stop=stop,
-        normalize=normalize,
-        top_k=top_k,
-        output_profile=output_profile,
-        offset=offset,
-        limit=limit,
-        compress=compress,
-        store_result=store_result,
-        memory_session=memory_session,
-        check_profile=check_profile,
-        check_target=check_target,
-        check_timeout_seconds=check_timeout_seconds,
-        run_checks=run_checks,
-        packages=packages,
-        pip_upgrade=pip_upgrade,
-        sandbox_mode=sandbox_mode,
-        sandbox_id=sandbox_id,
-        sandbox_action=sandbox_action,
-        prompts=prompts,
-        max_parallel=max_parallel,
-        auto_parallel_when_possible=auto_parallel_when_possible,
-        max_steps=max_steps,
-        validation_profile=validation_profile,
-        rollback_on_failure=rollback_on_failure,
-        snapshot_before_edit=snapshot_before_edit,
-    )
+    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
+    audit_args = {
+        "mode": mode,
+        "task": task,
+        "backend": backend,
+        "model": model,
+        "check_profile": check_profile,
+        "check_target": check_target,
+        "run_checks": run_checks,
+        "packages": packages or [],
+        "sandbox_mode": sandbox_mode,
+        "sandbox_action": sandbox_action,
+    }
+    categories = _require_tool_security_gate("task_router", audit_args)
+    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+    try:
+        result = _TASK_ROUTER_SERVICE.route(
+            mode=mode,
+            prompt=prompt,
+            task=task,
+            prefix=prefix,
+            suffix=suffix,
+            language=language,
+            texts=texts,
+            query=query,
+            candidates=candidates,
+            backend=backend,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            stop=stop,
+            normalize=normalize,
+            top_k=top_k,
+            output_profile=output_profile,
+            offset=offset,
+            limit=limit,
+            compress=compress,
+            store_result=store_result,
+            memory_session=memory_session,
+            check_profile=check_profile,
+            check_target=check_target,
+            check_timeout_seconds=check_timeout_seconds,
+            run_checks=run_checks,
+            packages=packages,
+            pip_upgrade=pip_upgrade,
+            sandbox_mode=sandbox_mode,
+            sandbox_id=sandbox_id,
+            sandbox_action=sandbox_action,
+            prompts=prompts,
+            max_parallel=max_parallel,
+            auto_parallel_when_possible=auto_parallel_when_possible,
+        )
+    except Exception as exc:
+        if sensitive:
+            _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
+        raise
+    if sensitive:
+        _append_audit_event("task_router", categories, True, audit_args)
+    return result
 
 
 @mcp.tool()
@@ -15457,42 +10422,7 @@ def tool_benchmark(
     if warmup < 0:
         raise ValueError("warmup must be >= 0")
 
-    results = _tool_benchmark_measurements(tools=tools, iterations=iterations, warmup=warmup)
-    _require_mutations()
-    benchmark_file = _resolve_repo_path(report_path)
-    existing = _json_file_load(Path(report_path), {"schema": "tool_benchmark.report.v1", "tools": {}})
-    tools_payload = existing.get("tools", {}) if isinstance(existing, dict) else {}
-    if not isinstance(tools_payload, dict):
-        tools_payload = {}
-    generated_at = _now_iso()
-    for row in results:
-        tools_payload[str(row["tool"])] = {
-            "tool": row["tool"],
-            "iterations": row["iterations"],
-            "median_duration_ms": row["latency_ms_median"],
-            "latency_ms_avg": row["latency_ms_avg"],
-            "latency_ms_p95": row["latency_ms_p95"],
-            "payload_bytes_avg": row["payload_bytes_avg"],
-            "payload_bytes_max": row["payload_bytes_max"],
-            "updated_at": generated_at,
-        }
-    report = {
-        "schema": "tool_benchmark.report.v1",
-        "generated_at": generated_at,
-        "tools": dict(sorted(tools_payload.items())),
-    }
-    benchmark_file.parent.mkdir(parents=True, exist_ok=True)
-    benchmark_file.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-
-    return {
-        "schema": "tool_benchmark.v1",
-        "report_path": report_path,
-        "results": results,
-    }
-
-
-def _tool_benchmark_catalog() -> dict[str, Callable[[], Any]]:
-    return {
+    catalog = {
         "find_paths": lambda: find_paths(path=".", recursive=True, max_entries=500, output_profile="compact"),
         "grep": lambda: grep(pattern="def ", path=".", recursive=True, max_matches=100, output_profile="compact"),
         "symbol_index": lambda: symbol_index(path=".", recursive=True, max_symbols=1000, output_profile="compact"),
@@ -15501,14 +10431,6 @@ def _tool_benchmark_catalog() -> dict[str, Callable[[], Any]]:
         "semantic_find": lambda: semantic_find(query="tool cache", path=".", max_results=20, output_profile="compact"),
         "tree_sitter_core": lambda: tree_sitter_core(path=".", mode="parse", max_files=20, max_nodes=500, output_profile="compact", summary_mode="quick"),
     }
-
-
-def _tool_benchmark_measurements(
-    tools: list[str] | None = None,
-    iterations: int = 1,
-    warmup: int = 0,
-) -> list[dict[str, Any]]:
-    catalog = _tool_benchmark_catalog()
     selected = tools or list(catalog.keys())
     unknown = [t for t in selected if t not in catalog]
     if unknown:
@@ -15544,82 +10466,7 @@ def _tool_benchmark_measurements(
                 "payload_bytes_max": int(max(size_bytes)),
             }
         )
-    return results
 
-
-def _workflow_benchmark_load() -> dict[str, Any]:
-    payload = _json_file_load(
-        WORKFLOW_BENCHMARK_FILE,
-        {"schema": "workflow_benchmark.report.v1", "workflows": {}},
-    )
-    workflows = payload.get("workflows", {})
-    if not isinstance(workflows, dict):
-        workflows = {}
-    payload["workflows"] = workflows
-    return payload
-
-
-def _workflow_benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    total = len(rows)
-    success = sum(1 for row in rows if bool(row.get("ok", False)))
-    avg_duration_ms = round(
-        sum(float(row.get("duration_ms", 0.0) or 0.0) for row in rows) / max(1, total),
-        2,
-    )
-    return {
-        "run_count": total,
-        "success_count": success,
-        "success_rate": round(success / max(1, total), 4),
-        "avg_duration_ms": avg_duration_ms,
-    }
-
-
-def _workflow_benchmark_record(workflow: str, metrics: dict[str, Any]) -> dict[str, Any]:
-    workflow_name = str(workflow or "").strip() or "unknown"
-    row = {"ts": _now_iso(), **(metrics if isinstance(metrics, dict) else {})}
-    if not ALLOW_MUTATIONS:
-        return {
-            "schema": "workflow_benchmark.report.v1",
-            "workflow": workflow_name,
-            "written": False,
-            "summary": _workflow_benchmark_summary([row]),
-            "run": row,
-            "reason": "mutations_disabled",
-        }
-    payload = _workflow_benchmark_load()
-    workflows = payload.get("workflows", {})
-    rows = workflows.get(workflow_name, [])
-    if not isinstance(rows, list):
-        rows = []
-    rows.append(row)
-    rows = rows[-50:]
-    workflows[workflow_name] = rows
-    payload["workflows"] = workflows
-    payload["updated_at"] = _now_iso()
-    _json_file_save(WORKFLOW_BENCHMARK_FILE, payload)
-    return {
-        "schema": "workflow_benchmark.report.v1",
-        "workflow": workflow_name,
-        "written": True,
-        "summary": _workflow_benchmark_summary(rows),
-        "run": row,
-    }
-
-
-@mcp.tool()
-def tool_benchmark(
-    tools: list[str] | None = None,
-    iterations: int = 3,
-    warmup: int = 1,
-    report_path: str = str(TOOL_BENCHMARK_REPORT_FILE),
-) -> dict[str, Any]:
-    """Benchmark representative tool invocations for latency and payload size and persist one median-duration entry per tool."""
-    if iterations < 1:
-        raise ValueError("iterations must be >= 1")
-    if warmup < 0:
-        raise ValueError("warmup must be >= 0")
-
-    results = _tool_benchmark_measurements(tools=tools, iterations=iterations, warmup=warmup)
     _require_mutations()
     benchmark_file = _resolve_repo_path(report_path)
     existing = _json_file_load(Path(report_path), {"schema": "tool_benchmark.report.v1", "tools": {}})
@@ -15810,8 +10657,8 @@ def output_size_guard(
     if tolerance_ratio < 1.0:
         raise ValueError("tolerance_ratio must be >= 1.0")
 
-    measured = _tool_benchmark_measurements(tools=tools, iterations=1, warmup=0)
-    current = {r["tool"]: int(r["payload_bytes_max"]) for r in measured}
+    bench = tool_benchmark(tools=tools, iterations=1, warmup=0)
+    current = {r["tool"]: int(r["payload_bytes_max"]) for r in bench["results"]}
     baseline_file = _resolve_repo_path(baseline_path)
 
     if mode == "write":
@@ -17121,6 +11968,59 @@ def constraint_solver_for_tasks(
 
 
 @mcp.tool()
+def spec_to_tests(
+    spec_text: str,
+    framework: str = "pytest",
+    output_path: str = "",
+    mode: str = "generate",
+) -> dict[str, Any]:
+    """Generate test skeletons from natural-language spec bullets."""
+    if framework not in {"pytest", "unittest"}:
+        raise ValueError("framework must be one of: pytest, unittest")
+    if mode not in {"generate", "write"}:
+        raise ValueError("mode must be one of: generate, write")
+    lines = [line.strip("-* ").strip() for line in spec_text.splitlines() if line.strip()]
+    reqs = [line for line in lines if any(tok in line.lower() for tok in {"must", "should", "shall"})]
+    if not reqs:
+        reqs = lines[:5]
+    tests: list[str] = []
+    if framework == "pytest":
+        tests.append("import pytest")
+        tests.append("")
+        for i, req in enumerate(reqs, start=1):
+            name = re.sub(r"[^a-z0-9]+", "_", req.lower()).strip("_")[:48] or f"req_{i}"
+            tests.append(f"def test_spec_{i}_{name}():")
+            tests.append(f"    # {req}")
+            tests.append("    assert True")
+            tests.append("")
+    else:
+        tests.append("import unittest")
+        tests.append("")
+        tests.append("class SpecTests(unittest.TestCase):")
+        for i, req in enumerate(reqs, start=1):
+            name = re.sub(r"[^a-z0-9]+", "_", req.lower()).strip("_")[:48] or f"req_{i}"
+            tests.append(f"    def test_spec_{i}_{name}(self):")
+            tests.append(f"        # {req}")
+            tests.append("        self.assertTrue(True)")
+            tests.append("")
+    test_code = "\n".join(tests).rstrip() + "\n"
+    if mode == "write":
+        _require_mutations()
+        if not output_path:
+            raise ValueError("output_path is required for write mode")
+        out = _resolve_repo_path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(test_code, encoding="utf-8")
+    return {
+        "schema": "spec_to_tests.v1",
+        "framework": framework,
+        "requirements_count": len(reqs),
+        "test_code": test_code,
+        "output_path": output_path if mode == "write" else None,
+    }
+
+
+@mcp.tool()
 def auto_sharding_for_analysis(
     path: str = ".",
     shard_size: int = 100,
@@ -17188,24 +12088,18 @@ def confidence_scoring(
 
 @mcp.tool()
 def runtime_contract_checker() -> dict[str, Any]:
-    """Verify runtime MCP tool/resource exposure vs README contract and report drift."""
+    """Verify runtime tool exposure vs README contract and report drift."""
     code_tools = _server_tool_names()
     readme_tools = _readme_tool_names()
-    resource_uris = _server_resource_uris()
-    resource_templates = _server_resource_templates()
-    unexpected_resources = sorted(resource_uris | resource_templates)
     missing_in_readme = sorted(code_tools - readme_tools)
     extra_in_readme = sorted(readme_tools - code_tools)
     return {
         "schema": "runtime_contract_checker.v1",
-        "ok": not missing_in_readme and not extra_in_readme and not unexpected_resources,
+        "ok": not missing_in_readme and not extra_in_readme,
         "code_tool_count": len(code_tools),
         "readme_tool_count": len(readme_tools),
-        "resource_uri_count": len(resource_uris),
-        "resource_template_count": len(resource_templates),
         "missing_in_readme": missing_in_readme,
         "extra_in_readme": extra_in_readme,
-        "unexpected_resources": unexpected_resources,
     }
 
 
@@ -17258,6 +12152,44 @@ def cost_budget_enforcer(
         "limits": limits,
         "used": used,
         "over_budget": over,
+    }
+
+
+@mcp.tool()
+def multi_agent_lane(
+    task: str,
+    lanes: list[str] | None = None,
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+) -> dict[str, Any]:
+    """Run specialized analysis lanes and merge into one decision packet."""
+    if not task.strip():
+        raise ValueError("task must not be empty")
+    selected = lanes or ["security", "risk", "docs", "tests"]
+    lane_results: dict[str, Any] = {}
+    if "security" in selected:
+        patch = _git("diff", f"{base_ref}...{head_ref}", "--", ".").stdout
+        lane_results["security"] = security_triage(diff_text=patch, max_findings=20)
+    if "risk" in selected:
+        lane_results["risk"] = risk_scoring(ref=head_ref)
+    if "docs" in selected:
+        lane_results["docs"] = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+    if "tests" in selected:
+        lane_results["tests"] = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
+    confidence = confidence_scoring(
+        checks=[
+            {"name": "security", "ok": int(lane_results.get("security", {}).get("finding_count", 0)) == 0, "weight": 3},
+            {"name": "risk", "ok": lane_results.get("risk", {}).get("risk_level", "low") != "high", "weight": 2},
+            {"name": "docs", "ok": not lane_results.get("docs", {}).get("needs_docs_update", False), "weight": 1},
+            {"name": "tests", "ok": True, "weight": 1},
+        ]
+    )
+    return {
+        "schema": "multi_agent_lane.v1",
+        "task": task,
+        "lanes": selected,
+        "results": lane_results,
+        "confidence": confidence,
     }
 
 
@@ -17345,112 +12277,6 @@ def root_cause_memory(
     return {"schema": "root_cause_memory.v1", "mode": mode, "count": len(suggestions), "suggestions": suggestions}
 
 
-def _execution_replay_diagnose_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    events = payload.get("events", [])
-    if not isinstance(events, list):
-        events = []
-    failure_stage = ""
-    reason = ""
-    for row in events:
-        if not isinstance(row, dict):
-            continue
-        event = row.get("event", {})
-        if not isinstance(event, dict):
-            continue
-        stage = str(event.get("stage", "") or "")
-        watchdog = event.get("watchdog", {})
-        verification = event.get("verification", {})
-        validation = event.get("validation", {})
-        if isinstance(watchdog, dict) and bool(watchdog.get("blocked", False)):
-            failure_stage = stage or "watchdog"
-            blocked_reasons = watchdog.get("blocked_reasons", [])
-            reason = (
-                str(blocked_reasons[0])
-                if isinstance(blocked_reasons, list) and blocked_reasons
-                else "watchdog_blocked"
-            )
-            break
-        if isinstance(verification, dict) and bool(verification.get("blocked", False)):
-            failure_stage = stage or "verification"
-            reason = str(verification.get("reason", "") or "verifier_disagreement")
-            break
-        if isinstance(validation, dict) and not bool(validation.get("ok", True)):
-            failure_stage = stage or "validation"
-            if int(validation.get("compile_error_count", 0) or 0) > 0:
-                reason = "compile_error"
-            elif isinstance(validation.get("test_execution"), dict) and not bool(validation["test_execution"].get("ok", True)):
-                reason = "test_failure"
-            else:
-                reason = "validation_failed"
-            break
-    if not failure_stage:
-        for row in reversed(events):
-            if not isinstance(row, dict):
-                continue
-            event = row.get("event", {})
-            if not isinstance(event, dict):
-                continue
-            if "ok" in event and not bool(event.get("ok", True)):
-                failure_stage = str(event.get("stage", "") or "finish")
-                reason = str(event.get("stopped_reason", "") or "failed")
-                break
-    return {
-        "schema": "execution_replay.diagnosis.v1",
-        "replay_id": str(payload.get("replay_id", "") or ""),
-        "failed": bool(failure_stage),
-        "failure_stage": failure_stage,
-        "reason": reason,
-    }
-
-
-def _execution_replay_summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    events = payload.get("events", [])
-    if not isinstance(events, list):
-        events = []
-    stages: list[str] = []
-    changed_paths: list[str] = []
-    prompt_summary = ""
-    selected_targets: list[str] = []
-    stopped_reason = ""
-    ok = False
-    for row in events:
-        if not isinstance(row, dict):
-            continue
-        event = row.get("event", {})
-        if not isinstance(event, dict):
-            continue
-        stage = str(event.get("stage", "") or "")
-        if stage and stage not in stages:
-            stages.append(stage)
-        if stage == "start":
-            prompt_summary = _trim_task_inline_text(event.get("prompt_summary", ""), max_chars=180)
-        if stage == "plan":
-            targets = event.get("targets", [])
-            if isinstance(targets, list):
-                selected_targets = [str(path) for path in targets[:4]]
-        if stage == "execution":
-            paths = event.get("changed_paths", [])
-            if isinstance(paths, list):
-                changed_paths = [str(path) for path in paths[:8]]
-        if stage == "finish":
-            ok = bool(event.get("ok", False))
-            stopped_reason = str(event.get("stopped_reason", "") or "")
-    diagnosis = _execution_replay_diagnose_payload(payload)
-    return {
-        "schema": "execution_replay.summary.v1",
-        "replay_id": str(payload.get("replay_id", "") or ""),
-        "status": str(payload.get("status", "") or ""),
-        "ok": ok,
-        "stopped_reason": stopped_reason,
-        "prompt_summary": prompt_summary,
-        "stage_count": len(stages),
-        "stages": stages,
-        "selected_targets": selected_targets,
-        "changed_paths": changed_paths,
-        "failure_diagnosis": diagnosis,
-    }
-
-
 @mcp.tool()
 def execution_replay(
     mode: str = "start",
@@ -17459,8 +12285,8 @@ def execution_replay(
     max_events: int = 1000,
 ) -> dict[str, Any]:
     """Record and replay deterministic execution event streams."""
-    if mode not in {"start", "log", "finish", "read", "summarize", "diagnose"}:
-        raise ValueError("mode must be one of: start, log, finish, read, summarize, diagnose")
+    if mode not in {"start", "log", "finish", "read"}:
+        raise ValueError("mode must be one of: start, log, finish, read")
     if max_events < 1:
         raise ValueError("max_events must be >= 1")
     EXECUTION_REPLAY_DIR.mkdir(parents=True, exist_ok=True)
@@ -17482,10 +12308,6 @@ def execution_replay(
         events = []
     if mode == "read":
         return {"schema": "execution_replay.v1", "mode": mode, "replay_id": replay_id, "status": payload.get("status"), "events": events[:max_events]}
-    if mode == "summarize":
-        return _execution_replay_summarize_payload(payload)
-    if mode == "diagnose":
-        return _execution_replay_diagnose_payload(payload)
     _require_mutations()
     if mode == "log":
         events.append({"ts": _now_iso(), "event": event or {}})
@@ -18272,328 +13094,6 @@ def tree_sitter_core(
     return result
 
 
-def _repo_index_collect_import_refs(tree: ast.AST) -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            imports = [node.module] if node.module else []
-        else:
-            continue
-        for imp in imports:
-            refs.append(
-                {
-                    "import": imp,
-                    "line": int(getattr(node, "lineno", 1)),
-                }
-            )
-    return refs
-
-
-def _repo_index_collect_call_edges(tree: ast.AST, rel_path: str) -> list[dict[str, Any]]:
-    edges: list[dict[str, Any]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        caller = node.name
-        for child in ast.walk(node):
-            if not isinstance(child, ast.Call):
-                continue
-            callee = _ast_expr_name(child.func)
-            if not callee:
-                continue
-            edges.append(
-                {
-                    "path": rel_path,
-                    "caller": caller,
-                    "callee": callee,
-                    "line": int(getattr(child, "lineno", getattr(node, "lineno", 1))),
-                }
-            )
-    return edges
-
-
-def _repo_index_resolve_dependency_edges(
-    rel_path: str,
-    import_refs: list[dict[str, Any]],
-    module_to_path: dict[str, str],
-    include_stdlib: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    edges: list[dict[str, Any]] = []
-    unresolved: list[dict[str, Any]] = []
-    for row in import_refs:
-        imp = str(row.get("import", "") or "")
-        if not imp:
-            continue
-        line = int(row.get("line", 1) or 1)
-        resolved_path = None
-        for candidate_module in _import_candidates(imp):
-            resolved = module_to_path.get(candidate_module)
-            if resolved:
-                resolved_path = resolved
-                break
-        if resolved_path:
-            edges.append(
-                {
-                    "from": rel_path,
-                    "to": resolved_path,
-                    "import": imp,
-                    "line": line,
-                }
-            )
-        elif include_stdlib:
-            unresolved.append(
-                {
-                    "from": rel_path,
-                    "import": imp,
-                    "line": line,
-                }
-            )
-    return edges, unresolved
-
-
-def _repo_index_build_file_record(
-    file_path: Path,
-    meta: dict[str, Any],
-    module_to_path: dict[str, str],
-    *,
-    encoding: str = "utf-8",
-) -> dict[str, Any]:
-    rel_path = str(meta["path"])
-    suffix = file_path.suffix.lower()
-    record: dict[str, Any] = {
-        "path": rel_path,
-        "size": int(meta.get("size", 0)),
-        "mtime_ns": int(meta.get("mtime_ns", 0)),
-        "file_type": str(meta.get("file_type", suffix.lstrip(".") or "file")),
-        "language": "python" if suffix == ".py" else "",
-        "parse_error": "",
-        "symbols": [],
-        "import_refs": [],
-        "dependencies": [],
-        "unresolved_imports": [],
-        "call_edges": [],
-    }
-    if "sha256" in meta:
-        record["sha256"] = str(meta.get("sha256", ""))
-    if suffix != ".py" or _is_likely_binary(file_path):
-        return record
-    try:
-        source = file_path.read_text(encoding=encoding, errors="replace")
-    except OSError as exc:
-        record["parse_error"] = str(exc)
-        return record
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as exc:
-        record["parse_error"] = str(exc)
-        return record
-    record["symbols"] = _collect_python_symbols(source, rel_path, include_private=False)
-    record["import_refs"] = _repo_index_collect_import_refs(tree)
-    deps, unresolved = _repo_index_resolve_dependency_edges(
-        rel_path=rel_path,
-        import_refs=record["import_refs"],
-        module_to_path=module_to_path,
-        include_stdlib=False,
-    )
-    record["dependencies"] = deps
-    record["unresolved_imports"] = unresolved
-    record["call_edges"] = _repo_index_collect_call_edges(tree, rel_path=rel_path)
-    return record
-
-
-def _semantic_role_for_path(path: str) -> str:
-    rel = str(path or "").replace("\\", "/").lower()
-    if rel.endswith((".md", ".rst", ".txt")) or rel.startswith("docs/") or rel == "readme.md":
-        return "doc"
-    if rel.startswith("tests/") or "/test" in rel or rel.endswith("_test.py"):
-        return "test"
-    if rel.endswith((".py", ".js", ".ts", ".tsx", ".go", ".rs", ".sh")):
-        return "code"
-    return "other"
-
-
-def _repo_index_build_semantic_dag(payload: dict[str, Any]) -> dict[str, Any]:
-    files = payload.get("files", [])
-    symbols = payload.get("symbols", [])
-    dependencies = payload.get("dependencies", [])
-    file_nodes: list[dict[str, Any]] = []
-    symbol_nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
-    path_set: set[str] = set()
-    role_by_path: dict[str, str] = {}
-    symbol_name_map: dict[str, list[str]] = {}
-
-    for row in files if isinstance(files, list) else []:
-        if not isinstance(row, dict):
-            continue
-        path = str(row.get("path", "") or "").strip()
-        if not path:
-            continue
-        role = _semantic_role_for_path(path)
-        role_by_path[path] = role
-        path_set.add(path)
-        file_nodes.append({"id": f"file:{path}", "kind": "file", "role": role, "path": path})
-
-    for row in symbols if isinstance(symbols, list) else []:
-        if not isinstance(row, dict):
-            continue
-        path = str(row.get("path", "") or "").strip()
-        name = str(row.get("name", "") or "").strip()
-        if not path or not name:
-            continue
-        node_id = f"symbol:{path}:{name}"
-        symbol_nodes.append(
-            {
-                "id": node_id,
-                "kind": "symbol",
-                "path": path,
-                "name": name,
-                "symbol_kind": str(row.get("kind", "") or ""),
-            }
-        )
-        symbol_name_map.setdefault(name, []).append(node_id)
-        edges.append({"kind": "defines", "from": f"file:{path}", "to": node_id})
-
-    for row in dependencies if isinstance(dependencies, list) else []:
-        if not isinstance(row, dict):
-            continue
-        src = str(row.get("from", "") or "").strip()
-        dst = str(row.get("to", "") or "").strip()
-        if not src or not dst:
-            continue
-        edge_kind = "test_covers" if role_by_path.get(src) == "test" else "dependency"
-        edges.append({"kind": edge_kind, "from": f"file:{src}", "to": f"file:{dst}"})
-
-    for path, role in role_by_path.items():
-        if role != "test":
-            continue
-        stem = Path(path).stem
-        candidates = {
-            f"src/{stem.removeprefix('test_')}.py",
-            f"source/{stem.removeprefix('test_')}.py",
-        }
-        for candidate in sorted(candidates):
-            if candidate in path_set:
-                edges.append({"kind": "test_covers", "from": f"file:{path}", "to": f"file:{candidate}"})
-
-    doc_candidates = [path for path, role in role_by_path.items() if role == "doc"]
-    for doc_path in doc_candidates[:120]:
-        try:
-            text = _resolve_repo_path(doc_path).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for mention in sorted(set(re.findall(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", text)))[:80]:
-            normalized = mention.replace("\\", "/")
-            if normalized in path_set:
-                edges.append({"kind": "doc_mentions_path", "from": f"file:{doc_path}", "to": f"file:{normalized}"})
-        for name, node_ids in list(symbol_name_map.items())[:400]:
-            if len(name) < 4 or len(node_ids) > 3:
-                continue
-            if re.search(rf"`{re.escape(name)}`|\b{re.escape(name)}\b", text):
-                for node_id in node_ids:
-                    edges.append({"kind": "doc_mentions_symbol", "from": f"file:{doc_path}", "to": node_id})
-
-    edge_kind_counts: dict[str, int] = {}
-    for edge in edges:
-        kind = str(edge.get("kind", "") or "")
-        edge_kind_counts[kind] = edge_kind_counts.get(kind, 0) + 1
-    return {
-        "schema": "semantic_dag.v1",
-        "node_count": len(file_nodes) + len(symbol_nodes),
-        "edge_count": len(edges),
-        "edge_kinds": dict(sorted(edge_kind_counts.items())),
-        "nodes": file_nodes + symbol_nodes,
-        "edges": edges,
-    }
-
-
-def _repo_index_materialize_core_payload(index_payload: dict[str, Any]) -> dict[str, Any]:
-    records = index_payload.get("records", {})
-    if not isinstance(records, dict):
-        records = {}
-    file_order = index_payload.get("file_order", [])
-    if not isinstance(file_order, list):
-        file_order = sorted(records.keys())
-
-    files: list[dict[str, Any]] = []
-    symbols: list[dict[str, Any]] = []
-    dependencies: list[dict[str, Any]] = []
-    call_edges: list[dict[str, Any]] = []
-
-    for rel in file_order:
-        record = records.get(rel, {})
-        if not isinstance(record, dict):
-            continue
-        file_row = {
-            "path": str(record.get("path", rel)),
-            "size": int(record.get("size", 0) or 0),
-            "mtime_ns": int(record.get("mtime_ns", 0) or 0),
-            "file_type": str(record.get("file_type", "") or ""),
-        }
-        sha256 = str(record.get("sha256", "") or "")
-        if sha256:
-            file_row["sha256"] = sha256
-        language = str(record.get("language", "") or "")
-        if language:
-            file_row["language"] = language
-        parse_error = str(record.get("parse_error", "") or "")
-        if parse_error:
-            file_row["parse_error"] = parse_error
-        files.append(file_row)
-        if isinstance(record.get("symbols"), list):
-            symbols.extend(record["symbols"])
-        if isinstance(record.get("dependencies"), list):
-            dependencies.extend(record["dependencies"])
-        if isinstance(record.get("call_edges"), list):
-            call_edges.extend(record["call_edges"])
-
-    payload: dict[str, Any] = {
-        "schema": "repo_index_daemon.v1",
-        "generated_at": index_payload.get("generated_at"),
-        "path": index_payload.get("path"),
-        "file_count": int(index_payload.get("file_count", len(files)) or 0),
-        "symbol_count": int(index_payload.get("symbol_count", len(symbols)) or 0),
-        "dependency_edge_count": int(index_payload.get("dependency_edge_count", len(dependencies)) or 0),
-        "call_edge_count": int(index_payload.get("call_edge_count", len(call_edges)) or 0),
-        "files": files,
-        "symbols": symbols,
-        "dependencies": dependencies,
-        "call_edges": call_edges,
-        "incremental": bool(index_payload.get("incremental", True)),
-        "changed_paths_count": int(index_payload.get("changed_paths_count", 0) or 0),
-        "reused_paths_count": int(index_payload.get("reused_paths_count", 0) or 0),
-        "removed_paths_count": int(index_payload.get("removed_paths_count", 0) or 0),
-    }
-    history_memory = index_payload.get("history_memory")
-    if isinstance(history_memory, dict):
-        payload["history_memory"] = history_memory
-    for key in ("git_head", "git_branch"):
-        if key in index_payload:
-            payload[key] = index_payload[key]
-    return payload
-
-
-def _repo_index_materialize_payload(index_payload: dict[str, Any]) -> dict[str, Any]:
-    if str(index_payload.get("schema", "")) != "repo_index_daemon.v2":
-        raise RuntimeError("stale repo index format; run repo_index_daemon(mode='refresh') to rebuild")
-    payload = _repo_index_materialize_core_payload(index_payload)
-    stored_dag = index_payload.get("semantic_dag")
-    if isinstance(stored_dag, dict):
-        payload["semantic_dag"] = stored_dag
-    else:
-        payload["semantic_dag"] = {
-            "schema": "semantic_dag.v1",
-            "node_count": 0,
-            "edge_count": 0,
-            "edge_kinds": {},
-            "nodes": [],
-            "edges": [],
-        }
-    return payload
-
-
 def repo_index_daemon(
     mode: str = "refresh",
     path: str = ".",
@@ -18611,7 +13111,7 @@ def repo_index_daemon(
     store_result: bool = False,
     incremental: bool = True,
 ) -> dict[str, Any]:
-    """Build/read/query a persistent repository index keyed by per-file analysis records."""
+    """Build/read/query a persistent repository index keyed by file metadata."""
     if mode not in {"refresh", "read", "query"}:
         raise ValueError("mode must be one of: refresh, read, query")
     if max_files < 1:
@@ -18627,9 +13127,8 @@ def repo_index_daemon(
         if not index_path.is_file():
             raise FileNotFoundError(str(REPO_INDEX_FILE))
         index_payload = json.loads(index_path.read_text(encoding="utf-8"))
-        full_payload = _repo_index_materialize_payload(index_payload)
         if mode == "query":
-            value = _query_value(full_payload, query) if query.strip() else full_payload
+            value = _query_value(index_payload, query) if query.strip() else index_payload
             if isinstance(value, list):
                 value = _paginate(value, offset=offset, limit=limit)
                 if value and isinstance(value[0], dict):
@@ -18640,34 +13139,19 @@ def repo_index_daemon(
                 "value_json": _trim_text(json.dumps(value, indent=2, ensure_ascii=True)),
                 "value": value if profile != "compact" else None,
             }
-        read_payload = dict(full_payload)
-        if profile != "verbose":
-            read_payload["symbols"] = []
-            read_payload["dependencies"] = []
-            read_payload["call_edges"] = []
-            dag = read_payload.get("semantic_dag", {})
-            if isinstance(dag, dict):
-                read_payload["semantic_dag"] = {
-                    "schema": dag.get("schema"),
-                    "node_count": dag.get("node_count", 0),
-                    "edge_count": dag.get("edge_count", 0),
-                    "edge_kinds": dag.get("edge_kinds", {}),
-                }
-        if isinstance(read_payload.get("files"), list):
-            files = _paginate(read_payload["files"], offset=offset, limit=limit)
+        if isinstance(index_payload.get("files"), list):
+            files = _paginate(index_payload["files"], offset=offset, limit=limit)
             if files and isinstance(files[0], dict):
                 files = _select_fields(files, fields)
-            read_payload["files"] = files
+            index_payload["files"] = files
         if profile == "compact":
             compact = {
                 "schema": "repo_index_daemon.compact.v1",
                 "mode": mode,
-                "generated_at": read_payload.get("generated_at"),
-                "file_count": read_payload.get("file_count", 0),
-                "symbol_count": read_payload.get("symbol_count", 0),
-                "dependency_edge_count": read_payload.get("dependency_edge_count", 0),
-                "semantic_dag_edge_count": int(read_payload.get("semantic_dag", {}).get("edge_count", 0) or 0),
-                "history_memory_entry_count": int(read_payload.get("history_memory", {}).get("entry_count", 0) or 0),
+                "generated_at": index_payload.get("generated_at"),
+                "file_count": index_payload.get("file_count", 0),
+                "symbol_count": index_payload.get("symbol_count", 0),
+                "dependency_edge_count": index_payload.get("dependency_edge_count", 0),
             }
             if store_result:
                 compact["result_id"] = _result_store_put("repo_index_daemon", compact)
@@ -18676,21 +13160,19 @@ def repo_index_daemon(
             quick = {
                 "schema": "repo_index_daemon.quick.v1",
                 "mode": mode,
-                "generated_at": read_payload.get("generated_at"),
-                "file_count": read_payload.get("file_count", 0),
-                "symbol_count": read_payload.get("symbol_count", 0),
-                "semantic_dag_edge_count": int(read_payload.get("semantic_dag", {}).get("edge_count", 0) or 0),
-                "history_memory_entry_count": int(read_payload.get("history_memory", {}).get("entry_count", 0) or 0),
+                "generated_at": index_payload.get("generated_at"),
+                "file_count": index_payload.get("file_count", 0),
+                "symbol_count": index_payload.get("symbol_count", 0),
             }
             if store_result:
                 quick["result_id"] = _result_store_put("repo_index_daemon", quick)
             return quick
-        if compress and isinstance(read_payload.get("files"), list):
-            read_payload["files_compressed"] = _compress_table(read_payload["files"])
-            read_payload.pop("files", None)
+        if compress and isinstance(index_payload.get("files"), list):
+            index_payload["files_compressed"] = _compress_table(index_payload["files"])
+            index_payload.pop("files", None)
         if store_result:
-            read_payload["result_id"] = _result_store_put("repo_index_daemon", read_payload)
-        return read_payload
+            index_payload["result_id"] = _result_store_put("repo_index_daemon", index_payload)
+        return index_payload
 
     root = _resolve_repo_path(path)
     if not root.exists():
@@ -18699,14 +13181,11 @@ def repo_index_daemon(
     existing_payload = None
     if incremental and index_path.is_file():
         try:
-            loaded = json.loads(index_path.read_text(encoding="utf-8"))
+            existing_payload = json.loads(index_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            loaded = None
-        if isinstance(loaded, dict) and str(loaded.get("schema", "")) == "repo_index_daemon.v2":
-            existing_payload = loaded
+            existing_payload = None
 
     files_meta: list[dict[str, Any]] = []
-    module_to_path: dict[str, str] = {}
     for candidate in _iter_candidate_files(root, recursive=recursive):
         rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
         if _is_hidden_rel_path(Path(rel)):
@@ -18716,7 +13195,6 @@ def repo_index_daemon(
             "path": rel,
             "size": int(stat.st_size),
             "mtime_ns": int(stat.st_mtime_ns),
-            "file_type": candidate.suffix.lower().lstrip(".") or "file",
         }
         if include_hashes:
             try:
@@ -18724,106 +13202,76 @@ def repo_index_daemon(
             except OSError:
                 entry["sha256"] = ""
         files_meta.append(entry)
-        if candidate.suffix == ".py":
-            module_to_path[_module_name_from_relpath(candidate.relative_to(REPO_PATH))] = rel
         if len(files_meta) >= max_files:
             break
-    files_meta.sort(key=lambda row: str(row.get("path", "")))
 
-    existing_records = existing_payload.get("records", {}) if isinstance(existing_payload, dict) else {}
-    if not isinstance(existing_records, dict):
-        existing_records = {}
-    file_paths = {str(row["path"]) for row in files_meta}
-    removed_paths = sorted(path for path in existing_records.keys() if path not in file_paths)
     changed_paths: list[str] = []
-    reused_paths_count = 0
-    recomputed_python_paths_count = 0
-    records: dict[str, dict[str, Any]] = {}
+    if existing_payload and isinstance(existing_payload.get("files"), list):
+        prev = {
+            f.get("path"): (f.get("size"), f.get("mtime_ns"))
+            for f in existing_payload["files"]
+            if isinstance(f, dict) and isinstance(f.get("path"), str)
+        }
+        for row in files_meta:
+            p = row["path"]
+            sig = (row.get("size"), row.get("mtime_ns"))
+            if prev.get(p) != sig:
+                changed_paths.append(p)
 
-    for row in files_meta:
-        rel = str(row["path"])
-        candidate = REPO_PATH / rel
-        previous = existing_records.get(rel)
-        reusable = (
-            incremental
-            and isinstance(previous, dict)
-            and str(previous.get("path", "")) == rel
-            and int(previous.get("size", -1) or -1) == int(row.get("size", 0) or 0)
-            and int(previous.get("mtime_ns", -1) or -1) == int(row.get("mtime_ns", 0) or 0)
-            and (not include_hashes or str(previous.get("sha256", "")) == str(row.get("sha256", "")))
-            and isinstance(previous.get("symbols"), list)
-            and isinstance(previous.get("import_refs"), list)
-            and isinstance(previous.get("call_edges"), list)
+    reuse_prev_graphs = bool(existing_payload) and len([p for p in changed_paths if p.endswith(".py")]) == 0
+    if reuse_prev_graphs:
+        symbols = existing_payload.get("symbols", []) if isinstance(existing_payload.get("symbols"), list) else []
+        dep_edges = existing_payload.get("dependencies", []) if isinstance(existing_payload.get("dependencies"), list) else []
+        call_edges = existing_payload.get("call_edges", []) if isinstance(existing_payload.get("call_edges"), list) else []
+        dep = {"edge_count": len(dep_edges), "edges": dep_edges}
+        call = {"edge_count": len(call_edges), "edges": call_edges}
+    else:
+        symbols = symbol_index(
+            path=path,
+            include_private=False,
+            recursive=recursive,
+            max_symbols=20000,
+            output_profile="compact",
         )
-        if reusable:
-            record = dict(previous)
-            record["size"] = int(row["size"])
-            record["mtime_ns"] = int(row["mtime_ns"])
-            record["file_type"] = row["file_type"]
-            if "sha256" in row:
-                record["sha256"] = row["sha256"]
-            records[rel] = record
-            reused_paths_count += 1
-            continue
-        changed_paths.append(rel)
-        records[rel] = _repo_index_build_file_record(
-            candidate,
-            row,
-            module_to_path,
-        )
-        if candidate.suffix == ".py":
-            recomputed_python_paths_count += 1
-
-    for rel, record in records.items():
-        if str(record.get("language", "")) != "python":
-            continue
-        deps, unresolved = _repo_index_resolve_dependency_edges(
-            rel_path=rel,
-            import_refs=record.get("import_refs", []),
-            module_to_path=module_to_path,
+        dep = dependency_map(
+            path=path,
+            recursive=recursive,
             include_stdlib=False,
+            max_files=max_files,
+            output_profile="compact",
         )
-        record["dependencies"] = deps
-        record["unresolved_imports"] = unresolved
+        call = call_graph(
+            path=path,
+            recursive=recursive,
+            max_edges=20000,
+            output_profile="compact",
+        )
 
-    symbol_count = sum(len(record.get("symbols", [])) for record in records.values() if isinstance(record, dict))
-    dependency_edge_count = sum(len(record.get("dependencies", [])) for record in records.values() if isinstance(record, dict))
-    call_edge_count = sum(len(record.get("call_edges", [])) for record in records.values() if isinstance(record, dict))
     payload: dict[str, Any] = {
-        "schema": "repo_index_daemon.v2",
+        "schema": "repo_index_daemon.v1",
         "generated_at": _now_iso(),
         "path": str(root.relative_to(REPO_PATH)),
         "file_count": len(files_meta),
-        "symbol_count": symbol_count,
-        "dependency_edge_count": dependency_edge_count,
-        "call_edge_count": call_edge_count,
-        "records": records,
-        "file_order": [str(row["path"]) for row in files_meta],
-        "incremental": incremental,
-        "include_hashes": include_hashes,
-        "changed_paths_count": len(changed_paths) + len(removed_paths),
-        "removed_paths_count": len(removed_paths),
-        "reused_paths_count": reused_paths_count,
-        "recomputed_python_paths_count": recomputed_python_paths_count,
-        "history_memory": _repo_history_memory_snapshot(
-            max_commits=REPO_HISTORY_MEMORY_MAX_COMMITS,
-            scope_prefixes=(
-                []
-                if str(root.relative_to(REPO_PATH)).replace("\\", "/") in {"", "."}
-                else [str(root.relative_to(REPO_PATH)).replace("\\", "/")]
-            ),
+        "symbol_count": (
+            int(existing_payload.get("symbol_count", 0))
+            if reuse_prev_graphs and existing_payload
+            else len(symbols)
         ),
+        "dependency_edge_count": int(dep.get("edge_count", 0)),
+        "call_edge_count": int(call.get("edge_count", 0)),
+        "files": files_meta if profile != "compact" else files_meta[:300],
+        "symbols": symbols if profile == "verbose" else [],
+        "dependencies": dep.get("edges", []) if profile == "verbose" else [],
+        "call_edges": call.get("edges", []) if profile == "verbose" else [],
+        "incremental": incremental,
+        "changed_paths_count": len(changed_paths),
     }
     if _is_git_repo():
         payload["git_head"] = _git("rev-parse", "HEAD").stdout.strip()
         payload["git_branch"] = _git("branch", "--show-current").stdout.strip()
-    payload["semantic_dag"] = _repo_index_build_semantic_dag(
-        _repo_index_materialize_core_payload(payload)
-    )
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    semantic_dag_summary = payload.get("semantic_dag", {})
     result = {
         "schema": "repo_index_daemon.refresh.v1",
         "mode": mode,
@@ -18834,12 +13282,7 @@ def repo_index_daemon(
         "dependency_edge_count": payload["dependency_edge_count"],
         "call_edge_count": payload["call_edge_count"],
         "incremental": incremental,
-        "changed_paths_count": payload["changed_paths_count"],
-        "reused_paths_count": reused_paths_count,
-        "recomputed_python_paths_count": recomputed_python_paths_count,
-        "removed_paths_count": len(removed_paths),
-        "semantic_dag_edge_count": int(semantic_dag_summary.get("edge_count", 0) or 0),
-        "history_memory_entry_count": int(payload.get("history_memory", {}).get("entry_count", 0) or 0),
+        "changed_paths_count": len(changed_paths),
     }
     if summary_mode == "quick":
         result = {
@@ -18849,17 +13292,287 @@ def repo_index_daemon(
             "file_count": payload["file_count"],
             "symbol_count": payload["symbol_count"],
             "incremental": incremental,
-            "changed_paths_count": payload["changed_paths_count"],
-            "reused_paths_count": reused_paths_count,
-            "recomputed_python_paths_count": recomputed_python_paths_count,
-            "semantic_dag_edge_count": int(semantic_dag_summary.get("edge_count", 0) or 0),
-            "history_memory_entry_count": int(payload.get("history_memory", {}).get("entry_count", 0) or 0),
+            "changed_paths_count": len(changed_paths),
         }
     if compress:
         result["files_compressed"] = _compress_table(files_meta[:500])
     if store_result:
         result["result_id"] = _result_store_put("repo_index_daemon", result)
     return result
+
+
+class CodeIndexRouterService:
+    """Application service for code indexing and semantic-search routing."""
+
+    def route(
+        self,
+        mode: str = "refresh",
+        path: str = ".",
+        query: str = "",
+        recursive: bool = True,
+        output_profile: str | None = None,
+        fields: list[str] | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+        max_files: int = 5000,
+        max_symbols: int = 20000,
+        max_edges: int = 20000,
+        include_hashes: bool = False,
+        include_private: bool = False,
+        include_stdlib: bool = False,
+        local_rerank_top_k: int = 25,
+        use_local_rerank: bool = True,
+        summary_mode: str = "full",
+        compress: bool = False,
+        store_result: bool = False,
+        incremental: bool = True,
+        action_mode: str = "",
+        pattern: str = "",
+        case_insensitive: bool = False,
+        include_globs: list[str] | None = None,
+        exclude_globs: list[str] | None = None,
+        include_hidden: bool = False,
+        max_matches: int = 500,
+        max_file_bytes: int = 1048576,
+        node_type: str = "Call",
+        name_pattern: str = "",
+        base_ref: str = "HEAD~1",
+        head_ref: str = "HEAD",
+        snapshot_path: str = str(API_SNAPSHOT_FILE),
+    ) -> dict[str, Any]:
+        allowed = {
+            "refresh",
+            "read",
+            "query",
+            "symbols",
+            "deps",
+            "calls",
+            "search",
+            "grep",
+            "tree",
+            "ast",
+            "impact_tests",
+            "doc_sync",
+            "api_surface",
+        }
+        if mode not in allowed:
+            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+
+        if mode in {"refresh", "read", "query"}:
+            result = repo_index_daemon(
+                mode=mode,
+                path=path,
+                query=query,
+                recursive=recursive,
+                include_hashes=include_hashes,
+                max_files=max_files,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+                incremental=incremental,
+            )
+        elif mode == "symbols":
+            result = symbol_index(
+                path=path,
+                recursive=recursive,
+                include_private=include_private,
+                max_symbols=max_symbols,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+            )
+        elif mode == "deps":
+            result = dependency_map(
+                path=path,
+                recursive=recursive,
+                include_stdlib=include_stdlib,
+                max_files=max_files,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        elif mode == "calls":
+            result = call_graph(
+                path=path,
+                recursive=recursive,
+                max_edges=max_edges,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        elif mode == "search":
+            result = semantic_find(
+                query=query,
+                path=path,
+                max_results=limit or 20,
+                local_rerank_top_k=local_rerank_top_k,
+                use_local_rerank=use_local_rerank,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        elif mode == "grep":
+            needle = pattern or query
+            if not needle:
+                raise ValueError("query or pattern is required for grep mode")
+            result = grep(
+                pattern=needle,
+                path=path,
+                recursive=recursive,
+                case_insensitive=case_insensitive,
+                include_globs=include_globs,
+                exclude_globs=exclude_globs,
+                include_hidden=include_hidden,
+                max_matches=max_matches,
+                max_file_bytes=max_file_bytes,
+                output_profile=output_profile or "compact",
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                compress=compress,
+                summary_mode=summary_mode,
+                store_result=store_result,
+            )
+        elif mode == "tree":
+            tree_mode = action_mode or "parse"
+            result = tree_sitter_core(
+                path=path,
+                mode=tree_mode,
+                recursive=recursive,
+                node_types=[node_type] if node_type else None,
+                text_pattern=query or pattern or None,
+                max_files=max_files,
+                max_nodes=max_symbols,
+                output_profile=output_profile,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                summary_mode=summary_mode,
+                compress=compress,
+                store_result=store_result,
+            )
+        elif mode == "ast":
+            result = ast_search(
+                path=path,
+                node_type=node_type,
+                name_pattern=name_pattern or query or None,
+                recursive=recursive,
+                max_results=max_matches,
+            )
+        elif mode == "impact_tests":
+            result = impact_tests(
+                base_ref=base_ref,
+                head_ref=head_ref,
+                max_tests=limit or max_matches,
+                output_profile=output_profile or "normal",
+            )
+        elif mode == "doc_sync":
+            result = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
+        else:
+            result = api_surface_snapshot(
+                path=path,
+                snapshot_path=snapshot_path,
+                mode=action_mode or "check",
+                include_private=include_private,
+            )
+        return {
+            "schema": "code_index_router.v1",
+            "mode": mode,
+            "result": result,
+        }
+
+
+_CODE_INDEX_ROUTER_SERVICE = CodeIndexRouterService()
+
+
+@mcp.tool()
+def code_index_router(
+    mode: str = "refresh",
+    path: str = ".",
+    query: str = "",
+    recursive: bool = True,
+    output_profile: str | None = None,
+    fields: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+    max_files: int = 5000,
+    max_symbols: int = 20000,
+    max_edges: int = 20000,
+    include_hashes: bool = False,
+    include_private: bool = False,
+    include_stdlib: bool = False,
+    local_rerank_top_k: int = 25,
+    use_local_rerank: bool = True,
+    summary_mode: str = "full",
+    compress: bool = False,
+    store_result: bool = False,
+    incremental: bool = True,
+    action_mode: str = "",
+    pattern: str = "",
+    case_insensitive: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    max_matches: int = 500,
+    max_file_bytes: int = 1048576,
+    node_type: str = "Call",
+    name_pattern: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    snapshot_path: str = str(API_SNAPSHOT_FILE),
+) -> dict[str, Any]:
+    """Strict code-intel router for repository index, search, structural analysis, and test/doc impact modes."""
+    return _CODE_INDEX_ROUTER_SERVICE.route(
+        mode=mode,
+        path=path,
+        query=query,
+        recursive=recursive,
+        output_profile=output_profile,
+        fields=fields,
+        offset=offset,
+        limit=limit,
+        max_files=max_files,
+        max_symbols=max_symbols,
+        max_edges=max_edges,
+        include_hashes=include_hashes,
+        include_private=include_private,
+        include_stdlib=include_stdlib,
+        local_rerank_top_k=local_rerank_top_k,
+        use_local_rerank=use_local_rerank,
+        summary_mode=summary_mode,
+        compress=compress,
+        store_result=store_result,
+        incremental=incremental,
+        action_mode=action_mode,
+        pattern=pattern,
+        case_insensitive=case_insensitive,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        include_hidden=include_hidden,
+        max_matches=max_matches,
+        max_file_bytes=max_file_bytes,
+        node_type=node_type,
+        name_pattern=name_pattern,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        snapshot_path=snapshot_path,
+    )
 
 
 @mcp.tool()
@@ -19003,10 +13716,6 @@ def memory_upsert(
     confidence: float = 1.0,
     source: str = "agent",
     tags: list[str] | None = None,
-    evidence: list[dict[str, Any]] | None = None,
-    provenance: str = "agent",
-    trust_level: str = "medium",
-    quarantined: bool | None = None,
 ) -> dict[str, Any]:
     """Create or update a structured context memory record."""
     _require_mutations()
@@ -19019,12 +13728,6 @@ def memory_upsert(
     entries = payload["entries"]
     now_iso = _now_iso()
     expires_at = _to_iso_expiry(ttl_days)
-    normalized_evidence = _normalize_memory_evidence(evidence)
-    normalized_provenance = _normalize_memory_provenance(provenance)
-    normalized_trust = _normalize_memory_trust_level(trust_level)
-    effective_quarantine = bool(quarantined) if quarantined is not None else (
-        normalized_trust == "low" and not normalized_evidence
-    )
     updated = False
     for entry in entries:
         if entry.get("namespace") == namespace and entry.get("key") == key:
@@ -19034,38 +13737,23 @@ def memory_upsert(
             entry["tags"] = tags or []
             entry["updated_at"] = now_iso
             entry["expires_at"] = expires_at
-            if normalized_evidence:
-                entry["evidence"] = normalized_evidence
-            _memory_apply_metadata(
-                entry,
-                provenance=normalized_provenance,
-                trust_level=normalized_trust,
-                quarantined=effective_quarantine,
-            )
             updated = True
             break
 
     if not updated:
-        row = {
-            "namespace": namespace,
-            "key": key,
-            "value": value,
-            "confidence": confidence,
-            "source": source,
-            "tags": tags or [],
-            "created_at": now_iso,
-            "updated_at": now_iso,
-            "expires_at": expires_at,
-        }
-        if normalized_evidence:
-            row["evidence"] = normalized_evidence
-        _memory_apply_metadata(
-            row,
-            provenance=normalized_provenance,
-            trust_level=normalized_trust,
-            quarantined=effective_quarantine,
+        entries.append(
+            {
+                "namespace": namespace,
+                "key": key,
+                "value": value,
+                "confidence": confidence,
+                "source": source,
+                "tags": tags or [],
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "expires_at": expires_at,
+            }
         )
-        entries.append(row)
 
     _memory_save(payload)
     return {
@@ -19074,9 +13762,6 @@ def memory_upsert(
         "key": key,
         "updated": True,
         "expires_at": expires_at,
-        "evidence_count": len(normalized_evidence),
-        "trust_level": normalized_trust,
-        "quarantined": effective_quarantine,
     }
 
 
@@ -19088,10 +13773,6 @@ def memory_summary_upsert(
     confidence: float = 1.0,
     source: str = "agent",
     tags: list[str] | None = None,
-    evidence: list[dict[str, Any]] | None = None,
-    provenance: str = "agent",
-    trust_level: str = "medium",
-    quarantined: bool | None = None,
 ) -> dict[str, Any]:
     """Create or update memory summary/focus records for context retention."""
     _require_mutations()
@@ -19103,12 +13784,6 @@ def memory_summary_upsert(
     summaries = payload["summaries"]
     now_iso = _now_iso()
     expires_at = _to_iso_expiry(ttl_days)
-    normalized_evidence = _normalize_memory_evidence(evidence)
-    normalized_provenance = _normalize_memory_provenance(provenance)
-    normalized_trust = _normalize_memory_trust_level(trust_level)
-    effective_quarantine = bool(quarantined) if quarantined is not None else (
-        normalized_trust == "low" and not normalized_evidence
-    )
     updated = False
     for row in summaries:
         if row.get("namespace") == namespace and row.get("focus") == focus:
@@ -19118,37 +13793,22 @@ def memory_summary_upsert(
             row["tags"] = tags or []
             row["updated_at"] = now_iso
             row["expires_at"] = expires_at
-            if normalized_evidence:
-                row["evidence"] = normalized_evidence
-            _memory_apply_metadata(
-                row,
-                provenance=normalized_provenance,
-                trust_level=normalized_trust,
-                quarantined=effective_quarantine,
-            )
             updated = True
             break
     if not updated:
-        row = {
-            "namespace": namespace,
-            "focus": focus,
-            "summary": summary,
-            "confidence": confidence,
-            "source": source,
-            "tags": tags or [],
-            "created_at": now_iso,
-            "updated_at": now_iso,
-            "expires_at": expires_at,
-        }
-        if normalized_evidence:
-            row["evidence"] = normalized_evidence
-        _memory_apply_metadata(
-            row,
-            provenance=normalized_provenance,
-            trust_level=normalized_trust,
-            quarantined=effective_quarantine,
+        summaries.append(
+            {
+                "namespace": namespace,
+                "focus": focus,
+                "summary": summary,
+                "confidence": confidence,
+                "source": source,
+                "tags": tags or [],
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "expires_at": expires_at,
+            }
         )
-        summaries.append(row)
     _memory_save(payload)
     return {
         "path": str(MEMORY_FILE),
@@ -19156,9 +13816,6 @@ def memory_summary_upsert(
         "focus": focus,
         "updated": True,
         "expires_at": expires_at,
-        "evidence_count": len(normalized_evidence),
-        "trust_level": normalized_trust,
-        "quarantined": effective_quarantine,
     }
 
 
@@ -19224,7 +13881,6 @@ def memory_get(
     namespace: str | None = None,
     key: str | None = None,
     include_expired: bool = False,
-    include_quarantined: bool = False,
     max_entries: int = 200,
     include_summaries: bool = True,
     include_effective_decisions: bool = True,
@@ -19242,16 +13898,11 @@ def memory_get(
     now = datetime.now(timezone.utc)
     entries_out: list[dict[str, Any]] = []
     summaries_out: list[dict[str, Any]] = []
-    quarantined_entries = 0
-    quarantined_summaries = 0
 
     for entry in payload["entries"]:
         if namespace is not None and entry.get("namespace") != namespace:
             continue
         if key is not None and entry.get("key") != key:
-            continue
-        if _memory_row_quarantined(entry) and not include_quarantined:
-            quarantined_entries += 1
             continue
         expired = _is_expired(entry.get("expires_at"), now)
         if expired and not include_expired:
@@ -19265,9 +13916,6 @@ def memory_get(
     if include_summaries:
         for row in payload["summaries"]:
             if namespace is not None and row.get("namespace") != namespace:
-                continue
-            if _memory_row_quarantined(row) and not include_quarantined:
-                quarantined_summaries += 1
                 continue
             expired = _is_expired(row.get("expires_at"), now)
             if expired and not include_expired:
@@ -19312,8 +13960,6 @@ def memory_get(
         "summaries": summaries_out,
         "effective_decision_count": len(effective_decisions),
         "effective_decisions": effective_decisions,
-        "quarantined_entry_count": quarantined_entries,
-        "quarantined_summary_count": quarantined_summaries,
         "usage_stats": _memory_stats_load(),
     }
     if compact_result is not None:
@@ -19407,6 +14053,775 @@ def memory_validate(
         "dropped_expired": dropped,
         "stale_entries": stale,
     }
+
+
+class MemoryRouterService:
+    """Application service for context-memory operations and policy routing."""
+
+    def route(
+        self,
+        mode: str = "get",
+        namespace: str | None = None,
+        key: str | None = None,
+        value: Any = None,
+        ttl_days: int | None = None,
+        confidence: float = 1.0,
+        source: str = "agent",
+        tags: list[str] | None = None,
+        focus: str = "",
+        summary: str = "",
+        topic: str = "",
+        decision: Any = None,
+        decided_by: str = "llm",
+        rationale: str = "",
+        include_expired: bool = False,
+        max_entries: int = 200,
+        include_summaries: bool = True,
+        include_effective_decisions: bool = True,
+        validate_paths: bool = True,
+        drop_expired: bool = False,
+        auto_compact: bool = False,
+        compact_threshold_entries: int = 80,
+        compact_threshold_chars: int = 16000,
+        compact_keep_entries: int = 40,
+        compact_summary_max_chars: int = 1200,
+        contains: str = "",
+        category: str = "",
+        error_text: str = "",
+        max_suggestions: int = 5,
+        issue: str = "",
+        root_cause: str = "",
+        fix: str = "",
+        path: str = ".codebase-tooling-mcp/reports",
+        query: str = "",
+        artifact_mode: str = "refresh",
+    ) -> dict[str, Any]:
+        allowed = {
+            "upsert",
+            "summary_upsert",
+            "decision_record",
+            "get",
+            "validate",
+            "auto_compact",
+            "failure_memory",
+            "root_cause",
+            "artifact_index",
+        }
+        if mode not in allowed:
+            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+        if mode == "upsert":
+            if namespace is None or key is None:
+                raise ValueError("namespace and key are required for upsert mode")
+            result = memory_upsert(
+                namespace=namespace,
+                key=key,
+                value=value,
+                ttl_days=ttl_days,
+                confidence=confidence,
+                source=source,
+                tags=tags,
+            )
+        elif mode == "summary_upsert":
+            if namespace is None:
+                raise ValueError("namespace is required for summary_upsert mode")
+            result = memory_summary_upsert(
+                namespace=namespace,
+                focus=focus,
+                summary=summary,
+                ttl_days=ttl_days,
+                confidence=confidence,
+                source=source,
+                tags=tags,
+            )
+        elif mode == "decision_record":
+            if namespace is None:
+                raise ValueError("namespace is required for decision_record mode")
+            result = memory_decision_record(
+                namespace=namespace,
+                topic=topic,
+                decision=decision,
+                decided_by=decided_by,
+                rationale=rationale,
+                ttl_days=ttl_days,
+                confidence=confidence,
+                source=source,
+                tags=tags,
+            )
+        elif mode == "validate":
+            result = memory_validate(
+                validate_paths=validate_paths,
+                drop_expired=drop_expired,
+                max_entries=max_entries,
+            )
+        elif mode == "auto_compact":
+            result = memory_auto_compact(
+                namespace=namespace,
+                threshold_entries=compact_threshold_entries,
+                threshold_chars=compact_threshold_chars,
+                keep_entries=compact_keep_entries,
+                summary_max_chars=compact_summary_max_chars,
+                drop_expired=drop_expired,
+            )
+        elif mode == "failure_memory":
+            result = failure_memory(
+                mode=query or "get",
+                category=category or None,
+                contains=contains or None,
+                max_entries=max_entries,
+                error_text=error_text,
+                max_suggestions=max_suggestions,
+            )
+        elif mode == "root_cause":
+            result = root_cause_memory(
+                mode=query or "list",
+                issue=issue,
+                root_cause=root_cause,
+                fix=fix,
+                max_entries=max_entries,
+            )
+        elif mode == "artifact_index":
+            result = artifact_memory_index(
+                mode=artifact_mode,
+                path=path,
+                query=query,
+                max_entries=max_entries,
+            )
+        else:
+            result = memory_get(
+                namespace=namespace,
+                key=key,
+                include_expired=include_expired,
+                max_entries=max_entries,
+                include_summaries=include_summaries,
+                include_effective_decisions=include_effective_decisions,
+                auto_compact=auto_compact,
+                compact_threshold_entries=compact_threshold_entries,
+                compact_threshold_chars=compact_threshold_chars,
+                compact_keep_entries=compact_keep_entries,
+                compact_summary_max_chars=compact_summary_max_chars,
+            )
+        return {
+            "schema": "memory_router.v1",
+            "mode": mode,
+            "result": result,
+        }
+
+
+_MEMORY_ROUTER_SERVICE = MemoryRouterService()
+
+
+@mcp.tool()
+def memory_router(
+    mode: str = "get",
+    namespace: str | None = None,
+    key: str | None = None,
+    value: Any = None,
+    ttl_days: int | None = None,
+    confidence: float = 1.0,
+    source: str = "agent",
+    tags: list[str] | None = None,
+    focus: str = "",
+    summary: str = "",
+    topic: str = "",
+    decision: Any = None,
+    decided_by: str = "llm",
+    rationale: str = "",
+    include_expired: bool = False,
+    max_entries: int = 200,
+    include_summaries: bool = True,
+    include_effective_decisions: bool = True,
+    validate_paths: bool = True,
+    drop_expired: bool = False,
+    auto_compact: bool = False,
+    compact_threshold_entries: int = 80,
+    compact_threshold_chars: int = 16000,
+    compact_keep_entries: int = 40,
+    compact_summary_max_chars: int = 1200,
+    contains: str = "",
+    category: str = "",
+    error_text: str = "",
+    max_suggestions: int = 5,
+    issue: str = "",
+    root_cause: str = "",
+    fix: str = "",
+    path: str = ".codebase-tooling-mcp/reports",
+    query: str = "",
+    artifact_mode: str = "refresh",
+) -> dict[str, Any]:
+    """Strict memory router for context memory, failure memory, root-cause memory, and artifact indexing."""
+    return _MEMORY_ROUTER_SERVICE.route(
+        mode=mode,
+        namespace=namespace,
+        key=key,
+        value=value,
+        ttl_days=ttl_days,
+        confidence=confidence,
+        source=source,
+        tags=tags,
+        focus=focus,
+        summary=summary,
+        topic=topic,
+        decision=decision,
+        decided_by=decided_by,
+        rationale=rationale,
+        include_expired=include_expired,
+        max_entries=max_entries,
+        include_summaries=include_summaries,
+        include_effective_decisions=include_effective_decisions,
+        validate_paths=validate_paths,
+        drop_expired=drop_expired,
+        auto_compact=auto_compact,
+        compact_threshold_entries=compact_threshold_entries,
+        compact_threshold_chars=compact_threshold_chars,
+        compact_keep_entries=compact_keep_entries,
+        compact_summary_max_chars=compact_summary_max_chars,
+        contains=contains,
+        category=category,
+        error_text=error_text,
+        max_suggestions=max_suggestions,
+        issue=issue,
+        root_cause=root_cause,
+        fix=fix,
+        path=path,
+        query=query,
+        artifact_mode=artifact_mode,
+    )
+
+
+@mcp.tool()
+def repo_router(
+    mode: str = "tree",
+    path: str = ".",
+    recursive: bool = True,
+    include_hidden: bool = False,
+    max_entries: int = 1000,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    file_type: str = "any",
+    max_depth: int | None = None,
+    output_profile: str | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+    adaptive_limits: bool = True,
+    encoding: str = "utf-8",
+    max_bytes: int = MAX_READ_BYTES,
+    max_chars: int = 20000,
+    max_pages: int = 20,
+    max_rows_per_sheet: int = 200,
+    start_line: int = 1,
+    end_line: int = 1,
+    context_before: int = 0,
+    context_after: int = 0,
+    requests: list[dict[str, Any]] | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Router for repository listing, reads, snippets, batches, and structured config queries."""
+    allowed = {"tree", "find", "read", "read_document", "read_snippet", "read_batch", "query_json"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "tree":
+        result = list_files(path=path, recursive=recursive, include_hidden=include_hidden, max_entries=max_entries)
+    elif mode == "find":
+        result = find_paths(
+            path=path,
+            recursive=recursive,
+            include_hidden=include_hidden,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            file_type=file_type,
+            max_depth=max_depth,
+            max_entries=max_entries,
+            output_profile=output_profile or "compact",
+            offset=offset,
+            limit=limit,
+            adaptive_limits=adaptive_limits,
+        )
+    elif mode == "read":
+        result = read_file(path=path, encoding=encoding, max_bytes=max_bytes)
+    elif mode == "read_document":
+        result = read_document(
+            path=path,
+            max_chars=max_chars,
+            max_pages=max_pages,
+            max_rows_per_sheet=max_rows_per_sheet,
+            output_profile=output_profile,
+        )
+    elif mode == "read_snippet":
+        result = read_snippet(
+            path=path,
+            start_line=start_line,
+            end_line=end_line,
+            context_before=context_before,
+            context_after=context_after,
+            encoding=encoding,
+            output_profile=output_profile,
+        )
+    elif mode == "read_batch":
+        result = read_batch(
+            requests=requests or [],
+            encoding=encoding,
+            output_profile=output_profile,
+        )
+    else:
+        result = json_query(path=path, query=query, file_type=file_type, output_profile=output_profile or "normal")
+    return {"schema": "repo_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def git_router(
+    mode: str = "status",
+    ref: str = "HEAD",
+    path: str = "",
+    pathspec: str = "",
+    staged: bool = False,
+    short: bool = True,
+    limit: int = 20,
+    paths: list[str] | None = None,
+    message: str = "",
+    allow_empty: bool = False,
+    remote: str = "origin",
+    branch: str = "",
+    rebase: bool = False,
+    set_upstream: bool = False,
+    create_branch: bool = False,
+    name: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    diff_text: str = "",
+    max_findings: int = 20,
+) -> dict[str, Any]:
+    """Router for Git operations, diff summaries, risk scoring, and security triage."""
+    allowed = {
+        "init",
+        "status",
+        "diff",
+        "log",
+        "show",
+        "add",
+        "restore",
+        "commit",
+        "checkout",
+        "create_branch",
+        "fetch",
+        "pull",
+        "push",
+        "summarize_diff",
+        "risk",
+        "security",
+    }
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "init":
+        result = git_init(initial_branch=branch or name or "main")
+    elif mode == "status":
+        result = git_status(short=short)
+    elif mode == "diff":
+        result = git_diff(ref=ref if ref else None, pathspec=pathspec or None, staged=staged)
+    elif mode == "log":
+        result = git_log(limit=limit, ref=ref or "HEAD")
+    elif mode == "show":
+        result = git_show(ref=ref or "HEAD", path=path or None)
+    elif mode == "add":
+        result = git_add(paths=paths or ([path] if path else []))
+    elif mode == "restore":
+        result = git_restore(paths=paths or ([path] if path else []), staged=staged)
+    elif mode == "commit":
+        result = git_commit(message=message, allow_empty=allow_empty)
+    elif mode == "checkout":
+        result = git_checkout(ref=branch or ref, create_branch=create_branch)
+    elif mode == "create_branch":
+        result = git_create_branch(name=name or branch, checkout=create_branch or True)
+    elif mode == "fetch":
+        result = git_fetch(remote=remote, prune=staged)
+    elif mode == "pull":
+        result = git_pull(remote=remote, branch=branch or None, rebase=rebase)
+    elif mode == "push":
+        result = git_push(remote=remote, branch=branch or None, set_upstream=set_upstream)
+    elif mode == "summarize_diff":
+        result = summarize_diff(ref=ref or None, pathspec=pathspec or None, staged=staged, output_profile="compact")
+    elif mode == "risk":
+        result = risk_scoring(ref=ref or head_ref, pathspec=pathspec or None, staged=staged)
+    else:
+        patch = diff_text or git_diff(ref=f"{base_ref}...{head_ref}")
+        result = security_triage(diff_text=patch, paths=paths or ([path] if path else None), max_findings=max_findings)
+    return {"schema": "git_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def tool_router(
+    mode: str = "route",
+    query: str = "",
+    candidates: list[str] | None = None,
+    selected_tool: str = "",
+    success: bool = True,
+    latency_ms: float = 0.0,
+    min_calls: int = 2,
+    min_success_rate: float = 0.6,
+    min_score_gap: float = 5.0,
+) -> dict[str, Any]:
+    """Router for tool selection with learned ranking and intent fallback."""
+    selected = candidates or []
+    if mode == "inspect":
+        ranked = _intent_rank_candidates(query=query, candidates=selected) if selected else []
+        stats_payload = _json_file_load(TOOL_ROUTER_STATS_FILE, {"stats": {}})
+        return {
+            "schema": "tool_router.v1",
+            "mode": mode,
+            "query": query,
+            "candidates": selected,
+            "stats": stats_payload.get("stats", {}),
+            "intent_ranked": ranked,
+        }
+    result = tool_router_learned(
+        query=query,
+        candidates=selected,
+        mode=mode,
+        selected_tool=selected_tool,
+        success=success,
+        latency_ms=latency_ms,
+        min_calls=min_calls,
+        min_success_rate=min_success_rate,
+        min_score_gap=min_score_gap,
+        fallback_to_intent=True,
+    )
+    return {
+        "schema": "tool_router.v1",
+        "mode": mode,
+        "result": result,
+    }
+
+
+@mcp.tool()
+def quality_router(
+    mode: str = "self_test",
+    runner: str = "pytest",
+    target: str = "tests",
+    verbose: bool = False,
+    timeout_seconds: int = 600,
+    fail_fast: bool = False,
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    run_test_execution: bool = True,
+    run_impact_tests: bool = True,
+    run_doc_check: bool = True,
+    run_api_check: bool = True,
+    run_risk_check: bool = True,
+    run_compile_check: bool = True,
+    snapshot_path: str = str(API_SNAPSHOT_FILE),
+    max_compile_files: int = 300,
+    summary_mode: str = "quick",
+    test_runner: str = "pytest",
+    test_target: str = "tests",
+    run_docs_check: bool = True,
+    run_license_check: bool = True,
+    run_security_check: bool = True,
+    run_tests: bool = True,
+    history_path: str = str(FLAKY_HISTORY_FILE),
+    runs: int = 5,
+    update_history: bool = True,
+    block_on_risk_level: str = "high",
+    critical_globs: list[str] | None = None,
+    require_docs_for_impl_diff: bool = True,
+    require_tests_for_critical: bool = True,
+    required_tools: list[str] | None = None,
+    required_artifacts: list[str] | None = None,
+    required_result_ids: list[str] | None = None,
+    max_age_minutes: int = 60,
+    require_order: bool = False,
+    spec_text: str = "",
+    framework: str = "pytest",
+    output_path: str = "",
+    findings: list[dict[str, Any]] | None = None,
+    replace_all: bool = False,
+    run_validation: bool = False,
+) -> dict[str, Any]:
+    """Router for testing, quality gates, spec-to-tests, and batch fixes."""
+    allowed = {"self_test", "self_check", "release_readiness", "flaky", "change_impact", "required_tool_chain", "spec_to_tests", "smart_fix"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "self_test":
+        result = self_test(runner=runner, target=target, verbose=verbose, timeout_seconds=timeout_seconds, fail_fast=fail_fast)
+    elif mode == "self_check":
+        result = self_check_pipeline(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            run_test_execution=run_test_execution,
+            run_impact_tests=run_impact_tests,
+            run_doc_check=run_doc_check,
+            run_api_check=run_api_check,
+            run_risk_check=run_risk_check,
+            run_compile_check=run_compile_check,
+            snapshot_path=snapshot_path,
+            max_compile_files=max_compile_files,
+            summary_mode=summary_mode,
+        )
+    elif mode == "release_readiness":
+        result = release_readiness(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            run_docs_check=run_docs_check,
+            run_impact_check=run_impact_tests,
+            run_license_check=run_license_check,
+            run_risk_check=run_risk_check,
+            run_security_check=run_security_check,
+            run_tests=run_tests,
+            summary_mode=summary_mode,
+            test_runner=test_runner,
+            test_target=test_target,
+        )
+    elif mode == "flaky":
+        result = flaky_test_detector(
+            runner=runner,
+            target=target,
+            runs=runs,
+            timeout_seconds=timeout_seconds,
+            fail_fast=fail_fast,
+            history_path=history_path,
+            update_history=update_history,
+        )
+    elif mode == "change_impact":
+        result = change_impact_gate(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            block_on_risk_level=block_on_risk_level,
+            critical_globs=critical_globs,
+            require_docs_for_impl_diff=require_docs_for_impl_diff,
+            require_tests_for_critical=require_tests_for_critical,
+        )
+    elif mode == "required_tool_chain":
+        result = required_tool_chain(
+            required_tools=required_tools or [],
+            required_artifacts=required_artifacts or [],
+            required_result_ids=required_result_ids or [],
+            max_age_minutes=max_age_minutes,
+            require_order=require_order,
+        )
+    elif mode == "spec_to_tests":
+        result = spec_to_tests(
+            spec_text=spec_text,
+            framework=framework,
+            mode="generate",
+            output_path=output_path or None,
+        )
+    else:
+        result = smart_fix_batch(
+            findings=findings or [],
+            mode="apply",
+            replace_all=replace_all,
+            run_validation=run_validation,
+        )
+    return {"schema": "quality_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def governance_router(
+    mode: str = "policy",
+    action_mode: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    diff_text: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    recursive: bool = True,
+    run_reuse_lint: bool = True,
+    generate_spdx: bool = False,
+    auto_fix_headers: bool = False,
+    download_missing_licenses: bool = False,
+    lint_report_path: str = str(REUSE_LINT_REPORT),
+    spdx_output_path: str = str(REUSE_SPDX_REPORT),
+    max_missing_files: int = 200,
+    action: str = "",
+    risk_level: str = "medium",
+    details: str = "",
+    approval_id: str = "",
+    approved: bool = False,
+    message: str = "",
+    ref: str = "HEAD",
+    include_diff_hints: bool = False,
+) -> dict[str, Any]:
+    """Router for policy, license, runtime contract, approval, and commit lint workflows."""
+    allowed = {"policy", "license", "runtime_contract", "human_approval", "commit_lint"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "policy":
+        result = policy_simulator(base_ref=base_ref, head_ref=head_ref, diff_text=diff_text)
+    elif mode == "license":
+        result = license_monitor(
+            path=".",
+            recursive=recursive,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            run_reuse_lint=run_reuse_lint,
+            generate_spdx=generate_spdx,
+            auto_fix_headers=auto_fix_headers,
+            download_missing_licenses=download_missing_licenses,
+            lint_report_path=lint_report_path,
+            spdx_output_path=spdx_output_path,
+            max_missing_files=max_missing_files,
+        )
+    elif mode == "runtime_contract":
+        result = runtime_contract_checker()
+    elif mode == "human_approval":
+        result = human_approval_points(
+            mode=action_mode or "list",
+            action=action,
+            risk_level=risk_level,
+            details=details,
+            approval_id=approval_id,
+            approved=approved,
+        )
+    else:
+        result = commit_lint_tag(message=message, ref=ref, include_diff_hints=include_diff_hints)
+    return {"schema": "governance_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def workflow_router(
+    mode: str = "fast_path",
+    action_mode: str = "",
+    task: str = "",
+    goal: str = "",
+    constraints: list[str] | None = None,
+    include_rollback: bool = True,
+    use_cache: bool = True,
+    refresh_cache: bool = False,
+    cache_ttl_minutes: int = 240,
+    lanes: list[str] | None = None,
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    actions: list[str] | None = None,
+    requirements: list[str] | None = None,
+    checks: list[dict[str, Any]] | None = None,
+    query: str = "",
+    path: str = ".codebase-tooling-mcp/reports",
+    max_entries: int = 100,
+    category: str = "",
+    contains: str = "",
+    error_text: str = "",
+    max_suggestions: int = 5,
+    issue: str = "",
+    root_cause: str = "",
+    fix: str = "",
+    replay_id: str = "",
+    event: dict[str, Any] | None = None,
+    max_events: int = 1000,
+    shard_size: int = 50,
+    refresh_index: bool = True,
+    run_readiness: bool = True,
+    enforce_tool_chain: bool = True,
+    store_result: bool = False,
+) -> dict[str, Any]:
+    """Router for workflow orchestration, artifact memory, failure memory, and replay helpers."""
+    allowed = {"fast_path", "compile", "multi_agent", "constraint_check", "confidence", "artifact_index", "failure_memory", "root_cause", "execution_replay", "auto_shard"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "fast_path":
+        result = fast_path_dev(
+            task=task,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            refresh_index=refresh_index,
+            run_readiness=run_readiness,
+            enforce_tool_chain=enforce_tool_chain,
+            store_result=store_result,
+        )
+    elif mode == "compile":
+        result = workflow_compiler(
+            goal=goal,
+            constraints=constraints,
+            include_rollback=include_rollback,
+            use_cache=use_cache,
+            refresh_cache=refresh_cache,
+            cache_ttl_minutes=cache_ttl_minutes,
+        )
+    elif mode == "multi_agent":
+        result = multi_agent_lane(task=task, lanes=lanes, base_ref=base_ref, head_ref=head_ref)
+    elif mode == "constraint_check":
+        result = constraint_solver_for_tasks(actions=actions or [], requirements=requirements or [])
+    elif mode == "confidence":
+        result = confidence_scoring(checks=checks or [])
+    elif mode == "artifact_index":
+        result = artifact_memory_index(mode=action_mode or "refresh", path=path, query=query, max_entries=max_entries)
+    elif mode == "failure_memory":
+        result = failure_memory(
+            mode=action_mode or "get",
+            category=category or None,
+            contains=contains or None,
+            max_entries=max_entries,
+            error_text=error_text,
+            max_suggestions=max_suggestions,
+        )
+    elif mode == "root_cause":
+        result = root_cause_memory(
+            mode=action_mode or "list",
+            issue=issue,
+            root_cause=root_cause,
+            fix=fix,
+            max_entries=max_entries,
+        )
+    elif mode == "execution_replay":
+        result = execution_replay(mode=action_mode or "read", replay_id=replay_id, event=event, max_events=max_events)
+    else:
+        result = auto_sharding_for_analysis(path=path or ".", shard_size=shard_size)
+    return {"schema": "workflow_router.v1", "mode": mode, "result": result}
+
+
+@mcp.tool()
+def runtime_guard_router(
+    mode: str = "benchmark",
+    action_mode: str = "",
+    tools: list[str] | None = None,
+    iterations: int = 3,
+    warmup: int = 1,
+    baseline_path: str = str(OUTPUT_BASELINE_FILE),
+    tolerance_ratio: float = 1.2,
+    max_output_chars: int | None = None,
+    default_output_profile: str | None = None,
+    reset: bool = False,
+    max_tokens: int = 200000,
+    max_calls: int = 50,
+    max_seconds: int = 600,
+    used_tokens: int = 0,
+    used_calls: int = 0,
+    used_seconds: int = 0,
+    tool: str | None = None,
+    max_age_minutes: int = 1440,
+    limit: int = 50,
+    result_id: str = "",
+    value: Any = None,
+    offset: int = 0,
+    fields: list[str] | None = None,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    """Router for benchmarks, guards, caches, result handles, and workspace facts."""
+    allowed = {"benchmark", "output_size", "golden_output", "token_budget", "cost_budget", "cache", "result_handle", "workspace_facts"}
+    if mode not in allowed:
+        raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+    if mode == "benchmark":
+        result = tool_benchmark(tools=tools, iterations=iterations, warmup=warmup)
+    elif mode == "output_size":
+        result = output_size_guard(mode=action_mode or "check", tools=tools, tolerance_ratio=tolerance_ratio, baseline_path=baseline_path)
+    elif mode == "golden_output":
+        result = golden_output_guard(mode=action_mode or "check", tools=tools, baseline_path=baseline_path)
+    elif mode == "token_budget":
+        result = token_budget_guard(max_output_chars=max_output_chars, default_output_profile=default_output_profile, reset=reset)
+    elif mode == "cost_budget":
+        result = cost_budget_enforcer(
+            mode=action_mode or "check",
+            max_tokens=max_tokens,
+            max_calls=max_calls,
+            max_seconds=max_seconds,
+            used_tokens=used_tokens,
+            used_calls=used_calls,
+            used_seconds=used_seconds,
+        )
+    elif mode == "cache":
+        result = cache_control(mode=action_mode or "stats", tool=tool, max_age_minutes=max_age_minutes, limit=limit)
+    elif mode == "result_handle":
+        result = result_handle(mode=action_mode or "fetch", result_id=result_id, tool=tool, value=value, offset=offset, limit=limit, fields=fields)
+    else:
+        result = workspace_facts(refresh=refresh)
+    return {"schema": "runtime_guard_router.v1", "mode": mode, "result": result}
 
 
 @mcp.tool()
@@ -19613,8 +15028,10 @@ starlette_app = Starlette(
     lifespan=lifespan,
 )
 
+authenticated_starlette_app = MCPHTTPAuthMiddleware(starlette_app)
+
 app = CORSMiddleware(
-    starlette_app,
+    authenticated_starlette_app,
     allow_origins=ALLOW_ORIGINS,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],

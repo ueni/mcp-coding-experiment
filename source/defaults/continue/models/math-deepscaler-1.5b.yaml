@@ -1,10 +1,10 @@
-name: review-granite3.3-2b
+name: math-deepscaler-1.5b
 version: 0.0.1
 schema: v1
 models:
-  - name: Review - Granite 3.3 2B
+  - name: Math - DeepScaler 1.5B
     provider: ollama
-    model: granite3.3:2b
+    model: deepscaler:1.5b
     apiBase: http://127.0.0.1:2345
     roles:
       - chat

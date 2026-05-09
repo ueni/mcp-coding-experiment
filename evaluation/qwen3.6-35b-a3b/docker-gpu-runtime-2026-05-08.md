@@ -76,6 +76,6 @@ This smoke result validates the Docker GPU/Ollama runtime only. It is not a Qwen
 
 ## Remaining blocker
 
-The Qwen3.6-35B-A3B weights are still absent from the runtime. The target benchmark remains blocked until ueni explicitly authorizes a specific large model pull/download or provides the model weights/cache.
+Historical note: at the time of this runtime-only check, Qwen3.6-35B-A3B weights were absent from the runtime. Later 2026-05-09 artifacts record the selected GGUF acquisition, smoke run, and full bounded target-model run.
 
 No large target-model weights were downloaded as part of this evidence update.

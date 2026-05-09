@@ -1,7 +1,7 @@
 {
   "name": "mcp-inline-autocomplete",
   "displayName": "MCP Inline Autocomplete",
-  "description": "Inline autocomplete provider backed by task_router autocomplete mode.",
+  "description": "Inline autocomplete provider backed by an MCP tool endpoint.",
   "version": "0.0.1",
   "publisher": "local",
   "engines": {
@@ -34,6 +34,11 @@
           "default": 1500,
           "minimum": 200,
           "description": "Timeout for MCP requests in milliseconds."
+        },
+        "mcpInlineAutocomplete.bearerTokenEnv": {
+          "type": "string",
+          "default": "MCP_HTTP_BEARER_TOKEN",
+          "description": "Environment variable containing the bearer token to send in Authorization. Set empty only for explicit insecure-local tests."
         },
         "mcpInlineAutocomplete.maxTokens": {
           "type": "number",

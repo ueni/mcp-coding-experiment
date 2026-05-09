@@ -8,7 +8,7 @@ set -euo pipefail
 
 umask 027
 
-DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,smollm2:360m,granite3.3:2b,deepseek-r1:1.5b,granite3.2-vision:2b"
+DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
 
 is_truthy() {
   case "${1:-}" in
@@ -354,6 +354,7 @@ apply_repo_defaults() {
       printf '
 [mcp_servers."codebase-tooling-mcp"]
 url = "http://localhost:8000/mcp"
+bearer_token_env_var = "MCP_HTTP_BEARER_TOKEN"
 ' >> /home/app/.codex/config.toml
     fi
   fi
@@ -456,4 +457,4 @@ else
 fi
 
 
-exec "${CODING_VENV_PYTHON:-/opt/codebase-tooling/coding-venv/bin/python}" /app/server.py
+exec python /app/server.py

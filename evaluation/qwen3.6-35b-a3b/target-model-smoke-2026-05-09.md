@@ -102,4 +102,4 @@ EOF
 - Target-model inference starts in the repository Docker/Ollama runtime.
 - The Docker/Ollama GPU offload blocker was the missing host render device group in direct `docker run` commands that bypass `/app/entrypoint.sh` group mapping.
 - The rerun used Vulkan and offloaded 41/41 layers to GPU, producing 7.929 tokens/sec on the first scenario.
-- This is still only a one-scenario smoke result with a `partial` quality verdict, not the full seven-scenario issue #1 benchmark acceptance result.
+- This is only the one-scenario smoke result with a `partial` quality verdict; the full seven-scenario issue #1 evaluation result is recorded separately in `results/results-docker-ollama-full-2026-05-09.json`.

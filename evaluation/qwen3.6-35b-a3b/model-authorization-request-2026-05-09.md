@@ -12,7 +12,7 @@ Issue: #1
 
 ## Blocker
 
-This is an explicit blocked evaluation artifact for the Qwen3.6-35B-A3B run required by issue #1.
+This is a historical authorization-blocker artifact for the Qwen3.6-35B-A3B run required by issue #1. It is retained to document model acquisition provenance; later checked-in smoke and bounded result artifacts supersede it as the current evaluation state.
 
 The Docker/devcontainer runtime path is verified, but the actual Qwen3.6-35B-A3B benchmark cannot be completed until a specific target model artifact is authorized or supplied.
 
@@ -51,4 +51,4 @@ After the model artifact is authorized/provided, run the seven scenario categori
 - current-orchestrator comparison outputs and quality/usability judgments;
 - known limitations, operational costs, and final viability recommendation.
 
-Until that decision is made, the issue #1 acceptance criteria for the actual Qwen3.6-35B-A3B run and measurements remain blocked. PR #2 is scoped as evaluation-artifact/runtime-readiness evidence only and must not close or claim issue #1 unless option 1 or 2 above is completed and this report is rerun with real model outputs.
+Historical status: this blocker applied before the selected GGUF was available locally and before the issue #1 acceptance criteria could be evaluated with real target-model output. The current PR state includes real target-model smoke and bounded run outputs; use the canonical evaluation doc and report template for the current issue #1 status.

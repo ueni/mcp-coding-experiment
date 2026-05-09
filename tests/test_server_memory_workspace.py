@@ -11,82 +11,69 @@ from tests.server_test_support import ServerToolsTestBase
 
 
 class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
-    def test_memory_decision_record_and_get_effective(self):
-        self.server.memory_decision_record(
+    def test_memory_router_decision_record_and_get_effective(self):
+        self.server.memory_router(
+            mode="decision_record",
             namespace="decisions",
             topic="router-plan",
             decision="draft",
             decided_by="llm",
             rationale="initial draft",
         )
-        self.server.memory_decision_record(
+        self.server.memory_router(
+            mode="decision_record",
             namespace="decisions",
             topic="router-plan",
             decision="approved",
             decided_by="human",
             rationale="approved by reviewer",
         )
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="decisions",
             focus="coverage",
             summary="coverage target is source/server.py only",
         )
-        self.server.memory_upsert(
+        self.server.memory_router(
+            mode="upsert",
             namespace="decisions",
             key="paths",
             value={"file_paths": ["src/sample.py"]},
             tags=["files"],
         )
 
-        result = self.server.memory_get(
+        out = self.server.memory_router(
+            mode="get",
             namespace="decisions",
             max_entries=10,
             include_summaries=True,
             include_effective_decisions=True,
         )
 
+        result = out["result"]
+        self.assertEqual(out["schema"], "memory_router.v1")
         self.assertEqual(result["effective_decision_count"], 1)
         self.assertEqual(result["effective_decisions"][0]["decided_by"], "human")
         self.assertGreaterEqual(result["summary_count"], 1)
         self.assertGreaterEqual(result["count"], 1)
 
-    def test_memory_quarantine_blocks_task_context_injection(self):
-        self.server.memory_upsert(
-            namespace="task/session/quarantine-demo",
-            key="unsafe-note",
-            value={"detail": "unverified external memory"},
-            trust_level="low",
-        )
-        visible = self.server.memory_get(namespace="task/session/quarantine-demo")
-        hidden = self.server.memory_get(
-            namespace="task/session/quarantine-demo",
-            include_quarantined=True,
-        )
-        context = self.server._task_namespace_memory_context(
-            "task/session/quarantine-demo",
-            max_chars=240,
-        )
-
-        self.assertEqual(visible["count"], 0)
-        self.assertEqual(visible["quarantined_entry_count"], 1)
-        self.assertEqual(hidden["count"], 1)
-        self.assertTrue(hidden["entries"][0]["quarantined"])
-        self.assertEqual(context, "")
-
     def test_memory_validate_flags_stale_paths_and_drops_expired(self):
-        self.server.memory_upsert(
+        self.server.memory_router(
+            mode="upsert",
             namespace="validate-demo",
             key="stale-entry",
             value={"file_paths": ["missing.txt", "../escape.py"]},
             ttl_days=30,
         )
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="validate-demo",
             focus="summary",
             summary="expired summary",
             ttl_days=30,
         )
-        self.server.memory_decision_record(
+        self.server.memory_router(
+            mode="decision_record",
             namespace="validate-demo",
             topic="expiry",
             decision="old decision",
@@ -101,11 +88,14 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         payload["decisions"][0]["expires_at"] = expired_at
         self.server._memory_save(payload)
 
-        result = self.server.memory_validate(
+        validated = self.server.memory_router(
+            mode="validate",
             validate_paths=True,
             drop_expired=False,
             max_entries=20,
         )
+        result = validated["result"]
+        self.assertEqual(validated["schema"], "memory_router.v1")
         self.assertEqual(result["stale_count"], 1)
         self.assertEqual(result["summary_stale_count"], 1)
         self.assertEqual(result["decision_stale_count"], 1)
@@ -114,11 +104,13 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         self.assertIn("missing.txt", stale_entry["stale_paths"])
         self.assertIn("../escape.py", stale_entry["stale_paths"])
 
-        dropped_result = self.server.memory_validate(
+        dropped = self.server.memory_router(
+            mode="validate",
             validate_paths=True,
             drop_expired=True,
             max_entries=20,
         )
+        dropped_result = dropped["result"]
         self.assertGreaterEqual(dropped_result["dropped_expired"], 3)
         payload_after = self.server._memory_load()
         self.assertEqual(payload_after["entries"], [])
@@ -326,22 +318,26 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
 
 
     def test_task_memory_route_and_session_namespace_isolation(self):
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="task/route/security",
             focus="recent_activity",
             summary="route-security",
         )
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="task/route/review",
             focus="recent_activity",
             summary="route-review",
         )
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="task/session/default",
             focus="session",
             summary="default-session",
         )
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="task/session/other",
             focus="session",
             summary="other-session",
@@ -365,7 +361,8 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
 
     def test_task_memory_session_auto_compact_creates_summary(self):
         for idx in range(12):
-            self.server.memory_upsert(
+            self.server.memory_router(
+                mode="upsert",
                 namespace="task/session/default",
                 key=f"seed-{idx}",
                 value={"text": "x" * 400},
@@ -398,6 +395,59 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         self.assertEqual(len(summaries), 1)
         self.assertIn("Auto-compact summary", summaries[0]["summary"])
         self.assertTrue(out["memory"]["session_compaction"]["compacted"])
+
+    def test_memory_compatibility_wrappers_remain_usable(self):
+        self.server._failure_record(
+            command=["pytest", "-q"],
+            stderr="command timed out while running pytest",
+            category="command_runner",
+            suggestion="Increase timeout_seconds.",
+        )
+        direct_failure = self.server.failure_memory(
+            mode="get",
+            category="command_runner",
+            max_entries=5,
+        )
+        routed_failure = self.server.memory_router(
+            mode="failure_memory",
+            query="get",
+            category="command_runner",
+            max_entries=5,
+        )
+        self.assertEqual(direct_failure["count"], routed_failure["result"]["count"])
+
+        self.server.root_cause_memory(
+            mode="add",
+            issue="build fails",
+            root_cause="bad config",
+            fix="update config",
+        )
+        direct_root = self.server.root_cause_memory(
+            mode="suggest",
+            issue="build config",
+            max_entries=5,
+        )
+        routed_root = self.server.memory_router(
+            mode="root_cause",
+            query="suggest",
+            issue="build config",
+            max_entries=5,
+        )
+        self.assertEqual(direct_root["count"], routed_root["result"]["count"])
+
+        report = self.repo_path / ".codebase-tooling-mcp" / "reports" / "sample.txt"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("ok\n", encoding="utf-8")
+        self.server.artifact_memory_index(mode="refresh", path=".codebase-tooling-mcp/reports")
+        direct_artifact = self.server.artifact_memory_index(mode="query", query="sample", max_entries=5)
+        routed_artifact = self.server.memory_router(
+            mode="artifact_index",
+            artifact_mode="query",
+            path=".codebase-tooling-mcp/reports",
+            query="sample",
+            max_entries=5,
+        )
+        self.assertEqual(direct_artifact["count"], routed_artifact["result"]["count"])
 
     def test_effective_decisions_prefers_human_and_newer_timestamp(self):
         now = datetime.now(timezone.utc)

@@ -11,7 +11,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG APP_UID=1000
 ARG APP_GID=1000
 ARG OLLAMA_VERSION=0.18.2
-ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,smollm2:360m,granite3.3:2b,deepseek-r1:1.5b,granite3.2-vision:2b"
+ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
 
@@ -20,8 +20,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_CACHE_DIR=/var/cache/buildkit/pip \
-    VIRTUAL_ENV=/opt/codebase-tooling/coding-venv \
-    PATH=/opt/codebase-tooling/coding-venv/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     DEBIAN_FRONTEND=noninteractive \
     REPO_PATH=/repo \
     HOST=0.0.0.0 \
@@ -42,7 +40,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CODING_DEFAULT_MODEL=qwen2.5-coder:3b \
     CODING_MICRO_MODEL=qwen2.5-coder:1.5b \
     CODING_MICRO_MAX_PROMPT_CHARS=600 \
-    CONTINUE_OLLAMA_MODELS=qwen2.5-coder:3b,qwen2.5-coder:1.5b,smollm2:360m,granite3.3:2b,deepseek-r1:1.5b,granite3.2-vision:2b \
+    CONTINUE_OLLAMA_MODELS=qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b \
     OLLAMA_ALLOW_PULL=false \
     OLLAMA_PRELOAD_MODELS=${OLLAMA_PRELOAD_MODELS} \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
@@ -84,6 +82,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /app
 
 COPY requirements.txt ./
+RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+    pip install --root-user-action=ignore -r requirements.txt
 RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
@@ -163,8 +163,9 @@ RUN groupadd --gid "${APP_GID}" app \
     && echo 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app \
     && chmod 0440 /etc/sudoers.d/app \
     && visudo -cf /etc/sudoers.d/app \
-    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models \
+    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
     && cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/ \
+    && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
     && rm -rf /tmp/ollama-models \
     && chown -R app:app /app /models /home/app /opt/codebase-tooling
 

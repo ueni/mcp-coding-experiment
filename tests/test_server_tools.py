@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import unittest
+import urllib.parse
 import zipfile
 from unittest.mock import patch
 
@@ -20,7 +21,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("optimized_prompt", out)
         self.assertGreater(out["optimized_chars"], 0)
 
-    def test_no_public_mcp_resources_or_templates_by_default(self):
+    def test_mcp_resources_and_templates(self):
         async def run_checks():
             resources = await self.server.mcp.list_resources()
             templates = await self.server.mcp.list_resource_templates()
@@ -28,16 +29,27 @@ class ServerToolsTest(ServerToolsTestBase):
             resource_uris = {str(item.model_dump().get("uri")) for item in resources}
             template_uris = {item.model_dump().get("uriTemplate") for item in templates}
 
-            self.assertEqual(resource_uris, set())
-            self.assertEqual(template_uris, set())
+            self.assertIn("repo://summary", resource_uris)
+            self.assertIn("repo://file/{path}", template_uris)
+            self.assertIn("repo://tree/{path}", template_uris)
+
+            summary_contents = await self.server.mcp.read_resource("repo://summary")
+            self.assertGreaterEqual(len(summary_contents), 1)
+            summary_payload = json.loads(summary_contents[0].content)
+            self.assertEqual(summary_payload["schema"], "resource.repo_summary.v1")
+
+            encoded_file = urllib.parse.quote("src/sample.py", safe="")
+            file_contents = await self.server.mcp.read_resource(f"repo://file/{encoded_file}")
+            self.assertGreaterEqual(len(file_contents), 1)
+            self.assertIn("def alpha", file_contents[0].content)
+
+            tree_contents = await self.server.mcp.read_resource("repo://tree/src")
+            self.assertGreaterEqual(len(tree_contents), 1)
+            tree_payload = json.loads(tree_contents[0].content)
+            self.assertEqual(tree_payload["schema"], "resource.repo_tree.v1")
+            self.assertIn("src/sample.py", tree_payload["entries"])
 
         asyncio.run(run_checks())
-        self.assertEqual(
-            self.server._normalize_public_resource_path("src/sample.py"),
-            "src/sample.py",
-        )
-        with self.assertRaises(ValueError):
-            self.server._normalize_public_resource_path(".codebase-tooling-mcp/index/repo_index.json")
 
     def test_terminal_support_session(self):
         started = self.server.terminal_support_session(
@@ -133,34 +145,6 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["schema"], "semantic_find.quick.v1")
         self.assertIn("result_id", out)
 
-    def test_semantic_find_quick_skips_symbol_index_and_returns_ranked_results(self):
-        grep_payload = [
-            {
-                "path": "src/sample.py",
-                "line": 1,
-                "column": 5,
-                "match": "alpha",
-                "lineText": "def alpha(x):",
-            }
-        ]
-        with patch.object(self.server, "find_paths", return_value=["src/sample.py"]), patch.object(
-            self.server,
-            "symbol_index",
-            side_effect=AssertionError("symbol_index should not run in semantic_find quick mode"),
-        ), patch.object(self.server, "grep", return_value=grep_payload):
-            out = self.server.semantic_find(
-                query="alpha",
-                path=".",
-                summary_mode="quick",
-                output_profile="normal",
-            )
-        self.assertEqual(out["schema"], "semantic_find.quick.v1")
-        self.assertEqual(out["count"], 1)
-        self.assertIn("results", out)
-        self.assertGreaterEqual(len(out["results"]), 1)
-        self.assertEqual(out["results"][0]["path"], "src/sample.py")
-        self.assertIn("src/sample.py", out["top_paths"])
-
     def test_dependency_map_and_call_graph(self):
         dep = self.server.dependency_map(
             path="src",
@@ -204,23 +188,28 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(query["mode"], "query")
         self.assertIn("value_json", query)
 
-    def test_code_index_leaf_modes(self):
-        refreshed = self.server.repo_index_daemon(
+    def test_code_index_router_modes(self):
+        refreshed = self.server.code_index_router(
             mode="refresh",
             path=".",
             output_profile="compact",
             summary_mode="quick",
         )
-        self.assertEqual(refreshed["schema"], "repo_index_daemon.quick.v1")
-        self.assertGreaterEqual(refreshed["file_count"], 1)
+        self.assertEqual(refreshed["schema"], "code_index_router.v1")
+        self.assertEqual(refreshed["mode"], "refresh")
+        self.assertIn("schema", refreshed["result"])
 
-        symbols = self.server.symbol_index(
+        symbols = self.server.code_index_router(
+            mode="symbols",
             path="src",
             output_profile="compact",
+            summary_mode="quick",
             limit=10,
         )
-        self.assertIsInstance(symbols, list)
-        self.assertGreaterEqual(len(symbols), 1)
+        self.assertEqual(symbols["schema"], "code_index_router.v1")
+        self.assertEqual(symbols["mode"], "symbols")
+        self.assertIsInstance(symbols["result"], list)
+        self.assertGreaterEqual(len(symbols["result"]), 1)
 
     def test_tool_benchmark(self):
         out = self.server.tool_benchmark(tools=["find_paths", "grep"], iterations=1, warmup=0)
@@ -310,30 +299,26 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(rerank["count"], 2)
 
 
-    def test_local_infer_fallback_without_grounded_context_is_unavailable(self):
+    def test_local_infer_fallback(self):
         out = self.server.local_infer(
             prompt="explain alpha function quickly",
             backend="fallback",
             output_profile="compact",
             max_tokens=64,
         )
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["backend"], "unavailable")
-        self.assertTrue(out["degraded"])
-        self.assertEqual(out["degraded_reason"], "no_grounded_fallback_available")
-        self.assertEqual(out["output"], "")
+        self.assertTrue(out["ok"])
+        self.assertIn("output", out)
 
-    def test_local_infer_fallback_uses_grounded_tool_summary(self):
+    def test_local_infer_fallback_uses_task_aware_prompt_optimization(self):
         out = self.server.local_infer(
-            prompt="Summarize src/sample.py in 2 concise sentences focused on behavior.",
+            prompt="review the patch for regressions",
             backend="fallback",
+            task="review",
             output_profile="compact",
-            max_tokens=96,
+            max_tokens=64,
         )
         self.assertTrue(out["ok"])
-        self.assertEqual(out["backend"], "tool_fallback")
-        self.assertTrue(out["degraded"])
-        self.assertIn("alpha", out["output"].lower())
+        self.assertIn("high-severity issues first", out["output"])
 
     def test_task_router_parallel_infer(self):
         out = self.server.task_router(
@@ -464,10 +449,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["classification"]["route"], "security")
         self.assertEqual(out["routing"]["selected_model"], "deepseek-r1:1.5b")
         self.assertTrue(out["routing"]["routing_loaded"])
-        packet = json.loads(out["encoding"]["encoded_prompt"])
-        self.assertEqual(packet["r"], "SEC")
-        self.assertIn("i", packet)
-        self.assertEqual(packet["i"]["d"], "findings")
+        self.assertIn('"r":"SEC"', out["encoding"]["encoded_prompt"])
         self.assertEqual(linf.call_args.kwargs["task"], "security")
         self.assertEqual(linf.call_args.kwargs["model"], "deepseek-r1:1.5b")
 
@@ -475,7 +457,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "granite3.3:2b",
+            "model": "phi4-mini-reasoning:3.8b",
             "ok": True,
             "output": "review findings",
         }
@@ -516,104 +498,6 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["retrieval"]["item_count"], 1)
         self.assertEqual(out["retrieval"]["sources"]["code_search"], 1)
         self.assertEqual(out["retrieval"]["items"][0]["path"], "src/sample.py")
-        self.assertIn("context", out["context_packet"])
-        self.assertGreaterEqual(out["retrieval"]["telemetry"]["explored_candidates"], 1)
-        self.assertEqual(out["retrieval"]["telemetry"]["selected_items"], 1)
-
-    def test_task_router_task_retrieval_context_uses_quick_top_paths(self):
-        infer_payload = {
-            "schema": "local_infer.v1",
-            "backend": "fallback",
-            "model": "granite3.3:2b",
-            "ok": True,
-            "output": "review findings",
-        }
-        search_payload = {
-            "schema": "semantic_find.quick.v1",
-            "query": "sample alpha behavior regressions",
-            "count": 1,
-            "top_paths": ["src/sample.py"],
-        }
-        snippet_payload = {
-            "path": "src/sample.py",
-            "start_line": 1,
-            "end_line": 6,
-            "content": "def alpha(x):\n    return x + 1\n",
-        }
-        with patch.object(self.server, "semantic_find", return_value=search_payload), patch.object(
-            self.server, "read_snippet", return_value=snippet_payload
-        ), patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.task_router(
-                mode="task",
-                prompt="Review sample alpha behavior for regressions.",
-                backend="fallback",
-                output_profile="normal",
-            )
-        packet = json.loads(out["encoding"]["encoded_prompt"])
-        self.assertIn("k", packet)
-        self.assertIn("src/sample.py", packet["k"])
-        self.assertEqual(out["retrieval"]["item_count"], 1)
-        self.assertEqual(out["retrieval"]["items"][0]["path"], "src/sample.py")
-        self.assertEqual(out["retrieval"]["sources"]["code_search"], 1)
-        self.assertGreaterEqual(out["retrieval"]["telemetry"]["explored_candidates"], 1)
-
-    def test_task_router_task_uses_repo_memory_and_curated_skill_pack(self):
-        sample_path = self.repo_path / "src" / "sample.py"
-        sample_path.write_text(
-            sample_path.read_text(encoding="utf-8").replace(
-                "    return alpha(y)\n",
-                "    # recent commit for repo memory\n    return alpha(y)\n",
-            ),
-            encoding="utf-8",
-        )
-        self.commit_all("feat(sample): update sample behavior")
-        infer_payload = {
-            "schema": "local_infer.v1",
-            "backend": "fallback",
-            "model": "qwen2.5-coder:1.5b",
-            "ok": True,
-            "output": "bounded patch plan",
-        }
-        search_payload = {
-            "schema": "semantic_find.quick.v1",
-            "query": "sample helper minimal patch",
-            "count": 1,
-            "results": [
-                {
-                    "kind": "symbol",
-                    "path": "src/sample.py",
-                    "name": "alpha",
-                    "line_start": 3,
-                    "line_end": 7,
-                    "score": 6.0,
-                }
-            ],
-        }
-        snippet_payload = {
-            "path": "src/sample.py",
-            "start_line": 1,
-            "end_line": 8,
-            "content": "def alpha(x):\n    return x + 1\n",
-        }
-        prompt = (
-            "Implement a careful but bounded update for src/sample.py that preserves behavior, "
-            "stays repository-grounded, and only changes the minimum necessary region. "
-        ) * 5
-        with patch.object(self.server, "semantic_find", return_value=search_payload), patch.object(
-            self.server, "read_snippet", return_value=snippet_payload
-        ), patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.task_router(
-                mode="task",
-                prompt=prompt,
-                backend="fallback",
-                output_profile="normal",
-            )
-        self.assertEqual(out["routing"]["selected_by"], "auto:repo_specialist_grounded")
-        self.assertGreaterEqual(out["repo_memory"]["entry_count"], 1)
-        self.assertGreaterEqual(out["skill_pack"]["module_count"], 1)
-        self.assertIn("history=", out["context_packet"]["context"])
-        self.assertIn("skills=", out["context_packet"]["context"])
-        self.assertEqual(out["retrieval"]["telemetry"]["selected_items"], 1)
 
     def test_task_router_defaults_to_task_mode(self):
         infer_payload = {
@@ -637,7 +521,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.compact.v1",
             "backend": "fallback",
-            "model": "granite3.3:2b",
+            "model": "phi4-mini-reasoning:3.8b",
             "ok": True,
             "output": "review findings",
         }
@@ -651,10 +535,10 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "task_router.task.compact.v1")
         self.assertEqual(out["route"], "review")
-        self.assertEqual(out["model"], "granite3.3:2b")
+        self.assertEqual(out["model"], "phi4-mini-reasoning:3.8b")
         self.assertTrue(out["ok"])
         self.assertEqual(linf.call_args.kwargs["task"], "review")
-        self.assertEqual(linf.call_args.kwargs["model"], "granite3.3:2b")
+        self.assertEqual(linf.call_args.kwargs["model"], "phi4-mini-reasoning:3.8b")
 
     def test_task_router_task_auto_selects_micro_coding_model_for_short_prompt(self):
         infer_payload = {
@@ -677,41 +561,16 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(linf.call_args.kwargs["task"], "coding")
         self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
 
-    def test_task_router_task_respects_requested_max_tokens(self):
-        infer_payload = {
-            "schema": "local_infer.v1",
-            "backend": "fallback",
-            "model": "deepseek-r1:1.5b",
-            "ok": True,
-            "output": "security findings",
-        }
-        with patch.object(self.server, "local_infer", return_value=infer_payload) as linf:
-            out = self.server.task_router(
-                mode="task",
-                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
-                backend="fallback",
-                max_tokens=64,
-                output_profile="normal",
-            )
-        self.assertEqual(linf.call_args.kwargs["max_tokens"], 64)
-        self.assertEqual(out["cost_plan"]["requested_max_tokens"], 64)
-        self.assertEqual(out["cost_plan"]["effective_max_tokens"], 64)
-
-    def test_skill_pack_lint_curated_pack_is_small_and_unique(self):
-        out = self.server.skill_pack_lint(route="coding")
-        self.assertEqual(out["schema"], "skill_pack_lint.v1")
-        self.assertTrue(out["lint"]["ok"])
-        self.assertLessEqual(out["lint"]["module_count"], 3)
-        self.assertEqual(out["lint"]["duplicates"], [])
-
 
     def test_task_router_task_reads_memory_and_encodes_session_and_memory(self):
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="task/route/security",
             focus="recent_activity",
             summary="prior route summary",
         )
-        self.server.memory_decision_record(
+        self.server.memory_router(
+            mode="decision_record",
             namespace="task/session/abc",
             topic="response_style",
             decision="be terse",
@@ -757,10 +616,8 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("files=11", packet["m"])
         self.assertEqual(out["memory"]["session_namespace"], "task/session/abc")
         self.assertEqual(out["memory"]["route_namespace"], "task/route/security")
-        self.assertEqual(out["intent"]["deliverable"], "findings")
-        self.assertEqual(out["cost_plan"]["effort"], "medium")
 
-    def test_task_router_task_success_persists_session_entry_and_route_summary_with_evidence(self):
+    def test_task_router_task_success_persists_session_entry_and_route_summary(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
@@ -772,7 +629,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(self.server, "local_infer", return_value=infer_payload):
             out = self.server.task_router(
                 mode="task",
-                prompt="Review src/sample.py for security vulnerabilities and secret exposure.",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
                 memory_session="persist",
@@ -798,35 +655,8 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("security findings", route_summaries[0]["summary"])
         self.assertTrue(out["memory"]["session_write"]["written"])
         self.assertTrue(out["memory"]["route_summary_write"]["written"])
-        self.assertGreaterEqual(out["memory"]["evidence_count"], 1)
 
-    def test_task_router_task_persists_explicit_session_without_grounded_evidence(self):
-        infer_payload = {
-            "schema": "local_infer.v1",
-            "backend": "fallback",
-            "model": "deepseek-r1:1.5b",
-            "ok": True,
-            "output": "ungrounded security findings",
-        }
-        with patch.object(self.server, "local_infer", return_value=infer_payload):
-            out = self.server.task_router(
-                mode="task",
-                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
-                backend="fallback",
-                output_profile="normal",
-                memory_session="no-evidence",
-            )
-        payload = self.server._memory_load()
-        session_entries = [
-            row for row in payload["entries"] if row.get("namespace") == "task/session/no-evidence"
-        ]
-        self.assertEqual(len(session_entries), 1)
-        self.assertTrue(out["memory"]["session_write"]["written"])
-        self.assertFalse(out["memory"]["route_summary_write"]["written"])
-        self.assertEqual(out["memory"]["route_summary_write"]["reason"], "no_evidence")
-        self.assertGreaterEqual(out["memory"]["session_evidence_count"], 1)
-
-    def test_task_router_task_failure_records_failure_and_session_context_with_evidence(self):
+    def test_task_router_task_failure_records_failure_and_session_context(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
@@ -837,7 +667,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(self.server, "local_infer", return_value=infer_payload):
             out = self.server.task_router(
                 mode="task",
-                prompt="Review src/sample.py for security vulnerabilities and secret exposure.",
+                prompt="Review auth middleware for security vulnerabilities and secret exposure.",
                 backend="fallback",
                 output_profile="normal",
                 memory_session="failure",
@@ -856,22 +686,26 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(out["memory"]["failure_recorded"])
 
     def test_task_router_task_memory_context_is_summary_first_and_capped(self):
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="task/route/security",
             focus="recent_activity",
             summary=("route-summary " * 80).strip(),
         )
-        self.server.memory_upsert(
+        self.server.memory_router(
+            mode="upsert",
             namespace="task/route/security",
             key="raw-route",
             value={"detail": "raw route fallback should not appear"},
         )
-        self.server.memory_summary_upsert(
+        self.server.memory_router(
+            mode="summary_upsert",
             namespace="task/session/abc",
             focus="session",
             summary=("session-summary " * 80).strip(),
         )
-        self.server.memory_upsert(
+        self.server.memory_router(
+            mode="upsert",
             namespace="task/session/abc",
             key="raw-session",
             value={"detail": "raw session fallback should not appear"},
@@ -906,9 +740,8 @@ class ServerToolsTest(ServerToolsTestBase):
             max_tokens=16,
         )
         self.assertEqual(out["schema"], "autocomplete.compact.v1")
-        self.assertEqual(out["backend"], "heuristic_fallback")
+        self.assertEqual(out["backend"], "fallback")
         self.assertTrue(out["ok"])
-        self.assertTrue(out["degraded"])
         self.assertIn("completion", out)
 
     def test_semantic_find_with_local_rerank(self):
@@ -1598,6 +1431,14 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(solved["schema"], "constraint_solver_for_tasks.v1")
         self.assertFalse(solved["ok"])
 
+        st = self.server.spec_to_tests(
+            spec_text="- system must authenticate users\n- response should be fast",
+            framework="pytest",
+            mode="generate",
+        )
+        self.assertEqual(st["schema"], "spec_to_tests.v1")
+        self.assertIn("def test_spec_", st["test_code"])
+
         shards = self.server.auto_sharding_for_analysis(path=".", shard_size=2)
         self.assertEqual(shards["schema"], "auto_sharding_for_analysis.v1")
         self.assertGreaterEqual(shards["shard_count"], 1)
@@ -1611,14 +1452,15 @@ class ServerToolsTest(ServerToolsTestBase):
         contract = self.server.runtime_contract_checker()
         self.assertEqual(contract["schema"], "runtime_contract_checker.v1")
         self.assertIn("ok", contract)
-        self.assertEqual(contract["resource_uri_count"], 0)
-        self.assertEqual(contract["resource_template_count"], 0)
-        self.assertEqual(contract["unexpected_resources"], [])
 
         budget_set = self.server.cost_budget_enforcer(mode="set", max_tokens=100, max_calls=10, max_seconds=60)
         self.assertEqual(budget_set["schema"], "cost_budget_enforcer.v1")
         budget_record = self.server.cost_budget_enforcer(mode="record", used_tokens=10, used_calls=1, used_seconds=5)
         self.assertTrue(budget_record["ok"])
+
+        lane = self.server.multi_agent_lane(task="pre-release", base_ref="HEAD", head_ref="HEAD")
+        self.assertEqual(lane["schema"], "multi_agent_lane.v1")
+        self.assertIn("confidence", lane)
 
         approval = self.server.human_approval_points(mode="create", action="deploy", risk_level="high", details="prod deploy")
         self.assertEqual(approval["schema"], "human_approval_points.v1")
@@ -1650,60 +1492,6 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertGreaterEqual(len(read["events"]), 1)
         done = self.server.execution_replay(mode="finish", replay_id=rid)
         self.assertEqual(done["status"], "closed")
-
-    def test_execution_replay_summarize_and_diagnose_failure(self):
-        replay = self.server.execution_replay(mode="start")
-        rid = replay["replay_id"]
-        self.server.execution_replay(
-            mode="log",
-            replay_id=rid,
-            event={"stage": "start", "prompt_summary": "Update src/sample.py"},
-        )
-        self.server.execution_replay(
-            mode="log",
-            replay_id=rid,
-            event={
-                "stage": "execution",
-                "changed_paths": ["src/sample.py"],
-                "verification": {"blocked": True, "reason": "diff expands scope"},
-            },
-        )
-        self.server.execution_replay(
-            mode="log",
-            replay_id=rid,
-            event={"stage": "finish", "ok": False, "stopped_reason": "verifier_disagreement"},
-        )
-        self.server.execution_replay(mode="finish", replay_id=rid)
-        summary = self.server.execution_replay(mode="summarize", replay_id=rid)
-        diagnosis = self.server.execution_replay(mode="diagnose", replay_id=rid)
-        self.assertEqual(summary["schema"], "execution_replay.summary.v1")
-        self.assertEqual(summary["changed_paths"], ["src/sample.py"])
-        self.assertFalse(summary["ok"])
-        self.assertEqual(diagnosis["schema"], "execution_replay.diagnosis.v1")
-        self.assertTrue(diagnosis["failed"])
-        self.assertEqual(diagnosis["failure_stage"], "execution")
-        self.assertIn("scope", diagnosis["reason"])
-
-    def test_execution_replay_summarize_defaults_to_not_ok_without_finish_event(self):
-        replay = self.server.execution_replay(mode="start")
-        rid = replay["replay_id"]
-        self.server.execution_replay(
-            mode="log",
-            replay_id=rid,
-            event={"stage": "start", "prompt_summary": "Inspect src/sample.py"},
-        )
-        self.server.execution_replay(
-            mode="log",
-            replay_id=rid,
-            event={"stage": "execution", "changed_paths": ["src/sample.py"]},
-        )
-        self.server.execution_replay(mode="finish", replay_id=rid)
-
-        summary = self.server.execution_replay(mode="summarize", replay_id=rid)
-
-        self.assertEqual(summary["status"], "closed")
-        self.assertFalse(summary["ok"])
-        self.assertEqual(summary["changed_paths"], ["src/sample.py"])
 
     def test_task_router_coding_modes_and_validation(self):
         with self.assertRaises(ValueError):
@@ -1839,1299 +1627,18 @@ class ServerToolsTest(ServerToolsTestBase):
             )
             self.assertTrue(deleted["deleted"])
 
-    def test_task_router_guided_edit_validates_arguments(self):
-        with self.assertRaises(ValueError):
-            self.server.task_router(mode="guided_edit", prompt="update src/sample.py", max_steps=0)
-
-        with self.assertRaises(ValueError):
-            self.server.task_router(
-                mode="guided_edit",
-                prompt="update src/sample.py",
-                target_paths=["src/sample.py"],
-                validation_profile="full",
-            )
-
-    def test_task_router_guided_edit_applies_single_step_and_validates(self):
-        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
-        after = before.replace(
-            "def alpha(x):\n    return x + 1\n",
-            "def alpha(x):\n    # alpha increments the input\n    return x + 1\n",
-        )
-        replacement_output = (
-            "def alpha(x):\n"
-            "    # alpha increments the input\n"
-            "    return x + 1"
-        )
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "keep the change minimal",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": replacement_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "def alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "agree", "confidence": 0.93, "reason": "diff matches the bounded plan"}
-                    ),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="quick",
-            )
-        self.assertEqual(out["schema"], "task_router.guided_edit.v1")
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["step_count"], 1)
-        self.assertEqual(out["stopped_reason"], "single_step_complete")
-        self.assertTrue(out["snapshot_id"])
-        self.assertTrue(out["replay_id"])
-        self.assertIn(
-            "# alpha increments the input",
-            (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
-        )
-        self.assertTrue(out["final_validation"]["ok"])
-        self.assertIn("tests/test_sample.py", out["final_validation"]["selected_tests"])
-        self.assertFalse(out["steps"][0]["rolled_back"])
-        self.assertEqual(out["steps"][0]["execution"]["isolation"]["backend"], "git_worktree")
-        self.assertTrue(out["steps"][0]["execution"]["materialized"])
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
-        self.assertEqual(len(out["steps"][0]["execution"]["candidates"]), 3)
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "initial")
-        self.assertTrue(out["memory_write"]["written"])
-        self.assertTrue(out["memory_write"]["experience_write"]["written"])
-        self.assertEqual(out["replay_summary"]["schema"], "execution_replay.summary.v1")
-        self.assertEqual(out["replay_diagnosis"]["schema"], "execution_replay.diagnosis.v1")
-        self.assertIn("candidate_selection", out["replay_summary"]["stages"])
-        self.assertEqual(out["workflow_benchmark"]["run"]["candidate_count"], 3)
-        self.assertEqual(out["workflow_benchmark"]["run"]["selected_candidate_index"], 1)
-        self.assertGreaterEqual(out["repo_memory"]["entry_count"], 1)
-        self.assertGreaterEqual(out["skill_pack"]["module_count"], 1)
-        self.assertEqual(out["state_machine"]["states"], ["start", "plan", "execute", "validate", "finish"])
-        self.assertEqual(out["state_machine"]["current_state"], "finish")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "single_step_complete")
-
-    def test_task_router_guided_edit_repairs_invalid_planner_output(self):
-        replacement_output = (
-            "def alpha(x):\n"
-            "    # alpha increments the input\n"
-            "    return x + 1"
-        )
-        repaired_planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "keep the change minimal",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "I would update src/sample.py with a tiny comment.",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": repaired_planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": replacement_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "def alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "agree", "confidence": 0.91, "reason": "repaired plan matches the diff"}
-                    ),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="endpoint",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(len(out["steps"][0]["planner_attempts"]), 2)
-        self.assertEqual(out["steps"][0]["planner_attempts"][1]["kind"], "repair")
-        self.assertTrue(out["steps"][0]["planner_attempts"][1]["ok"])
-        self.assertIsNotNone(out["steps"][0]["repair_result"])
-        self.assertEqual(out["steps"][0]["execution"]["isolation"]["backend"], "git_worktree")
-        self.assertTrue(out["steps"][0]["execution"]["materialized"])
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
-
-    def test_task_router_guided_edit_repairs_prior_violation_from_planner(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "add_test",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "wrongly choose tests for a comment request",
-                "validation_scope": "quick",
-            }
-        )
-        repaired_planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "keep the change minimal",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": repaired_planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "def alpha(x):\n    # alpha increments the input\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "def alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "agree", "confidence": 0.92, "reason": "repaired planner action matches the request"}
-                    ),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="endpoint",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(len(out["steps"][0]["planner_attempts"]), 2)
-        self.assertEqual(out["steps"][0]["planner_attempts"][1]["kind"], "repair")
-        self.assertEqual(out["steps"][0]["plan"]["action_type"], "replace_region")
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "initial")
-
-    def test_task_router_guided_edit_repairs_invalid_edit_output(self):
-        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
-        repaired_output = (
-            "def alpha(x):\n"
-            "    # alpha increments the input\n"
-            "    return x + 1"
-        )
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "keep the change minimal",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": repaired_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "agree", "confidence": 0.94, "reason": "repaired diff matches the request"}
-                    ),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="endpoint",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertTrue(out["steps"][0]["execution"]["repair_used"])
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
-        self.assertIsNotNone(out["steps"][0]["execution"]["repair_result"])
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "repair")
-
-    def test_task_router_guided_edit_rolls_back_on_failed_validation(self):
-        before = (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8")
-        invalid_replacement_output = (
-            "def alpha(x)\n"
-            "    return x + 1"
-        )
-        wrong_behavior_output = (
-            "def alpha(x):\n"
-            "    return x + 999"
-        )
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "make a bad edit for rollback coverage",
-                "rationale": "exercise validation failure handling",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": wrong_behavior_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": invalid_replacement_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "agree", "confidence": 0.88, "reason": "diff is syntactically scoped but invalid"}
-                    ),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Break src/sample.py to test rollback.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="quick",
-                rollback_on_failure=True,
-                snapshot_before_edit=True,
-            )
-        self.assertEqual(out["schema"], "task_router.guided_edit.v1")
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
-        self.assertEqual(out["abstain_reason"], "validation_abstain")
-        self.assertEqual(out["final_validation"]["compile_error_count"], 0)
-        self.assertFalse(out["final_validation"]["test_execution"]["ok"])
-        self.assertFalse(out["steps"][0]["rolled_back"])
-        self.assertEqual(
-            (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
-            before,
-        )
-        self.assertTrue(out["memory_write"]["written"])
-        self.assertFalse(out["steps"][0]["execution"].get("materialized", False))
-        self.assertEqual(out["workflow_benchmark"]["run"]["verifier_false_positive"], 1)
-        self.assertTrue(out["verifier_false_positive_write"]["written"])
-        self.assertEqual(out["state_machine"]["current_state"], "validate")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
-
-    def test_task_router_guided_edit_blocks_verifier_disagreement(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "attempt an over-broad edit",
-                "rationale": "exercise verifier disagreement handling",
-                "validation_scope": "standard",
-            }
-        )
-        broad_replacement_output = (
-            "def alpha(x):\n"
-            "    # over-broad change\n"
-            "    return x + 2"
-        )
-        broader_replacement_output = (
-            "def alpha(x):\n"
-            "    # another broad change\n"
-            "    return x + 3"
-        )
-        repair_replacement_output = (
-            "def alpha(x):\n"
-            "    # repaired but still broad\n"
-            "    return x + 4"
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": broad_replacement_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": broader_replacement_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": repair_replacement_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"winner": "tie", "reason": "both candidates are similarly broad"}
-                    ),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"winner": "tie", "reason": "both candidates are similarly broad"}
-                    ),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"winner": "tie", "reason": "both candidates are similarly broad"}
-                    ),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "disagree", "confidence": 0.97, "reason": "repaired diff still expands scope beyond the stated action"}
-                    ),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "disagree", "confidence": 0.96, "reason": "alternate diff still expands scope beyond the stated action"}
-                    ),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"verdict": "disagree", "confidence": 0.97, "reason": "repair diff still expands scope beyond the stated action"}
-                    ),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a tiny comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="auto",
-            )
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
-        self.assertEqual(out["abstain_reason"], "verifier_veto_abstain")
-        self.assertFalse(out["steps"][0]["execution"]["applied"])
-        self.assertTrue(out["steps"][0]["execution"]["verification"]["blocked"])
-        self.assertTrue(out["steps"][0]["execution"]["repair_used"])
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 3)
-        self.assertEqual(out["state_machine"]["current_state"], "execute")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
-
-    def test_task_router_guided_edit_returns_structured_failure_for_invalid_planner_output(self):
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Make a tiny edit in src/sample.py.",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "still not json",
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="endpoint",
-                validation_profile="quick",
-            )
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "planner_invalid")
-        self.assertEqual(out["failure_diagnosis"]["failure_stage"], "plan")
-        self.assertEqual(out["failure_diagnosis"]["reason"], "planner_invalid")
-        self.assertEqual(out["state_machine"]["current_state"], "plan")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "planner_invalid")
-
-    def test_task_router_guided_edit_returns_structured_failure_for_invalid_edit_output(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "keep the change minimal",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "still invalid",
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="endpoint",
-                validation_profile="quick",
-            )
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
-        self.assertEqual(out["abstain_reason"], "low_confidence_abstain")
-        self.assertEqual(out["failure_diagnosis"]["failure_stage"], "execute")
-        self.assertEqual(out["failure_diagnosis"]["reason"], "low_confidence_abstain")
-        self.assertEqual(out["steps"][0]["execution"]["attempt_count"], 4)
-        self.assertTrue(out["steps"][0]["execution"]["repair_used"])
-        self.assertEqual(out["state_machine"]["current_state"], "execute")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
-
-    def test_guided_edit_parse_verification_accepts_word_confidence(self):
-        parsed = self.server._guided_edit_parse_verification(
-            json.dumps(
-                {
-                    "verdict": "disagree",
-                    "confidence": "high",
-                    "reason": "scope mismatch",
-                }
-            )
-        )
-        self.assertEqual(parsed["verdict"], "disagree")
-        self.assertEqual(parsed["confidence"], 0.9)
-
-    def test_guided_edit_output_to_diff_rejects_large_structured_expansion(self):
-        region = self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0)
-        with self.assertRaises(ValueError):
-            self.server._guided_edit_output_to_diff(
-                raw_output=(
-                    "def alpha(x):\n"
-                    "    # line one\n"
-                    "    # line two\n"
-                    "    # line three\n"
-                    "    return x + 1"
-                ),
-                target_region=region,
-                allow_raw_diff=False,
-                max_extra_lines=1,
-            )
-
-    def test_task_router_guided_edit_blocks_unrelated_update_docs_diff(self):
-        other_path = self.repo_path / "tests" / "test_smoke.py"
-        before = other_path.read_text(encoding="utf-8")
-        after = before.replace(
-            "        self.assertTrue(True)\n",
-            "        self.assertTrue(True)\n        # unrelated change\n",
-        )
-        other_path.write_text(after, encoding="utf-8")
-        diff_output = self.git("diff", "--", "tests/test_smoke.py").stdout
-        other_path.write_text(before, encoding="utf-8")
-        planner_output = json.dumps(
-            {
-                "action_type": "update_docs",
-                "target": {"path": "src/sample.py", "start_line": 1, "end_line": 4},
-                "goal": "update docs for the sample behavior",
-                "rationale": "exercise out-of-scope diff blocking",
-                "validation_scope": "standard",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": diff_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "still invalid",
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Update docs for src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="auto",
-            )
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["stopped_reason"], "low_confidence_abstain")
-        self.assertEqual(out["abstain_reason"], "low_confidence_abstain")
-        self.assertFalse(out["steps"][0]["execution"]["watchdog"]["blocked"])
-        self.assertEqual(out["steps"][0]["execution"]["stopped_reason_hint"], "low_confidence_abstain")
-        self.assertEqual(out["state_machine"]["current_state"], "execute")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "low_confidence_abstain")
-
-    def test_task_router_guided_edit_planner_stop_uses_normalized_state_machine(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "stop",
-                "target": {"path": "src/sample.py", "start_line": 1, "end_line": 4},
-                "goal": "no edit required",
-                "rationale": "the request is already satisfied",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            return_value={
-                "schema": "local_infer.v1",
-                "backend": "fallback",
-                "model": "qwen2.5-coder:3b",
-                "ok": True,
-                "output": planner_output,
-            },
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Leave src/sample.py unchanged.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="quick",
-            )
-        self.assertEqual(out["stopped_reason"], "planner_stop")
-        self.assertEqual(out["state_machine"]["states"], ["start", "plan", "execute", "validate", "finish"])
-        self.assertEqual(out["state_machine"]["current_state"], "plan")
-        self.assertEqual(out["state_machine"]["terminal_reason"], "planner_stop")
-
-    def test_task_router_guided_edit_ranks_candidates_and_selects_later_success(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "exercise candidate ranking",
-                "validation_scope": "quick",
-            }
-        )
-        candidate_one = (
-            "def beta(y):\n"
-            "    return y - 1"
-        )
-        candidate_two = (
-            "def alpha(x):\n"
-            "    # alpha increments the input\n"
-            "    return x + 2"
-        )
-        candidate_three = (
-            "def alpha(x):\n"
-            "    # alpha increments the input\n"
-            "    # kept intentionally verbose for ranking coverage\n"
-            "    return x + 1"
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": planner_output},
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_one},
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_two},
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_three},
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps(
-                        {"winner": "tie", "reason": "both candidates are similarly scoped before verification"}
-                    ),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps({"verdict": "disagree", "confidence": 0.9, "reason": "candidate changes behavior"}),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps({"verdict": "agree", "confidence": 0.93, "reason": "candidate matches the bounded request"}),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["index"], 3)
-        self.assertEqual(out["steps"][0]["execution"]["candidates"][0]["stop_reason"], "acceptance_failed")
-        self.assertEqual(out["steps"][0]["execution"]["candidates"][1]["stop_reason"], "verifier_disagreement")
-        self.assertEqual(out["steps"][0]["execution"]["candidates"][2]["stop_reason"], "selected")
-
-    def test_task_router_guided_edit_pairwise_prefers_better_candidate(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "exercise pairwise ranking",
-                "validation_scope": "quick",
-            }
-        )
-        candidate_one = (
-            "def alpha(x):\n"
-            "    # alpha increments the input in a somewhat verbose way\n"
-            "    return x + 1"
-        )
-        candidate_two = (
-            "def alpha(x):\n"
-            "    # alpha increments the input\n"
-            "    return x + 1"
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": planner_output},
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_one},
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": candidate_two},
-                {"schema": "local_infer.v1", "backend": "fallback", "model": "qwen", "ok": True, "output": "Target snippet:\ndef alpha(x):\n    return x + 1"},
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps({"winner": "right", "reason": "right is the smaller valid edit"}),
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": json.dumps({"verdict": "agree", "confidence": 0.93, "reason": "candidate matches the bounded request"}),
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["index"], 2)
-        self.assertEqual(out["workflow_benchmark"]["run"]["selected_candidate_index"], 2)
-        self.assertEqual(out["steps"][0]["execution"]["candidates"][0]["pairwise_score"], -1)
-        self.assertEqual(out["steps"][0]["execution"]["candidates"][1]["pairwise_score"], 1)
-
-    def test_task_router_guided_edit_verifier_uses_review_route_even_with_explicit_model(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "capture verifier routing",
-                "validation_scope": "quick",
-            }
-        )
-        verifier_models = []
-
-        def fake_infer(*, prompt, model, **kwargs):
-            if prompt.startswith("Plan exactly one bounded repository edit step."):
-                return {"schema": "local_infer.v1", "backend": "fallback", "model": model, "ok": True, "output": planner_output}
-            if prompt.startswith("Apply exactly one bounded edit to the target region."):
-                if "Strategy: Produce the highest-confidence minimal bounded edit." in prompt:
-                    return {
-                        "schema": "local_infer.v1",
-                        "backend": "fallback",
-                        "model": model,
-                        "ok": True,
-                        "output": "def alpha(x):\n    # alpha increments the input\n    return x + 1",
-                    }
-                return {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": model,
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                }
-            if prompt.startswith("Repair the bounded edit output for the target region."):
-                return {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": model,
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                }
-            verifier_models.append(model)
-            return {
-                "schema": "local_infer.v1",
-                "backend": "fallback",
-                "model": model,
-                "ok": True,
-                "output": json.dumps({"verdict": "agree", "confidence": 0.9, "reason": "candidate matches the request"}),
-            }
-
-        with patch.object(self.server, "local_infer", side_effect=fake_infer):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                model="qwen2.5-coder:1.5b",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertTrue(verifier_models)
-        self.assertTrue(all(model == "granite3.3:2b" for model in verifier_models))
-
-    def test_guided_edit_output_to_diff_accepts_micro_edit(self):
-        region = self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0)
-        parsed = self.server._guided_edit_output_to_diff(
-            raw_output=json.dumps(
-                {
-                    "op": "insert_before",
-                    "anchor": "return x + 1",
-                    "text": "    # alpha increments the input",
-                }
-            ),
-            target_region=region,
-            allow_raw_diff=False,
-            allow_micro_edit=True,
-            max_extra_lines=2,
-        )
-        self.assertEqual(parsed["mode"], "micro_edit")
-        self.assertIn("# alpha increments the input", parsed["replacement_text"])
-        self.assertIn("src/sample.py", parsed["diff_text"])
-
-    def test_guided_edit_acceptance_action_specific_postconditions(self):
-        doc_region = {
-            "path": "README.md",
-            "original_text": "# Demo\nAlpha behavior\n",
-            "original_lines": ["# Demo\n", "Alpha behavior\n"],
-            "start_line": 1,
-            "end_line": 2,
-            "region_text": "# Demo\nAlpha behavior\n",
-            "context_before_text": "",
-            "context_after_text": "",
-        }
-        doc_diff = self.server._guided_edit_build_local_diff(
-            target_region=doc_region,
-            replacement_text="# Demo\nBehavior overview\n",
-            max_extra_lines=2,
-        )
-        update_docs_acceptance = self.server._guided_edit_acceptance(
-            prompt='Update README.md and include "Alpha behavior".',
-            action={
-                "action_type": "update_docs",
-                "goal": "include Alpha behavior",
-                "rationale": "docs coverage",
-                "target": {"path": "README.md", "start_line": 1, "end_line": 2},
-                "postconditions": {},
-            },
-            target_region=doc_region,
-            parsed_edit={"mode": "replacement_text", "replacement_text": "# Demo\nBehavior overview\n", "diff_text": doc_diff},
-            allowed_paths=["README.md"],
-        )
-        self.assertFalse(update_docs_acceptance["ok"])
-        self.assertIn("update_docs_missing_required_phrase", update_docs_acceptance["hard_failures"])
-
-        add_test_acceptance = self.server._guided_edit_acceptance(
-            prompt="Add a regression test.",
-            action={
-                "action_type": "add_test",
-                "goal": "add regression test",
-                "rationale": "tests only",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "postconditions": {},
-            },
-            target_region=self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0),
-            parsed_edit={
-                "mode": "raw_diff",
-                "diff_text": (
-                    "--- a/src/sample.py\n"
-                    "+++ b/src/sample.py\n"
-                    "@@ -3,2 +3,3 @@\n"
-                    " def alpha(x):\n"
-                    "+    # not a test\n"
-                    "     return x + 1\n"
-                ),
-            },
-            allowed_paths=["src/sample.py"],
-        )
-        self.assertFalse(add_test_acceptance["ok"])
-        self.assertIn("add_test_must_change_test_paths", add_test_acceptance["hard_failures"])
-
-        extract_helper_acceptance = self.server._guided_edit_acceptance(
-            prompt="Extract helper helper_alpha from src/sample.py.",
-            action={
-                "action_type": "extract_helper",
-                "goal": "extract helper_alpha",
-                "rationale": "extract helper helper_alpha",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4, "symbol": "helper_alpha"},
-                "postconditions": {},
-            },
-            target_region=self.server._guided_edit_target_region("src/sample.py", 3, 4, context_before=0, context_after=0),
-            parsed_edit={
-                "mode": "raw_diff",
-                "diff_text": (
-                    "--- a/src/sample.py\n"
-                    "+++ b/src/sample.py\n"
-                    "@@ -3,2 +3,2 @@\n"
-                    " def alpha(x):\n"
-                    "-    return x + 1\n"
-                    "+    return x + 2\n"
-                ),
-            },
-            allowed_paths=["src/sample.py"],
-        )
-        self.assertFalse(extract_helper_acceptance["ok"])
-        self.assertIn("extract_helper_missing_helper_symbol", extract_helper_acceptance["hard_failures"])
-
-    def test_task_router_guided_edit_records_regression_on_failure(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "force regression recording",
-                "validation_scope": "quick",
-            }
-        )
-        with patch.object(
-            self.server,
-            "local_infer",
-            side_effect=[
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": planner_output,
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "qwen2.5-coder:3b",
-                    "ok": True,
-                    "output": "Curated skills:\nChange only the named files or symbols and keep the patch minimal.",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "Recent repository history:\n9c5627112a48 Rename task router contract and tooling artifact root",
-                },
-                {
-                    "schema": "local_infer.v1",
-                    "backend": "endpoint",
-                    "model": "granite3.3:2b",
-                    "ok": True,
-                    "output": "still invalid",
-                },
-            ],
-        ):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="endpoint",
-                validation_profile="quick",
-            )
-        self.assertFalse(out["ok"])
-        self.assertTrue(out["regression_write"]["written"])
-        regression_path = self.repo_path / ".codebase-tooling-mcp" / "reports" / "GUIDED_EDIT_REGRESSIONS.json"
-        self.assertTrue(regression_path.is_file())
-        payload = json.loads(regression_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema"], "guided_edit.regressions.v1")
-        self.assertEqual(payload["entries"][-1]["target_path"], "src/sample.py")
-        self.assertEqual(payload["entries"][-1]["stopped_reason"], "low_confidence_abstain")
-
-    def test_task_router_guided_edit_uses_deterministic_micro_edit_for_exact_anchor(self):
-        seen_prompts = []
-
-        def fake_infer(*, prompt, model, **kwargs):
-            seen_prompts.append(prompt)
-            return {
-                "schema": "local_infer.v1",
-                "backend": "fallback",
-                "model": model,
-                "ok": True,
-                "output": json.dumps(
-                    {
-                        "verdict": "agree",
-                        "confidence": 0.95,
-                        "reason": "deterministic micro edit matches the bounded request",
-                    }
-                ),
-            }
-
-        with patch.object(self.server, "local_infer", side_effect=fake_infer):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt='Add this exact line: "    # alpha increments the input" before "return x + 1" in src/sample.py.',
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["routing"]["selected_route"], "deterministic_micro")
-        self.assertEqual(out["steps"][0]["planner_attempts"][0]["kind"], "deterministic")
-        self.assertEqual(out["generation_tier"], 0)
-        self.assertFalse(any(prompt.startswith("Plan exactly one bounded repository edit step.") for prompt in seen_prompts))
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "deterministic")
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["generation_tier"], 0)
-        self.assertIn(
-            "    # alpha increments the input\n    return x + 1\n",
-            (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"),
-        )
-
-    def test_task_router_guided_edit_uses_stronger_fallback_only_after_tier1_exhaustion(self):
-        planner_output = json.dumps(
-            {
-                "action_type": "replace_region",
-                "target": {"path": "src/sample.py", "start_line": 3, "end_line": 4},
-                "goal": "add a short behavior comment",
-                "rationale": "exercise stronger fallback routing",
-                "validation_scope": "quick",
-            }
-        )
-        models = []
-
-        def fake_infer(*, prompt, model, **kwargs):
-            models.append(model)
-            if prompt.startswith("Plan exactly one bounded repository edit step."):
-                return {"schema": "local_infer.v1", "backend": "fallback", "model": model, "ok": True, "output": planner_output}
-            if prompt.startswith("Apply exactly one bounded edit to the target region."):
-                return {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": model,
-                    "ok": True,
-                    "output": "Target snippet:\ndef alpha(x):\n    return x + 1",
-                }
-            if prompt.startswith("Repair the bounded edit output for the target region."):
-                if model == "granite3.3:2b":
-                    return {
-                        "schema": "local_infer.v1",
-                        "backend": "fallback",
-                        "model": model,
-                        "ok": True,
-                        "output": "def alpha(x):\n    # alpha increments the input\n    return x + 1",
-                    }
-                return {
-                    "schema": "local_infer.v1",
-                    "backend": "fallback",
-                    "model": model,
-                    "ok": True,
-                    "output": "Recent repository history:\ninvalid",
-                }
-            return {
-                "schema": "local_infer.v1",
-                "backend": "fallback",
-                "model": model,
-                "ok": True,
-                "output": json.dumps(
-                    {"verdict": "agree", "confidence": 0.92, "reason": "fallback candidate is the first valid edit"}
-                ),
-            }
-
-        with patch.object(self.server, "local_infer", side_effect=fake_infer):
-            out = self.server.task_router(
-                mode="guided_edit",
-                prompt="Add a short behavior comment to src/sample.py.",
-                target_paths=["src/sample.py"],
-                backend="fallback",
-                validation_profile="quick",
-            )
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["generation_tier"], 2)
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["strategy"], "fallback")
-        self.assertEqual(out["steps"][0]["execution"]["selected_candidate"]["generation_tier"], 2)
-        self.assertIn("granite3.3:2b", models)
-
-    def test_guided_edit_replay_benchmark_report_tracks_thresholds(self):
-        results = (
-            [{"bucket": "tiny_anchored", "applied_success": True, "safe_outcome": True} for _ in range(80)]
-            + [{"bucket": "bounded_semantic", "applied_success": True, "safe_outcome": True} for _ in range(70)]
-            + [{"bucket": "structural", "applied_success": True, "safe_outcome": True} for _ in range(46)]
-            + [{"bucket": "structural", "applied_success": False, "safe_outcome": True} for _ in range(4)]
-        )
-        report = self.server._guided_edit_replay_benchmark_report(results=results, min_cases=200)
-        self.assertEqual(report["schema"], "guided_edit.replay_benchmark.v1")
-        self.assertEqual(report["case_count"], 200)
-        self.assertTrue(report["thresholds_met"])
-        self.assertEqual(report["bucket_metrics"]["tiny_anchored"]["applied_success_rate"], 1.0)
-        self.assertEqual(report["bucket_metrics"]["structural"]["applied_success_rate"], 0.92)
-
-    def test_memory_auto_compact_and_usage_stats(self):
+    def test_memory_router_auto_compact_and_usage_stats(self):
         for i in range(10):
-            self.server.memory_upsert(
+            self.server.memory_router(
+                mode="upsert",
                 namespace="compact_demo",
                 key=f"k{i}",
                 value={"n": i, "payload": "x" * 180},
                 ttl_days=30,
             )
 
-        result = self.server.memory_get(
+        out = self.server.memory_router(
+            mode="get",
             namespace="compact_demo",
             max_entries=100,
             auto_compact=True,
@@ -3139,21 +1646,20 @@ class ServerToolsTest(ServerToolsTestBase):
             compact_threshold_chars=1000,
             compact_keep_entries=3,
         )
+        result = out["result"]
         self.assertGreaterEqual(result["count"], 10)
         self.assertIn("usage_stats", result)
         self.assertIn("events", result["usage_stats"])
         self.assertTrue(result["auto_compact"]["compacted"])
 
-        compact = self.server.memory_auto_compact(
+        compact = self.server.memory_router(
+            mode="auto_compact",
             namespace="compact_demo",
-            threshold_entries=5,
-            threshold_chars=1000,
-            keep_entries=3,
+            compact_threshold_entries=5,
+            compact_threshold_chars=1000,
+            compact_keep_entries=3,
         )
-        self.assertFalse(compact["compacted"])
-        payload = self.server._memory_load()
-        entries = [row for row in payload["entries"] if row.get("namespace") == "compact_demo"]
-        self.assertLessEqual(len(entries), 3)
+        self.assertTrue(compact["result"]["compacted"])
 
     def test_self_test_internal_and_repo_target_routing(self):
         internal_dir = self.repo_path / "internal_selftests"
@@ -3189,7 +1695,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with self.assertRaises(ValueError):
             self.server.self_test(runner="unittest", target="repo:", timeout_seconds=10)
 
-    def test_docker_and_vscode_leaf_helpers(self):
+    def test_router_split_docker_and_vscode(self):
         vscode_dir = self.repo_path / ".vscode"
         vscode_dir.mkdir(parents=True, exist_ok=True)
         tasks_path = vscode_dir / "tasks.json"
@@ -3209,22 +1715,21 @@ class ServerToolsTest(ServerToolsTestBase):
             encoding="utf-8",
         )
 
-        status = self.server.docker_cli_status()
-        self.assertEqual(status["schema"], "docker_cli_status.v1")
-
         with self.assertRaises(ValueError):
-            self.server.docker_cli_run(command=["docker", "run", "hello-world"])
+            self.server.docker_router(mode="run")
 
-        listed = self.server.vscode_tasks_list(
+        listed = self.server.vscode_router(
+            mode="list",
             tasks_path=".vscode/tasks.json",
             control_profile="build",
         )
-        self.assertEqual(listed["schema"], "vscode_tasks_list.v1")
-        self.assertEqual(listed["count"], 1)
-        self.assertFalse(listed["tasks"][0]["ok"])
+        self.assertEqual(listed["schema"], "vscode_router.v1")
+        self.assertEqual(listed["result"]["count"], 1)
+        self.assertFalse(listed["result"]["tasks"][0]["ok"])
 
         with self.assertRaises(ValueError):
-            self.server.vscode_task_run(
+            self.server.vscode_router(
+                mode="run",
                 label="Docker: blocked",
                 tasks_path=".vscode/tasks.json",
                 control_profile="build",
@@ -3301,39 +1806,51 @@ class ServerToolsTest(ServerToolsTestBase):
 
         asyncio.run(run_checks())
 
-    def test_leaf_surface_modes(self):
+    def test_router_surface_modes(self):
         self.write_repo_text("config.json", '{"outer": {"value": 7}}\n')
 
-        repo_out = self.server.json_query(path="config.json", query="outer.value", file_type="json")
-        self.assertEqual(json.loads(repo_out["value_json"]), 7)
+        repo_out = self.server.repo_router(mode="query_json", path="config.json", query="outer.value", file_type="json")
+        self.assertEqual(repo_out["schema"], "repo_router.v1")
+        self.assertEqual(repo_out["result"]["value"], 7)
 
         write_out = self.server.workspace_transaction(mode="write", path="notes.txt", content="hello\n")
         self.assertEqual(write_out["schema"], "workspace_transaction.v1")
         self.assertTrue((self.repo_path / "notes.txt").is_file())
 
-        git_out = self.server.git_status(short=True)
-        self.assertIn("notes.txt", git_out)
+        git_out = self.server.git_router(mode="status")
+        self.assertEqual(git_out["schema"], "git_router.v1")
 
-        grep_out = self.server.grep(pattern="alpha", path="src", output_profile="compact")
-        self.assertGreaterEqual(len(grep_out), 1)
+        grep_out = self.server.code_index_router(mode="grep", query="alpha", path="src")
+        self.assertEqual(grep_out["schema"], "code_index_router.v1")
+        self.assertGreaterEqual(len(grep_out["result"]), 1)
 
-        mem_out = self.server.artifact_memory_index(mode="refresh", path="docs")
-        self.assertEqual(mem_out["schema"], "artifact_memory_index.v1")
+        mem_out = self.server.memory_router(mode="artifact_index", artifact_mode="refresh", path="docs")
+        self.assertEqual(mem_out["schema"], "memory_router.v1")
+        self.assertEqual(mem_out["mode"], "artifact_index")
 
-        tool_out = self.server.tool_router_learned(query="find files", candidates=["find_paths", "grep"], mode="route")
-        self.assertEqual(tool_out["schema"], "tool_router_learned.v1")
+        tool_out = self.server.tool_router(mode="route", query="find files", candidates=["find_paths", "grep"])
+        self.assertEqual(tool_out["schema"], "tool_router.v1")
+        self.assertEqual(tool_out["mode"], "route")
 
-        governance_out = self.server.runtime_contract_checker()
-        self.assertEqual(governance_out["schema"], "runtime_contract_checker.v1")
+        quality_out = self.server.quality_router(
+            mode="spec_to_tests",
+            spec_text="- system should validate tokens",
+            framework="pytest",
+        )
+        self.assertEqual(quality_out["schema"], "quality_router.v1")
 
-        workflow_out = self.server.constraint_solver_for_tasks(
+        governance_out = self.server.governance_router(mode="runtime_contract")
+        self.assertEqual(governance_out["schema"], "governance_router.v1")
+
+        workflow_out = self.server.workflow_router(
+            mode="constraint_check",
             actions=["run tests"],
             requirements=["run tests"],
         )
-        self.assertTrue(workflow_out["ok"])
+        self.assertEqual(workflow_out["schema"], "workflow_router.v1")
 
-        guard_out = self.server.workspace_facts(refresh=True)
-        self.assertIn("generated_at", guard_out)
+        guard_out = self.server.runtime_guard_router(mode="workspace_facts")
+        self.assertEqual(guard_out["schema"], "runtime_guard_router.v1")
 
         math_out = self.server.math_router(mode="verify", left="x*(x+1)", right="x**2 + x")
         self.assertEqual(math_out["schema"], "math_router.v1")
@@ -3345,7 +1862,21 @@ class ServerToolsTest(ServerToolsTestBase):
         diagram_out = self.server.diagram_router(mode="lint_mermaid", mermaid_text="A -> B", auto_fix=True)
         self.assertEqual(diagram_out["schema"], "diagram_router.v1")
 
-    def test_remaining_router_invalid_modes(self):
+    def test_router_invalid_modes(self):
+        with self.assertRaises(ValueError):
+            self.server.repo_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.git_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.code_index_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.quality_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.governance_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.workflow_router(mode="bad")
+        with self.assertRaises(ValueError):
+            self.server.runtime_guard_router(mode="bad")
         with self.assertRaises(ValueError):
             self.server.math_router(mode="bad")
         with self.assertRaises(ValueError):

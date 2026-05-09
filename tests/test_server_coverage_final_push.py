@@ -683,31 +683,11 @@ class ServerCoverageFinalPushTest(ServerToolsTestBase):
         index_file.write_text(
             json.dumps(
                 {
-                    "schema": "repo_index_daemon.v2",
                     "generated_at": "2026-03-12T00:00:00+00:00",
-                    "path": ".",
                     "file_count": 2,
                     "symbol_count": 1,
                     "dependency_edge_count": 1,
-                    "call_edge_count": 0,
-                    "records": {
-                        "src/sample.py": {
-                            "path": "src/sample.py",
-                            "size": 10,
-                            "mtime_ns": 1,
-                            "file_type": "py",
-                            "language": "python",
-                            "parse_error": "",
-                            "symbols": [{"path": "src/sample.py", "name": "alpha", "kind": "function"}],
-                            "dependencies": [],
-                            "call_edges": [],
-                        }
-                    },
-                    "file_order": ["src/sample.py"],
-                    "incremental": True,
-                    "changed_paths_count": 0,
-                    "reused_paths_count": 1,
-                    "removed_paths_count": 0,
+                    "files": [{"path": "src/sample.py"}],
                 }
             ),
             encoding="utf-8",

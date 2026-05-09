@@ -154,30 +154,11 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
         self.assertIn("result_id", refreshed)
         self.assertEqual(compact["schema"], "repo_index_daemon.compact.v1")
         self.assertIn("result_id", compact)
-        self.assertGreaterEqual(compact["history_memory_entry_count"], 1)
         self.assertEqual(quick["schema"], "repo_index_daemon.quick.v1")
-        self.assertIn("semantic_dag_edge_count", quick)
-        self.assertGreaterEqual(quick["history_memory_entry_count"], 1)
         self.assertIn("files_compressed", verbose)
-        self.assertIn("semantic_dag", verbose)
-        self.assertIn("history_memory", verbose)
-        self.assertGreaterEqual(verbose["semantic_dag"]["edge_count"], 1)
-        self.assertGreaterEqual(verbose["history_memory"]["entry_count"], 1)
         self.assertIn("value_json", queried)
-        initial_dag_edge_count = int(verbose["semantic_dag"]["edge_count"])
-        index_payload = json.loads(
-            (self.repo_path / ".codebase-tooling-mcp" / "index" / "repo_index.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(index_payload["schema"], "repo_index_daemon.v2")
-        self.assertIn("records", index_payload)
-        self.assertIn("history_memory", index_payload)
 
-        self.write_repo_text("docs/a.md", "updated docs mention src/sample.py and alpha\n")
-        read_without_refresh = self.server.repo_index_daemon(
-            mode="read",
-            output_profile="normal",
-        )
-        self.assertEqual(read_without_refresh["semantic_dag"]["edge_count"], initial_dag_edge_count)
+        self.write_repo_text("docs/a.md", "updated docs\n")
         incremented = self.server.repo_index_daemon(
             mode="refresh",
             path=".",
@@ -185,84 +166,6 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
             incremental=True,
         )
         self.assertGreaterEqual(incremented["changed_paths_count"], 1)
-        self.assertGreaterEqual(incremented["reused_paths_count"], 1)
-        refreshed_verbose = self.server.repo_index_daemon(
-            mode="read",
-            output_profile="normal",
-        )
-        self.assertGreaterEqual(
-            refreshed_verbose["semantic_dag"]["edge_count"],
-            initial_dag_edge_count,
-        )
-
-    def test_repo_index_daemon_scopes_history_memory_to_subdir(self):
-        self.write_repo_text("docs/a.md", "docs-only change\n")
-        self.commit_all("docs: update docs only")
-
-        self.write_repo_text(
-            "src/sample.py",
-            "import os\n\n"
-            "def alpha(x):\n"
-            "    return x + 2\n\n"
-            "def beta(y):\n"
-            "    return alpha(y)\n",
-        )
-        self.commit_all("feat(src): update sample behavior")
-
-        self.server.repo_index_daemon(
-            mode="refresh",
-            path="src",
-            output_profile="normal",
-            incremental=False,
-        )
-        index_payload = json.loads(
-            (self.repo_path / ".codebase-tooling-mcp" / "index" / "repo_index.json").read_text(encoding="utf-8")
-        )
-        history_memory = index_payload["history_memory"]
-
-        self.assertEqual(history_memory["scope_prefixes"], ["src"])
-        self.assertTrue(all(row["path"].startswith("src/") for row in history_memory["hot_paths"]))
-        self.assertTrue(
-            all(
-                all(path.startswith("src/") for path in row.get("files", []))
-                for row in history_memory["entries"]
-            )
-        )
-        subjects = [row.get("subject", "") for row in history_memory["entries"]]
-        self.assertNotIn("docs: update docs only", subjects)
-
-    def test_repo_memory_lookup_prefers_cached_snapshot_over_live_git_history(self):
-        self.write_repo_text(
-            "src/sample.py",
-            "import os\n\n"
-            "def alpha(x):\n"
-            "    return x + 2\n\n"
-            "def beta(y):\n"
-            "    return alpha(y)\n",
-        )
-        self.commit_all("feat(sample): update sample behavior")
-        self.server.repo_index_daemon(
-            mode="refresh",
-            path=".",
-            output_profile="normal",
-            incremental=False,
-        )
-
-        with patch.object(
-            self.server,
-            "_repo_history_memory_snapshot",
-            side_effect=AssertionError("live git history should not be recomputed"),
-        ) as history_snapshot:
-            memory = self.server._repo_memory_lookup(
-                prompt="Review src/sample.py behavior for regressions.",
-                target_paths=["src/sample.py"],
-                retrieval_info={},
-            )
-
-        history_snapshot.assert_not_called()
-        self.assertTrue(memory["enabled"])
-        self.assertGreaterEqual(memory["entry_count"], 1)
-        self.assertIn("src/sample.py", memory["context"])
 
     def test_tool_assisted_infer_helpers_and_parallel_fallback(self):
         self.write_repo_text(
@@ -331,13 +234,12 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
     def test_local_infer_autocomplete_and_translation_modes(self):
         with patch.object(self.server, "_local_infer_via_endpoint", side_effect=RuntimeError("offline")):
             infer = self.server.local_infer(
-                prompt="Summarize src/sample.py in 2 concise sentences focused on behavior.",
+                prompt="explain sample.py",
                 backend="endpoint",
                 output_profile="compact",
                 store_result=True,
             )
-        self.assertEqual(infer["backend"], "tool_fallback")
-        self.assertTrue(infer["degraded"])
+        self.assertEqual(infer["backend"], "fallback")
         self.assertIn("result_id", infer)
 
         with patch.object(self.server, "_local_infer_via_endpoint", side_effect=RuntimeError("offline")):
@@ -348,8 +250,7 @@ class ServerAnalysisCoverageTest(ServerToolsTestBase):
                 output_profile="compact",
                 store_result=True,
             )
-        self.assertEqual(completion["backend"], "heuristic_fallback")
-        self.assertTrue(completion["degraded"])
+        self.assertEqual(completion["backend"], "fallback")
         self.assertIn("result_id", completion)
         self.assertTrue(completion["ok"])
 

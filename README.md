@@ -33,10 +33,15 @@ Successfully tagged codebase-tooling-mcp:latest
 
 ### 2) Run HTTP server
 
+HTTP mode requires bearer-token authorization by default. Generate a local token before starting the server:
+
 ```bash
+export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+
 docker run --rm \
   -p 8000:8000 \
   -e MCP_TRANSPORT=http \
+  -e MCP_HTTP_BEARER_TOKEN="$MCP_HTTP_BEARER_TOKEN" \
   -e ALLOW_MUTATIONS=true \
   -e HOST_CA_CERT_FILE=/host-certs/ca-certificates.crt \
   -v /etc/ssl/certs:/host-certs:ro \
@@ -46,8 +51,11 @@ docker run --rm \
 
 ### 3) Register MCP server
 
+Send the same token to MCP clients as an `Authorization: Bearer ...` header:
+
 ```bash
-claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
+claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp \
+  --header "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN"
 ```
 
 Expected result (example):
@@ -89,9 +97,10 @@ Expected result (example):
 ## Use With VS Code Dev Containers
 
 1. Open this repository in VS Code.
-2. Run `Dev Containers: Reopen in Container`.
-3. Wait for the `codebase-tooling-mcp` container to build and start.
-4. Use the MCP endpoint at `http://localhost:8000/mcp`.
+2. Export a local HTTP token before opening/rebuilding the container: `export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"`.
+3. Run `Dev Containers: Reopen in Container`.
+4. Wait for the `codebase-tooling-mcp` container to build and start.
+5. Use the MCP endpoint at `http://localhost:8000/mcp` with header `Authorization: Bearer $MCP_HTTP_BEARER_TOKEN`.
 
 The VS Code entry point is [`.devcontainer/devcontainer.json`](./.devcontainer/devcontainer.json). This repository uses a single-file devcontainer setup (no required `docker-compose.yml`).
 
@@ -108,6 +117,7 @@ Inline devcontainer example (non-compose):
   "runArgs": ["--device=/dev/dri"],
   "containerEnv": {
     "MCP_TRANSPORT": "http",
+    "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "ALLOW_MUTATIONS": "true",
     "OLLAMA_VULKAN": "1"
   },
@@ -163,11 +173,12 @@ Run it in VS Code:
 1. Open [`vscode/mcp-inline-autocomplete/package.json`](./vscode/mcp-inline-autocomplete/package.json).
 2. Press `F5` (Run Extension) to start an Extension Development Host.
 3. In the dev host, open Command Palette and run `MCP Inline Autocomplete: Show Status`.
-4. Start typing in a file; inline suggestions come from `task_router(mode="autocomplete")` at `http://localhost:8000/mcp`.
+4. Start typing in a file; inline suggestions come from MCP tool `autocomplete` at `http://localhost:8000/mcp`. By default, the extension sends `Authorization: Bearer $MCP_HTTP_BEARER_TOKEN` from the configured environment variable.
 
 Key settings (in VS Code Settings):
 
 - `mcpInlineAutocomplete.endpoint` (default `http://localhost:8000/mcp`)
+- `mcpInlineAutocomplete.bearerTokenEnv` (default `MCP_HTTP_BEARER_TOKEN`; set empty only for explicit `insecure-local` tests)
 - `mcpInlineAutocomplete.maxTokens`
 - `mcpInlineAutocomplete.temperature`
 - `mcpInlineAutocomplete.enabledLanguages`
@@ -198,7 +209,7 @@ The script finds the repository root by locating `.git` and creates only:
 When the devcontainer starts, the image applies default repository files if they
 are missing:
 
-- `.continue/models/*.yaml` (agent + router + specialist model defaults, repo-owned)
+- `.continue/models/*.yaml` (router + specialist model defaults, repo-owned)
 - `.continue/model-routing.yaml` (routing map for router/specialists)
 - `.continue/mcpServers/codebase-tooling-mcp.yaml`
 - `.config/labs/*.json`
@@ -213,6 +224,7 @@ That generated Codex entry uses the server key `codebase-tooling-mcp`:
 ```toml
 [mcp_servers."codebase-tooling-mcp"]
 url = "http://localhost:8000/mcp"
+bearer_token_env_var = "MCP_HTTP_BEARER_TOKEN"
 ```
 
 The `.gitignore` bootstrap is intentionally one-time. A marker file
@@ -231,14 +243,35 @@ repository does not need a local `vscode/mcp-inline-autocomplete/` copy and VS C
 
 - MCP endpoint: `http://localhost:8000/mcp`
 - Health endpoint: `http://localhost:8000/healthz`
+- Authorization metadata: `http://localhost:8000/.well-known/oauth-protected-resource`
+
+HTTP mode requires bearer-token authorization by default. Start with a token and pass it in the standard header:
+
+```bash
+export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+python source/server.py
+
+curl -H "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN" http://localhost:8000/mcp
+```
+
+For throwaway local-only experiments, unauthenticated HTTP is still available only by explicit opt-in:
+
+```bash
+MCP_HTTP_AUTH_MODE=insecure-local HOST=127.0.0.1 python source/server.py
+```
+
+Do not use insecure-local mode with public interfaces, tunnels, shared devcontainers, or VS Code port forwarding.
 
 ## Example Claude Code registration
 
 ### HTTP server
 
 ```bash
-claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
+claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp \
+  --header "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN"
 ```
+
+If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local` for a throwaway loopback-only test, omit the header. Do not use that mode through forwarded ports, devcontainers, SSH tunnels, or shared networks.
 
 ### Local stdio server via Docker
 
@@ -271,14 +304,20 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 | `MCP_TRANSPORT` | `http` | No | `http`, `stdio`, `direct`, `streamable-http`, `streamable_http` | Selects server transport mode. |
 | `REPO_PATH` | `/repo` | No | Absolute path | Root path tools may operate on. |
 | `ALLOW_MUTATIONS` | `false` (recommended default) | No | `true`, `false` | Enables/disables write and git-mutating operations. |
-| `HOST` | `0.0.0.0` | No | Host/IP string | Bind address for HTTP mode. |
+| `MCP_HTTP_AUTH_MODE` | `token` | No | `token`, `bearer`, `oauth-resource`, `insecure-local`, `disabled`, `off`, `none` | HTTP auth mode. Token/bearer modes require `Authorization: Bearer ...`; insecure modes are explicit local-only escapes. Stdio is unaffected. |
+| `MCP_HTTP_BEARER_TOKEN` | empty | Required for HTTP token modes | Secret string | Bearer token accepted by HTTP MCP/SSE requests. Missing token in token mode returns 403. |
+| `MCP_HTTP_RATE_LIMIT_REQUESTS` | `120` | No | Positive integer | Per-client HTTP request budget per window. Exceeded requests return 429 with `Retry-After`. |
+| `MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` | `60` | No | Positive integer seconds | Rate-limit window size. |
+| `MCP_HTTP_REQUEST_TIMEOUT_SECONDS` | `120` | No | Positive seconds | Non-SSE HTTP request timeout; exceeded requests return 504. |
+| `MCP_AUDIT_LOG_FILE` | `.codebase-tooling-mcp/audit/security_events.jsonl` | No | Path | Append-only JSONL audit events for sensitive tool calls and denied HTTP auth attempts. Arguments are redacted/truncated. |
+| `HOST` | `0.0.0.0` | No | Host/IP string | Bind address for HTTP mode. Prefer `127.0.0.1` for local development. |
 | `PORT` | `8000` | No | Integer port | HTTP listen port. |
 | `MAX_READ_BYTES` | `262144` | No | Positive integer | Max bytes read by file tools per request. |
 | `MAX_OUTPUT_CHARS` | `200000` | No | Positive integer | Output truncation limit for tool responses. |
 | `CODING_DEFAULT_MODEL` | `qwen2.5-coder:3b` | No | Ollama model ID | Primary coding model used by `coding_infer` and the default coding route. |
 | `CODING_MICRO_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Smaller coding model used for explicit `micro_coding` requests and short auto-routed coding prompts. |
 | `CODING_MICRO_MAX_PROMPT_CHARS` | `600` | No | Positive integer | Maximum normalized prompt size for automatic micro-coding selection. |
-| `CONTINUE_OLLAMA_MODELS` | `qwen2.5-coder:3b,qwen2.5-coder:1.5b,smollm2:360m,granite3.3:2b,deepseek-r1:1.5b,granite3.2-vision:2b` | No | Comma-separated model IDs (or empty) | Default Ollama model set expected to be embedded in the image and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
+| `CONTINUE_OLLAMA_MODELS` | `qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b` | No | Comma-separated model IDs (or empty) | Default Ollama model set expected to be embedded in the image and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
 | `OLLAMA_ALLOW_PULL` | `false` | No | `true`, `false` | Explicit opt-in for runtime `ollama pull` of missing models. Keep `false` for offline-only startup. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
 | `OLLAMA_STARTUP_TIMEOUT` | `30` | No | Integer seconds | Max wait time for Ollama readiness before fallback/failure logic. |
@@ -292,16 +331,10 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
-- `.continue/models/agent-qwen2.5-coder-3b.yaml` is the repo-owned front-door Continue chat/agent model. Use that model in VS Code Continue Agent mode if you want the model to call MCP tools.
-- `task_router` is an MCP tool, not a Continue chat model. If Continue only prints JSON like `{"name":"codebase_tooling_mcp_task_router","arguments":{"mode":"task"}}`, the selected chat model is describing a tool call instead of emitting one Continue can execute.
-- The repo-owned agent model declares `capabilities: [tool_use]` so Continue can enable Agent mode and route MCP calls through the selected chat model.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
 - `source/Dockerfile` preloads the full default model set declared by `CONTINUE_OLLAMA_MODELS` into the image, and `source/entrypoint.sh` seeds those models into the runtime model directory before server startup.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
 - `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided.
-- `task_router(mode="task")` now emits a structured intent packet, compact task context packet, retrieval telemetry, curated skill pack hints, adaptive cost/watchdog metadata, and repository-history memory before inference. Task memory writes carry provenance/trust metadata and low-trust rows are quarantined from automatic context reuse.
-- `task_router(mode="guided_edit")` now runs a bounded edit planner, diff verifier, watchdog scan, replay log, replay summarizer/diagnoser, workflow benchmark record, and evidence-backed edit/experience memory write in a single step.
-- `repo_index_daemon` now materializes both a semantic DAG that links files, symbols, tests, and docs and a persistent commit-history memory snapshot for hot paths and recent repository changes.
 - Setting `CONTINUE_OLLAMA_MODELS` to an empty value declares that no default bundled model set is required. In that mode, Continue may report `model not found` until models are installed manually or `OLLAMA_ALLOW_PULL=true` is used.
 - A `404` on `http://127.0.0.1:2345/v1/` does not invalidate the native Ollama integration in this repo; the native base and `/api/tags` are the relevant health checks.
 
@@ -309,7 +342,10 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 
 - Path traversal outside the mounted repository is blocked.
 - Read-only usage is the safest default: keep `ALLOW_MUTATIONS=false` unless changes are required.
-- Mutating operations (for example `write_file`, `delete_path`, `move_path`, Git writes) require `ALLOW_MUTATIONS=true`.
+- HTTP mode requires authorization by default (`MCP_HTTP_AUTH_MODE=token` plus `MCP_HTTP_BEARER_TOKEN`). Stdio-only use is not affected.
+- Mutating categories (`write`, `git mutation`) require both `ALLOW_MUTATIONS=true` and an authorized HTTP session when called over HTTP.
+- Sensitive categories (`shell/process`, `network`, `secret-sensitive`) require an authorized HTTP session and are audited.
+- `task_router` carries per-mode security categories: read/status modes are read-only; inference/autocomplete modes include `network`; coding check/package/sandbox modes include `shell/process`, and package/sandbox/coding-infer modes include `write` where applicable.
 - Git commits still require Git user identity in repo config or environment.
 - In stdio mode, avoid writing logs to stdout to preserve protocol framing.
 
@@ -328,9 +364,7 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 - Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
 - `tool_output_contracts`
 
-`task_router()` is the single public MCP entrypoint and now defaults to `mode="task"`. It classifies the request, encodes a structured intent packet, attaches compact memory, repository-history memory, retrieval telemetry, and curated skill/context packets, records adaptive execution metadata, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
-
-No public MCP resources or resource templates are exposed by default.
+`task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
 The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`. `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for schema-aware MCP clients.
 

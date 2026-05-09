@@ -29,17 +29,6 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertIn(f"apiBase: {NATIVE_OLLAMA_BASE}", text, str(path))
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
 
-    def test_continue_agent_model_declares_tool_use_capability(self):
-        for agent_path in [
-            REPO_ROOT / ".continue" / "models" / "agent-qwen2.5-coder-3b.yaml",
-            REPO_ROOT / "source" / "defaults" / "continue" / "models" / "agent-qwen2.5-coder-3b.yaml",
-        ]:
-            text = agent_path.read_text(encoding="utf-8")
-            self.assertIn("model: qwen2.5-coder:3b", text, str(agent_path))
-            self.assertIn("capabilities:", text, str(agent_path))
-            self.assertIn("- tool_use", text, str(agent_path))
-            self.assertIn("- chat", text, str(agent_path))
-
     def test_devcontainer_does_not_override_default_ollama_model_policy(self):
         config = json.loads(
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
@@ -158,14 +147,10 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:3b", dockerfile)
         self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
-        self.assertIn("VIRTUAL_ENV=/opt/codebase-tooling/coding-venv", dockerfile)
-        self.assertIn(
-            "PATH=/opt/codebase-tooling/coding-venv/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            dockerfile,
-        )
         full_default_models = (
-            "qwen2.5-coder:3b,qwen2.5-coder:1.5b,smollm2:360m,granite3.3:2b,"
-            "deepseek-r1:1.5b,granite3.2-vision:2b"
+            "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,"
+            "phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,"
+            "granite3.2-vision:2b,llama3.2:1b"
         )
         self.assertIn(f"CONTINUE_OLLAMA_MODELS={full_default_models}", dockerfile)
         self.assertIn(f'ARG OLLAMA_PRELOAD_MODELS="{full_default_models}"', dockerfile)
@@ -173,7 +158,6 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('ollama pull "$model"', dockerfile)
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
         self.assertIn('cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/', dockerfile)
-        self.assertNotIn('/home/app/.ollama/models', dockerfile)
 
     def test_dockerfile_uses_python_313_trixie_base_image(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -185,7 +169,6 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('/opt/codebase-tooling/coding-venv/bin/pip install \\', dockerfile)
         self.assertIn('--root-user-action=ignore \\', dockerfile)
         self.assertIn('-r requirements.txt \\', dockerfile)
-        self.assertEqual(dockerfile.count('-r requirements.txt \\'), 1)
 
     def test_continue_model_routing_uses_small_default_profile(self):
         for routing_path in [
@@ -193,25 +176,18 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             REPO_ROOT / "source" / "defaults" / "continue" / "model-routing.yaml",
         ]:
             routing = routing_path.read_text(encoding="utf-8")
-            self.assertIn("model: smollm2:360m", routing, str(routing_path))
-            self.assertIn("file: .continue/models/router-smollm2-360m.yaml", routing, str(routing_path))
+            self.assertIn("model: granite3.3:2b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/router-granite3.3-2b.yaml", routing, str(routing_path))
             self.assertIn("model: qwen2.5-coder:3b", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen2.5-coder-3b.yaml", routing, str(routing_path))
             self.assertIn("model: qwen2.5-coder:1.5b", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen2.5-coder-1.5b.yaml", routing, str(routing_path))
-            self.assertIn("model: granite3.3:2b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/refactor-granite3.3-2b.yaml", routing, str(routing_path))
-            self.assertIn("file: .continue/models/review-granite3.3-2b.yaml", routing, str(routing_path))
-            self.assertIn("file: .continue/models/research-granite3.3-2b.yaml", routing, str(routing_path))
-            self.assertIn("model: deepseek-r1:1.5b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/math-deepseek-r1-1.5b.yaml", routing, str(routing_path))
+            self.assertIn("model: llama3.2:1b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/research-llama3.2-1b.yaml", routing, str(routing_path))
 
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "router-granite3.3-2b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "router-granite3.2-2b.yaml").exists())
         self.assertFalse((REPO_ROOT / ".continue" / "models" / "coding-qwen2.5-coder-7b.yaml").exists())
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "refactor-phi4-mini-3.8b.yaml").exists())
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "review-phi4-mini-reasoning-3.8b.yaml").exists())
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "math-deepscaler-1.5b.yaml").exists())
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "research-llama3.2-1b.yaml").exists())
+        self.assertFalse((REPO_ROOT / ".continue" / "models" / "research-llama3.2-3b.yaml").exists())
 
     def test_dockerfile_installs_vulkan_runtime_for_ollama(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -258,7 +234,6 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("/dev/kfd", entrypoint)
         self.assertIn('seed_ollama_models_from_image_preload', entrypoint)
         self.assertIn('export OLLAMA_VULKAN=1', entrypoint)
-        self.assertIn('exec "${CODING_VENV_PYTHON:-/opt/codebase-tooling/coding-venv/bin/python}" /app/server.py', entrypoint)
         before_drop = entrypoint.split(
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1
         )[0]

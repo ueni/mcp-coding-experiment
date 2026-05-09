@@ -116,25 +116,47 @@ The new git-backed snapshot restore flow intentionally performs rollback-style c
 
 ## 5. Tooling Taxonomy
 
-The platform now exposes a compact LLM-first MCP v1 surface. Capabilities remain broad, but the public contract is intentionally single-entrypoint so weaker models spend attention on one stable tool and route internally.
+The platform now exposes a compact LLM-first MCP v1 surface. Capabilities remain broad, but the public contract is intentionally router-shaped so weaker models spend attention on fewer tool names.
 
 ### 5.1 Public MCP v1 Surface
 
 Public tools:
 
-- `task_router`
+- `autocomplete`
+- `repo_info`, `runtime_state`
+- `repo_router`, `workspace_transaction`, `git_router`
+- `code_index_router`, `task_router`, `memory_router`, `docker_router`, `vscode_router`, `tool_router`
+- `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`
+- `math_router`, `document_router`, `diagram_router`
+- `sql_expert`, `browse_web`
 
 ### 5.2 Router Design Principle
 
-`task_router` owns the public contract and dispatches to internal leaf implementations. Its explicit modes expose status, task inference, embeddings, autocomplete, reranking, guided edit, and coding sandbox/check/package flows without publishing the full internal helper surface. The task path now emits a structured intent packet plus compact context packet, repository-history memory, retrieval telemetry, curated skill hints, adaptive cost/watchdog metadata, and provenance-aware memory writes. The guided-edit path adds verifier, replay summarization/diagnosis, workflow benchmarking, and evidence-backed experience memory hooks.
+Each public router owns a task-shaped capability family and dispatches to internal leaf implementations:
+
+- `repo_router`: repository listing, focused reads, snippets, batch reads, JSON/TOML/YAML queries
+- `workspace_transaction`: transaction lifecycle plus direct file mutations
+- `git_router`: Git operations, diff summarization, risk scoring, security triage
+- `code_index_router`: repository index, semantic search, grep, AST/tree-sitter, impact/doc/API checks
+- `memory_router`: context memory, failure memory, root-cause memory, artifact index access
+- `tool_router`: learned routing with intent fallback
+- `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`: higher-level operational flows
+- `math_router`, `document_router`, `diagram_router`: domain-specific utility families
 
 ### 5.3 Internal Leaf Tools
 
-Internal leaf tools remain implemented in the server for reuse and testing, but they are not part of the public MCP v1 surface. This preserves feature breadth while materially reducing the exposed tool count.
+Former leaf tools remain implemented in the server for reuse and testing, but they are not part of the public MCP v1 surface. This preserves feature breadth while materially reducing the exposed tool count.
 
 ## 6. Advanced Workflow Layer
 
-The workflow, governance, and runtime layers remain available as internal leaf functions and higher-level helpers, but they are no longer published as separate MCP routers. This keeps the public contract truthful: one entrypoint, many internal capabilities.
+The workflow/governance/runtime layers are now expressed primarily through routers:
+
+- `quality_router`: tests, readiness, required-tool-chain, spec-to-tests, batch fixes
+- `governance_router`: policy simulation, license checks, runtime contract validation, approval checkpoints, commit linting
+- `workflow_router`: fast-path development, workflow compilation, multi-agent analysis, artifact/failure/root-cause memory, replay, sharding
+- `runtime_guard_router`: benchmarks, golden/output guards, token/cost budgets, cache inspection, result handles, workspace facts
+
+This shifts the public contract from a large collection of primitives to a smaller number of strict mode-based interfaces.
 
 ## 7. State Management and Rollback Strategy
 
@@ -234,10 +256,10 @@ Primary cost vectors:
 
 Recommended controls:
 
-- Reuse the persisted per-file repo index (`repo_index_daemon`) and its semantic DAG instead of rebuilding full analysis state.
+- Keep index warm (`repo_index_daemon`).
 - Use `read_snippet`/focused queries over full-file reads when possible.
 - Gate output size early (`token_budget_guard`).
-- Use explicit benchmark and guard checks when you need them; do not rely on hidden router layers to optimize automatically.
+- Benchmark critical chains (`tool_benchmark`) and route with learned stats (`tool_router_learned`).
 
 ## 12. Adoption Maturity Model
 

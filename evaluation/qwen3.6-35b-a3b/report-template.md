@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Evaluation Report
 
-This file is an evaluation report related to issue #1. It records the 2026-05-08 target-host probe, the verified Docker GPU runtime path, the 2026-05-09 GPU-backed target-model smoke/bounded runs, and the 2026-05-09 current-orchestrator comparison harness result. It does **not** satisfy the full issue #1 benchmark acceptance criteria as a replacement recommendation because bounded local-model quality is below the productive/default-assistant threshold and the current-orchestrator comparison could only exercise the repository task router's non-streaming degraded fallback path in this environment. The bounded GPU-backed run's median `8.056` sustained tokens/sec now meets the revised approximately 7 sustained tokens/sec throughput threshold. No CPU-only or orchestrator result is fabricated.
+This file is an evaluation report related to issue #1. It records the 2026-05-08 target-host probe, the verified Docker GPU runtime path, the 2026-05-09 GPU-backed target-model smoke/bounded runs, and the 2026-05-09 current-orchestrator comparison harness result. The revised artifacts satisfy the issue #1 evaluation acceptance criteria for a **limited/offline** viability recommendation, not for replacing the default/productive assistant path. The remaining comparison limitation is explicit: the current-orchestrator harness could only exercise the repository task router's non-streaming degraded fallback path in this environment, not a hosted/default-assistant production endpoint. The bounded GPU-backed run's median `8.056` sustained tokens/sec meets the revised approximately 7 sustained tokens/sec throughput threshold. No CPU-only or orchestrator result is fabricated.
 
 ## Run metadata
 
