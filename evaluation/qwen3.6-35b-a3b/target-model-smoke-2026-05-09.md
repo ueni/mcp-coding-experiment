@@ -15,62 +15,64 @@ Runtime source: `source/Dockerfile`; `.devcontainer/devcontainer.json` remains t
 
 ## Result
 
-A smallest safe target-model smoke run completed for one scenario, but it did **not** satisfy the GPU-backed benchmark requirement.
+A smallest safe target-model smoke run completed for one scenario with Vulkan GPU offload enabled after adding the host render device group to the direct Docker invocation.
 
 The selected GGUF was present and importable, so Qwen3.6-35B-A3B weights were available for this selected quantization:
 
 - File: `.qwen-eval-models/Qwen3.6-35B-A3B-UD-IQ1_M.gguf`
 - Size: `10047749088` bytes
 - SHA256: `0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e`
-- AC power: online during the run
-- Host memory before run: 28 GiB total, 23 GiB available, 788 MiB free swap
+- Host GPU device: `AMD Radeon Graphics (RADV RENOIR)` via Vulkan
+- Direct Docker requirement: pass `/dev/dri` and `/dev/kfd`, then add the host render group with `--group-add "$(stat -c '%g' /dev/dri/renderD128)"` so the non-root `app` user can open the device nodes.
 
 The Docker/Ollama run completed `embedded-c-review-001` with `--num-predict 80`:
 
 | Metric | Value |
 | --- | ---: |
 | Scenarios completed | 1/7 |
-| First-token latency | 15.501 s |
-| End-to-end latency | 29.843 s |
+| First-token latency | 19.161 s |
+| End-to-end latency | 29.357 s |
 | Input tokens | 145 |
 | Output tokens | 80 |
-| Sustained output rate | 5.584 tokens/sec |
-| Ollama load duration | 10.081 s |
-| Prompt eval duration | 5.028 s |
-| Eval duration | 14.326 s |
+| Sustained output rate | 7.929 tokens/sec |
+| Ollama load duration | 13.108 s |
+| Prompt eval duration | 5.832 s |
+| Eval duration | 10.090 s |
 | Quality verdict | partial |
 
 Machine-readable result: `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json`.
+Full captured log: `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.log`.
 
-## Critical blocker found
+## GPU offload evidence
 
-Although `/dev/dri` was passed and `OLLAMA_VULKAN=1` was set, Ollama did not use GPU acceleration for Qwen3.6-35B-A3B-UD-IQ1_M on this run.
-
-Relevant Ollama log excerpts:
+The earlier direct Docker command passed `/dev/dri` but did not add the render group to the `app` user, so Ollama only discovered CPU compute and reported `offloaded 0/41 layers to GPU`. The rerun adds the host render/KFD group ID to the container. Vulkan discovery and Ollama offload then worked:
 
 ```text
-time=2026-05-09T10:33:31.776Z level=INFO source=types.go:60 msg="inference compute" id=cpu library=cpu compute="" name=cpu description=cpu libdirs=ollama driver="" pci_id="" type="" total="28.6 GiB" available="28.5 GiB"
-time=2026-05-09T10:33:52.654Z level=INFO source=sched.go:484 msg="system memory" total="28.6 GiB" free="23.1 GiB" free_swap="788.7 MiB"
-time=2026-05-09T10:33:52.782Z level=INFO source=ggml.go:136 msg="" architecture=qwen35moe file_type=unknown name=Qwen3.6-35B-A3B description="" num_tensors=733 num_key_values=55
-load_backend: loaded CPU backend from /usr/local/lib/ollama/libggml-cpu-haswell.so
-time=2026-05-09T10:33:53.731Z level=INFO source=ggml.go:494 msg="offloaded 0/41 layers to GPU"
-time=2026-05-09T10:33:53.731Z level=INFO source=device.go:245 msg="model weights" device=CPU size="9.3 GiB"
-time=2026-05-09T10:33:53.731Z level=INFO source=device.go:256 msg="kv cache" device=CPU size="1.6 GiB"
-time=2026-05-09T10:33:53.731Z level=INFO source=device.go:272 msg="total memory" size="11.0 GiB"
-time=2026-05-09T10:34:02.143Z level=INFO source=server.go:1388 msg="llama runner started in 9.49 seconds"
-[GIN] 2026/05/09 - 10:34:21 | 200 | 29.826022057s | 127.0.0.1 | POST "/api/generate"
+GPU0:
+    deviceType         = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+    deviceName         = AMD Radeon Graphics (RADV RENOIR)
+time=2026-05-09T11:30:25.199Z level=INFO source=types.go:42 msg="inference compute" id=00000000-0700-0000-0000-000000000000 filter_id="" library=Vulkan compute=0.0 name=Vulkan0 description="AMD Radeon Graphics (RADV RENOIR)" libdirs=ollama,vulkan driver=0.0 pci_id=0000:07:00.0 type=iGPU total="16.3 GiB" available="15.1 GiB"
+load_backend: loaded Vulkan backend from /usr/local/lib/ollama/vulkan/libggml-vulkan.so
+time=2026-05-09T11:31:16.311Z level=INFO source=ggml.go:482 msg="offloading 40 repeating layers to GPU"
+time=2026-05-09T11:31:16.311Z level=INFO source=ggml.go:489 msg="offloading output layer to GPU"
+time=2026-05-09T11:31:16.311Z level=INFO source=ggml.go:494 msg="offloaded 41/41 layers to GPU"
+time=2026-05-09T11:31:16.311Z level=INFO source=device.go:240 msg="model weights" device=Vulkan0 size="9.1 GiB"
+time=2026-05-09T11:31:16.311Z level=INFO source=device.go:251 msg="kv cache" device=Vulkan0 size="1.6 GiB"
 ```
-
-Because ueni clarified that GPU must be used, this smoke run is evidence of a target-runtime blocker, not a PASS for issue #1.
 
 ## Command run
 
 ```bash
 head -n 1 evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl > /tmp/qwen36-one-scenario.jsonl
+render_gid="$(stat -c '%g' /dev/dri/renderD128)"
+kfd_gid="$(stat -c '%g' /dev/kfd)"
 /usr/bin/time -v docker run --rm \
   --security-opt=seccomp=unconfined \
   --security-opt=apparmor=unconfined \
   --device=/dev/dri \
+  --device=/dev/kfd \
+  --group-add "$render_gid" \
+  --group-add "$kfd_gid" \
   -e OLLAMA_VULKAN=1 \
   -e OLLAMA_HOST=127.0.0.1:11434 \
   -v "$PWD:/repo" \
@@ -88,7 +90,7 @@ EOF
             python3 /repo/evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py \
               --scenarios /tmp/qwen36-one-scenario.jsonl \
               --model qwen3.6-35b-a3b-iq1m \
-              --backend qwen3.6-35b-a3b-local-docker-ollama \
+              --backend qwen3.6-35b-a3b-local-docker-ollama-vulkan \
               --num-predict 80 \
               --timeout 1800 \
               --output /repo/evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json'
@@ -97,7 +99,7 @@ EOF
 ## Interpretation
 
 - Reproducible target-model acquisition is no longer blocked for the selected IQ1_M GGUF: the file is complete and checksummed locally.
-- Target-model inference can start in the repository Docker/Ollama runtime.
-- GPU acceleration for the target model did not activate: `offloaded 0/41 layers to GPU` and the CPU backend was loaded.
-- The observed 5.584 tokens/sec on the first scenario is below the approximately 14 tokens/sec expectation and is CPU-only, so it cannot be accepted as the required GPU-backed throughput measurement.
-- Full seven-scenario quality comparison and current-orchestrator comparison remain blocked until the target runtime uses GPU or the issue scope is explicitly changed to allow CPU-only evaluation.
+- Target-model inference starts in the repository Docker/Ollama runtime.
+- The Docker/Ollama GPU offload blocker was the missing host render device group in direct `docker run` commands that bypass `/app/entrypoint.sh` group mapping.
+- The rerun used Vulkan and offloaded 41/41 layers to GPU, producing 7.929 tokens/sec on the first scenario.
+- This is still only a one-scenario smoke result with a `partial` quality verdict, not the full seven-scenario issue #1 benchmark acceptance result.

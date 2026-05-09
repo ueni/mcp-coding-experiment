@@ -91,7 +91,13 @@ except ModuleNotFoundError:  # pragma: no cover
     _ts_get_parser = None
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import Field
+from pydantic import Field, RootModel
+from source.tool_output_schemas import (
+    SCHEMA_BACKED_TOOL_NAMES,
+    TOOL_OUTPUT_SCHEMAS,
+    all_tool_output_contracts,
+    tool_output_contract,
+)
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -139,9 +145,15 @@ SKILL_PACK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/SKILL_PACK_LINT.jso
 GUIDED_EDIT_REGRESSION_FILE = Path(".codebase-tooling-mcp/reports/GUIDED_EDIT_REGRESSIONS.json")
 GUIDED_EDIT_EXAMPLE_FILE = Path(".codebase-tooling-mcp/reports/GUIDED_EDIT_EXAMPLES.json")
 GUIDED_EDIT_REPLAY_BENCHMARK_FILE = Path(".codebase-tooling-mcp/reports/GUIDED_EDIT_REPLAY_BENCHMARK.json")
-REPO_HISTORY_MEMORY_MAX_COMMITS = max(10, int(os.getenv("REPO_HISTORY_MEMORY_MAX_COMMITS", "40")))
-REPO_HISTORY_MEMORY_MAX_FILES = max(4, int(os.getenv("REPO_HISTORY_MEMORY_MAX_FILES", "12")))
-REPO_HISTORY_MEMORY_MAX_ENTRIES = max(2, int(os.getenv("REPO_HISTORY_MEMORY_MAX_ENTRIES", "6")))
+REPO_HISTORY_MEMORY_MAX_COMMITS = max(
+    10, int(os.getenv("REPO_HISTORY_MEMORY_MAX_COMMITS", "40"))
+)
+REPO_HISTORY_MEMORY_MAX_FILES = max(
+    4, int(os.getenv("REPO_HISTORY_MEMORY_MAX_FILES", "12"))
+)
+REPO_HISTORY_MEMORY_MAX_ENTRIES = max(
+    2, int(os.getenv("REPO_HISTORY_MEMORY_MAX_ENTRIES", "6"))
+)
 MEMORY_TRUST_LEVELS = {"low", "medium", "high"}
 GUIDED_EDIT_REPLAY_GLOBAL_THRESHOLDS = {
     "applied_success_rate": 0.95,
@@ -234,15 +246,25 @@ CURATED_TASK_SKILL_PACKS: dict[str, list[dict[str, str]]] = {
         },
     ],
 }
-# Keep the external MCP contract to a single entrypoint; the rest remain internal call targets.
+# Keep the external MCP contract focused: task_router remains the normal entrypoint,
+# and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
+    "tool_output_contracts",
+    *SCHEMA_BACKED_TOOL_NAMES,
 }
 ENABLE_PUBLIC_MCP_RESOURCES = os.getenv(
     "ENABLE_PUBLIC_MCP_RESOURCES", "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
 PUBLIC_MCP_RESOURCE_URIS: set[str] = set()
 PUBLIC_MCP_RESOURCE_TEMPLATES: set[str] = set()
+OUTPUT_SCHEMA_BY_TOOL = TOOL_OUTPUT_SCHEMAS
+
+
+class _AnyToolOutput(RootModel[Any]):
+    root: Any
+
+
 APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
@@ -3349,7 +3371,7 @@ def _readme_tool_names() -> set[str]:
 
 
 def _declared_tool_names() -> set[str]:
-    server_file = _resolve_repo_path("source/server.py")
+    server_file = REPO_PATH / "source/server.py"
     if not server_file.is_file():
         server_file = Path(__file__).resolve()
     names: set[str] = set()
@@ -4057,6 +4079,14 @@ def _build_log_proposals(stdout: str, stderr: str) -> list[dict[str, str]]:
 
 
 @mcp.tool()
+def tool_output_contracts(tool_name: str = "") -> dict[str, Any]:
+    """Return outputSchema contracts for the schema-backed core tools."""
+    if tool_name.strip():
+        return tool_output_contract(tool_name.strip())
+    return all_tool_output_contracts()
+
+
+@mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Read-only capability probe: repo/git/docker state, branch/head, and server limits."""
     _ensure_repo_path_exists()
@@ -4683,13 +4713,18 @@ def move_path(
 
 
 @mcp.tool()
-def git_status(short: bool = True) -> str:
-    """Return git status."""
+def git_status(short: bool = True) -> dict[str, Any]:
+    """Return git status as structured content with raw text preserved."""
     _require_git_repo()
     args = ["status"]
     if short:
         args.append("--short")
-    return _trim_text(_git(*args).stdout)
+    raw = _trim_text(_git(*args).stdout)
+    return {
+        "status": [line for line in raw.splitlines() if line],
+        "short": short,
+        "raw": raw,
+    }
 
 
 @mcp.tool()
@@ -19471,6 +19506,19 @@ def _prune_public_mcp_surface() -> None:
             continue
 
 
+def _apply_output_schemas_to_mcp_tools() -> None:
+    """Attach checked-in outputSchema metadata to schema-backed FastMCP tools."""
+    for name, schema in OUTPUT_SCHEMA_BY_TOOL.items():
+        tool = mcp._tool_manager.get_tool(name)  # FastMCP has no public setter for outputSchema.
+        if tool is None:
+            continue
+        tool.fn_metadata.output_schema = schema
+        tool.fn_metadata.output_model = _AnyToolOutput
+        tool.fn_metadata.wrap_output = False
+        tool.__dict__.pop("output_schema", None)
+
+
+_apply_output_schemas_to_mcp_tools()
 _prune_public_mcp_surface()
 
 

@@ -120,14 +120,14 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "Content-Length: 10047749088" in acquisition_attempt
     assert "no Qwen3.6-35B-A3B inference result was produced" in acquisition_attempt
 
-    assert "First-token latency | 15.501 s" in smoke
-    assert "Sustained output rate | 5.584 tokens/sec" in smoke
-    assert "offloaded 0/41 layers to GPU" in smoke
-    assert "CPU backend" in smoke
+    assert "First-token latency | 19.161 s" in smoke
+    assert "Sustained output rate | 7.929 tokens/sec" in smoke
+    assert "offloaded 41/41 layers to GPU" in smoke
+    assert "Vulkan backend" in smoke
     assert "0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e" in smoke
     smoke_result = json.loads(SMOKE_RESULT.read_text())
     assert smoke_result["aggregate"]["completed"] == 1
-    assert smoke_result["aggregate"]["median_tokens_per_sec"] == 5.584
+    assert smoke_result["aggregate"]["median_tokens_per_sec"] == 7.929
 
     for recommendation in (
         "suitable for productive coding usage",

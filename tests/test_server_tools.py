@@ -3270,8 +3270,9 @@ class ServerToolsTest(ServerToolsTestBase):
             tools = await self.server.mcp.list_tools()
             names = {item.model_dump().get("name") for item in tools}
             self.assertEqual(names, expected)
-            self.assertEqual(names, {"task_router"})
-            self.assertEqual(len(names), 1)
+            self.assertIn("task_router", names)
+            for tool_name in self.server.SCHEMA_BACKED_TOOL_NAMES:
+                self.assertIn(tool_name, names)
 
         asyncio.run(run_checks())
 
