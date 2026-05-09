@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Coding Evaluation
 
-Status: blocked target-runtime evaluation record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria. The Docker runtime path is covered and the selected public GGUF is now present/checksummed locally. A one-scenario target-model smoke run completed on 2026-05-09, but Ollama loaded the CPU backend and offloaded `0/41` layers to GPU despite `/dev/dri` and `OLLAMA_VULKAN=1`. Because GPU use is required, the full benchmark and viability decision remain blocked.
+Status: GPU-backed target-runtime evaluation record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria because the current-orchestrator comparison remains unavailable and the bounded target-model quality/throughput is below the expected default-assistant bar. The selected public GGUF is present/checksummed locally, Docker/Ollama can load it with Vulkan/RADV, and a full seven-scenario bounded target-model run completed on 2026-05-09 with `offloaded 41/41 layers to GPU`.
 
 ## Goal
 
@@ -31,6 +31,8 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Target model acquisition attempt | `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md` |
 | Scenario runner harness | `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` |
 | Target model smoke result | `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md` and `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json` |
+| Verifier bounded expansion | `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json` and `.log` |
+| Full bounded target-model run | `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json` and `.log` |
 
 ## Evaluation scope
 
@@ -39,7 +41,7 @@ Run every scenario in the manifest for both systems where possible:
 1. local Qwen3.6-35B-A3B candidate;
 2. current orchestrator implementation.
 
-Capture the same measurements for both systems so the recommendation is based on comparable data.
+The local candidate now has a seven-scenario GPU-backed bounded run. The current orchestrator comparison was not run: this repository does not expose a directly comparable checked-in benchmark harness that returns the same first-token latency, token counts, and sustained tokens/sec fields for the scenario manifest without adding new orchestration code. That comparison remains a documented blocker rather than fabricated evidence.
 
 ## Official Docker runtime path
 
@@ -53,30 +55,34 @@ The checked-in runtime path provides:
 - `OLLAMA_VULKAN=1` for the bundled Ollama service;
 - an Ollama API exposed on port `2345` and used by `LOCAL_INFER_ENDPOINT`.
 
-Equivalent non-VS Code command shape:
+Equivalent non-VS Code command shape for the target-model evidence adds both GPU devices and the host render/KFD groups so the non-root container user can access RADV:
 
 ```bash
 docker build -t codebase-tooling-mcp:qwen-eval ./source
 
+render_gid=$(stat -c '%g' /dev/dri/renderD* | head -n1)
+kfd_gid=$(stat -c '%g' /dev/kfd 2>/dev/null || echo "$render_gid")
 docker run --rm \
   --security-opt=seccomp=unconfined \
   --security-opt=apparmor=unconfined \
   --device=/dev/dri \
-  -p 8000:8000 \
-  -p 2345:2345 \
-  -e MCP_TRANSPORT=http \
-  -e ALLOW_MUTATIONS=true \
+  --device=/dev/kfd \
+  --group-add "$render_gid" \
+  --group-add "$kfd_gid" \
   -e OLLAMA_VULKAN=1 \
-  -e OLLAMA_HOST=0.0.0.0:2345 \
-  -e OLLAMA_FALLBACK_HOST=0.0.0.0:2345 \
-  -e LOCAL_INFER_ENDPOINT=http://127.0.0.1:2345/api/generate \
+  -e OLLAMA_HOST=127.0.0.1:11434 \
   -v "$PWD:/repo" \
-  codebase-tooling-mcp:qwen-eval
+  -v "$PWD/.qwen-eval-models:/models:ro" \
+  codebase-tooling-mcp:qwen36-eval bash -lc '... ollama serve/create; python3 /repo/evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py ...'
 ```
 
-Verifier confirmed this Docker GPU path on the target AMD host: RADV/Renoir was visible, Ollama Vulkan was active, and a `qwen2.5-coder:1.5b` smoke generation offloaded `29/29` layers to GPU. That smoke test is runtime validation only; it is not a target Qwen3.6-35B-A3B result.
+Verifier confirmed the base Docker GPU path on the target AMD host: RADV/Renoir was visible, Ollama Vulkan was active, and a `qwen2.5-coder:1.5b` smoke generation offloaded `29/29` layers to GPU. That smoke test is runtime validation only; it is not a target Qwen3.6-35B-A3B result.
 
-The current blocker is precise: the selected target GGUF is present and importable, so Qwen3.6-35B-A3B weights are no longer the acquisition blocker for this selected quantization, but GPU acceleration did not activate for Qwen3.6-35B-A3B. On 2026-05-09, `Qwen3.6-35B-A3B-UD-IQ1_M.gguf` was present at `10047749088` bytes with SHA256 `0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e`. A one-scenario smoke run completed (`embedded-c-review-001`, `--num-predict 80`) with first-token latency `15.501s`, end-to-end latency `29.843s`, and `5.584` sustained output tokens/sec. Ollama logs show `load_backend: loaded CPU backend` and `offloaded 0/41 layers to GPU`, so this run does not meet the clarified GPU-backed requirement and is below the approximately 14 tokens/sec expectation. The exact smoke evidence is recorded in `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md`.
+The earlier target-model CPU-only attempt is historical evidence, not the current result: the direct Docker command mounted `/dev/dri` but did not add the render device group for the `app` user, so Ollama reported `offloaded 0/41 layers to GPU` and measured 5.584 tokens/sec on one smoke prompt. After adding `/dev/kfd` and the host render/KFD `--group-add` values, Qwen3.6-35B-A3B loaded the Vulkan backend and offloaded `41/41` layers to GPU. Current committed target-model evidence is:
+
+- one-scenario smoke: median `7.929` tokens/sec, `partial`, GPU-backed;
+- Verifier bounded two-scenario expansion: `2/2` completed, median `7.997` tokens/sec, GPU-backed;
+- full bounded seven-scenario run: `7/7` completed, median `8.056` tokens/sec, median first-token latency `3.307`s, median end-to-end latency `13.337`s, GPU-backed.
 
 ## Reproducible setup
 
@@ -95,7 +101,7 @@ python --version
 If GPU acceleration is used, also record:
 
 ```bash
-ls -l /dev/dri || true
+ls -l /dev/dri /dev/kfd || true
 vulkaninfo --summary || true
 ```
 
@@ -105,7 +111,7 @@ Model acquisition must record one of:
 - Ollama model tag and `ollama show` output;
 - llama.cpp or vLLM command, image tag, model file, and checksum.
 
-Do not commit downloaded model weights to this repository.
+Do not commit downloaded model weights to this repository. The Qwen3.6-35B-A3B weights remain local-only evidence and are not committed.
 
 ## Startup and inference procedure
 
@@ -131,7 +137,7 @@ For each scenario, capture:
 - output file or transcript path;
 - pass/fail/partial judgment and reviewer notes.
 
-Use the report template for final results. After a model artifact is authorized or provided, `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` can run the scenario manifest against the Docker Ollama endpoint and write machine-readable latency/throughput results.
+Use the report template for final results. `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` runs the scenario manifest against the Docker Ollama endpoint and writes machine-readable latency/throughput results.
 
 ## Scenario set
 
@@ -156,7 +162,8 @@ The workflow `.github/workflows/qwen-evaluation-artifacts.yml` runs on `ubuntu-l
 - the scenario manifest is valid JSONL;
 - required scenario categories are present;
 - each scenario carries measurement fields needed for latency, throughput, resource usage, and quality comparison;
-- this documentation links the canonical manifest and report template.
+- this documentation links the canonical manifest and report template;
+- committed GPU-backed result JSON covers all seven scenarios and does not contradict the current Vulkan offload evidence.
 
 This satisfies the GitHub-hosted CI path without depending on self-hosted hardware, private model caches, or non-default runners.
 
@@ -173,6 +180,12 @@ Use this minimum bar:
 - **Productive**: setup reproducible, common prompts feel interactive, sustained throughput is close to or above the 14 tokens/sec expectation, resource use leaves the laptop usable, quality is competitive with the current orchestrator for most categories, and structured output is reliable.
 - **Limited/offline**: setup works and privacy/offline value is high, but latency, resource use, context limits, or quality make it a fallback rather than the default.
 - **Not viable**: setup is not reproducible on the target hardware, throughput/latency is below practical use, resource use destabilizes the laptop, or quality is materially worse than the current orchestrator.
+
+## Current recommendation
+
+Selected recommendation: **suitable only for limited/offline scenarios**.
+
+Rationale: the GPU-backed Docker/Ollama path is reproducible on the target laptop for the selected IQ1_M GGUF, but measured throughput is materially below the approximately 14 sustained tokens/sec expectation (`8.056` median tokens/sec in the seven-scenario bounded run). Quality is mixed under the 80-token cap: several scenarios pass, but C/C++ embedded and debugging are partial and strict structured JSON failed. The current orchestrator comparison is still blocked, so this is not sufficient to recommend replacing the repository's current assistant/orchestrator path.
 
 ## Known limitations to document during execution
 

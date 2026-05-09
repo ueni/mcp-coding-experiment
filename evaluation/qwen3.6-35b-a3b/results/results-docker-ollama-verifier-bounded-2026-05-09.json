@@ -1,0 +1,47 @@
+{
+  "aggregate": {
+    "backend": "qwen3.6-35b-a3b-local-docker-ollama-vulkan-verifier-bounded",
+    "model": "qwen3.6-35b-a3b-iq1m",
+    "scenario_count": 2,
+    "completed": 2,
+    "median_tokens_per_sec": 7.997,
+    "median_first_token_latency_s": 10.09,
+    "median_end_to_end_latency_s": 20.2
+  },
+  "results": [
+    {
+      "scenario_id": "bash-hardening-001",
+      "category": "bash",
+      "backend": "qwen3.6-35b-a3b-local-docker-ollama-vulkan-verifier-bounded",
+      "model": "qwen3.6-35b-a3b-iq1m",
+      "first_token_latency_s": 16.749,
+      "end_to_end_latency_s": 26.927,
+      "input_tokens": 57,
+      "output_tokens": 80,
+      "sustained_tokens_per_sec": 7.949,
+      "load_duration_s": 12.764,
+      "prompt_eval_duration_s": 3.753,
+      "eval_duration_s": 10.065,
+      "verdict": "pass",
+      "error": null,
+      "output_preview": "```\n\nHere is the improved script and the rationale.\n\n### Rationale\n\n1.  **Strict Mode (`set -euo pipefail`)**:\n    *   `set -e`: Exit immediately if a command fails (e.g., `mkdir` fails).\n    *   `set -u`: Treat unset variables as errors (prevents typos like `$SRCC`"
+    },
+    {
+      "scenario_id": "python-refactor-001",
+      "category": "python",
+      "backend": "qwen3.6-35b-a3b-local-docker-ollama-vulkan-verifier-bounded",
+      "model": "qwen3.6-35b-a3b-iq1m",
+      "first_token_latency_s": 3.432,
+      "end_to_end_latency_s": 13.474,
+      "input_tokens": 77,
+      "output_tokens": 80,
+      "sustained_tokens_per_sec": 8.044,
+      "load_duration_s": 0.349,
+      "prompt_eval_duration_s": 3.079,
+      "eval_duration_s": 9.946,
+      "verdict": "pass",
+      "error": null,
+      "output_preview": "<think>\n\n</think>\n\n```python\nimport pytest\n\n\ndef parse_kv(text):\n    \"\"\"\n    Parse a string of key=value pairs into a dictionary.\n\n    Args:\n        text (str): A string containing key=value pairs separated by newlines.\n\n    Returns:\n        dict: A dictionary with keys and values stripped of whitespace.\n\n    Raises:\n        ValueError: If a"
+    }
+  ]
+}

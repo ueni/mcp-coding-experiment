@@ -16,6 +16,10 @@ ACQUISITION_ATTEMPT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/target-model-acqui
 RUNNER = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py"
 SMOKE = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md"
 SMOKE_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json"
+BOUNDED_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json"
+BOUNDED_LOG = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.log"
+FULL_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json"
+FULL_LOG = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.log"
 
 REQUIRED_CATEGORIES = {
     "c_cpp_embedded",
@@ -88,10 +92,16 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py" in doc
     assert "evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json" in doc
+    assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json" in doc
+    assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json" in doc
     assert ACQUISITION_ATTEMPT.exists()
     assert RUNNER.exists()
     assert SMOKE.exists()
     assert SMOKE_RESULT.exists()
+    assert BOUNDED_RESULT.exists()
+    assert BOUNDED_LOG.exists()
+    assert FULL_RESULT.exists()
+    assert FULL_LOG.exists()
 
     for text in (doc, report, docker_runtime, auth_request, acquisition_attempt, smoke):
         assert "source/Dockerfile" in text
@@ -128,6 +138,23 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     smoke_result = json.loads(SMOKE_RESULT.read_text())
     assert smoke_result["aggregate"]["completed"] == 1
     assert smoke_result["aggregate"]["median_tokens_per_sec"] == 7.929
+
+    bounded_result = json.loads(BOUNDED_RESULT.read_text())
+    assert bounded_result["aggregate"]["completed"] == 2
+    assert bounded_result["aggregate"]["median_tokens_per_sec"] == 7.997
+
+    full_result = json.loads(FULL_RESULT.read_text())
+    full_log = FULL_LOG.read_text(errors="replace")
+    assert full_result["aggregate"]["completed"] == 7
+    assert full_result["aggregate"]["scenario_count"] == 7
+    assert full_result["aggregate"]["median_tokens_per_sec"] == 8.056
+    assert {result["category"] for result in full_result["results"]} == REQUIRED_CATEGORIES
+    assert "offloaded 41/41 layers to GPU" in full_log
+    assert "AMD Radeon Graphics (RADV RENOIR)" in full_log
+    assert "offloaded `0/41` layers to GPU" not in doc
+    assert "offloaded `0/41` layers to GPU" not in report
+    assert "Current target-model results are GPU-backed" in report
+    assert "current-orchestrator comparison" in report
 
     for recommendation in (
         "suitable for productive coding usage",

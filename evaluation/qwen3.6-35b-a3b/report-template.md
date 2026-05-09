@@ -6,94 +6,89 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Evaluation Report
 
-This file is an evaluation-artifact/runtime-readiness report related to issue #1. It records the 2026-05-08 target-host attempt, the verified Docker GPU runtime path, and the 2026-05-09 one-scenario target-model smoke run. It does **not** satisfy the full issue #1 benchmark acceptance criteria because the Qwen3.6-35B-A3B run used CPU only (`offloaded 0/41 layers to GPU`) and the full seven-scenario/comparison benchmark remains blocked. No GPU-backed target-model result is fabricated.
+This file is an evaluation report related to issue #1. It records the 2026-05-08 target-host probe, the verified Docker GPU runtime path, the 2026-05-09 GPU-backed target-model smoke/bounded runs, and the current remaining comparison blocker. It does **not** satisfy the full issue #1 benchmark acceptance criteria because the current-orchestrator comparison has not been executed and the bounded local model run is below the productive/default-assistant threshold. No CPU-only or orchestrator result is fabricated.
 
 ## Run metadata
 
 - Date: 2026-05-09
 - Evaluator: Builder
-- Repository commit: `ee38164c0c57018c7760a6fe88bbf022a5423b8a` plus Verifier smoke-result commit
+- Repository commit: updated from `a833c495e6a5ffac20c82770c62418e4b3653f8d` with full bounded evidence
 - Target hardware observed: Lenovo ThinkPad T14 Gen1 AMD / `user-thinkpad-t14`
 - Hardware deviation from Lenovo ThinkPad T14 Gen1 AMD, if any: none observed
-- Power profile / AC or battery: `performance`; AC offline during the 2026-05-08 host probe; AC online during the 2026-05-09 target-model smoke run
+- Power profile / AC or battery: `performance`; AC offline during the 2026-05-08 host probe; AC online during the 2026-05-09 target-model runs
 - OS/kernel: `Linux user-thinkpad-t14 7.0.0-15-generic #15-Ubuntu SMP PREEMPT_DYNAMIC Wed Apr 22 16:06:43 UTC 2026 x86_64 GNU/Linux`
 - Backend/runtime: official path is Docker/devcontainer using `source/Dockerfile`; the image installs Ollama `0.18.2` plus Vulkan/Mesa tooling and `.devcontainer/devcontainer.json` passes `/dev/dri` with `OLLAMA_VULKAN=1`
 - Model source, revision, quantization, checksum: `unsloth/Qwen3.6-35B-A3B-GGUF`, `Qwen3.6-35B-A3B-UD-IQ1_M.gguf`, size `10047749088` bytes, SHA256 `0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e`
-- Reference comparison implementation: current orchestrator implementation in this repository; target-model runtime comparison not executed because Qwen3.6-35B-A3B weights are absent
-- Detailed evidence: `evaluation/qwen3.6-35b-a3b/host-gpu-probe-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md`, and `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md`
+- Reference comparison implementation: current orchestrator implementation in this repository; not executed because no checked-in comparable latency/token harness currently maps the scenario manifest to the orchestrator with the same measurement schema
+- Detailed evidence: `evaluation/qwen3.6-35b-a3b/host-gpu-probe-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md`, `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md`, `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json`, and `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json`
 
 ## Setup and startup
 
-- Model acquisition command(s): completed before this Verifier run; selected practical GGUF file now exists locally:
+- Model acquisition command(s): completed before this run; selected practical GGUF file exists locally:
   - `Qwen3.6-35B-A3B-UD-IQ1_M.gguf`: 10,047,749,088 bytes (~9.4 GiB), SHA256 `0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e`
 - Server startup command shape:
 
   ```bash
-  docker build -t codebase-tooling-mcp:qwen-eval ./source
-
+  render_gid=$(stat -c '%g' /dev/dri/renderD* | head -n1)
+  kfd_gid=$(stat -c '%g' /dev/kfd 2>/dev/null || echo "$render_gid")
   docker run --rm \
     --security-opt=seccomp=unconfined \
     --security-opt=apparmor=unconfined \
     --device=/dev/dri \
-    -p 8000:8000 \
-    -p 2345:2345 \
-    -e MCP_TRANSPORT=http \
-    -e ALLOW_MUTATIONS=true \
+    --device=/dev/kfd \
+    --group-add "$render_gid" \
+    --group-add "$kfd_gid" \
     -e OLLAMA_VULKAN=1 \
-    -e OLLAMA_HOST=0.0.0.0:2345 \
-    -e OLLAMA_FALLBACK_HOST=0.0.0.0:2345 \
-    -e LOCAL_INFER_ENDPOINT=http://127.0.0.1:2345/api/generate \
+    -e OLLAMA_HOST=127.0.0.1:11434 \
     -v "$PWD:/repo" \
-    codebase-tooling-mcp:qwen-eval
+    -v "$PWD/.qwen-eval-models:/models:ro" \
+    codebase-tooling-mcp:qwen36-eval bash -lc 'ollama serve ...; ollama create ...; python3 /repo/evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py ...'
   ```
 
-- Startup time: not measured for the target model; Docker runtime smoke was verified separately with bundled `qwen2.5-coder:1.5b` only
-- Disk footprint: no additional model/runtime footprint created; repo filesystem had 147 GiB available at probe time
-- Notes: CPU fallback was intentionally not attempted because ueni clarified that GPU must be used
+- Startup/runtime evidence: full bounded run elapsed wall clock `2:34.21`; Ollama runner startup `10.55` seconds; first scenario included model load and measured first token `17.196`s.
+- Disk footprint: selected GGUF is 10,047,749,088 bytes; no model weights are committed. The Qwen3.6-35B-A3B weights remain local-only evidence and are not committed.
+- Notes: CPU-only target-model evidence (`offloaded 0/41`, 5.584 tokens/sec) is retained only as historical failed setup context. Current target-model results are GPU-backed with Vulkan/RADV and `offloaded 41/41 layers to GPU`.
 
 ## Aggregate results
 
 | Backend | Scenarios completed | Median first-token latency (s) | Median end-to-end latency (s) | Sustained tokens/sec | Peak RAM (MB) | GPU/VRAM | Overall quality |
 | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| qwen3.6-35b-a3b-local | 1/7 smoke only | 15.501 | 29.843 | 5.584 | not measured | CPU only for target model: Ollama logged `offloaded 0/41 layers to GPU`; model weights 9.3 GiB CPU, KV cache 1.6 GiB CPU | partial on one C/C++ embedded prompt; GPU/full run blocked |
-| current-orchestrator | 0/7 | not measured | not measured | not measured | not measured | Docker runtime available; comparison deferred until target model is available | not evaluated; comparison blocked |
+| qwen3.6-35b-a3b-local | 7/7 bounded | 3.307 | 13.337 | 8.056 | not measured by harness | Vulkan/RADV on AMD Radeon Graphics; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan; total memory 11.1 GiB | mixed: 4 pass, 2 partial, 1 fail under 80-token cap |
+| current-orchestrator | 0/7 | not measured | not measured | not measured | not measured | Docker/runtime available | not evaluated; comparable measurement harness missing |
 
 ## Scenario results
 
 | Scenario ID | Backend | First token (s) | End-to-end (s) | Input tokens | Output tokens | Tokens/sec | Resources | Verdict | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
-| embedded-c-review-001 | qwen3.6-35b-a3b-local | 15.501 | 29.843 | 145 | 80 | 5.584 | CPU backend; 0/41 layers offloaded to GPU; model weights 9.3 GiB CPU, KV cache 1.6 GiB CPU | partial | One-scenario smoke only, `--num-predict 80`; does not satisfy GPU requirement |
-| embedded-c-review-001 | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker runtime available | blocked | Comparison deferred until target model is available |
-| bash-hardening-001 | qwen3.6-35b-a3b-local | n/a | n/a | n/a | n/a | n/a | Docker GPU path verified; target weights absent | blocked | Same blocker |
-| bash-hardening-001 | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker runtime available | blocked | Same blocker |
-| python-refactor-001 | qwen3.6-35b-a3b-local | n/a | n/a | n/a | n/a | n/a | Docker GPU path verified; target weights absent | blocked | Same blocker |
-| python-refactor-001 | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker runtime available | blocked | Same blocker |
-| javascript-async-001 | qwen3.6-35b-a3b-local | n/a | n/a | n/a | n/a | n/a | Docker GPU path verified; target weights absent | blocked | Same blocker |
-| javascript-async-001 | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker runtime available | blocked | Same blocker |
-| debug-review-001 | qwen3.6-35b-a3b-local | n/a | n/a | n/a | n/a | n/a | Docker GPU path verified; target weights absent | blocked | Same blocker |
-| debug-review-001 | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker runtime available | blocked | Same blocker |
-| long-context-001 | qwen3.6-35b-a3b-local | n/a | n/a | n/a | n/a | n/a | Docker GPU path verified; target weights absent | blocked | Same blocker |
-| long-context-001 | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker runtime available | blocked | Same blocker |
-| structured-json-001 | qwen3.6-35b-a3b-local | n/a | n/a | n/a | n/a | n/a | Docker GPU path verified; target weights absent | blocked | Same blocker |
-| structured-json-001 | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker runtime available | blocked | Same blocker |
+| embedded-c-review-001 | qwen3.6-35b-a3b-local | 17.196 | 27.320 | 145 | 80 | 7.983 | Vulkan/RADV; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan | partial | Bounded `--num-predict 80`; see JSON output preview |
+| bash-hardening-001 | qwen3.6-35b-a3b-local | 2.608 | 12.621 | 57 | 80 | 8.056 | Vulkan/RADV; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan | pass | Bounded `--num-predict 80`; see JSON output preview |
+| python-refactor-001 | qwen3.6-35b-a3b-local | 3.298 | 13.285 | 77 | 80 | 8.078 | Vulkan/RADV; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan | pass | Bounded `--num-predict 80`; see JSON output preview |
+| javascript-async-001 | qwen3.6-35b-a3b-local | 3.223 | 13.234 | 69 | 80 | 8.062 | Vulkan/RADV; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan | pass | Bounded `--num-predict 80`; see JSON output preview |
+| debug-review-001 | qwen3.6-35b-a3b-local | 3.380 | 13.421 | 77 | 80 | 8.040 | Vulkan/RADV; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan | partial | Bounded `--num-predict 80`; see JSON output preview |
+| long-context-001 | qwen3.6-35b-a3b-local | 4.070 | 14.091 | 145 | 80 | 8.057 | Vulkan/RADV; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan | pass | Bounded `--num-predict 80`; see JSON output preview |
+| structured-json-001 | qwen3.6-35b-a3b-local | 3.307 | 13.337 | 78 | 80 | 8.048 | Vulkan/RADV; `offloaded 41/41 layers to GPU`; model weights 9.1 GiB Vulkan + 272.8 MiB CPU; KV cache 1.6 GiB Vulkan | fail | Bounded `--num-predict 80`; see JSON output preview |
+| all scenarios | current-orchestrator | n/a | n/a | n/a | n/a | n/a | Docker/runtime available | blocked | Comparable current-orchestrator latency/token/quality run was not available without adding new harness code |
 
 ## Quality notes
 
-- C/C++ embedded: one target-model smoke output generated. It identified race/concurrency and memory-safety risks but was truncated to 80 output tokens; verdict `partial`.
-- Bash: not evaluated; no model output generated.
-- Python: not evaluated; no model output generated.
-- JavaScript: not evaluated; no model output generated.
-- Debugging/review: not evaluated; no model output generated.
-- Long-context prompts: not evaluated; no model output generated.
-- Structured output reliability: not evaluated; no model output generated.
+- c_cpp_embedded / `embedded-c-review-001`: verdict `partial` at 7.983 tokens/sec; output truncated to 80 tokens for bounded local testing.
+- bash / `bash-hardening-001`: verdict `pass` at 8.056 tokens/sec; output truncated to 80 tokens for bounded local testing.
+- python / `python-refactor-001`: verdict `pass` at 8.078 tokens/sec; output truncated to 80 tokens for bounded local testing.
+- javascript / `javascript-async-001`: verdict `pass` at 8.062 tokens/sec; output truncated to 80 tokens for bounded local testing.
+- debugging_review / `debug-review-001`: verdict `partial` at 8.040 tokens/sec; output truncated to 80 tokens for bounded local testing.
+- long_context / `long-context-001`: verdict `pass` at 8.057 tokens/sec; output truncated to 80 tokens for bounded local testing.
+- structured_output / `structured-json-001`: verdict `fail` at 8.048 tokens/sec; output truncated to 80 tokens for bounded local testing.
+
+The simple automated verdict function is a coarse screen, not a human code review. The strict JSON scenario failed because the model emitted non-parseable strict JSON under the bounded generation settings.
 
 ## Limitations and failure patterns
 
-- Reproducibility issues: target hardware is correct and GPU is visible through Vulkan/RADV. The official Docker runtime path is verified and the target model can be imported, but target-model inference used CPU only (`offloaded 0/41 layers to GPU`).
-- Latency/throughput issues: the one-scenario CPU-only smoke measured first-token latency 15.501s, end-to-end latency 29.843s, and 5.584 sustained output tokens/sec. This is below the ~14 tokens/sec expectation and not GPU-backed.
-- Resource pressure: host has 28 GiB RAM. The IQ1_M GGUF uses a 10,047,749,088-byte file; Ollama logged 9.3 GiB CPU model weights, 1.6 GiB CPU KV cache, and 11.0 GiB total memory for the target smoke. Integrated GPU memory is shared system memory, and GPU offload did not occur.
-- Quality failures: no candidate or orchestrator outputs were produced, so no coding-quality comparison is possible yet.
-- Operational costs: before the target evaluation can run, someone must authorize a large model pull/download or provide a model cache/weights. The machine should be on AC power for representative measurements.
+- Reproducibility: target hardware is correct, GPU is visible through Vulkan/RADV, and the target model now offloads `41/41` layers to GPU when the Docker invocation includes `/dev/kfd` and host render/KFD groups.
+- Latency/throughput: the full bounded GPU-backed run measured median first-token latency `3.307`s, median end-to-end latency `13.337`s, and median `8.056` sustained output tokens/sec. This is below the ~14 tokens/sec expectation.
+- Resource pressure: host has 28.6 GiB RAM. Ollama logged 9.1 GiB model weights on Vulkan, 272.8 MiB model weights on CPU, 1.6 GiB Vulkan KV cache, 98.0 MiB Vulkan compute graph, and 11.1 GiB total model memory. Free swap during full run startup was only 21.7 MiB, so longer generations/context should be treated cautiously.
+- Quality failures: bounded `--num-predict 80` limits output depth; strict structured JSON failed; embedded C and debugging/review were partial.
+- Comparison blocker: current-orchestrator comparison outputs are absent because no existing comparable benchmark harness was found for the scenario manifest and measurement schema.
+- Operational costs: setup requires a 10 GB GGUF, GPU device/group setup, Docker image build/cache, AC power, and local disk/RAM headroom.
 
 ## Final recommendation
 
@@ -103,6 +98,6 @@ Choose exactly one:
 - suitable only for limited/offline scenarios
 - not viable
 
-Selected recommendation: **not viable** for the current host state.
+Selected recommendation: **suitable only for limited/offline scenarios**.
 
-Rationale: The target host has a usable AMD Renoir iGPU via Vulkan/RADV, and the repository Docker/devcontainer path has been verified with Ollama Vulkan using the bundled `qwen2.5-coder:1.5b` smoke model. The selected Qwen3.6-35B-A3B IQ1_M GGUF is now present, checksummed, and importable by Ollama, but the actual target-model smoke run loaded the CPU backend and offloaded `0/41` layers to GPU. The one measured scenario produced 5.584 tokens/sec, below the ~14 tokens/sec expectation, and cannot count as the required GPU-backed benchmark. Full seven-scenario target-model testing, resource characterization, and current-orchestrator comparison remain blocked until the target runtime uses GPU offload or the issue scope explicitly permits CPU-only evaluation.
+Rationale: The target host can run the selected Qwen3.6-35B-A3B IQ1_M GGUF through Docker/Ollama with Vulkan/RADV and full GPU layer offload, and all seven scenario categories completed in the bounded run. However, throughput is around `8.056` tokens/sec rather than the expected ~14, quality is mixed under the 80-token cap, strict JSON failed, and there is still no current-orchestrator comparison. This supports limited/offline fallback use, not replacement as the default productive coding assistant.
