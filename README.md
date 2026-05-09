@@ -319,10 +319,12 @@ claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
 ### Public MCP v1 Surface
 
 - `task_router`
+- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
+- `tool_output_contracts`
 
-`task_router()` is the single public MCP entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
+`task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
-Leaf implementations remain in `source/server.py` as internal helpers and call targets for `task_router` orchestration. Only the tools listed here are exposed over MCP v1.
+The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`. `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for schema-aware MCP clients.
 
 ## Labs and Reports
 
@@ -337,3 +339,4 @@ See [MCP Fun Labs](./docs/labs.md) for command examples and expected outputs.
 - [MCP Fun Labs](./docs/labs.md)
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Release Notes and Documentation Policy](./docs/release-notes-policy.md)
+- [MCP Output Schemas](./docs/mcp-output-schemas.md)
