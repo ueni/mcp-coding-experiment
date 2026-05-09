@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Coding Evaluation
 
-Status: evaluation plan and reproducibility artifact for `ueni/mcp-coding-experiment#1`.
+Status: blocked evaluation artifact and reproducibility/runtime-readiness record for `ueni/mcp-coding-experiment#1`. The Docker runtime path is covered, but the target Qwen3.6-35B-A3B benchmark remains blocked until model weights are authorized or provided.
 
 ## Goal
 

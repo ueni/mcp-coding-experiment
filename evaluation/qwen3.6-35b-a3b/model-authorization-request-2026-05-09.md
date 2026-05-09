@@ -4,7 +4,7 @@ SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 SPDX-License-Identifier: MIT
 -->
 
-# Qwen3.6-35B-A3B Model Authorization Request
+# Qwen3.6-35B-A3B Blocked Evaluation Artifact
 
 Date: 2026-05-09
 PR: #2
@@ -12,11 +12,13 @@ Issue: #1
 
 ## Blocker
 
+This is an explicit blocked evaluation artifact for the Qwen3.6-35B-A3B run required by issue #1.
+
 The Docker/devcontainer runtime path is verified, but the actual Qwen3.6-35B-A3B benchmark cannot be completed until a specific target model artifact is authorized or supplied.
 
 The verified runtime is `source/Dockerfile` with `.devcontainer/devcontainer.json` or an equivalent Docker invocation that passes `--device=/dev/dri` and sets `OLLAMA_VULKAN=1`.
 
-No large Qwen3.6-35B-A3B weights file has been downloaded in this PR.
+No large Qwen3.6-35B-A3B weights file has been downloaded in this PR. This is an external/non-code blocker: changing repository docs, tests, or Docker configuration cannot produce valid throughput, latency, resource, or quality-comparison measurements without the target weights.
 
 ## Requested decision
 
@@ -49,4 +51,4 @@ After the model artifact is authorized/provided, run the seven scenario categori
 - current-orchestrator comparison outputs and quality/usability judgments;
 - known limitations, operational costs, and final viability recommendation.
 
-Until that decision is made, the issue #1 acceptance criteria for the actual Qwen3.6-35B-A3B run and measurements remain blocked.
+Until that decision is made, the issue #1 acceptance criteria for the actual Qwen3.6-35B-A3B run and measurements remain blocked. PR #2 should be treated as evaluation-artifact/runtime-readiness evidence only unless option 1 or 2 above is completed and this report is rerun with real model outputs.

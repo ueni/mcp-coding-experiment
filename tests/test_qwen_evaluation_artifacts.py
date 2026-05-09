@@ -90,6 +90,8 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "29/29" in docker_runtime
     assert "validates the Docker GPU/Ollama runtime only" in docker_runtime
 
+    assert "explicit blocked evaluation artifact" in auth_request
+    assert "external/non-code blocker" in auth_request
     assert "Authorize exactly one" in auth_request
     assert "unsloth/Qwen3.6-35B-A3B-GGUF" in auth_request
     assert "a483e9e6cbd595906af30beda3187c2663a1118c" in auth_request
