@@ -1,0 +1,30 @@
+{
+  "aggregate": {
+    "backend": "qwen3.6-35b-a3b-local-docker-ollama",
+    "model": "qwen3.6-35b-a3b-iq1m",
+    "scenario_count": 1,
+    "completed": 1,
+    "median_tokens_per_sec": 5.584,
+    "median_first_token_latency_s": 15.501,
+    "median_end_to_end_latency_s": 29.843
+  },
+  "results": [
+    {
+      "scenario_id": "embedded-c-review-001",
+      "category": "c_cpp_embedded",
+      "backend": "qwen3.6-35b-a3b-local-docker-ollama",
+      "model": "qwen3.6-35b-a3b-iq1m",
+      "first_token_latency_s": 15.501,
+      "end_to_end_latency_s": 29.843,
+      "input_tokens": 145,
+      "output_tokens": 80,
+      "sustained_tokens_per_sec": 5.584,
+      "load_duration_s": 10.081,
+      "prompt_eval_duration_s": 5.028,
+      "eval_duration_s": 14.326,
+      "verdict": "partial",
+      "error": null,
+      "output_preview": "This code is vulnerable to race conditions and undefined behavior.\n\n<think>\n\n</think>\n\n### Analysis of Risks\n\nThe provided code exhibits several critical concurrency and memory-safety vulnerabilities common in embedded systems:\n\n1.  **Race Condition (Data Race)**:\n    *   The variables `head` and `tail` are shared between the ISR (`isr_rx`) and the main loop (`pop"
+    }
+  ]
+}

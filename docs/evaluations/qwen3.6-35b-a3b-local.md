@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Coding Evaluation
 
-Status: blocked execution artifact and reproducibility/runtime-readiness record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria. The Docker runtime path is covered and the target public GGUF acquisition was attempted on 2026-05-09, but the Qwen3.6-35B-A3B benchmark could not be executed because the 10,047,749,088-byte target model artifact did not finish downloading in the available run window. No target-model results are claimed.
+Status: blocked target-runtime evaluation record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria. The Docker runtime path is covered and the selected public GGUF is now present/checksummed locally. A one-scenario target-model smoke run completed on 2026-05-09, but Ollama loaded the CPU backend and offloaded `0/41` layers to GPU despite `/dev/dri` and `OLLAMA_VULKAN=1`. Because GPU use is required, the full benchmark and viability decision remain blocked.
 
 ## Goal
 
@@ -30,6 +30,7 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Model authorization blocker | `evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md` |
 | Target model acquisition attempt | `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md` |
 | Scenario runner harness | `evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py` |
+| Target model smoke result | `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md` and `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json` |
 
 ## Evaluation scope
 
@@ -75,7 +76,7 @@ docker run --rm \
 
 Verifier confirmed this Docker GPU path on the target AMD host: RADV/Renoir was visible, Ollama Vulkan was active, and a `qwen2.5-coder:1.5b` smoke generation offloaded `29/29` layers to GPU. That smoke test is runtime validation only; it is not a target Qwen3.6-35B-A3B result.
 
-The remaining blocker is precise: Qwen3.6-35B-A3B weights are not completely present in the runtime. On 2026-05-09, the public `unsloth/Qwen3.6-35B-A3B-GGUF` `Qwen3.6-35B-A3B-UD-IQ1_M.gguf` artifact was selected and acquisition was attempted. HEAD reported `Content-Length: 10047749088`; the local attempt did not complete, leaving an incomplete/sparse local cache artifact, so it was not imported into Ollama and no target-model result was recorded. The exact acquisition evidence and next Docker command are recorded in `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md`.
+The current blocker is precise: the selected target GGUF is present and importable, so Qwen3.6-35B-A3B weights are no longer the acquisition blocker for this selected quantization, but GPU acceleration did not activate for Qwen3.6-35B-A3B. On 2026-05-09, `Qwen3.6-35B-A3B-UD-IQ1_M.gguf` was present at `10047749088` bytes with SHA256 `0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e`. A one-scenario smoke run completed (`embedded-c-review-001`, `--num-predict 80`) with first-token latency `15.501s`, end-to-end latency `29.843s`, and `5.584` sustained output tokens/sec. Ollama logs show `load_backend: loaded CPU backend` and `offloaded 0/41 layers to GPU`, so this run does not meet the clarified GPU-backed requirement and is below the approximately 14 tokens/sec expectation. The exact smoke evidence is recorded in `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md`.
 
 ## Reproducible setup
 

@@ -18,6 +18,7 @@ env/
 .ruff_cache/
 .codebase-tooling-mcp/
 .qwen-eval-models/
+.qwen-eval-models
 
 # Local environment files
 .env

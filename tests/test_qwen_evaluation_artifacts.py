@@ -14,6 +14,8 @@ DOCKER_RUNTIME = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026
 AUTH_REQUEST = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md"
 ACQUISITION_ATTEMPT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md"
 RUNNER = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py"
+SMOKE = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md"
+SMOKE_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json"
 
 REQUIRED_CATEGORIES = {
     "c_cpp_embedded",
@@ -72,6 +74,7 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     docker_runtime = DOCKER_RUNTIME.read_text()
     auth_request = AUTH_REQUEST.read_text()
     acquisition_attempt = ACQUISITION_ATTEMPT.read_text()
+    smoke = SMOKE.read_text()
 
     assert "Lenovo ThinkPad T14 Gen1 AMD" in doc
     assert "current orchestrator" in doc
@@ -83,10 +86,14 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "evaluation/qwen3.6-35b-a3b/model-authorization-request-2026-05-09.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md" in doc
     assert "evaluation/qwen3.6-35b-a3b/run-docker-ollama-eval.py" in doc
+    assert "evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md" in doc
+    assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json" in doc
     assert ACQUISITION_ATTEMPT.exists()
     assert RUNNER.exists()
+    assert SMOKE.exists()
+    assert SMOKE_RESULT.exists()
 
-    for text in (doc, report, docker_runtime, auth_request, acquisition_attempt):
+    for text in (doc, report, docker_runtime, auth_request, acquisition_attempt, smoke):
         assert "source/Dockerfile" in text
         assert ".devcontainer/devcontainer.json" in text
         assert "--device=/dev/dri" in text
@@ -112,6 +119,15 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "Qwen3.6-35B-A3B-UD-IQ1_M.gguf" in acquisition_attempt
     assert "Content-Length: 10047749088" in acquisition_attempt
     assert "no Qwen3.6-35B-A3B inference result was produced" in acquisition_attempt
+
+    assert "First-token latency | 15.501 s" in smoke
+    assert "Sustained output rate | 5.584 tokens/sec" in smoke
+    assert "offloaded 0/41 layers to GPU" in smoke
+    assert "CPU backend" in smoke
+    assert "0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e" in smoke
+    smoke_result = json.loads(SMOKE_RESULT.read_text())
+    assert smoke_result["aggregate"]["completed"] == 1
+    assert smoke_result["aggregate"]["median_tokens_per_sec"] == 5.584
 
     for recommendation in (
         "suitable for productive coding usage",
