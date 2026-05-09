@@ -17,7 +17,7 @@ function makeRequestBody(id, method, params) {
   });
 }
 
-async function postJson(endpoint, payload, timeoutMs, sessionId) {
+async function postJson(endpoint, payload, timeoutMs, sessionId, bearerToken) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -25,6 +25,9 @@ async function postJson(endpoint, payload, timeoutMs, sessionId) {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
     };
+    if (bearerToken) {
+      headers.authorization = `Bearer ${bearerToken}`;
+    }
     if (sessionId) {
       headers["mcp-session-id"] = sessionId;
     }
@@ -102,9 +105,10 @@ function parseToolResult(result) {
 }
 
 class McpHttpClient {
-  constructor(endpoint, timeoutMs) {
+  constructor(endpoint, timeoutMs, bearerToken) {
     this.endpoint = endpoint;
     this.timeoutMs = timeoutMs;
+    this.bearerToken = bearerToken;
     this.sessionId = "";
     this.nextId = 1;
     this.initialized = false;
@@ -113,7 +117,7 @@ class McpHttpClient {
   async call(method, params) {
     const id = this.nextId++;
     const payload = makeRequestBody(id, method, params);
-    const raw = await postJson(this.endpoint, payload, this.timeoutMs, this.sessionId);
+    const raw = await postJson(this.endpoint, payload, this.timeoutMs, this.sessionId, this.bearerToken);
     if (raw.nextSessionId) {
       this.sessionId = raw.nextSessionId;
     }
@@ -145,7 +149,7 @@ class McpHttpClient {
       params: {},
     });
     try {
-      const raw = await postJson(this.endpoint, payload, this.timeoutMs, this.sessionId);
+      const raw = await postJson(this.endpoint, payload, this.timeoutMs, this.sessionId, this.bearerToken);
       if (raw.nextSessionId) {
         this.sessionId = raw.nextSessionId;
       }
@@ -189,8 +193,10 @@ function activate(context) {
   function getClient() {
     const endpoint = String(cfg().get("endpoint", "http://localhost:8000/mcp"));
     const timeoutMs = Number(cfg().get("timeoutMs", 1500));
-    if (!client || client.endpoint !== endpoint || client.timeoutMs !== timeoutMs) {
-      client = new McpHttpClient(endpoint, timeoutMs);
+    const tokenEnv = String(cfg().get("bearerTokenEnv", "MCP_HTTP_BEARER_TOKEN"));
+    const bearerToken = tokenEnv ? String(process.env[tokenEnv] || "") : "";
+    if (!client || client.endpoint !== endpoint || client.timeoutMs !== timeoutMs || client.bearerToken !== bearerToken) {
+      client = new McpHttpClient(endpoint, timeoutMs, bearerToken);
     }
     return client;
   }

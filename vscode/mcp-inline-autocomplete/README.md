@@ -11,6 +11,7 @@ Inline completion provider for VS Code backed by this repository's MCP server to
 ## Requirements
 
 - MCP server running at `http://localhost:8000/mcp` (default in this repo's devcontainer).
+- `MCP_HTTP_BEARER_TOKEN` exported with the token required by the HTTP MCP server.
 - VS Code 1.85+.
 
 ## Run
@@ -18,12 +19,13 @@ Inline completion provider for VS Code backed by this repository's MCP server to
 1. Open this folder in VS Code: `vscode/mcp-inline-autocomplete`.
 2. Press `F5` to launch an Extension Development Host.
 3. In the dev host, run command `MCP Inline Autocomplete: Show Status`.
-4. Type in any code file to trigger inline completion.
+4. Type in any code file to trigger inline completion. The extension sends `Authorization: Bearer $MCP_HTTP_BEARER_TOKEN` by default.
 
 ## Settings
 
 - `mcpInlineAutocomplete.endpoint`
 - `mcpInlineAutocomplete.timeoutMs`
+- `mcpInlineAutocomplete.bearerTokenEnv` (default `MCP_HTTP_BEARER_TOKEN`; set empty only for explicit `insecure-local` tests)
 - `mcpInlineAutocomplete.maxTokens`
 - `mcpInlineAutocomplete.temperature`
 - `mcpInlineAutocomplete.maxPrefixChars`
