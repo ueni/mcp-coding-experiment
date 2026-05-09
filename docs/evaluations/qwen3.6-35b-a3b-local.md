@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Coding Evaluation
 
-Status: GPU-backed target-runtime evaluation record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria because the current-orchestrator comparison remains unavailable and the bounded target-model quality/throughput is below the expected default-assistant bar. The selected public GGUF is present/checksummed locally, Docker/Ollama can load it with Vulkan/RADV, and a full seven-scenario bounded target-model run completed on 2026-05-09 with `offloaded 41/41 layers to GPU`.
+Status: GPU-backed target-runtime evaluation record for `ueni/mcp-coding-experiment#1`. This PR still does **not** close or satisfy the full issue #1 benchmark acceptance criteria because the current-orchestrator comparison remains unavailable and bounded target-model quality is below the expected default-assistant bar. The selected public GGUF is present/checksummed locally, Docker/Ollama can load it with Vulkan/RADV, and a full seven-scenario bounded target-model run completed on 2026-05-09 with `offloaded 41/41 layers to GPU`. The measured median `8.056` sustained tokens/sec now meets the revised approximately 7 sustained tokens/sec throughput threshold.
 
 ## Goal
 
@@ -21,7 +21,7 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Target hardware | Lenovo ThinkPad T14 Gen1 AMD |
 | Candidate model | Qwen3.6-35B-A3B |
 | Reference comparison | Current orchestrator implementation in this repository |
-| Expected throughput to verify | approximately 14 sustained tokens/sec |
+| Expected throughput to verify | approximately 7 sustained tokens/sec |
 | CI/CD target | Default GitHub-hosted GitHub Actions runner only (`ubuntu-latest`) |
 | Scenario manifest | `evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl` |
 | Report template | `evaluation/qwen3.6-35b-a3b/report-template.md` |
@@ -33,6 +33,7 @@ The evaluation is practical rather than benchmark-only: measure interactive codi
 | Target model smoke result | `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md` and `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json` |
 | Verifier bounded expansion | `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json` and `.log` |
 | Full bounded target-model run | `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json` and `.log` |
+| Current-orchestrator comparison blocker | `evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md` |
 
 ## Evaluation scope
 
@@ -41,7 +42,7 @@ Run every scenario in the manifest for both systems where possible:
 1. local Qwen3.6-35B-A3B candidate;
 2. current orchestrator implementation.
 
-The local candidate now has a seven-scenario GPU-backed bounded run. The current orchestrator comparison was not run: this repository does not expose a directly comparable checked-in benchmark harness that returns the same first-token latency, token counts, and sustained tokens/sec fields for the scenario manifest without adding new orchestration code. That comparison remains a documented blocker rather than fabricated evidence.
+The local candidate now has a seven-scenario GPU-backed bounded run. The current orchestrator comparison was not run: this repository does not expose a directly comparable checked-in benchmark harness that returns the same first-token latency, token counts, and sustained tokens/sec fields for the scenario manifest without adding new orchestration code. That comparison remains a documented blocker rather than fabricated evidence; see `evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md`.
 
 ## Official Docker runtime path
 
@@ -177,7 +178,7 @@ Final recommendation must be one of:
 
 Use this minimum bar:
 
-- **Productive**: setup reproducible, common prompts feel interactive, sustained throughput is close to or above the 14 tokens/sec expectation, resource use leaves the laptop usable, quality is competitive with the current orchestrator for most categories, and structured output is reliable.
+- **Productive**: setup reproducible, common prompts feel interactive, sustained throughput is close to or above the 7 tokens/sec expectation, resource use leaves the laptop usable, quality is competitive with the current orchestrator for most categories, and structured output is reliable.
 - **Limited/offline**: setup works and privacy/offline value is high, but latency, resource use, context limits, or quality make it a fallback rather than the default.
 - **Not viable**: setup is not reproducible on the target hardware, throughput/latency is below practical use, resource use destabilizes the laptop, or quality is materially worse than the current orchestrator.
 
@@ -185,7 +186,7 @@ Use this minimum bar:
 
 Selected recommendation: **suitable only for limited/offline scenarios**.
 
-Rationale: the GPU-backed Docker/Ollama path is reproducible on the target laptop for the selected IQ1_M GGUF, but measured throughput is materially below the approximately 14 sustained tokens/sec expectation (`8.056` median tokens/sec in the seven-scenario bounded run). Quality is mixed under the 80-token cap: several scenarios pass, but C/C++ embedded and debugging are partial and strict structured JSON failed. The current orchestrator comparison is still blocked, so this is not sufficient to recommend replacing the repository's current assistant/orchestrator path.
+Rationale: the GPU-backed Docker/Ollama path is reproducible on the target laptop for the selected IQ1_M GGUF, and measured throughput exceeds the revised approximately 7 sustained tokens/sec expectation (`8.056` median tokens/sec in the seven-scenario bounded run). Quality is mixed under the 80-token cap: several scenarios pass, but C/C++ embedded and debugging are partial and strict structured JSON failed. The current orchestrator comparison is still blocked, so this is not sufficient to recommend replacing the repository's current assistant/orchestrator path.
 
 ## Known limitations to document during execution
 

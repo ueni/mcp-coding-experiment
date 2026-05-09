@@ -20,6 +20,7 @@ BOUNDED_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-
 BOUNDED_LOG = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.log"
 FULL_RESULT = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json"
 FULL_LOG = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.log"
+ORCHESTRATOR_BLOCKER = REPO_ROOT / "evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md"
 
 REQUIRED_CATEGORIES = {
     "c_cpp_embedded",
@@ -79,10 +80,11 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     auth_request = AUTH_REQUEST.read_text()
     acquisition_attempt = ACQUISITION_ATTEMPT.read_text()
     smoke = SMOKE.read_text()
+    orchestrator_blocker = ORCHESTRATOR_BLOCKER.read_text()
 
     assert "Lenovo ThinkPad T14 Gen1 AMD" in doc
     assert "current orchestrator" in doc
-    assert "approximately 14 sustained tokens/sec" in doc
+    assert "approximately 7 sustained tokens/sec" in doc
     assert "GitHub-hosted" in doc
     assert "evaluation/qwen3.6-35b-a3b/coding-scenarios.jsonl" in doc
     assert "evaluation/qwen3.6-35b-a3b/report-template.md" in doc
@@ -94,6 +96,7 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-smoke-2026-05-09.json" in doc
     assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json" in doc
     assert "evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json" in doc
+    assert "evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md" in doc
     assert ACQUISITION_ATTEMPT.exists()
     assert RUNNER.exists()
     assert SMOKE.exists()
@@ -102,6 +105,7 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert BOUNDED_LOG.exists()
     assert FULL_RESULT.exists()
     assert FULL_LOG.exists()
+    assert ORCHESTRATOR_BLOCKER.exists()
 
     for text in (doc, report, docker_runtime, auth_request, acquisition_attempt, smoke):
         assert "source/Dockerfile" in text
@@ -148,6 +152,7 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert full_result["aggregate"]["completed"] == 7
     assert full_result["aggregate"]["scenario_count"] == 7
     assert full_result["aggregate"]["median_tokens_per_sec"] == 8.056
+    assert full_result["aggregate"]["median_tokens_per_sec"] >= 7.0
     assert {result["category"] for result in full_result["results"]} == REQUIRED_CATEGORIES
     assert "offloaded 41/41 layers to GPU" in full_log
     assert "AMD Radeon Graphics (RADV RENOIR)" in full_log
@@ -155,6 +160,11 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "offloaded `0/41` layers to GPU" not in report
     assert "Current target-model results are GPU-backed" in report
     assert "current-orchestrator comparison" in report
+    assert "evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md" in report
+    assert "must not be inferred from the local Qwen run" in orchestrator_blocker
+    assert "current-orchestrator` as `0/7` and `not measured`" in orchestrator_blocker
+    assert "median `8.056` sustained tokens/sec" in orchestrator_blocker
+    assert "approximately `7` sustained tokens/sec" in orchestrator_blocker
 
     for recommendation in (
         "suitable for productive coding usage",

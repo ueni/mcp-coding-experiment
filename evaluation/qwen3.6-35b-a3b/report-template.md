@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Qwen3.6-35B-A3B Local Evaluation Report
 
-This file is an evaluation report related to issue #1. It records the 2026-05-08 target-host probe, the verified Docker GPU runtime path, the 2026-05-09 GPU-backed target-model smoke/bounded runs, and the current remaining comparison blocker. It does **not** satisfy the full issue #1 benchmark acceptance criteria because the current-orchestrator comparison has not been executed and the bounded local model run is below the productive/default-assistant threshold. No CPU-only or orchestrator result is fabricated.
+This file is an evaluation report related to issue #1. It records the 2026-05-08 target-host probe, the verified Docker GPU runtime path, the 2026-05-09 GPU-backed target-model smoke/bounded runs, and the current remaining comparison blocker. It does **not** satisfy the full issue #1 benchmark acceptance criteria because the current-orchestrator comparison has not been executed and bounded local-model quality is below the productive/default-assistant threshold. The bounded GPU-backed run's median `8.056` sustained tokens/sec now meets the revised approximately 7 sustained tokens/sec throughput threshold. No CPU-only or orchestrator result is fabricated.
 
 ## Run metadata
 
@@ -20,7 +20,7 @@ This file is an evaluation report related to issue #1. It records the 2026-05-08
 - Backend/runtime: official path is Docker/devcontainer using `source/Dockerfile`; the image installs Ollama `0.18.2` plus Vulkan/Mesa tooling and `.devcontainer/devcontainer.json` passes `/dev/dri` with `OLLAMA_VULKAN=1`
 - Model source, revision, quantization, checksum: `unsloth/Qwen3.6-35B-A3B-GGUF`, `Qwen3.6-35B-A3B-UD-IQ1_M.gguf`, size `10047749088` bytes, SHA256 `0dc2488c89d916c5599f7c03a286cd8f37a6a75a02bc13caf41c6bac26d70c9e`
 - Reference comparison implementation: current orchestrator implementation in this repository; not executed because no checked-in comparable latency/token harness currently maps the scenario manifest to the orchestrator with the same measurement schema
-- Detailed evidence: `evaluation/qwen3.6-35b-a3b/host-gpu-probe-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md`, `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md`, `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json`, and `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json`
+- Detailed evidence: `evaluation/qwen3.6-35b-a3b/host-gpu-probe-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/docker-gpu-runtime-2026-05-08.md`, `evaluation/qwen3.6-35b-a3b/target-model-acquisition-attempt-2026-05-09.md`, `evaluation/qwen3.6-35b-a3b/target-model-smoke-2026-05-09.md`, `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-verifier-bounded-2026-05-09.json`, `evaluation/qwen3.6-35b-a3b/results/results-docker-ollama-full-2026-05-09.json`, and `evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md`
 
 ## Setup and startup
 
@@ -84,10 +84,10 @@ The simple automated verdict function is a coarse screen, not a human code revie
 ## Limitations and failure patterns
 
 - Reproducibility: target hardware is correct, GPU is visible through Vulkan/RADV, and the target model now offloads `41/41` layers to GPU when the Docker invocation includes `/dev/kfd` and host render/KFD groups.
-- Latency/throughput: the full bounded GPU-backed run measured median first-token latency `3.307`s, median end-to-end latency `13.337`s, and median `8.056` sustained output tokens/sec. This is below the ~14 tokens/sec expectation.
+- Latency/throughput: the full bounded GPU-backed run measured median first-token latency `3.307`s, median end-to-end latency `13.337`s, and median `8.056` sustained output tokens/sec. This meets the revised ~7 tokens/sec expectation.
 - Resource pressure: host has 28.6 GiB RAM. Ollama logged 9.1 GiB model weights on Vulkan, 272.8 MiB model weights on CPU, 1.6 GiB Vulkan KV cache, 98.0 MiB Vulkan compute graph, and 11.1 GiB total model memory. Free swap during full run startup was only 21.7 MiB, so longer generations/context should be treated cautiously.
 - Quality failures: bounded `--num-predict 80` limits output depth; strict structured JSON failed; embedded C and debugging/review were partial.
-- Comparison blocker: current-orchestrator comparison outputs are absent because no existing comparable benchmark harness was found for the scenario manifest and measurement schema.
+- Comparison blocker: current-orchestrator comparison outputs are absent because no existing comparable benchmark harness was found for the scenario manifest and measurement schema. The blocker analysis is recorded in `evaluation/qwen3.6-35b-a3b/current-orchestrator-comparison-blocker-2026-05-09.md`.
 - Operational costs: setup requires a 10 GB GGUF, GPU device/group setup, Docker image build/cache, AC power, and local disk/RAM headroom.
 
 ## Final recommendation
@@ -100,4 +100,4 @@ Choose exactly one:
 
 Selected recommendation: **suitable only for limited/offline scenarios**.
 
-Rationale: The target host can run the selected Qwen3.6-35B-A3B IQ1_M GGUF through Docker/Ollama with Vulkan/RADV and full GPU layer offload, and all seven scenario categories completed in the bounded run. However, throughput is around `8.056` tokens/sec rather than the expected ~14, quality is mixed under the 80-token cap, strict JSON failed, and there is still no current-orchestrator comparison. This supports limited/offline fallback use, not replacement as the default productive coding assistant.
+Rationale: The target host can run the selected Qwen3.6-35B-A3B IQ1_M GGUF through Docker/Ollama with Vulkan/RADV and full GPU layer offload, all seven scenario categories completed in the bounded run, and median throughput is around `8.056` tokens/sec, above the revised expected ~7. However, quality is mixed under the 80-token cap, strict JSON failed, and there is still no current-orchestrator comparison. This supports limited/offline fallback use, not replacement as the default productive coding assistant.
