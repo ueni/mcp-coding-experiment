@@ -94,6 +94,10 @@ Expected result (example):
 }
 ```
 
+## VS Code MCP Onboarding
+
+For a complete VS Code MCP path from fresh clone/devcontainer to a verified tool call, see [VS Code MCP Onboarding](./docs/vscode-mcp-onboarding.md). The workspace task **MCP: Workspace Health Check** validates `/healthz`, `/mcp`, forwarded ports `8000`/`2345`, Ollama status, mutation mode, and HTTP bearer-token state without committing secrets.
+
 ## Use With VS Code Dev Containers
 
 1. Open this repository in VS Code.

@@ -1,0 +1,19 @@
+{
+  "inputs": [
+    {
+      "id": "mcp-http-bearer-token",
+      "type": "promptString",
+      "description": "Bearer token for local codebase-tooling-mcp HTTP sessions. Use the value from MCP_HTTP_BEARER_TOKEN.",
+      "password": true
+    }
+  ],
+  "servers": {
+    "codebase-tooling-mcp": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:mcp-http-bearer-token}"
+      }
+    }
+  }
+}
