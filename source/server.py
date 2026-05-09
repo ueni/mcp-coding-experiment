@@ -171,6 +171,20 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
 }
 SENSITIVE_TOOL_CATEGORIES = {"write", "git mutation", "shell/process", "network", "secret-sensitive"}
 MUTATION_TOOL_CATEGORIES = {"write", "git mutation"}
+SENSITIVE_AUDIT_KEY_RE = re.compile(
+    r"token|secret|password|credential|authorization|api[_-]?key", re.IGNORECASE
+)
+SENSITIVE_AUDIT_VALUE_RE = re.compile(
+    r"("
+    r"\b(?:bearer|token|secret|password|credential|authorization|api[_-]?key)\b\s*[:= ]\s*\S+"
+    r"|\b[A-Za-z0-9._%+-]+-secret-[A-Za-z0-9._%+-]+\b"
+    r"|\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{12,}\b"
+    r"|\bsk-[A-Za-z0-9_-]{16,}\b"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
+    r")",
+    re.IGNORECASE,
+)
 _HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
     "http_request_authorized", default=None
 )
@@ -588,6 +602,14 @@ def _http_rate_limit_allow(scope: dict[str, Any], now: float | None = None) -> t
     return True, 0
 
 
+def _redact_audit_string(value: str) -> str:
+    if SENSITIVE_AUDIT_VALUE_RE.search(value):
+        return "<redacted>"
+    if len(value) > 500:
+        return value[:500] + "...[truncated]"
+    return value
+
+
 def _redact_audit_value(value: Any, depth: int = 0) -> Any:
     if depth > 4:
         return "<redacted-depth>"
@@ -595,15 +617,15 @@ def _redact_audit_value(value: Any, depth: int = 0) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_str = str(key)
-            if re.search(r"token|secret|password|credential|authorization|api[_-]?key", key_str, re.I):
+            if SENSITIVE_AUDIT_KEY_RE.search(key_str):
                 redacted[key_str] = "<redacted>"
             else:
                 redacted[key_str] = _redact_audit_value(item, depth + 1)
         return redacted
     if isinstance(value, list):
         return [_redact_audit_value(item, depth + 1) for item in value[:25]]
-    if isinstance(value, str) and len(value) > 500:
-        return value[:500] + "...[truncated]"
+    if isinstance(value, str):
+        return _redact_audit_string(value)
     return value
 
 

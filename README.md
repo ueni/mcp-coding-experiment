@@ -33,10 +33,15 @@ Successfully tagged codebase-tooling-mcp:latest
 
 ### 2) Run HTTP server
 
+HTTP mode requires bearer-token authorization by default. Generate a local token before starting the server:
+
 ```bash
+export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+
 docker run --rm \
   -p 8000:8000 \
   -e MCP_TRANSPORT=http \
+  -e MCP_HTTP_BEARER_TOKEN="$MCP_HTTP_BEARER_TOKEN" \
   -e ALLOW_MUTATIONS=true \
   -e HOST_CA_CERT_FILE=/host-certs/ca-certificates.crt \
   -v /etc/ssl/certs:/host-certs:ro \
@@ -46,8 +51,11 @@ docker run --rm \
 
 ### 3) Register MCP server
 
+Send the same token to MCP clients as an `Authorization: Bearer ...` header:
+
 ```bash
-claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
+claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp \
+  --header "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN"
 ```
 
 Expected result (example):
@@ -89,9 +97,10 @@ Expected result (example):
 ## Use With VS Code Dev Containers
 
 1. Open this repository in VS Code.
-2. Run `Dev Containers: Reopen in Container`.
-3. Wait for the `codebase-tooling-mcp` container to build and start.
-4. Use the MCP endpoint at `http://localhost:8000/mcp`.
+2. Export a local HTTP token before opening/rebuilding the container: `export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"`.
+3. Run `Dev Containers: Reopen in Container`.
+4. Wait for the `codebase-tooling-mcp` container to build and start.
+5. Use the MCP endpoint at `http://localhost:8000/mcp` with header `Authorization: Bearer $MCP_HTTP_BEARER_TOKEN`.
 
 The VS Code entry point is [`.devcontainer/devcontainer.json`](./.devcontainer/devcontainer.json). This repository uses a single-file devcontainer setup (no required `docker-compose.yml`).
 
@@ -108,6 +117,7 @@ Inline devcontainer example (non-compose):
   "runArgs": ["--device=/dev/dri"],
   "containerEnv": {
     "MCP_TRANSPORT": "http",
+    "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "ALLOW_MUTATIONS": "true",
     "OLLAMA_VULKAN": "1"
   },
@@ -163,11 +173,12 @@ Run it in VS Code:
 1. Open [`vscode/mcp-inline-autocomplete/package.json`](./vscode/mcp-inline-autocomplete/package.json).
 2. Press `F5` (Run Extension) to start an Extension Development Host.
 3. In the dev host, open Command Palette and run `MCP Inline Autocomplete: Show Status`.
-4. Start typing in a file; inline suggestions come from MCP tool `autocomplete` at `http://localhost:8000/mcp`.
+4. Start typing in a file; inline suggestions come from MCP tool `autocomplete` at `http://localhost:8000/mcp`. By default, the extension sends `Authorization: Bearer $MCP_HTTP_BEARER_TOKEN` from the configured environment variable.
 
 Key settings (in VS Code Settings):
 
 - `mcpInlineAutocomplete.endpoint` (default `http://localhost:8000/mcp`)
+- `mcpInlineAutocomplete.bearerTokenEnv` (default `MCP_HTTP_BEARER_TOKEN`; set empty only for explicit `insecure-local` tests)
 - `mcpInlineAutocomplete.maxTokens`
 - `mcpInlineAutocomplete.temperature`
 - `mcpInlineAutocomplete.enabledLanguages`
@@ -213,6 +224,7 @@ That generated Codex entry uses the server key `codebase-tooling-mcp`:
 ```toml
 [mcp_servers."codebase-tooling-mcp"]
 url = "http://localhost:8000/mcp"
+bearer_token_env_var = "MCP_HTTP_BEARER_TOKEN"
 ```
 
 The `.gitignore` bootstrap is intentionally one-time. A marker file
@@ -255,8 +267,11 @@ Do not use insecure-local mode with public interfaces, tunnels, shared devcontai
 ### HTTP server
 
 ```bash
-claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp
+claude mcp add --transport http codebase-tooling-mcp http://localhost:8000/mcp \
+  --header "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN"
 ```
+
+If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local` for a throwaway loopback-only test, omit the header. Do not use that mode through forwarded ports, devcontainers, SSH tunnels, or shared networks.
 
 ### Local stdio server via Docker
 

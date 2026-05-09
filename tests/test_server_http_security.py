@@ -137,18 +137,34 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         event = json.loads(self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8").splitlines()[0])
         self.assertFalse(event["success"])
         self.assertIn("write", event["categories"])
-        self.assertEqual(event["arguments"]["packages"], ["example-secret-token"])
+        audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertNotIn("example-secret-token", audit_text)
+        self.assertEqual(event["arguments"]["packages"], ["<redacted>"])
 
     def test_redacts_sensitive_audit_arguments(self):
         self.server._append_audit_event(
             "unit_tool",
             ["secret-sensitive"],
             False,
-            {"api_token": "abc", "nested": {"password": "pw"}, "safe": "value"},
+            {
+                "api_token": "abc",
+                "nested": {"password": "pw"},
+                "safe": "value",
+                "packages": ["example-secret-token"],
+                "prompt": "download from https://example.invalid/pkg?token=secret-value",
+                "headers": ["Authorization: Bearer abc123"],
+            },
             "unit",
         )
 
-        event = json.loads(self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8").splitlines()[0])
+        audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertNotIn("example-secret-token", audit_text)
+        self.assertNotIn("secret-value", audit_text)
+        self.assertNotIn("Bearer abc123", audit_text)
+        event = json.loads(audit_text.splitlines()[0])
         self.assertEqual(event["arguments"]["api_token"], "<redacted>")
         self.assertEqual(event["arguments"]["nested"]["password"], "<redacted>")
         self.assertEqual(event["arguments"]["safe"], "value")
+        self.assertEqual(event["arguments"]["packages"], ["<redacted>"])
+        self.assertEqual(event["arguments"]["prompt"], "<redacted>")
+        self.assertEqual(event["arguments"]["headers"], ["<redacted>"])
