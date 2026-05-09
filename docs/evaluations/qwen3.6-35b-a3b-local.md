@@ -154,7 +154,21 @@ The manifest covers all required categories:
 - long-context technical prompts;
 - structured output reliability.
 
-Each JSONL row contains `id`, `category`, `title`, `prompt`, `expected_observations`, `quality_checks`, and `measurement_fields`.
+Each JSONL row contains `id`, `category`, `title`, `prompt`, `requested_output_format`, `expected_observations`, `quality_checks`, and `measurement_fields`.
+
+Requested output formats are explicit manifest metadata so format adherence can be judged independently from content quality:
+
+| Scenario ID | Requested output format |
+| --- | --- |
+| `embedded-c-review-001` | Markdown review with bullet-point risks plus a minimal C patch or code snippet; no unrelated rewrite. |
+| `bash-hardening-001` | Unified diff followed by a short rationale. |
+| `python-refactor-001` | Only the changed Python code blocks, including pytest cases; no full-file rewrite. |
+| `javascript-async-001` | Plain-text explanation followed by a corrected JavaScript implementation code block. |
+| `debug-review-001` | Structured Markdown sections for root cause, smallest diagnostic step, and suggested fix. |
+| `long-context-001` | Numbered/sectioned Markdown containing risk-ranked implementation plan, open questions, and test strategy. |
+| `structured-json-001` | Strictly valid JSON only, with no markdown fences or prose, matching the declared findings/summary schema. |
+
+Output-format adherence is judged from each scenario's `output_preview`/transcript against `requested_output_format`: Markdown and diff scenarios must use the requested organization, code-block scenarios must avoid unrelated prose/full-file rewrites, and structured JSON must parse without repair and contain the exact schema keys. The result JSON artifacts copy the `requested_output_format` into each result row, including `structured-json-001`, so a reviewer can compare the request, preview, and verdict without reopening the manifest.
 
 ## CI/CD validation on GitHub-hosted runners
 
@@ -165,7 +179,8 @@ The workflow `.github/workflows/qwen-evaluation-artifacts.yml` runs on `ubuntu-l
 - the scenario manifest is valid JSONL;
 - required scenario categories are present;
 - each scenario carries measurement fields needed for latency, throughput, resource usage, and quality comparison;
-- this documentation links the canonical manifest and report template;
+- each scenario carries explicit `requested_output_format` metadata;
+- this documentation links the canonical manifest and report template and explains requested output-format adherence;
 - committed GPU-backed result JSON covers all seven scenarios and does not contradict the current Vulkan offload evidence;
 - committed current-orchestrator result JSON covers the same seven scenarios with explicit non-streaming/estimated measurement notes.
 

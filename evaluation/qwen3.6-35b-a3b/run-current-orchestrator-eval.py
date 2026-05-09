@@ -123,6 +123,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             result = {
                 "scenario_id": scenario["id"],
                 "category": scenario["category"],
+                "requested_output_format": scenario["requested_output_format"],
                 "backend": "current-orchestrator",
                 "orchestrator_backend": backend,
                 "model": str(response.get("model", "") or args.model),
@@ -151,6 +152,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             result = {
                 "scenario_id": scenario["id"],
                 "category": scenario["category"],
+                "requested_output_format": scenario["requested_output_format"],
                 "backend": "current-orchestrator",
                 "orchestrator_backend": args.backend,
                 "model": args.model,

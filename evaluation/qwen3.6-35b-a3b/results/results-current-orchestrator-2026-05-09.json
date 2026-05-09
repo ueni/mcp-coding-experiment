@@ -72,7 +72,8 @@
         },
         "reason": "mutations_disabled"
       },
-      "output_preview": "README.md: <!-- SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt SPDX-License-Identifier: MIT .continue/models/agent-qwen2.5-coder-3b.yaml: name: agent-qwen2.5-coder-3b version: 0.0.1 schema: v1"
+      "output_preview": "README.md: <!-- SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt SPDX-License-Identifier: MIT .continue/models/agent-qwen2.5-coder-3b.yaml: name: agent-qwen2.5-coder-3b version: 0.0.1 schema: v1",
+      "requested_output_format": "Markdown review with bullet-point risks plus a minimal C patch or code snippet; no unrelated rewrite."
     },
     {
       "scenario_id": "bash-hardening-001",
@@ -131,7 +132,8 @@
         },
         "reason": "mutations_disabled"
       },
-      "output_preview": ""
+      "output_preview": "",
+      "requested_output_format": "Unified diff followed by a short rationale."
     },
     {
       "scenario_id": "python-refactor-001",
@@ -187,7 +189,8 @@
         },
         "reason": "mutations_disabled"
       },
-      "output_preview": "source/defaults/config/labs/refactor_tournament.json: { \"base_ref\": \"HEAD\", \"report_path\": \".codebase-tooling-mcp/reports/REFACTOR_TOURNAMENT.md\", source/defaults/config/labs/refactor_tournament_cpp_tooling.json: { \"base_ref\": \"HEAD\", \"report_path\": \".codebase-tooling-mcp/reports/REFACTOR_TOURNAMENT_CPP_TOOLING.md\", source/defaults/continue/models/refactor-granite3.3-2b.yaml: name: refactor-granite3.3-2b version: 0.0.1 schema: v1 source/labs/refactor_tournament.py: #!/usr/bin/env python3 # SPDX-License-Identifier: MIT # Copyright (c) Nico Ueberfeldt"
+      "output_preview": "source/defaults/config/labs/refactor_tournament.json: { \"base_ref\": \"HEAD\", \"report_path\": \".codebase-tooling-mcp/reports/REFACTOR_TOURNAMENT.md\", source/defaults/config/labs/refactor_tournament_cpp_tooling.json: { \"base_ref\": \"HEAD\", \"report_path\": \".codebase-tooling-mcp/reports/REFACTOR_TOURNAMENT_CPP_TOOLING.md\", source/defaults/continue/models/refactor-granite3.3-2b.yaml: name: refactor-granite3.3-2b version: 0.0.1 schema: v1 source/labs/refactor_tournament.py: #!/usr/bin/env python3 # SPDX-License-Identifier: MIT # Copyright (c) Nico Ueberfeldt",
+      "requested_output_format": "Only the changed Python code blocks, including pytest cases; no full-file rewrite."
     },
     {
       "scenario_id": "javascript-async-001",
@@ -243,7 +246,8 @@
         },
         "reason": "mutations_disabled"
       },
-      "output_preview": "setup-repository.sh: #!/bin/sh # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt # /.docker-build/, /.gitignore_codebase_tooling_mcp.touched README.md: <!-- SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt SPDX-License-Identifier: MIT .git: gitdir: /home/user/source/mcp-server-git-local-files/.git/worktrees/mcp-pr2-qwen-eval"
+      "output_preview": "setup-repository.sh: #!/bin/sh # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt # /.docker-build/, /.gitignore_codebase_tooling_mcp.touched README.md: <!-- SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt SPDX-License-Identifier: MIT .git: gitdir: /home/user/source/mcp-server-git-local-files/.git/worktrees/mcp-pr2-qwen-eval",
+      "requested_output_format": "Plain-text explanation followed by a corrected JavaScript implementation code block."
     },
     {
       "scenario_id": "debug-review-001",
@@ -299,7 +303,8 @@
         },
         "reason": "mutations_disabled"
       },
-      "output_preview": "source/defaults/config/labs/release_rehearsal_cpp_gtest.json: { \"target_branch\": \"main\", \"changelog_from\": \"HEAD~10\", source/defaults/selftests/test_container_smoke.py: # SPDX-License-Identifier: MIT # Copyright (c) Nico Ueberfeldt import os tests/__init__.py: # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt # # SPDX-License-Identifier: MIT"
+      "output_preview": "source/defaults/config/labs/release_rehearsal_cpp_gtest.json: { \"target_branch\": \"main\", \"changelog_from\": \"HEAD~10\", source/defaults/selftests/test_container_smoke.py: # SPDX-License-Identifier: MIT # Copyright (c) Nico Ueberfeldt import os tests/__init__.py: # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt # # SPDX-License-Identifier: MIT",
+      "requested_output_format": "Structured Markdown sections for root cause, smallest diagnostic step, and suggested fix."
     },
     {
       "scenario_id": "long-context-001",
@@ -355,7 +360,8 @@
         },
         "reason": "mutations_disabled"
       },
-      "output_preview": "setup-repository.sh: #!/bin/sh # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt #"
+      "output_preview": "setup-repository.sh: #!/bin/sh # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt #",
+      "requested_output_format": "Numbered/sectioned Markdown containing risk-ranked implementation plan, open questions, and test strategy."
     },
     {
       "scenario_id": "structured-json-001",
@@ -411,7 +417,8 @@
         },
         "reason": "mutations_disabled"
       },
-      "output_preview": "source/server.py implements the FastMCP/Starlette service, tool registry, and router-oriented execution model for repository operations. It includes runtime diagnostics and transport handling for stdio/direct/http modes. { \"content\": [ { \"type\": \"text\", \"text\": \"[{\\\"schema\\\": \\\"grep.quick.v1\\\", \\\"total_matches\\\": 2, \\\"returned\\\": 2, \\\"paths\\\": [\\\"src/sample.py\\\"]}]\" } ], \"structuredContent\": [ { \"schema\": \"grep.quick.v1\", \"total_matches\": 2, \"returned\": 2, \"paths\": [\"src/sample.py\"] } ], \"outputSchema\": { \"type\": \"array\", \"items\": { \"type\": \"object\", \"properties\": { \"path\": {\"type\": \"string\"}, \"line\": {\"type\": \"integer\"}, \"column\": {\"type\": \"integer\"}, \"match\": {\"type\": \"string\"}, \"lineText\": {\"type\": \"string\"}, \"schema\": {\"type\": \"string\"}, \"total_matches\": {\"type\": \"integer\"}, \"returned\": {\"type\": \"integer\"}, \"paths\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}} }, \"additionalProperties\": true } } }. SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt SPDX-License-Identifier: MIT. When a repository is bootstrapped via `curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh` and then opened in the devcontainer image, these files a"
+      "output_preview": "source/server.py implements the FastMCP/Starlette service, tool registry, and router-oriented execution model for repository operations. It includes runtime diagnostics and transport handling for stdio/direct/http modes. { \"content\": [ { \"type\": \"text\", \"text\": \"[{\\\"schema\\\": \\\"grep.quick.v1\\\", \\\"total_matches\\\": 2, \\\"returned\\\": 2, \\\"paths\\\": [\\\"src/sample.py\\\"]}]\" } ], \"structuredContent\": [ { \"schema\": \"grep.quick.v1\", \"total_matches\": 2, \"returned\": 2, \"paths\": [\"src/sample.py\"] } ], \"outputSchema\": { \"type\": \"array\", \"items\": { \"type\": \"object\", \"properties\": { \"path\": {\"type\": \"string\"}, \"line\": {\"type\": \"integer\"}, \"column\": {\"type\": \"integer\"}, \"match\": {\"type\": \"string\"}, \"lineText\": {\"type\": \"string\"}, \"schema\": {\"type\": \"string\"}, \"total_matches\": {\"type\": \"integer\"}, \"returned\": {\"type\": \"integer\"}, \"paths\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}} }, \"additionalProperties\": true } } }. SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt SPDX-License-Identifier: MIT. When a repository is bootstrapped via `curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh` and then opened in the devcontainer image, these files a",
+      "requested_output_format": "Strictly valid JSON only, with no markdown fences or prose, matching schema {\"findings\":[{\"severity\":\"low|medium|high\",\"file\":\"string\",\"line\":number,\"message\":\"string\"}],\"summary\":\"string\"}."
     }
   ]
 }

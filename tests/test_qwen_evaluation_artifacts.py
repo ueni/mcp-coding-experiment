@@ -47,6 +47,16 @@ REQUIRED_MEASUREMENT_FIELDS = {
     "verdict",
 }
 
+EXPECTED_REQUESTED_OUTPUT_FORMATS = {
+    "embedded-c-review-001": "Markdown review with bullet-point risks plus a minimal C patch or code snippet; no unrelated rewrite.",
+    "bash-hardening-001": "Unified diff followed by a short rationale.",
+    "python-refactor-001": "Only the changed Python code blocks, including pytest cases; no full-file rewrite.",
+    "javascript-async-001": "Plain-text explanation followed by a corrected JavaScript implementation code block.",
+    "debug-review-001": "Structured Markdown sections for root cause, smallest diagnostic step, and suggested fix.",
+    "long-context-001": "Numbered/sectioned Markdown containing risk-ranked implementation plan, open questions, and test strategy.",
+    "structured-json-001": "Strictly valid JSON only, with no markdown fences or prose, matching schema {\"findings\":[{\"severity\":\"low|medium|high\",\"file\":\"string\",\"line\":number,\"message\":\"string\"}],\"summary\":\"string\"}.",
+}
+
 
 def _load_scenarios() -> list[dict]:
     scenarios = []
@@ -74,6 +84,31 @@ def test_qwen_scenarios_have_measurement_and_quality_contract() -> None:
         assert scenario["expected_observations"], context
         assert scenario["quality_checks"], context
         assert REQUIRED_MEASUREMENT_FIELDS <= set(scenario["measurement_fields"]), context
+
+
+def test_qwen_scenarios_have_requested_output_format_contract() -> None:
+    scenarios = _load_scenarios()
+    assert {scenario["id"]: scenario["requested_output_format"] for scenario in scenarios} == EXPECTED_REQUESTED_OUTPUT_FORMATS
+
+    doc = DOC.read_text()
+    report = REPORT.read_text()
+    assert "requested_output_format" in doc
+    assert "requested_output_format" in report
+    assert "Output-format adherence" in doc
+    assert "Output-format adherence" in report
+    assert "Strictly valid JSON only" in doc
+    assert "Strict JSON only" in report
+
+    for result_path in (SMOKE_RESULT, BOUNDED_RESULT, FULL_RESULT, CURRENT_ORCHESTRATOR_RESULT):
+        result = json.loads(result_path.read_text())
+        for row in result["results"]:
+            scenario_id = row["scenario_id"]
+            assert row["requested_output_format"] == EXPECTED_REQUESTED_OUTPUT_FORMATS[scenario_id]
+
+    full_result = json.loads(FULL_RESULT.read_text())
+    structured_row = next(row for row in full_result["results"] if row["scenario_id"] == "structured-json-001")
+    assert "Strictly valid JSON only" in structured_row["requested_output_format"]
+    assert structured_row["verdict"] == "fail"
 
 
 def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
@@ -134,6 +169,8 @@ def test_qwen_evaluation_docs_link_canonical_artifacts() -> None:
     assert "issue #1 acceptance criteria" in auth_request
     assert "satisfy the reproducibility, scenario coverage, measurement, GitHub-hosted artifact-validation" in doc
     assert "satisfy the issue #1 evaluation acceptance criteria for a **limited/offline** viability recommendation" in report
+    assert "each scenario carries explicit `requested_output_format` metadata" in doc
+    assert "Each result row in the committed JSON artifacts includes `requested_output_format`" in report
     assert "Historical status: this blocker applied before the selected GGUF was available locally" in auth_request
     assert "first-token latency" in auth_request
     assert "sustained tokens/sec" in auth_request

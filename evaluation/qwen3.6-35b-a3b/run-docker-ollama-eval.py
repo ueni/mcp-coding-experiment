@@ -94,6 +94,7 @@ def run(args: argparse.Namespace) -> dict:
             result = {
                 "scenario_id": scenario["id"],
                 "category": scenario["category"],
+                "requested_output_format": scenario["requested_output_format"],
                 "backend": args.backend,
                 "model": args.model,
                 "first_token_latency_s": round(first_s, 3),
@@ -112,6 +113,7 @@ def run(args: argparse.Namespace) -> dict:
             result = {
                 "scenario_id": scenario["id"],
                 "category": scenario["category"],
+                "requested_output_format": scenario["requested_output_format"],
                 "backend": args.backend,
                 "model": args.model,
                 "error": repr(exc),

@@ -24,7 +24,8 @@
       "eval_duration_s": 10.09,
       "verdict": "partial",
       "error": null,
-      "output_preview": "```\n\n<think>\n\n</think>\n\n### Analysis of Concurrency and Memory-Safety Risks\n\nThe provided code implements a simple ring buffer but suffers from critical flaws when used in an embedded system where an Interrupt Service Routine (ISR) and a main-loop task may access the buffer concurrently.\n\n#### 1. Race Condition (Concurrency Risk)\nThe core issue is that `head` and `tail`"
+      "output_preview": "```\n\n<think>\n\n</think>\n\n### Analysis of Concurrency and Memory-Safety Risks\n\nThe provided code implements a simple ring buffer but suffers from critical flaws when used in an embedded system where an Interrupt Service Routine (ISR) and a main-loop task may access the buffer concurrently.\n\n#### 1. Race Condition (Concurrency Risk)\nThe core issue is that `head` and `tail`",
+      "requested_output_format": "Markdown review with bullet-point risks plus a minimal C patch or code snippet; no unrelated rewrite."
     }
   ]
 }

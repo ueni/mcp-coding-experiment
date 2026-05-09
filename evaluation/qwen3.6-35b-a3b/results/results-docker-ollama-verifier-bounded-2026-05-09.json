@@ -24,7 +24,8 @@
       "eval_duration_s": 10.065,
       "verdict": "pass",
       "error": null,
-      "output_preview": "```\n\nHere is the improved script and the rationale.\n\n### Rationale\n\n1.  **Strict Mode (`set -euo pipefail`)**:\n    *   `set -e`: Exit immediately if a command fails (e.g., `mkdir` fails).\n    *   `set -u`: Treat unset variables as errors (prevents typos like `$SRCC`"
+      "output_preview": "```\n\nHere is the improved script and the rationale.\n\n### Rationale\n\n1.  **Strict Mode (`set -euo pipefail`)**:\n    *   `set -e`: Exit immediately if a command fails (e.g., `mkdir` fails).\n    *   `set -u`: Treat unset variables as errors (prevents typos like `$SRCC`",
+      "requested_output_format": "Unified diff followed by a short rationale."
     },
     {
       "scenario_id": "python-refactor-001",
@@ -41,7 +42,8 @@
       "eval_duration_s": 9.946,
       "verdict": "pass",
       "error": null,
-      "output_preview": "<think>\n\n</think>\n\n```python\nimport pytest\n\n\ndef parse_kv(text):\n    \"\"\"\n    Parse a string of key=value pairs into a dictionary.\n\n    Args:\n        text (str): A string containing key=value pairs separated by newlines.\n\n    Returns:\n        dict: A dictionary with keys and values stripped of whitespace.\n\n    Raises:\n        ValueError: If a"
+      "output_preview": "<think>\n\n</think>\n\n```python\nimport pytest\n\n\ndef parse_kv(text):\n    \"\"\"\n    Parse a string of key=value pairs into a dictionary.\n\n    Args:\n        text (str): A string containing key=value pairs separated by newlines.\n\n    Returns:\n        dict: A dictionary with keys and values stripped of whitespace.\n\n    Raises:\n        ValueError: If a",
+      "requested_output_format": "Only the changed Python code blocks, including pytest cases; no full-file rewrite."
     }
   ]
 }

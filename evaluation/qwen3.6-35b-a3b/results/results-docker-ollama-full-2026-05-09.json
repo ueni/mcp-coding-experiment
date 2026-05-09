@@ -24,7 +24,8 @@
       "eval_duration_s": 10.022,
       "verdict": "partial",
       "error": null,
-      "output_preview": "```\n\n<think>\n\n</think>\n\n### Analysis of Concurrency and Memory-Safety Risks\n\nThe provided code implements a simple ring buffer but suffers from critical flaws that make it unsafe for embedded systems, particularly in interrupt-driven architectures.\n\n#### 1. Lack of Atomicity (Race Conditions)\n*   **Risk:** The variables `head` and `tail` are modified by both the ISR (`"
+      "output_preview": "```\n\n<think>\n\n</think>\n\n### Analysis of Concurrency and Memory-Safety Risks\n\nThe provided code implements a simple ring buffer but suffers from critical flaws that make it unsafe for embedded systems, particularly in interrupt-driven architectures.\n\n#### 1. Lack of Atomicity (Race Conditions)\n*   **Risk:** The variables `head` and `tail` are modified by both the ISR (`",
+      "requested_output_format": "Markdown review with bullet-point risks plus a minimal C patch or code snippet; no unrelated rewrite."
     },
     {
       "scenario_id": "bash-hardening-001",
@@ -41,7 +42,8 @@
       "eval_duration_s": 9.93,
       "verdict": "pass",
       "error": null,
-      "output_preview": "```\n\nHere is the improved script and the rationale.\n\n### Rationale\n\n1.  **Strict Mode (`set -euo pipefail`)**:\n    *   `-e`: Exit immediately if a command fails (prevents silent errors).\n    *   `-u`: Treat unset variables as errors (prevents typos like `$SRCC` from becoming empty strings).\n   "
+      "output_preview": "```\n\nHere is the improved script and the rationale.\n\n### Rationale\n\n1.  **Strict Mode (`set -euo pipefail`)**:\n    *   `-e`: Exit immediately if a command fails (prevents silent errors).\n    *   `-u`: Treat unset variables as errors (prevents typos like `$SRCC` from becoming empty strings).\n   ",
+      "requested_output_format": "Unified diff followed by a short rationale."
     },
     {
       "scenario_id": "python-refactor-001",
@@ -58,7 +60,8 @@
       "eval_duration_s": 9.903,
       "verdict": "pass",
       "error": null,
-      "output_preview": "<think>\n\n</think>\n\n```python\nimport pytest\n\n\ndef parse_kv(text):\n    \"\"\"\n    Parse a string of key=value pairs separated by newlines.\n\n    Args:\n        text (str): A string containing key=value pairs, one per line.\n\n    Returns:\n        dict: A dictionary with keys and values stripped of whitespace.\n\n    Raises:\n        ValueError: If"
+      "output_preview": "<think>\n\n</think>\n\n```python\nimport pytest\n\n\ndef parse_kv(text):\n    \"\"\"\n    Parse a string of key=value pairs separated by newlines.\n\n    Args:\n        text (str): A string containing key=value pairs, one per line.\n\n    Returns:\n        dict: A dictionary with keys and values stripped of whitespace.\n\n    Raises:\n        ValueError: If",
+      "requested_output_format": "Only the changed Python code blocks, including pytest cases; no full-file rewrite."
     },
     {
       "scenario_id": "javascript-async-001",
@@ -75,7 +78,8 @@
       "eval_duration_s": 9.923,
       "verdict": "pass",
       "error": null,
-      "output_preview": "```\n\n<think>\n\n</think>\n\n## The Bug\n\nThe bug is that `urls.forEach()` does **not** wait for the async callbacks to complete. `forEach` returns immediately after starting all the async operations, so `loadAll` returns `results` before any of the `fetch` calls have finished. The `results` array will be empty (or incomplete) when the function resolves.\n\n"
+      "output_preview": "```\n\n<think>\n\n</think>\n\n## The Bug\n\nThe bug is that `urls.forEach()` does **not** wait for the async callbacks to complete. `forEach` returns immediately after starting all the async operations, so `loadAll` returns `results` before any of the `fetch` calls have finished. The `results` array will be empty (or incomplete) when the function resolves.\n\n",
+      "requested_output_format": "Plain-text explanation followed by a corrected JavaScript implementation code block."
     },
     {
       "scenario_id": "debug-review-001",
@@ -92,7 +96,8 @@
       "eval_duration_s": 9.951,
       "verdict": "partial",
       "error": null,
-      "output_preview": "\n\n<think>\n\n</think>\n\n### Root Cause\nThe root cause is a **race condition** caused by concurrent modification of a shared `list` from multiple worker threads. In Python, while list appends are thread-safe due to the Global Interpreter Lock (GIL), the *order* of appends is not deterministic when multiple threads are running concurrently. The test expects a stable, deterministic order (e"
+      "output_preview": "\n\n<think>\n\n</think>\n\n### Root Cause\nThe root cause is a **race condition** caused by concurrent modification of a shared `list` from multiple worker threads. In Python, while list appends are thread-safe due to the Global Interpreter Lock (GIL), the *order* of appends is not deterministic when multiple threads are running concurrently. The test expects a stable, deterministic order (e",
+      "requested_output_format": "Structured Markdown sections for root cause, smallest diagnostic step, and suggested fix."
     },
     {
       "scenario_id": "long-context-001",
@@ -109,7 +114,8 @@
       "eval_duration_s": 9.929,
       "verdict": "pass",
       "error": null,
-      "output_preview": "\n\n<think>\n\n</think>\n\nBased on the design notes provided, here is the structured output for the **codebase-tooling-mcp** project.\n\n### 1. Risk-Ranked Implementation Plan\n\nThis plan prioritizes implementation based on security criticality, compliance requirements, and architectural stability.\n\n| Priority | Risk Category | Implementation Focus | Key Actions & Constraints |\n| :--- | :---"
+      "output_preview": "\n\n<think>\n\n</think>\n\nBased on the design notes provided, here is the structured output for the **codebase-tooling-mcp** project.\n\n### 1. Risk-Ranked Implementation Plan\n\nThis plan prioritizes implementation based on security criticality, compliance requirements, and architectural stability.\n\n| Priority | Risk Category | Implementation Focus | Key Actions & Constraints |\n| :--- | :---",
+      "requested_output_format": "Numbered/sectioned Markdown containing risk-ranked implementation plan, open questions, and test strategy."
     },
     {
       "scenario_id": "structured-json-001",
@@ -126,7 +132,8 @@
       "eval_duration_s": 9.94,
       "verdict": "fail",
       "error": null,
-      "output_preview": "\n\n<think>\n\n</think>\n\n{\n  \"findings\": [\n    {\n      \"severity\": \"low\",\n      \"file\": \"source/server.py\",\n      \"line\": 42,\n      \"message\": \"The comment stating that mutations default to true contradicts the code logic which defaults ALLOW_MUTATIONS to false.\"\n    }\n  ],\n  \"summary"
+      "output_preview": "\n\n<think>\n\n</think>\n\n{\n  \"findings\": [\n    {\n      \"severity\": \"low\",\n      \"file\": \"source/server.py\",\n      \"line\": 42,\n      \"message\": \"The comment stating that mutations default to true contradicts the code logic which defaults ALLOW_MUTATIONS to false.\"\n    }\n  ],\n  \"summary",
+      "requested_output_format": "Strictly valid JSON only, with no markdown fences or prose, matching schema {\"findings\":[{\"severity\":\"low|medium|high\",\"file\":\"string\",\"line\":number,\"message\":\"string\"}],\"summary\":\"string\"}."
     }
   ]
 }
