@@ -217,7 +217,7 @@ index 0000000..257cc56
         self.assertIn("shell/process", events[0]["categories"])
         self.assertIn("git mutation", events[3]["categories"])
 
-    def test_redacts_sensitive_audit_arguments(self):
+    def test_redacts_sensitive_audit_arguments_and_reason(self):
         self.server._append_audit_event(
             "unit_tool",
             ["secret-sensitive"],
@@ -230,7 +230,7 @@ index 0000000..257cc56
                 "prompt": "download from https://example.invalid/pkg?token=secret-value",
                 "headers": ["Authorization: Bearer abc123"],
             },
-            "unit",
+            "failed while reading example-secret-token",
         )
 
         audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
@@ -238,9 +238,24 @@ index 0000000..257cc56
         self.assertNotIn("secret-value", audit_text)
         self.assertNotIn("Bearer abc123", audit_text)
         event = json.loads(audit_text.splitlines()[0])
+        self.assertEqual(event["reason"], "<redacted>")
         self.assertEqual(event["arguments"]["api_token"], "<redacted>")
         self.assertEqual(event["arguments"]["nested"]["password"], "<redacted>")
         self.assertEqual(event["arguments"]["safe"], "value")
         self.assertEqual(event["arguments"]["packages"], ["<redacted>"])
         self.assertEqual(event["arguments"]["prompt"], "<redacted>")
         self.assertEqual(event["arguments"]["headers"], ["<redacted>"])
+
+    def test_command_runner_direct_failure_redacts_sensitive_audit_reason(self):
+        self.server.ALLOW_MUTATIONS = True
+
+        result = self.server.command_runner(command=["cat", "example-secret-token"])
+
+        self.assertFalse(result["ok"])
+        audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertNotIn("example-secret-token", audit_text)
+        event = json.loads(audit_text.splitlines()[0])
+        self.assertEqual(event["tool_name"], "command_runner")
+        self.assertFalse(event["success"])
+        self.assertEqual(event["arguments"]["command"], ["cat", "<redacted>"])
+        self.assertEqual(event["reason"], "<redacted>")

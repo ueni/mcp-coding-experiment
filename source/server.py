@@ -657,7 +657,7 @@ def _append_audit_event(
         "tool_name": tool_name,
         "categories": categories,
         "success": success,
-        "reason": reason,
+        "reason": _redact_audit_string(reason),
         "arguments": _redact_audit_value(arguments or {}),
     }
     try:
