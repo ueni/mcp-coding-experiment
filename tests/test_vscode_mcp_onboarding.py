@@ -2,12 +2,25 @@
 #
 # SPDX-License-Identifier: MIT
 
+import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+HEALTHCHECK_SCRIPT = REPO_ROOT / "scripts" / "vscode_mcp_healthcheck.py"
+
+
+def _load_healthcheck_module():
+    spec = importlib.util.spec_from_file_location("vscode_mcp_healthcheck", HEALTHCHECK_SCRIPT)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_vscode_mcp_example_uses_secret_free_input_pattern():
@@ -32,7 +45,112 @@ def test_vscode_healthcheck_task_points_at_checked_in_script():
     assert task["type"] == "process"
     assert task["command"] == "python3"
     assert "${workspaceFolder}/scripts/vscode_mcp_healthcheck.py" in task["args"]
-    assert (REPO_ROOT / "scripts" / "vscode_mcp_healthcheck.py").exists()
+    assert HEALTHCHECK_SCRIPT.exists()
+
+
+def test_healthcheck_requires_unauthenticated_mcp_auth_rejection():
+    healthcheck = _load_healthcheck_module()
+
+    assert healthcheck._is_expected_unauth_mcp_rejection(401, "missing bearer token")
+    assert healthcheck._is_expected_unauth_mcp_rejection(
+        403,
+        "HTTP auth is enabled but MCP_HTTP_BEARER_TOKEN is not configured",
+    )
+    assert not healthcheck._is_expected_unauth_mcp_rejection(200, "ok")
+    assert not healthcheck._is_expected_unauth_mcp_rejection(404, "not found")
+
+
+def test_healthcheck_authorization_state_fails_when_unauthenticated_request_succeeds(monkeypatch):
+    healthcheck = _load_healthcheck_module()
+    monkeypatch.setattr(healthcheck, "TOKEN", "secret-token")
+    monkeypatch.setattr(healthcheck, "TOKEN_ENV", "MCP_HTTP_BEARER_TOKEN")
+    monkeypatch.setattr(healthcheck, "_port_open", lambda _host, _port: True)
+
+    def fake_request_json(url):
+        if url.endswith("/healthz"):
+            return (
+                200,
+                {
+                    "ok": True,
+                    "transport": "http",
+                    "allow_mutations": True,
+                    "server": {"http_mode": True},
+                    "ollama": {"running": True, "configured_port": 2345, "configured_port_listening": True},
+                },
+                "",
+            )
+        return 200, {}, ""
+
+    request_statuses = iter([(200, "ok"), (405, "method not allowed")])
+    monkeypatch.setattr(healthcheck, "_request_json", fake_request_json)
+    monkeypatch.setattr(healthcheck, "_request_status", lambda *_args, **_kwargs: next(request_statuses))
+
+    auth_check = next(check for check in healthcheck.run_checks() if check.name == "HTTP authorization state")
+
+    assert auth_check.ok is False
+    assert "unexpected response" in auth_check.detail
+
+
+def test_healthcheck_authorization_state_fails_when_token_request_has_auth_error(monkeypatch):
+    healthcheck = _load_healthcheck_module()
+    monkeypatch.setattr(healthcheck, "TOKEN", "secret-token")
+    monkeypatch.setattr(healthcheck, "TOKEN_ENV", "MCP_HTTP_BEARER_TOKEN")
+    monkeypatch.setattr(healthcheck, "_port_open", lambda _host, _port: True)
+
+    def fake_request_json(url):
+        if url.endswith("/healthz"):
+            return (
+                200,
+                {
+                    "ok": True,
+                    "transport": "http",
+                    "allow_mutations": True,
+                    "server": {"http_mode": True},
+                    "ollama": {"running": True, "configured_port": 2345, "configured_port_listening": True},
+                },
+                "",
+            )
+        return 200, {}, ""
+
+    request_statuses = iter([(401, "missing bearer token"), (403, "invalid bearer token")])
+    monkeypatch.setattr(healthcheck, "_request_json", fake_request_json)
+    monkeypatch.setattr(healthcheck, "_request_status", lambda *_args, **_kwargs: next(request_statuses))
+
+    auth_check = next(check for check in healthcheck.run_checks() if check.name == "HTTP authorization state")
+
+    assert auth_check.ok is False
+    assert "with $MCP_HTTP_BEARER_TOKEN=403" in auth_check.detail
+
+
+def test_healthcheck_authorization_state_passes_only_for_rejection_then_endpoint_reached(monkeypatch):
+    healthcheck = _load_healthcheck_module()
+    monkeypatch.setattr(healthcheck, "TOKEN", "secret-token")
+    monkeypatch.setattr(healthcheck, "TOKEN_ENV", "MCP_HTTP_BEARER_TOKEN")
+    monkeypatch.setattr(healthcheck, "_port_open", lambda _host, _port: True)
+
+    def fake_request_json(url):
+        if url.endswith("/healthz"):
+            return (
+                200,
+                {
+                    "ok": True,
+                    "transport": "http",
+                    "allow_mutations": True,
+                    "server": {"http_mode": True},
+                    "ollama": {"running": True, "configured_port": 2345, "configured_port_listening": True},
+                },
+                "",
+            )
+        return 200, {}, ""
+
+    request_statuses = iter([(401, "missing bearer token"), (405, "method not allowed")])
+    monkeypatch.setattr(healthcheck, "_request_json", fake_request_json)
+    monkeypatch.setattr(healthcheck, "_request_status", lambda *_args, **_kwargs: next(request_statuses))
+
+    auth_check = next(check for check in healthcheck.run_checks() if check.name == "HTTP authorization state")
+
+    assert auth_check.ok is True
+    assert "expected auth rejection" in auth_check.detail
 
 
 def test_devcontainer_passes_http_bearer_token_from_local_env():

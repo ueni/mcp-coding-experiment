@@ -74,6 +74,28 @@ def _host_port(url: str) -> tuple[str, int]:
     return parsed.hostname or "localhost", parsed.port or (443 if parsed.scheme == "https" else 80)
 
 
+_EXPECTED_UNAUTH_DETAILS = (
+    "missing bearer token",
+    "mcp_http_bearer_token is not configured",
+    "http auth is enabled but",
+)
+_AUTH_ERROR_DETAILS = _EXPECTED_UNAUTH_DETAILS + (
+    "invalid bearer token",
+    "unauthorized",
+    "forbidden",
+)
+
+
+def _is_expected_unauth_mcp_rejection(status: int, body: str) -> bool:
+    body_lower = body.lower()
+    return status in {401, 403} and any(detail in body_lower for detail in _EXPECTED_UNAUTH_DETAILS)
+
+
+def _is_auth_error_response(status: int, body: str) -> bool:
+    body_lower = body.lower()
+    return status in {401, 403} or any(detail in body_lower for detail in _AUTH_ERROR_DETAILS)
+
+
 def run_checks() -> list[Check]:
     checks: list[Check] = []
 
@@ -156,23 +178,29 @@ def run_checks() -> list[Check]:
         )
     )
 
-    unauth_status, _ = _request_status(MCP_URL)
+    unauth_status, unauth_body = _request_status(MCP_URL)
+    unauth_ok = _is_expected_unauth_mcp_rejection(unauth_status, unauth_body)
     if TOKEN:
         auth_status, auth_body = _request_status(MCP_URL, {"Authorization": f"Bearer {TOKEN}"})
-        auth_ok = auth_status not in {0, 401, 403}
-        auth_detail = f"without token={unauth_status or 'no response'}, with ${TOKEN_ENV}={auth_status or 'no response'}"
-        if auth_status in {405, 406}:
-            auth_ok = True
+        token_reached_endpoint = auth_status != 0 and not _is_auth_error_response(auth_status, auth_body)
+        auth_ok = unauth_ok and token_reached_endpoint
+        auth_detail = (
+            f"without token={unauth_status or 'no response'}"
+            f" ({'expected auth rejection' if unauth_ok else 'unexpected response'}), "
+            f"with ${TOKEN_ENV}={auth_status or 'no response'}"
+        )
+        if auth_status in {405, 406} and token_reached_endpoint:
             auth_detail += " (endpoint reached; method/content negotiation failed after auth)"
-        if "missing bearer token" in auth_body.lower() or "invalid bearer token" in auth_body.lower():
-            auth_ok = False
         auth_remediation = (
             f"Export {TOKEN_ENV} before rebuilding/opening the devcontainer and use the same env var in VS Code MCP config. "
-            "Token mode should reject missing/incorrect tokens but accept the configured bearer token."
+            "Token mode must reject missing/incorrect tokens but accept the configured bearer token."
         )
     else:
         auth_ok = False
-        auth_detail = f"no ${TOKEN_ENV} set; unauthenticated MCP request returned {unauth_status or 'no response'}"
+        auth_detail = (
+            f"no ${TOKEN_ENV} set; unauthenticated MCP request returned {unauth_status or 'no response'}"
+            f" ({'expected auth rejection' if unauth_ok else 'unexpected response'})"
+        )
         auth_remediation = (
             f"Generate a local token with `export {TOKEN_ENV}=\"$(openssl rand -hex 32)\"`, "
             "then rebuild/reopen the devcontainer so the server and VS Code use the same value."
