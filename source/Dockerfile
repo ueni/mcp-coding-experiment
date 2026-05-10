@@ -103,6 +103,9 @@ RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
 
 RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
     set -eux; \
+    curl_retry() { \
+      curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --http1.1 "$@"; \
+    }; \
     case "$(dpkg --print-architecture)" in \
       amd64) ollama_arch="amd64" ;; \
       arm64) ollama_arch="arm64" ;; \
@@ -111,13 +114,13 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
     ver_param="${OLLAMA_VERSION:+?version=${OLLAMA_VERSION}}"; \
     archive_ext=""; \
     download_url=""; \
-    if curl --fail --silent --head --location "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}" >/dev/null 2>&1; then \
+    if curl_retry --silent --head "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}" >/dev/null 2>&1; then \
       archive_ext="tar.zst"; \
       download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}"; \
-    elif curl --fail --silent --head --location "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}" >/dev/null 2>&1; then \
+    elif curl_retry --silent --head "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}" >/dev/null 2>&1; then \
       archive_ext="tgz"; \
       download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}"; \
-    elif curl --fail --silent --head --location "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst" >/dev/null 2>&1; then \
+    elif curl_retry --silent --head "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst" >/dev/null 2>&1; then \
       echo "Requested Ollama version ${OLLAMA_VERSION} is unavailable from ollama.com/download; falling back to the latest tar.zst package." >&2; \
       archive_ext="tar.zst"; \
       download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst"; \
@@ -128,8 +131,21 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
     fi; \
     ollama_version_label="${OLLAMA_VERSION:-latest}"; \
     ollama_archive="/var/cache/buildkit/ollama/ollama-${ollama_version_label}-linux-${ollama_arch}.${archive_ext}"; \
+    if [ -f "${ollama_archive}" ]; then \
+      case "${archive_ext}" in \
+        tar.zst) zstd -t "${ollama_archive}" || rm -f "${ollama_archive}" ;; \
+        tgz) tar -tzf "${ollama_archive}" >/dev/null || rm -f "${ollama_archive}" ;; \
+      esac; \
+    fi; \
     if [ ! -f "${ollama_archive}" ]; then \
-      curl -fL --progress-bar "${download_url}" -o "${ollama_archive}"; \
+      tmp_archive="${ollama_archive}.tmp"; \
+      rm -f "${tmp_archive}"; \
+      curl_retry --progress-bar "${download_url}" -o "${tmp_archive}"; \
+      case "${archive_ext}" in \
+        tar.zst) zstd -t "${tmp_archive}" ;; \
+        tgz) tar -tzf "${tmp_archive}" >/dev/null ;; \
+      esac; \
+      mv "${tmp_archive}" "${ollama_archive}"; \
     fi; \
     rm -rf /usr/local/lib/ollama; \
     case "${archive_ext}" in \
