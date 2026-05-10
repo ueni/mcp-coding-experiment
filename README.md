@@ -98,6 +98,10 @@ Expected result (example):
 
 For a complete VS Code MCP path from fresh clone/devcontainer to a verified tool call, see [VS Code MCP Onboarding](./docs/vscode-mcp-onboarding.md). The workspace task **MCP: Workspace Health Check** validates `/healthz`, `/mcp`, forwarded ports `8000`/`2345`, Ollama status, mutation mode, and HTTP bearer-token state without committing secrets.
 
+## Sandbox profiles for autonomous agents
+
+Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.
+
 ## Use With VS Code Dev Containers
 
 1. Open this repository in VS Code.

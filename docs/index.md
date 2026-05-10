@@ -13,6 +13,7 @@ This index lists documentation ownership and status.
 - [MCP Fun Labs](./labs.md) (`docs/labs.md`) - Status: `lab/experimental`
 - [Tooling White Paper](./tooling-whitepaper.md) (`docs/tooling-whitepaper.md`) - Status: `canonical/strategy`
 - [Troubleshooting](./troubleshooting.md) (`docs/troubleshooting.md`) - Status: `operational runbook`
+- [Sandbox Profiles for Autonomous Coding Agents](./sandbox-profiles.md) (`docs/sandbox-profiles.md`) - Status: `operational guidance`
 - [Release Notes and Documentation Policy](./release-notes-policy.md) (`docs/release-notes-policy.md`) - Status: `canonical`
 - [MCP Output Schemas](./mcp-output-schemas.md) (`docs/mcp-output-schemas.md`) - Status: `canonical`
 - Bootstrap instructions for external repositories live in `README.md` under `Bootstrap Another Repository`.
