@@ -12,6 +12,7 @@ ARG APP_UID=1000
 ARG APP_GID=1000
 ARG OLLAMA_VERSION=0.18.2
 ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
+ARG OLLAMA_PULL_TIMEOUT_SECONDS=1800
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
 
@@ -167,7 +168,16 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
     && IFS=',' read -ra preload_models <<<"${OLLAMA_PRELOAD_MODELS}" \
     && for model in "${preload_models[@]}"; do \
          model="$(echo "$model" | xargs)"; \
-         if [ -n "$model" ]; then ollama pull "$model"; fi; \
+         if [ -n "$model" ]; then \
+           pull_log="/tmp/ollama-pull-$(echo "$model" | tr -c 'A-Za-z0-9_.-' '_').log"; \
+           echo "Pulling Ollama model ${model}"; \
+           timeout "${OLLAMA_PULL_TIMEOUT_SECONDS}" ollama pull "$model" >"${pull_log}" 2>&1 || { \
+             status="$?"; \
+             cat "${pull_log}" >&2 || true; \
+             echo "Failed to pull Ollama model ${model} (exit ${status}; timeout ${OLLAMA_PULL_TIMEOUT_SECONDS}s)." >&2; \
+             exit "$status"; \
+           }; \
+         fi; \
        done \
     && rm -rf /tmp/ollama-models/* \
     && cp -a /var/cache/buildkit/ollama-models/. /tmp/ollama-models/ \

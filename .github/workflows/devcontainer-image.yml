@@ -13,6 +13,7 @@ on:
 jobs:
   test:
     runs-on: self-hosted
+    timeout-minutes: 180
     env:
       TEST_IMAGE: codebase-tooling-mcp:test
 
@@ -21,7 +22,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build test image
-        run: docker build --file source/Dockerfile --tag "${TEST_IMAGE}" source
+        timeout-minutes: 150
+        run: docker build --progress=plain --file source/Dockerfile --tag "${TEST_IMAGE}" source
 
       - name: Run tests with coverage in container
         run: |
@@ -71,6 +73,7 @@ jobs:
   build-and-push:
     needs: test
     runs-on: self-hosted
+    timeout-minutes: 240
 
     steps:
       - name: Checkout
@@ -83,9 +86,11 @@ jobs:
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       - name: Build and push devcontainer image
+        timeout-minutes: 210
         run: |
           IMAGE_NAME="docker.io/${{ secrets.DOCKER_USERNAME }}/codebase-tooling-mcp"
           docker buildx build \
+            --progress=plain \
             --platform linux/amd64,linux/arm64 \
             --file source/Dockerfile \
             --tag "${IMAGE_NAME}:latest" \
