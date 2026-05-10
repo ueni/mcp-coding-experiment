@@ -30,9 +30,11 @@ jobs:
 
           docker create \
             --name "${CONTAINER_NAME}" \
+            --user root \
+            --privileged \
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
-            --env HOME=/home/app \
+            --env HOME=/root \
             --env USER=app \
             --env LOGNAME=app \
             --env REPO_PATH=/home/app/work \
