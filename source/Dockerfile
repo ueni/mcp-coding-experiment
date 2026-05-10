@@ -71,7 +71,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ); \
     apt-get install -y --no-install-recommends "${packages[@]}"; \
     install -m 0755 -d /etc/apt/keyrings \
-    && curl -fL --progress-bar https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
     && . /etc/os-release \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
@@ -141,7 +141,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
     if [ ! -f "${ollama_archive}" ]; then \
       tmp_archive="${ollama_archive}.tmp"; \
       rm -f "${tmp_archive}"; \
-      curl_retry --progress-bar "${download_url}" -o "${tmp_archive}"; \
+      curl_retry --silent --show-error "${download_url}" -o "${tmp_archive}"; \
       case "${archive_ext}" in \
         tar.zst) zstd -t "${tmp_archive}" ;; \
         tgz) tar -tzf "${tmp_archive}" >/dev/null ;; \
@@ -204,7 +204,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
       publisher="${extension_id%%.*}"; \
       extension_name="${extension_id#*.}"; \
       vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"; \
-      if [ ! -f "${vsix_path}" ] && ! curl -fL --progress-bar "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${vsix_path}"; then \
+      if [ ! -f "${vsix_path}" ] && ! curl -fsSL "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${vsix_path}"; then \
         if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
         echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
         rm -f "${vsix_path}"; \
