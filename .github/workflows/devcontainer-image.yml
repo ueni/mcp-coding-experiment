@@ -156,3 +156,26 @@ jobs:
             "${tag_args[@]}" \
             "${output_args[@]}" \
             source
+
+  pr-validation:
+    name: PR devcontainer validation gate
+    needs:
+      - test
+      - build-and-push
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require devcontainer validation success
+        run: |
+          test_result='${{ needs.test.result }}'
+          build_result='${{ needs['build-and-push'].result }}'
+
+          echo "test result: ${test_result}"
+          echo "build-and-push result: ${build_result}"
+
+          if [ "${test_result}" != "success" ] || [ "${build_result}" != "success" ]; then
+            echo "::error::Devcontainer PR validation requires both test and build-and-push jobs to pass."
+            exit 1
+          fi
+
+          echo "Devcontainer PR validation passed."
