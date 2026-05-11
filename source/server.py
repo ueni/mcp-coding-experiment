@@ -555,12 +555,13 @@ TASK_RETRIEVAL_DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".
 mcp = FastMCP(
     "git-repo-manager",
     instructions=(
-        "Expose exactly one public MCP tool: `task_router`. "
-        "All other server functions remain internal call targets and are not part of the external MCP contract. "
+        "Expose the compact public MCP v1 surface: `task_router`, read-only inspection helpers "
+        "such as `tool_annotations` and `tool_output_contracts`, and schema-backed core tools. "
+        "Internal leaf tools and router families remain direct Python call targets, not MCP tools. "
         "LLM agents should start with `task_router()` for almost every natural-language request because its default "
         "`mode='task'` classifies the request, injects compact task/session memory, and dispatches to the right "
-        "specialist flow. Use explicit modes only when you intentionally need raw status, embed, rerank, "
-        "autocomplete, direct infer or batch infer, or coding sandbox/check/package operations."
+        "specialist flow. Use `tool_annotations()` before sensitive calls to inspect read-only, destructive, "
+        "idempotent, and open-world hints for public tools and covered modes."
     ),
 )
 

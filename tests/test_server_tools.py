@@ -1781,6 +1781,37 @@ class ServerToolsTest(ServerToolsTestBase):
 
         asyncio.run(run_checks())
 
+    def test_public_mcp_docs_match_manifest_scope(self):
+        docs_root = self.server.Path(__file__).resolve().parents[1]
+        readme = (docs_root / "README.md").read_text(encoding="utf-8")
+        whitepaper = (docs_root / "docs" / "tooling-whitepaper.md").read_text(encoding="utf-8")
+        manifest = self.server.tool_annotations()
+        manifest_tools = {entry["tool"] for entry in manifest["tools"]}
+
+        self.assertEqual(manifest_tools, set(self.server.PUBLIC_MCP_TOOL_NAMES))
+        for tool_name in self.server.PUBLIC_MCP_TOOL_NAMES:
+            self.assertIn(f"`{tool_name}`", readme, tool_name)
+            self.assertIn(f"`{tool_name}`", whitepaper, tool_name)
+
+        internal_router_names = {
+            "repo_router",
+            "git_router",
+            "code_index_router",
+            "memory_router",
+            "tool_router",
+            "quality_router",
+            "governance_router",
+            "workflow_router",
+            "runtime_guard_router",
+            "math_router",
+            "document_router",
+            "diagram_router",
+        }
+        self.assertTrue(internal_router_names.isdisjoint(self.server.PUBLIC_MCP_TOOL_NAMES))
+        self.assertIn("internal orchestration helpers, not public MCP v1 tools", whitepaper)
+        self.assertIn("`task_router` is the only public high-level router", whitepaper)
+        self.assertNotIn("Each public router", whitepaper)
+
     def test_public_task_router_argument_descriptions(self):
         async def run_checks():
             tools = await self.server.mcp.list_tools()
