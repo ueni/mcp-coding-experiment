@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import importlib.util
 import json
 import subprocess
@@ -11,6 +12,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HEALTHCHECK_SCRIPT = REPO_ROOT / "scripts" / "vscode_mcp_healthcheck.py"
+SERVER_SCRIPT = REPO_ROOT / "source" / "server.py"
+
+
+def _load_server_module():
+    spec = importlib.util.spec_from_file_location("dev_server_for_prompts", SERVER_SCRIPT)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_healthcheck_module():
@@ -21,6 +33,72 @@ def _load_healthcheck_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+
+def test_vscode_discovers_curated_mcp_workflow_prompts():
+    server = _load_server_module()
+
+    prompts = asyncio.run(server.mcp.list_prompts())
+    prompt_by_name = {prompt.name: prompt for prompt in prompts}
+
+    expected = {
+        "review_changed_files",
+        "release_readiness_check",
+        "security_triage",
+        "devcontainer_health_check",
+        "snapshot_before_refactor",
+    }
+    assert expected.issubset(prompt_by_name)
+    assert len(expected) == 5
+
+    for name in expected:
+        prompt = prompt_by_name[name]
+        assert prompt.description
+        assert prompt.title
+
+
+def test_vscode_workflow_prompt_content_routes_through_safe_existing_gates():
+    server = _load_server_module()
+
+    result = asyncio.run(
+        server.mcp.get_prompt(
+            "release_readiness_check",
+            {"base_ref": "origin/main", "head_ref": "HEAD", "summary_mode": "quick"},
+        )
+    )
+    text = result.messages[0].content.text
+
+    assert "task_router" in text
+    assert "release_readiness" in text
+    assert "required_tool_chain" in text
+    assert "Do not bypass failing gates" in text
+    assert "Do not mutate files" in text
+
+
+def test_vscode_devcontainer_prompt_redacts_auth_secret_guidance():
+    server = _load_server_module()
+
+    result = asyncio.run(server.mcp.get_prompt("devcontainer_health_check"))
+    text = result.messages[0].content.text
+
+    assert "VS Code/Copilot" in text
+    assert "Never echo bearer token values" in text
+    assert "/healthz" in text
+    assert "/mcp" in text
+
+
+def test_snapshot_prompt_uses_public_workspace_transaction_snapshot_flow():
+    server = _load_server_module()
+
+    result = asyncio.run(
+        server.mcp.get_prompt("snapshot_before_refactor", {"refactor_goal": "extract parser"})
+    )
+    text = result.messages[0].content.text
+
+    assert "workspace_transaction(mode='snapshot')" in text
+    assert "workspace_transaction(mode='restore')" in text
+    assert "mutation_router(mode='snapshot')" not in text
 
 
 def test_vscode_mcp_example_uses_secret_free_input_pattern():
