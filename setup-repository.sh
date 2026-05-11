@@ -134,6 +134,7 @@ ${DEVCONTAINER_RUNARGS_BLOCK}
     "DOCKER_CONFIG": "/home/app/.docker",
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
+    "MCP_HTTP_BEARER_TOKEN": "\${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "ALLOW_MUTATIONS": "true",
 ${DEVCONTAINER_GPU_ENV_BLOCK}
     "OLLAMA_HOST": "0.0.0.0:2345",
@@ -201,4 +202,4 @@ fi
 log "  .gitignore entries for generated hidden folders (one-time bootstrap)"
 log ""
 log "The container image provides the inline autocomplete extension and repo defaults."
-log "Next step: open this repository in VS Code and run 'Dev Containers: Reopen in Container'."
+log "Next step: export MCP_HTTP_BEARER_TOKEN before opening VS Code, then run 'Dev Containers: Reopen in Container'."
