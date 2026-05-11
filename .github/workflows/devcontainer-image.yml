@@ -5,6 +5,9 @@
 name: Build Devcontainer Image
 
 on:
+  pull_request:
+    branches:
+      - main
   release:
     types:
       - published
