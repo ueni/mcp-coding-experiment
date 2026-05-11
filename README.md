@@ -98,6 +98,18 @@ Expected result (example):
 
 For a complete VS Code MCP path from fresh clone/devcontainer to a verified tool call, see [VS Code MCP Onboarding](./docs/vscode-mcp-onboarding.md). The workspace task **MCP: Workspace Health Check** validates `/healthz`, `/mcp`, forwarded ports `8000`/`2345`, Ollama status, mutation mode, and HTTP bearer-token state without committing secrets.
 
+## MCP prompts in VS Code and Copilot
+
+This server exposes a curated prompt pack for clients that support MCP prompts, including VS Code and Copilot Chat slash-command workflows. After registering the MCP endpoint, use the client's MCP prompt picker or slash-command UI to discover:
+
+- `review_changed_files` - read-only branch diff review with impact and validation guidance.
+- `release_readiness_check` - release gate summary backed by existing readiness workflows.
+- `security_triage` - security-focused triage that avoids secret exposure and policy bypasses.
+- `devcontainer_health_check` - VS Code/devcontainer MCP endpoint, auth, port, and Ollama diagnostics.
+- `snapshot_before_refactor` - pre-refactor snapshot and rollback planning before mutation work.
+
+The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails.
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.

@@ -1109,6 +1109,171 @@ def repo_tree_resource(path: str) -> str:
     return _mcp_resource_json(payload)
 
 
+def _workflow_prompt_text(
+    title: str,
+    goal: str,
+    tool_chain: list[str],
+    guardrails: list[str],
+    requested_output: list[str],
+) -> str:
+    return "\n".join(
+        [
+            f"# {title}",
+            "",
+            f"Goal: {goal}",
+            "",
+            "Use this MCP workflow through the public `task_router` entrypoint. Prefer `mode='task'` for natural-language orchestration; when a client exposes internal workflow names in summaries or reports, keep the chain aligned with:",
+            *[f"- `{tool}`" for tool in tool_chain],
+            "",
+            "Safety guardrails:",
+            *[f"- {guardrail}" for guardrail in guardrails],
+            "",
+            "Return:",
+            *[f"- {item}" for item in requested_output],
+        ]
+    )
+
+
+@mcp.prompt(
+    name="review_changed_files",
+    title="Review changed files",
+    description="Review the current branch diff with impact, risk, and test guidance without mutating files.",
+)
+def review_changed_files(
+    base_ref: Annotated[
+        str,
+        Field(description="Base Git ref for the comparison, for example origin/main or HEAD~1."),
+    ] = "origin/main",
+    focus: Annotated[
+        str,
+        Field(description="Optional review focus such as security, docs, tests, or API compatibility."),
+    ] = "",
+) -> str:
+    """Review branch changes with existing read-only analysis workflows."""
+    focus_text = f" Focus area: {focus}." if focus.strip() else ""
+    return _workflow_prompt_text(
+        title="Review changed files",
+        goal=f"Compare the working branch against `{base_ref}` and produce concise review findings for changed files.{focus_text}",
+        tool_chain=["task_router(mode='task', task='review')", "change_impact_gate", "quality_router(mode='change_impact')"],
+        guardrails=[
+            "Stay read-only; do not edit files or run mutation modes.",
+            "Respect existing mutation and security gates if you later recommend fixes.",
+            "Call out high-risk files, missing tests, and rollback considerations before suggestions.",
+        ],
+        requested_output=[
+            "Findings first, each with file/path evidence when possible.",
+            "Changed-file risk summary and recommended validation commands.",
+            "Explicit note if no blocking issue is found.",
+        ],
+    )
+
+
+@mcp.prompt(
+    name="release_readiness_check",
+    title="Release readiness check",
+    description="Prepare a release gate report using existing readiness, impact, docs, license, risk, security, and test checks.",
+)
+def release_readiness_check(
+    base_ref: Annotated[str, Field(description="Release comparison base ref.")] = "origin/main",
+    head_ref: Annotated[str, Field(description="Release comparison head ref.")] = "HEAD",
+    summary_mode: Annotated[str, Field(description="Readiness summary detail, usually quick or full.")] = "quick",
+) -> str:
+    """Create a release-readiness workflow prompt backed by quality gates."""
+    return _workflow_prompt_text(
+        title="Release readiness check",
+        goal=f"Assess whether `{head_ref}` is ready to release against `{base_ref}` with `{summary_mode}` reporting.",
+        tool_chain=["quality_router(mode='release_readiness')", "release_readiness", "required_tool_chain"],
+        guardrails=[
+            "Do not bypass failing gates; report blockers clearly.",
+            "Do not mutate files unless the user explicitly requests a follow-up fix workflow and ALLOW_MUTATIONS permits it.",
+            "Keep artifacts compatible with existing structured readiness reports.",
+        ],
+        requested_output=[
+            "Release decision: ready, not ready, or needs human review.",
+            "Gate-by-gate summary for tests, docs, license, impact, risk, and security.",
+            "Required follow-up tool chain or validation commands.",
+        ],
+    )
+
+
+@mcp.prompt(
+    name="security_triage",
+    title="Security triage",
+    description="Triage suspicious files, diffs, or dependencies through existing security/risk workflows without weakening gates.",
+)
+def security_triage(
+    target: Annotated[str, Field(description="File, directory, diff range, dependency, or feature area to triage.")] = "changed files",
+) -> str:
+    """Triage security risk using existing read-only analysis paths."""
+    return _workflow_prompt_text(
+        title="Security triage",
+        goal=f"Investigate security-sensitive behavior in `{target}` and separate confirmed findings from hypotheses.",
+        tool_chain=["task_router(mode='task', task='security')", "change_impact_gate", "policy_simulator"],
+        guardrails=[
+            "Prefer read-only inspection and minimal reproduction steps.",
+            "Do not print secrets, tokens, private keys, or credential material.",
+            "Do not disable authentication, sandboxing, policy, or mutation gates.",
+        ],
+        requested_output=[
+            "Prioritized findings with exploitability and affected paths.",
+            "Safe verification steps that avoid secret exposure.",
+            "Mitigation options and residual risk.",
+        ],
+    )
+
+
+@mcp.prompt(
+    name="devcontainer_health_check",
+    title="Devcontainer health check",
+    description="Check VS Code/devcontainer MCP setup, forwarded ports, health endpoints, auth mode, and local model service state.",
+)
+def devcontainer_health_check(
+    endpoint: Annotated[str, Field(description="MCP HTTP endpoint expected by VS Code or Copilot.")] = "http://localhost:8000/mcp",
+) -> str:
+    """Guide VS Code users through a safe MCP/devcontainer health check."""
+    return _workflow_prompt_text(
+        title="Devcontainer health check",
+        goal=f"Verify that VS Code/Copilot can discover and use the MCP server at `{endpoint}` from the devcontainer workflow.",
+        tool_chain=["task_router(mode='status')", "healthz", "docs/vscode-mcp-onboarding.md"],
+        guardrails=[
+            "Never echo bearer token values; only report whether a token/header is configured.",
+            "Keep auth enabled unless the user intentionally selected documented insecure local-only mode.",
+            "Treat port and Ollama checks as diagnostics, not permission to change host services.",
+        ],
+        requested_output=[
+            "Discovery status for MCP prompts/tools/resources in VS Code or Copilot.",
+            "Health summary for `/healthz`, `/mcp`, port forwarding, auth mode, and Ollama.",
+            "Next actions with exact docs links or commands, redacting secrets.",
+        ],
+    )
+
+
+@mcp.prompt(
+    name="snapshot_before_refactor",
+    title="Snapshot before refactor",
+    description="Plan a safe pre-refactor snapshot and rollback path before any mutation workflow starts.",
+)
+def snapshot_before_refactor(
+    refactor_goal: Annotated[str, Field(description="Short description of the intended refactor.")] = "planned refactor",
+) -> str:
+    """Prepare snapshot and rollback guardrails before refactoring."""
+    return _workflow_prompt_text(
+        title="Snapshot before refactor",
+        goal=f"Before starting `{refactor_goal}`, create a verifiable rollback point and summarize the safe mutation plan.",
+        tool_chain=["mutation_router(mode='snapshot')", "state_snapshot", "quality_router(mode='self_check')"],
+        guardrails=[
+            "Only create snapshots or mutate files when ALLOW_MUTATIONS and user intent permit it.",
+            "Record snapshot id and current Git status before edits.",
+            "Prefer small, reviewable edits and run validation before handing off.",
+        ],
+        requested_output=[
+            "Snapshot/rollback plan and whether mutation is currently allowed.",
+            "Refactor steps ordered from safest to riskiest.",
+            "Validation commands and restore instructions if the refactor fails.",
+        ],
+    )
+
+
 def _is_git_repo() -> bool:
     try:
         result = subprocess.run(
