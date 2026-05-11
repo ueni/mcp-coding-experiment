@@ -88,6 +88,19 @@ def test_vscode_devcontainer_prompt_redacts_auth_secret_guidance():
     assert "/mcp" in text
 
 
+def test_snapshot_prompt_uses_public_workspace_transaction_snapshot_flow():
+    server = _load_server_module()
+
+    result = asyncio.run(
+        server.mcp.get_prompt("snapshot_before_refactor", {"refactor_goal": "extract parser"})
+    )
+    text = result.messages[0].content.text
+
+    assert "workspace_transaction(mode='snapshot')" in text
+    assert "workspace_transaction(mode='restore')" in text
+    assert "mutation_router(mode='snapshot')" not in text
+
+
 def test_vscode_mcp_example_uses_secret_free_input_pattern():
     config = json.loads((REPO_ROOT / ".vscode" / "mcp.example.json").read_text(encoding="utf-8"))
 

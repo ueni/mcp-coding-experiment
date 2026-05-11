@@ -1260,7 +1260,7 @@ def snapshot_before_refactor(
     return _workflow_prompt_text(
         title="Snapshot before refactor",
         goal=f"Before starting `{refactor_goal}`, create a verifiable rollback point and summarize the safe mutation plan.",
-        tool_chain=["mutation_router(mode='snapshot')", "state_snapshot", "quality_router(mode='self_check')"],
+        tool_chain=["workspace_transaction(mode='snapshot')", "workspace_transaction(mode='restore')", "quality_router(mode='self_check')"],
         guardrails=[
             "Only create snapshots or mutate files when ALLOW_MUTATIONS and user intent permit it.",
             "Record snapshot id and current Git status before edits.",
