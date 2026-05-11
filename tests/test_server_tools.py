@@ -1781,6 +1781,37 @@ class ServerToolsTest(ServerToolsTestBase):
 
         asyncio.run(run_checks())
 
+    def test_public_mcp_docs_match_manifest_scope(self):
+        docs_root = self.server.Path(__file__).resolve().parents[1]
+        readme = (docs_root / "README.md").read_text(encoding="utf-8")
+        whitepaper = (docs_root / "docs" / "tooling-whitepaper.md").read_text(encoding="utf-8")
+        manifest = self.server.tool_annotations()
+        manifest_tools = {entry["tool"] for entry in manifest["tools"]}
+
+        self.assertEqual(manifest_tools, set(self.server.PUBLIC_MCP_TOOL_NAMES))
+        for tool_name in self.server.PUBLIC_MCP_TOOL_NAMES:
+            self.assertIn(f"`{tool_name}`", readme, tool_name)
+            self.assertIn(f"`{tool_name}`", whitepaper, tool_name)
+
+        internal_router_names = {
+            "repo_router",
+            "git_router",
+            "code_index_router",
+            "memory_router",
+            "tool_router",
+            "quality_router",
+            "governance_router",
+            "workflow_router",
+            "runtime_guard_router",
+            "math_router",
+            "document_router",
+            "diagram_router",
+        }
+        self.assertTrue(internal_router_names.isdisjoint(self.server.PUBLIC_MCP_TOOL_NAMES))
+        self.assertIn("internal orchestration helpers, not public MCP v1 tools", whitepaper)
+        self.assertIn("`task_router` is the only public high-level router", whitepaper)
+        self.assertNotIn("Each public router", whitepaper)
+
     def test_public_task_router_argument_descriptions(self):
         async def run_checks():
             tools = await self.server.mcp.list_tools()
@@ -1883,6 +1914,41 @@ class ServerToolsTest(ServerToolsTestBase):
             self.server.document_router(mode="bad")
         with self.assertRaises(ValueError):
             self.server.diagram_router(mode="bad")
+
+    def test_tool_annotation_manifest_covers_public_surface(self):
+        manifest = self.server.tool_annotations()
+        self.assertEqual(manifest["schema"], "tool_annotations.v1")
+        by_name = {entry["tool"]: entry for entry in manifest["tools"]}
+        self.assertEqual(set(by_name), set(self.server.PUBLIC_MCP_TOOL_NAMES))
+
+        for tool_name, entry in by_name.items():
+            self.assertIn(tool_name, self.server.TOOL_SECURITY_METADATA)
+            annotations = entry["annotations"]
+            for key in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+                self.assertIn(key, annotations, tool_name)
+                self.assertIsInstance(annotations[key], bool, tool_name)
+
+    def test_tool_annotation_manifest_covers_router_modes(self):
+        manifest = self.server.tool_annotations()
+        task_router = next(entry for entry in manifest["tools"] if entry["tool"] == "task_router")
+        modes = {entry["mode"]: entry for entry in task_router["modes"]}
+        self.assertEqual(
+            set(modes),
+            set(self.server.TOOL_SECURITY_METADATA["task_router"]["mode_categories"]),
+        )
+        self.assertTrue(modes["status"]["annotations"]["readOnlyHint"])
+        self.assertFalse(modes["status"]["annotations"]["openWorldHint"])
+        self.assertTrue(modes["task"]["annotations"]["openWorldHint"])
+        self.assertFalse(modes["coding_sandbox"]["annotations"]["readOnlyHint"])
+        self.assertTrue(modes["coding_sandbox"]["annotations"]["openWorldHint"])
+
+        workspace = self.server.tool_annotations("workspace_transaction")["tool"]
+        workspace_modes = {entry["mode"]: entry for entry in workspace["modes"]}
+        self.assertTrue(workspace_modes["snapshot"]["annotations"]["readOnlyHint"])
+        self.assertFalse(workspace_modes["write"]["annotations"]["readOnlyHint"])
+        self.assertFalse(workspace_modes["write"]["annotations"]["destructiveHint"])
+        self.assertFalse(workspace_modes["delete"]["annotations"]["readOnlyHint"])
+        self.assertTrue(workspace_modes["delete"]["annotations"]["destructiveHint"])
 
 
 if __name__ == "__main__":

@@ -153,6 +153,7 @@ COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
+    "tool_annotations",
     "tool_output_contracts",
     *SCHEMA_BACKED_TOOL_NAMES,
 }
@@ -180,6 +181,35 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
             "coding_sandbox": ["write", "shell/process"],
         },
     },
+    "tool_annotations": {"categories": ["read-only"]},
+    "tool_output_contracts": {"categories": ["read-only"]},
+    "repo_info": {"categories": ["read-only"]},
+    "runtime_state": {"categories": ["read-only"]},
+    "git_status": {"categories": ["read-only"]},
+    "grep": {"categories": ["read-only"]},
+    "find_paths": {"categories": ["read-only"]},
+    "read_snippet": {"categories": ["read-only"]},
+    "summarize_diff": {"categories": ["read-only"]},
+    "risk_scoring": {"categories": ["read-only"]},
+    "workspace_transaction": {
+        "categories": ["write"],
+        "mode_categories": {
+            "begin": ["write"],
+            "apply": ["write"],
+            "validate": ["read-only"],
+            "rollback": ["write", "destructive"],
+            "commit": ["write"],
+            "snapshot": ["read-only"],
+            "restore": ["write", "destructive"],
+            "write": ["write"],
+            "replace": ["write"],
+            "move": ["write"],
+            "delete": ["write", "destructive"],
+            "apply_diff": ["write"],
+        },
+    },
+    "policy_simulator": {"categories": ["read-only"]},
+    "release_readiness": {"categories": ["read-only"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
     "docker_router": {"categories": ["shell/process"]},
@@ -525,12 +555,13 @@ TASK_RETRIEVAL_DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".
 mcp = FastMCP(
     "git-repo-manager",
     instructions=(
-        "Expose exactly one public MCP tool: `task_router`. "
-        "All other server functions remain internal call targets and are not part of the external MCP contract. "
+        "Expose the compact public MCP v1 surface: `task_router`, read-only inspection helpers "
+        "such as `tool_annotations` and `tool_output_contracts`, and schema-backed core tools. "
+        "Internal leaf tools and router families remain direct Python call targets, not MCP tools. "
         "LLM agents should start with `task_router()` for almost every natural-language request because its default "
         "`mode='task'` classifies the request, injects compact task/session memory, and dispatches to the right "
-        "specialist flow. Use explicit modes only when you intentionally need raw status, embed, rerank, "
-        "autocomplete, direct infer or batch infer, or coding sandbox/check/package operations."
+        "specialist flow. Use `tool_annotations()` before sensitive calls to inspect read-only, destructive, "
+        "idempotent, and open-world hints for public tools and covered modes."
     ),
 )
 
@@ -667,6 +698,54 @@ def _append_audit_event(
     except OSError:
         # Audit logging must not leak arguments through exception text or crash read-only calls.
         pass
+
+
+def _tool_annotation_from_categories(categories: list[str]) -> dict[str, Any]:
+    """Translate internal security categories to MCP tool annotation hints."""
+    category_set = set(categories)
+    mutation_capable = bool(MUTATION_TOOL_CATEGORIES.intersection(category_set))
+    destructive = "destructive" in category_set
+    open_world = bool({"network", "shell/process", "secret-sensitive"}.intersection(category_set))
+    return {
+        "readOnlyHint": not mutation_capable,
+        "destructiveHint": destructive,
+        "idempotentHint": not mutation_capable,
+        "openWorldHint": open_world,
+    }
+
+
+def _tool_annotation_entry(tool_name: str, *, mode: str = "") -> dict[str, Any]:
+    arguments = {"mode": mode} if mode else None
+    categories = _tool_categories(tool_name, arguments)
+    annotation = _tool_annotation_from_categories(categories)
+    return {
+        "tool": tool_name,
+        "mode": mode,
+        "categories": categories,
+        "mutation_capable": bool(MUTATION_TOOL_CATEGORIES.intersection(categories)),
+        "annotations": annotation,
+    }
+
+
+def _tool_annotation_manifest() -> dict[str, Any]:
+    """Build a machine-checkable safety annotation manifest for the public v1 MCP surface."""
+    tools: list[dict[str, Any]] = []
+    for tool_name in sorted(PUBLIC_MCP_TOOL_NAMES):
+        entry = _tool_annotation_entry(tool_name)
+        metadata = TOOL_SECURITY_METADATA.get(tool_name, {})
+        mode_categories = metadata.get("mode_categories")
+        if isinstance(mode_categories, dict):
+            entry["modes"] = [
+                _tool_annotation_entry(tool_name, mode=mode)
+                for mode in sorted(mode_categories)
+            ]
+        tools.append(entry)
+    return {
+        "schema": "tool_annotations.v1",
+        "source": "TOOL_SECURITY_METADATA",
+        "tool_count": len(tools),
+        "tools": tools,
+    }
 
 
 def _tool_categories(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
@@ -4021,6 +4100,19 @@ def _build_log_proposals(stdout: str, stderr: str) -> list[dict[str, str]]:
             "low",
         )
     return proposals
+
+
+@mcp.tool()
+def tool_annotations(tool_name: str = "") -> dict[str, Any]:
+    """Return MCP safety annotation hints for public tools and router modes."""
+    manifest = _tool_annotation_manifest()
+    selected = tool_name.strip()
+    if not selected:
+        return manifest
+    for entry in manifest["tools"]:
+        if entry["tool"] == selected:
+            return {"schema": manifest["schema"], "source": manifest["source"], "tool": entry}
+    raise ValueError(f"unknown public MCP tool: {selected}")
 
 
 @mcp.tool()

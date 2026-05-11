@@ -122,20 +122,20 @@ The platform now exposes a compact LLM-first MCP v1 surface. Capabilities remain
 
 Public tools:
 
-- `autocomplete`
-- `repo_info`, `runtime_state`
-- `repo_router`, `workspace_transaction`, `git_router`
-- `code_index_router`, `task_router`, `memory_router`, `docker_router`, `vscode_router`, `tool_router`
-- `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`
-- `math_router`, `document_router`, `diagram_router`
-- `sql_expert`, `browse_web`
+- `task_router`
+- `tool_annotations`
+- `tool_output_contracts`
+- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
 
 ### 5.2 Router Design Principle
 
-Each public router owns a task-shaped capability family and dispatches to internal leaf implementations:
+`task_router` is the only public high-level router in the MCP v1 surface. Its documented modes are covered by `tool_annotations` because each mode can have distinct safety semantics: status/embed/rerank are read-only, inference/autocomplete modes are open-world network operations, and coding modes may involve writes, shell/process execution, package/network access, or sandbox lifecycle actions.
+
+`workspace_transaction` is a public schema-backed core tool with mode-specific annotation coverage because it exposes transaction lifecycle and direct file mutations, including destructive delete/restore/rollback modes.
+
+The following router families are internal orchestration helpers, not public MCP v1 tools. They remain implemented in the server for reuse, direct Python tests, and future composition, but MCP clients do not see them in `list_tools()` and their modes are not part of the v1 annotation coverage contract unless they are exposed through a public tool:
 
 - `repo_router`: repository listing, focused reads, snippets, batch reads, JSON/TOML/YAML queries
-- `workspace_transaction`: transaction lifecycle plus direct file mutations
 - `git_router`: Git operations, diff summarization, risk scoring, security triage
 - `code_index_router`: repository index, semantic search, grep, AST/tree-sitter, impact/doc/API checks
 - `memory_router`: context memory, failure memory, root-cause memory, artifact index access
@@ -147,16 +147,27 @@ Each public router owns a task-shaped capability family and dispatches to intern
 
 Former leaf tools remain implemented in the server for reuse and testing, but they are not part of the public MCP v1 surface. This preserves feature breadth while materially reducing the exposed tool count.
 
+### 5.4 Tool Annotation Manifest
+
+Clients can call the read-only `tool_annotations` tool to inspect the machine-checkable safety manifest for the public MCP v1 surface. The manifest is generated from `TOOL_SECURITY_METADATA`, the same source used by security audit/gating helpers, and returns MCP annotation hints for every public tool in `PUBLIC_MCP_TOOL_NAMES` plus mode-level entries for public tools with mode-specific behavior. Today that mode coverage includes `task_router` and the schema-backed `workspace_transaction` core tool.
+
+- `readOnlyHint`: true for analysis/inspection operations, false for mutation-capable operations.
+- `destructiveHint`: true for explicitly destructive modes such as delete/restore/rollback; non-destructive writes remain distinguishable through `readOnlyHint=false`.
+- `idempotentHint`: true for repeatable read-only operations, false for writes and transactional mutations.
+- `openWorldHint`: true when the operation can reach outside the closed repository model, such as network-backed inference or shell/process execution.
+
+Approval UX should use these hints before invoking a tool or explicit router mode. Release gates should also validate the manifest so new public tools or router modes cannot ship without safety classification coverage.
+
 ## 6. Advanced Workflow Layer
 
-The workflow/governance/runtime layers are now expressed primarily through routers:
+The workflow/governance/runtime layers are internally expressed primarily through routers:
 
 - `quality_router`: tests, readiness, required-tool-chain, spec-to-tests, batch fixes
 - `governance_router`: policy simulation, license checks, runtime contract validation, approval checkpoints, commit linting
 - `workflow_router`: fast-path development, workflow compilation, multi-agent analysis, artifact/failure/root-cause memory, replay, sharding
 - `runtime_guard_router`: benchmarks, golden/output guards, token/cost budgets, cache inspection, result handles, workspace facts
 
-This shifts the public contract from a large collection of primitives to a smaller number of strict mode-based interfaces.
+This shifts the implementation from a large collection of primitives to strict mode-based interfaces while keeping the public MCP v1 contract compact. Public clients should enter through `task_router` for natural-language workflows, use the schema-backed core tools for direct structured operations, and inspect `tool_annotations` before invoking public tools or covered modes.
 
 ## 7. State Management and Rollback Strategy
 
