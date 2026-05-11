@@ -240,24 +240,34 @@ APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
 TERMINAL_CAPTURE_DIR = Path(".codebase-tooling-mcp/reports/terminal")
-DEFAULT_CODING_MODEL = "qwen2.5-coder:3b"
+DEFAULT_CODING_MODEL = "qwen3.6-35b-a3b:iq1"
 DEFAULT_CODING_MICRO_MODEL = "qwen2.5-coder:1.5b"
 DEFAULT_CONTINUE_OLLAMA_MODELS = ",".join(
     (
         DEFAULT_CODING_MODEL,
         DEFAULT_CODING_MICRO_MODEL,
-        "granite3.3:2b",
-        "phi4-mini:3.8b",
-        "phi4-mini-reasoning:3.8b",
-        "deepseek-r1:1.5b",
-        "deepscaler:1.5b",
-        "granite3.2-vision:2b",
-        "llama3.2:1b",
     )
 )
-CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-3b.yaml"
+CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen3.6-35b-a3b.yaml"
 CODING_MICRO_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
 CODING_MICRO_ROUTE = "coding_micro"
+QWEN36_MODEL_ID_PREFIXES = ("qwen3.6", "qwen3-6", "qwen36")
+QWEN36_CHAT_SENTINEL_STOPS = [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|endoftext|>",
+]
+QWEN36_STRIP_TOKENS = [
+    *QWEN36_CHAT_SENTINEL_STOPS,
+    "<think>",
+    "</think>",
+]
+QWEN36_TEMPLATE = """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+"""
 MICRO_CODING_TASK_HINTS = {
     "coding_micro",
     "micro coding",
@@ -2868,6 +2878,25 @@ def _local_embed_vectors(
     )
 
 
+def _is_qwen36_model(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith(QWEN36_MODEL_ID_PREFIXES)
+
+
+def _model_default_stop_sequences(model: str) -> list[str]:
+    return list(QWEN36_CHAT_SENTINEL_STOPS) if _is_qwen36_model(model) else []
+
+
+def _sanitize_model_output(text: str) -> str:
+    out = str(text or "")
+    out = re.sub(r"(?is)<think>.*?</think>\s*", "", out)
+    out = re.sub(r"(?is)^.*?</think>\s*", "", out)
+    out = re.sub(r"(?is)<think>.*$", "", out)
+    for token in QWEN36_STRIP_TOKENS:
+        out = out.replace(token, "")
+    return out
+
+
 def _local_infer_via_endpoint(
     prompt: str,
     model: str,
@@ -2877,8 +2906,9 @@ def _local_infer_via_endpoint(
     stop: list[str] | None = None,
 ) -> str:
     options: dict[str, Any] = {"num_predict": max_tokens, "temperature": temperature}
-    if stop:
-        options["stop"] = stop
+    stop_sequences = [*(_model_default_stop_sequences(model)), *(stop or [])]
+    if stop_sequences:
+        options["stop"] = list(dict.fromkeys(stop_sequences))
     payload = {
         "model": model,
         "prompt": prompt,
@@ -2886,6 +2916,8 @@ def _local_infer_via_endpoint(
         "stream": False,
         "options": options,
     }
+    if _is_qwen36_model(model):
+        payload["template"] = QWEN36_TEMPLATE
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         LOCAL_INFER_ENDPOINT,
@@ -2898,12 +2930,12 @@ def _local_infer_via_endpoint(
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError:
-        return body
+        return _sanitize_model_output(body)
     if isinstance(parsed, dict):
         for key in ("response", "text", "output", "completion"):
             if isinstance(parsed.get(key), str):
-                return parsed[key]
-    return body
+                return _sanitize_model_output(parsed[key])
+    return _sanitize_model_output(body)
 
 
 def _autocomplete_prompt(prefix: str, suffix: str, language: str) -> str:
@@ -8612,6 +8644,7 @@ def local_infer(
             mode=_prompt_optimize_mode_for_task(task),
         )
         text = optimized["optimized_prompt"][:max_tokens * 6]
+    text = _sanitize_model_output(text)
     result = {
         "schema": "local_infer.v1",
         "backend": selected,
@@ -8684,6 +8717,7 @@ def autocomplete(
     if selected in {"fallback", "rule", "hash"}:
         completion = _autocomplete_fallback(prefix=prefix, suffix=suffix)
 
+    completion = _sanitize_model_output(completion)
     completion = _autocomplete_strip_wrappers(completion)
     completion = _autocomplete_apply_stops(completion, stop=stop)
     completion = _trim_text(completion, max_chars=max(200, max_tokens * 12))
@@ -8796,46 +8830,24 @@ def _prompt_optimize_mode_for_task(task: str) -> str:
 
 
 def _default_continue_model_routing() -> dict[str, Any]:
+    qwen_model = CODING_DEFAULT_MODEL or DEFAULT_CODING_MODEL
+    qwen_route = {'model': qwen_model, 'file': CODING_MODEL_CONFIG_FILE}
     return {
         'source': None,
         'loaded': False,
-        'router': {
-            'model': 'granite3.3:2b',
-            'file': '.continue/models/router-granite3.3-2b.yaml',
-        },
+        'router': dict(qwen_route),
         'routes': {
-            'coding': {
-                'model': CODING_DEFAULT_MODEL or 'qwen2.5-coder:3b',
-                'file': CODING_MODEL_CONFIG_FILE,
-            },
+            'coding': dict(qwen_route),
             CODING_MICRO_ROUTE: {
                 'model': CODING_MICRO_MODEL or DEFAULT_CODING_MICRO_MODEL,
                 'file': CODING_MICRO_MODEL_CONFIG_FILE,
             },
-            'refactor': {
-                'model': 'phi4-mini:3.8b',
-                'file': '.continue/models/refactor-phi4-mini-3.8b.yaml',
-            },
-            'review': {
-                'model': 'phi4-mini-reasoning:3.8b',
-                'file': '.continue/models/review-phi4-mini-reasoning-3.8b.yaml',
-            },
-            'security': {
-                'model': 'deepseek-r1:1.5b',
-                'file': '.continue/models/security-deepseek-r1-1.5b.yaml',
-            },
-            'math': {
-                'model': 'deepscaler:1.5b',
-                'file': '.continue/models/math-deepscaler-1.5b.yaml',
-            },
-            'vision': {
-                'model': 'granite3.2-vision:2b',
-                'file': '.continue/models/vision-granite3.2-vision-2b.yaml',
-            },
-            'research': {
-                'model': 'llama3.2:1b',
-                'file': '.continue/models/research-llama3.2-1b.yaml',
-            },
+            'refactor': dict(qwen_route),
+            'review': dict(qwen_route),
+            'security': dict(qwen_route),
+            'math': dict(qwen_route),
+            'vision': dict(qwen_route),
+            'research': dict(qwen_route),
         },
     }
 

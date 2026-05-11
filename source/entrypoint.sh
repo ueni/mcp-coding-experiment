@@ -8,7 +8,7 @@ set -euo pipefail
 
 umask 027
 
-DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b"
+DEFAULT_CONTINUE_OLLAMA_MODELS="qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b"
 
 is_truthy() {
   case "${1:-}" in
@@ -406,7 +406,7 @@ seed_ollama_models_from_image_preload
 if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
   export OLLAMA_VULKAN=1
 fi
-CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:3b}"
+CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen3.6-35b-a3b:iq1}"
 CODING_MICRO_MODEL="${CODING_MICRO_MODEL:-qwen2.5-coder:1.5b}"
 OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
 OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"

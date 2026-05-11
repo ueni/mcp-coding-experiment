@@ -143,17 +143,13 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertNotIn("CODEX_DISABLE_INNER_SANDBOX", entrypoint)
         self.assertNotIn('sandbox_mode = "danger-full-access"', entrypoint)
 
-    def test_dockerfile_keeps_default_coding_model_and_preloads_it(self):
+    def test_dockerfile_keeps_qwen36_default_coding_model_and_micro_fast_path(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:3b", dockerfile)
+        self.assertIn("CODING_DEFAULT_MODEL=qwen3.6-35b-a3b:iq1", dockerfile)
         self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
-        full_default_models = (
-            "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,"
-            "phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,"
-            "granite3.2-vision:2b,llama3.2:1b"
-        )
+        full_default_models = "qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b"
         self.assertIn(f"CONTINUE_OLLAMA_MODELS={full_default_models}", dockerfile)
-        self.assertIn(f'ARG OLLAMA_PRELOAD_MODELS="{full_default_models}"', dockerfile)
+        self.assertIn('ARG OLLAMA_PRELOAD_MODELS=""', dockerfile)
         self.assertIn("OLLAMA_ALLOW_PULL=false", dockerfile)
         self.assertIn('ollama pull "$model"', dockerfile)
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
@@ -170,24 +166,38 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('--root-user-action=ignore \\', dockerfile)
         self.assertIn('-r requirements.txt \\', dockerfile)
 
-    def test_continue_model_routing_uses_small_default_profile(self):
+    def test_continue_model_routing_uses_qwen36_quality_profile(self):
+        obsolete_models = (
+            "qwen2.5-coder:3b",
+            "granite3.3:2b",
+            "phi4-mini:3.8b",
+            "phi4-mini-reasoning:3.8b",
+            "deepseek-r1:1.5b",
+            "deepscaler:1.5b",
+            "granite3.2-vision:2b",
+            "llama3.2:1b",
+        )
         for routing_path in [
             REPO_ROOT / ".continue" / "model-routing.yaml",
             REPO_ROOT / "source" / "defaults" / "continue" / "model-routing.yaml",
         ]:
             routing = routing_path.read_text(encoding="utf-8")
-            self.assertIn("model: granite3.3:2b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/router-granite3.3-2b.yaml", routing, str(routing_path))
-            self.assertIn("model: qwen2.5-coder:3b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/coding-qwen2.5-coder-3b.yaml", routing, str(routing_path))
+            self.assertIn("model: qwen3.6-35b-a3b:iq1", routing, str(routing_path))
+            self.assertIn("file: .continue/models/coding-qwen3.6-35b-a3b.yaml", routing, str(routing_path))
             self.assertIn("model: qwen2.5-coder:1.5b", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen2.5-coder-1.5b.yaml", routing, str(routing_path))
-            self.assertIn("model: llama3.2:1b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/research-llama3.2-1b.yaml", routing, str(routing_path))
+            for model in obsolete_models:
+                self.assertNotIn(model, routing, str(routing_path))
 
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "router-granite3.2-2b.yaml").exists())
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "coding-qwen2.5-coder-7b.yaml").exists())
-        self.assertFalse((REPO_ROOT / ".continue" / "models" / "research-llama3.2-3b.yaml").exists())
+        for models_root in [
+            REPO_ROOT / ".continue" / "models",
+            REPO_ROOT / "source" / "defaults" / "continue" / "models",
+        ]:
+            self.assertTrue((models_root / "coding-qwen3.6-35b-a3b.yaml").exists())
+            self.assertTrue((models_root / "coding-qwen2.5-coder-1.5b.yaml").exists())
+            self.assertFalse((models_root / "coding-qwen2.5-coder-3b.yaml").exists())
+            self.assertFalse((models_root / "router-granite3.3-2b.yaml").exists())
+            self.assertFalse((models_root / "research-llama3.2-1b.yaml").exists())
 
     def test_dockerfile_installs_vulkan_runtime_for_ollama(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -241,13 +251,51 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
 
 
 class ServerOllamaContractStatusTest(ServerToolsTestBase):
+    def test_qwen36_endpoint_requests_use_template_stops_and_sanitize_output(self):
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "response": "<think>hidden reasoning</think>actual answer<|im_end|><|endoftext|>"
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(req, timeout):
+            captured["timeout"] = timeout
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse()
+
+        with patch.object(self.server, "_urlopen_with_host_certs", side_effect=fake_urlopen):
+            output = self.server._local_infer_via_endpoint(
+                prompt="hello",
+                model="qwen3.6-35b-a3b:iq1",
+                max_tokens=32,
+                temperature=0.1,
+                system="system prompt",
+            )
+
+        self.assertEqual(output, "actual answer")
+        self.assertIn("template", captured["payload"])
+        self.assertIn("<|im_start|>user", captured["payload"]["template"])
+        self.assertIn("<|im_end|>", captured["payload"]["options"]["stop"])
+        self.assertNotIn("<think>", captured["payload"]["options"]["stop"])
+        self.assertNotIn("</think>", captured["payload"]["options"]["stop"])
+
     def test_local_model_status_reports_bootstrap_opt_out(self):
         with patch.dict(os.environ, {"CONTINUE_OLLAMA_MODELS": ""}, clear=False), patch.object(
             self.server, "LOCAL_INFER_BACKEND", "endpoint"
         ), patch.object(
             self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
         ), patch.object(
-            self.server, "CODING_DEFAULT_MODEL", "qwen2.5-coder:3b"
+            self.server, "CODING_DEFAULT_MODEL", "qwen3.6-35b-a3b:iq1"
         ), patch.object(
             self.server,
             "_fetch_ollama_tags",
@@ -286,14 +334,14 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         with patch.dict(
             os.environ,
             {
-                "CONTINUE_OLLAMA_MODELS": "qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b",
+                "CONTINUE_OLLAMA_MODELS": "qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b",
                 "OLLAMA_ALLOW_PULL": "false",
             },
             clear=False,
         ), patch.object(self.server, "LOCAL_INFER_BACKEND", "endpoint"), patch.object(
             self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
         ), patch.object(
-            self.server, "CODING_DEFAULT_MODEL", "qwen2.5-coder:3b"
+            self.server, "CODING_DEFAULT_MODEL", "qwen3.6-35b-a3b:iq1"
         ), patch.object(
             self.server,
             "_fetch_ollama_tags",
@@ -301,7 +349,7 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
                 "url": f"{NATIVE_OLLAMA_BASE}/api/tags",
                 "reachable": True,
                 "status": 200,
-                "model_ids": ["qwen2.5-coder:3b"],
+                "model_ids": ["qwen3.6-35b-a3b:iq1"],
             },
         ), patch.object(
             self.server,
@@ -318,7 +366,7 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertEqual(out["infer"]["openai_compat_base"], f"{NATIVE_OLLAMA_BASE}/v1/")
         self.assertTrue(out["ollama"]["bootstrap_enabled"])
         self.assertFalse(out["ollama"]["runtime_pull_enabled"])
-        self.assertEqual(out["ollama"]["installed_models"], ["qwen2.5-coder:3b"])
+        self.assertEqual(out["ollama"]["installed_models"], ["qwen3.6-35b-a3b:iq1"])
         self.assertTrue(out["coding"]["default_model_installed"])
         self.assertTrue(out["coding"]["default_model_in_bootstrap_list"])
         self.assertFalse(out["coding"]["micro_model_installed"])
