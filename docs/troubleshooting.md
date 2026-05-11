@@ -124,7 +124,7 @@ Symptom:
 ```text
 ollama ps
 NAME                ID              SIZE      PROCESSOR
-qwen2.5-coder:3b    ...             2.6 GB    100% CPU
+qwen3.6-35b-a3b:iq1 ...             22 GB     100% CPU
 ```
 
 Checks:

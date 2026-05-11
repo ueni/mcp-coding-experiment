@@ -334,10 +334,10 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `PORT` | `8000` | No | Integer port | HTTP listen port. |
 | `MAX_READ_BYTES` | `262144` | No | Positive integer | Max bytes read by file tools per request. |
 | `MAX_OUTPUT_CHARS` | `200000` | No | Positive integer | Output truncation limit for tool responses. |
-| `CODING_DEFAULT_MODEL` | `qwen2.5-coder:3b` | No | Ollama model ID | Primary coding model used by `coding_infer` and the default coding route. |
-| `CODING_MICRO_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Smaller coding model used for explicit `micro_coding` requests and short auto-routed coding prompts. |
+| `CODING_DEFAULT_MODEL` | `qwen3.6-35b-a3b:iq1` | No | Ollama model ID | Primary Qwen3.6 coding model used by `coding_infer`, specialist task routes, and the default quality route. |
+| `CODING_MICRO_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Small fast-path coding model used only for explicit `micro_coding` requests and short auto-routed autocomplete-like coding prompts. |
 | `CODING_MICRO_MAX_PROMPT_CHARS` | `600` | No | Positive integer | Maximum normalized prompt size for automatic micro-coding selection. |
-| `CONTINUE_OLLAMA_MODELS` | `qwen2.5-coder:3b,qwen2.5-coder:1.5b,granite3.3:2b,phi4-mini:3.8b,phi4-mini-reasoning:3.8b,deepseek-r1:1.5b,deepscaler:1.5b,granite3.2-vision:2b,llama3.2:1b` | No | Comma-separated model IDs (or empty) | Default Ollama model set expected to be embedded in the image and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
+| `CONTINUE_OLLAMA_MODELS` | `qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b` | No | Comma-separated model IDs (or empty) | Default steady-state Ollama model set expected to be present locally and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
 | `OLLAMA_ALLOW_PULL` | `false` | No | `true`, `false` | Explicit opt-in for runtime `ollama pull` of missing models. Keep `false` for offline-only startup. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
 | `OLLAMA_STARTUP_TIMEOUT` | `30` | No | Integer seconds | Max wait time for Ollama readiness before fallback/failure logic. |
@@ -352,9 +352,11 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
-- `source/Dockerfile` preloads the full default model set declared by `CONTINUE_OLLAMA_MODELS` into the image, and `source/entrypoint.sh` seeds those models into the runtime model directory before server startup.
+- The steady-state quality route is `qwen3.6-35b-a3b:iq1`, created locally from `.qwen-eval-models/Qwen3.6-35B-A3B-UD-IQ1_M.gguf` with `ollama create`; equivalent local tag aliases can be supplied with `CODING_DEFAULT_MODEL` and `CONTINUE_OLLAMA_MODELS`.
+- `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
-- `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided.
+- `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided. All other quality/specialist routes fall back to Qwen3.6 rather than obsolete small specialist models.
+- Qwen3.6 endpoint calls install chat sentinel stop sequences and strip leaked `<think>...</think>` reasoning blocks plus `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` tokens before returning tool output.
 - Setting `CONTINUE_OLLAMA_MODELS` to an empty value declares that no default bundled model set is required. In that mode, Continue may report `model not found` until models are installed manually or `OLLAMA_ALLOW_PULL=true` is used.
 - A `404` on `http://127.0.0.1:2345/v1/` does not invalidate the native Ollama integration in this repo; the native base and `/api/tags` are the relevant health checks.
 
