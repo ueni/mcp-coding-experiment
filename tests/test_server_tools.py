@@ -1884,6 +1884,41 @@ class ServerToolsTest(ServerToolsTestBase):
         with self.assertRaises(ValueError):
             self.server.diagram_router(mode="bad")
 
+    def test_tool_annotation_manifest_covers_public_surface(self):
+        manifest = self.server.tool_annotations()
+        self.assertEqual(manifest["schema"], "tool_annotations.v1")
+        by_name = {entry["tool"]: entry for entry in manifest["tools"]}
+        self.assertEqual(set(by_name), set(self.server.PUBLIC_MCP_TOOL_NAMES))
+
+        for tool_name, entry in by_name.items():
+            self.assertIn(tool_name, self.server.TOOL_SECURITY_METADATA)
+            annotations = entry["annotations"]
+            for key in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+                self.assertIn(key, annotations, tool_name)
+                self.assertIsInstance(annotations[key], bool, tool_name)
+
+    def test_tool_annotation_manifest_covers_router_modes(self):
+        manifest = self.server.tool_annotations()
+        task_router = next(entry for entry in manifest["tools"] if entry["tool"] == "task_router")
+        modes = {entry["mode"]: entry for entry in task_router["modes"]}
+        self.assertEqual(
+            set(modes),
+            set(self.server.TOOL_SECURITY_METADATA["task_router"]["mode_categories"]),
+        )
+        self.assertTrue(modes["status"]["annotations"]["readOnlyHint"])
+        self.assertFalse(modes["status"]["annotations"]["openWorldHint"])
+        self.assertTrue(modes["task"]["annotations"]["openWorldHint"])
+        self.assertFalse(modes["coding_sandbox"]["annotations"]["readOnlyHint"])
+        self.assertTrue(modes["coding_sandbox"]["annotations"]["openWorldHint"])
+
+        workspace = self.server.tool_annotations("workspace_transaction")["tool"]
+        workspace_modes = {entry["mode"]: entry for entry in workspace["modes"]}
+        self.assertTrue(workspace_modes["snapshot"]["annotations"]["readOnlyHint"])
+        self.assertFalse(workspace_modes["write"]["annotations"]["readOnlyHint"])
+        self.assertFalse(workspace_modes["write"]["annotations"]["destructiveHint"])
+        self.assertFalse(workspace_modes["delete"]["annotations"]["readOnlyHint"])
+        self.assertTrue(workspace_modes["delete"]["annotations"]["destructiveHint"])
+
 
 if __name__ == "__main__":
     unittest.main()

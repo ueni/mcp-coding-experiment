@@ -122,13 +122,9 @@ The platform now exposes a compact LLM-first MCP v1 surface. Capabilities remain
 
 Public tools:
 
-- `autocomplete`
-- `repo_info`, `runtime_state`
-- `repo_router`, `workspace_transaction`, `git_router`
-- `code_index_router`, `task_router`, `memory_router`, `docker_router`, `vscode_router`, `tool_router`
-- `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`
-- `math_router`, `document_router`, `diagram_router`
-- `sql_expert`, `browse_web`
+- `task_router`
+- `tool_annotations`, `tool_output_contracts`
+- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
 
 ### 5.2 Router Design Principle
 
@@ -146,6 +142,17 @@ Each public router owns a task-shaped capability family and dispatches to intern
 ### 5.3 Internal Leaf Tools
 
 Former leaf tools remain implemented in the server for reuse and testing, but they are not part of the public MCP v1 surface. This preserves feature breadth while materially reducing the exposed tool count.
+
+### 5.4 Tool Annotation Manifest
+
+Clients can call the read-only `tool_annotations` tool to inspect the machine-checkable safety manifest for the public MCP v1 surface. The manifest is generated from `TOOL_SECURITY_METADATA`, the same source used by security audit/gating helpers, and returns MCP annotation hints per public tool and covered router mode:
+
+- `readOnlyHint`: true for analysis/inspection operations, false for mutation-capable operations.
+- `destructiveHint`: true for explicitly destructive modes such as delete/restore/rollback; non-destructive writes remain distinguishable through `readOnlyHint=false`.
+- `idempotentHint`: true for repeatable read-only operations, false for writes and transactional mutations.
+- `openWorldHint`: true when the operation can reach outside the closed repository model, such as network-backed inference or shell/process execution.
+
+Approval UX should use these hints before invoking a tool or explicit router mode. Release gates should also validate the manifest so new public tools or router modes cannot ship without safety classification coverage.
 
 ## 6. Advanced Workflow Layer
 
