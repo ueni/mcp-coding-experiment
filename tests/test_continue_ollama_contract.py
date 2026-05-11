@@ -212,7 +212,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             'vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"',
             dockerfile,
         )
-        self.assertIn('if [ ! -f "${vsix_path}" ] && ! curl -fL --progress-bar', dockerfile)
+        self.assertIn('if [ ! -f "${vsix_path}" ] && ! curl -fsSL', dockerfile)
 
     def test_dockerfile_writes_app_sudoers_rule_with_single_shell_command(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
