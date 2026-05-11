@@ -9,6 +9,22 @@ on:
     types:
       - published
   workflow_dispatch:
+    inputs:
+      publish_image:
+        description: Push the built devcontainer image to Docker Hub.
+        required: false
+        type: boolean
+        default: false
+      preload_ollama_models:
+        description: Preload Ollama models into validation images. Published images always preload models.
+        required: false
+        type: boolean
+        default: false
+      preload_vscode_extensions:
+        description: Preload VS Code extensions into validation images. Published images always preload extensions.
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -23,7 +39,7 @@ jobs:
 
       - name: Build test image
         timeout-minutes: 150
-        run: docker build --progress=plain --file source/Dockerfile --tag "${TEST_IMAGE}" source
+        run: docker build --progress=plain --build-arg OLLAMA_PRELOAD_MODELS= --build-arg VSCODE_PRELOAD_EXTENSIONS= --file source/Dockerfile --tag "${TEST_IMAGE}" source
 
       - name: Run tests with coverage in container
         run: |
@@ -82,18 +98,58 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Decide image build mode
+        id: image-mode
+        run: |
+          if [ "${{ github.event_name }}" = "release" ] || [ "${{ inputs.publish_image || false }}" = "true" ]; then
+            echo "publish=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "publish=false" >>"${GITHUB_OUTPUT}"
+          fi
+
+          if [ "${{ github.event_name }}" = "release" ] || [ "${{ inputs.publish_image || false }}" = "true" ] || [ "${{ inputs.preload_ollama_models || false }}" = "true" ]; then
+            echo "preload_ollama=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "preload_ollama=false" >>"${GITHUB_OUTPUT}"
+          fi
+
+          if [ "${{ github.event_name }}" = "release" ] || [ "${{ inputs.publish_image || false }}" = "true" ] || [ "${{ inputs.preload_vscode_extensions || false }}" = "true" ]; then
+            echo "preload_vscode=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "preload_vscode=false" >>"${GITHUB_OUTPUT}"
+          fi
+
       - name: Login to docker hub
+        if: steps.image-mode.outputs.publish == 'true'
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: Build and push devcontainer image
+      - name: Build devcontainer image
         timeout-minutes: 210
+        env:
+          IMAGE_NAME: docker.io/${{ secrets.DOCKER_USERNAME }}/codebase-tooling-mcp
         run: |
-          IMAGE_NAME="docker.io/${{ secrets.DOCKER_USERNAME }}/codebase-tooling-mcp"
+          build_args=()
+          output_args=(--load)
+          tag_args=(--tag "codebase-tooling-mcp:${GITHUB_SHA}")
+
+          if [ "${{ steps.image-mode.outputs.preload_ollama }}" != "true" ]; then
+            build_args+=(--build-arg OLLAMA_PRELOAD_MODELS=)
+          fi
+
+          if [ "${{ steps.image-mode.outputs.preload_vscode }}" != "true" ]; then
+            build_args+=(--build-arg VSCODE_PRELOAD_EXTENSIONS=)
+          fi
+
+          if [ "${{ steps.image-mode.outputs.publish }}" = "true" ]; then
+            output_args=(--push)
+            tag_args=(--tag "${IMAGE_NAME}:latest" --tag "${IMAGE_NAME}:${GITHUB_SHA}")
+          fi
+
           docker buildx build \
             --progress=plain \
             --platform linux/amd64 \
             --file source/Dockerfile \
-            --tag "${IMAGE_NAME}:latest" \
-            --tag "${IMAGE_NAME}:${GITHUB_SHA}" \
-            --push \
+            "${build_args[@]}" \
+            "${tag_args[@]}" \
+            "${output_args[@]}" \
             source
