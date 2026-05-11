@@ -159,14 +159,7 @@ ${DEVCONTAINER_GPU_ENV_BLOCK}
   },
   "customizations": {
     "vscode": {
-      "extensions": [
-        "Continue.continue",
-        "ms-python.python",
-        "ms-python.vscode-pylance",
-        "ms-azuretools.vscode-docker",
-        "openai.chatgpt",
-        "mhutchie.git-graph"
-      ],
+      "extensions": [],
       "settings": {
         "mcpInlineAutocomplete.endpoint": "http://localhost:8000/mcp"
       }
@@ -204,4 +197,5 @@ fi
 log "  .gitignore entries for generated hidden folders (one-time bootstrap)"
 log ""
 log "The container image provides the inline autocomplete extension and repo defaults."
+log "Marketplace VS Code extensions are intentionally not auto-installed during initial attach; install them after the container is stable if needed."
 log "Next step: export MCP_HTTP_BEARER_TOKEN before opening VS Code, then run 'Dev Containers: Reopen in Container'."

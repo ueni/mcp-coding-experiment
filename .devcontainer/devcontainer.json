@@ -43,14 +43,7 @@
   },
   "customizations": {
     "vscode": {
-      "extensions": [
-        "Continue.continue",
-        "ms-python.python",
-        "ms-python.vscode-pylance",
-        "ms-azuretools.vscode-docker",
-        "openai.chatgpt",
-        "mhutchie.git-graph"
-      ],
+      "extensions": [],
       "settings": {
         "mcpInlineAutocomplete.endpoint": "http://localhost:8000/mcp"
       }

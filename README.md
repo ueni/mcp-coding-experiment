@@ -256,8 +256,9 @@ For home-config portability, the generated devcontainer mounts host paths under
 `/home/app/.codex`. Startup bootstrap copies from `/host` mounts only when the
 `$HOME` targets are missing or empty.
 
-The inline autocomplete extension and the Marketplace extensions declared in the devcontainer are preloaded into the image during `docker build` for the common VS Code server extension directories, so the target
-repository does not need a local `vscode/mcp-inline-autocomplete/` copy and VS Code should not need to fetch those extensions again on container start.
+The inline autocomplete extension is preloaded into the image during `docker build` for the common VS Code server extension directories, so the target repository does not need a local `vscode/mcp-inline-autocomplete/` copy.
+
+Marketplace VS Code extensions are intentionally not auto-installed during the initial devcontainer attach. Large extension dependency installs (Python/debugpy, Docker tooling, Continue/OpenAI chat extensions) can overlap with VS Code Server startup and cause laptop-class hosts to kill the container under memory pressure. Install optional Marketplace extensions manually after the container is stable.
 
 ## Endpoints (HTTP mode)
 

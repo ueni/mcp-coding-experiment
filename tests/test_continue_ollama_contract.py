@@ -60,6 +60,12 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual("false", config["containerEnv"]["OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL"])
         self.assertEqual("90", config["containerEnv"]["OLLAMA_STARTUP_DELAY_SECONDS"])
 
+    def test_devcontainer_does_not_auto_install_marketplace_extensions_on_attach(self):
+        config = json.loads(
+            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual([], config["customizations"]["vscode"].get("extensions", []))
+
     def test_setup_script_generates_devcontainer_with_ollama_ports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -97,6 +103,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
         )
         self.assertEqual("Bundled LLM", config["portsAttributes"]["2345"]["label"])
+        self.assertEqual([], config["customizations"]["vscode"].get("extensions", []))
 
     def test_setup_script_can_force_vulkan_gpu_passthrough(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -223,6 +230,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
 
     def test_dockerfile_caches_vscode_vsix_downloads(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('ARG VSCODE_PRELOAD_EXTENSIONS=""', dockerfile)
         self.assertIn("COPY --chown=app:app scripts/devcontainer_diagnostics.sh ./scripts/devcontainer_diagnostics.sh", dockerfile)
         self.assertIn("/app/scripts/devcontainer_diagnostics.sh", dockerfile)
         self.assertIn(
@@ -256,6 +264,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('seed_ollama_models_from_image_preload', entrypoint)
         self.assertIn('export OLLAMA_VULKAN=1', entrypoint)
         self.assertIn('write_devcontainer_diagnostics', entrypoint)
+        self.assertIn('/repo/.codebase-tooling-mcp/reports/devcontainer-startup-diagnostics.log', entrypoint)
+        self.assertIn('/tmp/codebase-tooling-mcp-devcontainer-diagnostics.log', entrypoint)
         self.assertIn('OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-false}"', entrypoint)
         self.assertIn('OLLAMA_STARTUP_DELAY_SECONDS="${OLLAMA_STARTUP_DELAY_SECONDS:-0}"', entrypoint)
         self.assertIn('delaying Ollama startup', entrypoint)

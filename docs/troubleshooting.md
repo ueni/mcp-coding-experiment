@@ -148,14 +148,14 @@ Stdin closed!
 Shell server terminated (code: 137, signal: null)
 ```
 
-Exit code 137 means the process received `SIGKILL`. In this devcontainer path, the supplied log is most consistent with OOM/resource pressure or an external container kill during VS Code Server installation. The Qwen3.6 production profile is memory-heavy, so the default devcontainer now defers Ollama startup/model checks during the initial attach window.
+Exit code 137 means the process received `SIGKILL`. In this devcontainer path, the supplied log is most consistent with OOM/resource pressure or an external container kill during VS Code Server or extension installation. The Qwen3.6 production profile and large VS Code extension dependency installs are memory-heavy, so the default devcontainer now defers Ollama startup/model checks and does not auto-install Marketplace extensions during the initial attach window.
 
 Checks:
 
-- Inside a running container, inspect the startup snapshot written by the entrypoint:
+- Inside a running container, inspect the startup snapshot written by the entrypoint. The default path is inside the mounted workspace so it remains retrievable after the container dies:
 
 ```bash
-cat /tmp/codebase-tooling-mcp-devcontainer-diagnostics.log
+cat .codebase-tooling-mcp/reports/devcontainer-startup-diagnostics.log
 ```
 
 - After a failed attach, collect host/container evidence. Pass the container name or id shown by Docker/VS Code:
@@ -175,6 +175,8 @@ Mitigations:
 "OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL": "false",
 "OLLAMA_STARTUP_DELAY_SECONDS": "90"
 ```
+
+- Keep `customizations.vscode.extensions` empty for initial attach. Install optional Marketplace extensions such as Python/Pylance, Docker, Continue, OpenAI ChatGPT, and Git Graph manually after the container is stable.
 
 - If attach still fails, temporarily disable bundled Ollama during attach:
 

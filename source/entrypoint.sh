@@ -333,9 +333,12 @@ maybe_fix_gpu_device_groups() {
 
 
 write_devcontainer_diagnostics() {
-  local output_path="${DEVCONTAINER_DIAGNOSTICS_FILE:-/tmp/codebase-tooling-mcp-devcontainer-diagnostics.log}"
+  local output_path="${DEVCONTAINER_DIAGNOSTICS_FILE:-/repo/.codebase-tooling-mcp/reports/devcontainer-startup-diagnostics.log}"
   if [[ "${DEVCONTAINER_DIAGNOSTICS_ENABLED:-true}" != "true" ]]; then
     return
+  fi
+  if ! mkdir -p "$(dirname "${output_path}")" 2>/dev/null; then
+    output_path="/tmp/codebase-tooling-mcp-devcontainer-diagnostics.log"
   fi
   if [[ -x /app/scripts/devcontainer_diagnostics.sh ]]; then
     /app/scripts/devcontainer_diagnostics.sh >"${output_path}" 2>&1 || true
