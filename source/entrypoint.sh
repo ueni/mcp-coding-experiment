@@ -29,6 +29,18 @@ sanitize_positive_int() {
   echo "${fallback}"
 }
 
+sanitize_nonnegative_int() {
+  local raw="${1:-}"
+  local fallback="${2:-0}"
+  local var_name="${3:-value}"
+  if [[ "${raw}" =~ ^[0-9]+$ ]]; then
+    echo "${raw}"
+    return 0
+  fi
+  echo "Invalid ${var_name}='${raw}'; using default ${fallback}" >&2
+  echo "${fallback}"
+}
+
 _ollama_probe_url() {
   local host_port="${1:-127.0.0.1:11434}"
   local host="${host_port%:*}"
@@ -319,6 +331,83 @@ maybe_fix_gpu_device_groups() {
   done
 }
 
+
+write_devcontainer_diagnostics() {
+  local output_path="${DEVCONTAINER_DIAGNOSTICS_FILE:-/tmp/codebase-tooling-mcp-devcontainer-diagnostics.log}"
+  if [[ "${DEVCONTAINER_DIAGNOSTICS_ENABLED:-true}" != "true" ]]; then
+    return
+  fi
+  if [[ -x /app/scripts/devcontainer_diagnostics.sh ]]; then
+    /app/scripts/devcontainer_diagnostics.sh >"${output_path}" 2>&1 || true
+  elif [[ -x /repo/scripts/devcontainer_diagnostics.sh ]]; then
+    /repo/scripts/devcontainer_diagnostics.sh >"${output_path}" 2>&1 || true
+  else
+    {
+      echo "# Devcontainer diagnostics"
+      date -Is 2>/dev/null || date
+      free -h 2>/dev/null || true
+      grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null || true
+      for path in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.events; do
+        [[ -e "${path}" ]] && { echo "## ${path}"; cat "${path}"; }
+      done
+      ps -eo pid,ppid,user,stat,pcpu,pmem,rss,vsz,comm,args --sort=-rss 2>/dev/null | head -80 || true
+    } >"${output_path}" 2>&1 || true
+  fi
+  echo "devcontainer diagnostics written to ${output_path}" >&2
+}
+
+run_ollama_startup() {
+  if is_truthy "${OLLAMA_ENABLED}"; then
+    started=0
+    hosts=("${OLLAMA_HOST}")
+    if [[ -n "${OLLAMA_FALLBACK_HOST}" ]] && [[ "${OLLAMA_FALLBACK_HOST}" != "${OLLAMA_HOST}" ]]; then
+      hosts+=("${OLLAMA_FALLBACK_HOST}")
+    fi
+
+    for host in "${hosts[@]}"; do
+      if start_ollama_with_host "${host}"; then
+        echo "ollama ready on ${host}" >&2
+        started=1
+        break
+      fi
+      echo "ollama failed to start on ${host}; see /tmp/ollama.log" >&2
+    done
+
+    if [[ "${started}" -ne 1 ]]; then
+      echo "continuing without Ollama" >&2
+    else
+      if is_truthy "${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL}" && [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
+        echo "ensuring default Ollama model '${CODING_DEFAULT_MODEL}' is available before server startup" >&2
+        if ! ensure_ollama_model_installed "${CODING_DEFAULT_MODEL}"; then
+          echo "failed to ensure default Ollama model '${CODING_DEFAULT_MODEL}' is available before server startup" >&2
+          echo "continuing with running Ollama and current model set" >&2
+        fi
+      fi
+      (
+        if ! ensure_ollama_models_installed; then
+          echo "ollama model ensure failed in background; see logs above" >&2
+          echo "continuing with running Ollama and current model set" >&2
+        fi
+      ) &
+      echo "ollama model availability check running in background (OLLAMA_ALLOW_PULL=${OLLAMA_ALLOW_PULL})" >&2
+    fi
+  else
+    echo "OLLAMA_ENABLED=false; skipping Ollama startup" >&2
+  fi
+}
+
+schedule_ollama_startup() {
+  if [[ "${OLLAMA_STARTUP_DELAY_SECONDS}" -gt 0 ]]; then
+    echo "delaying Ollama startup for ${OLLAMA_STARTUP_DELAY_SECONDS}s so VS Code Server attach can complete first" >&2
+    (
+      sleep "${OLLAMA_STARTUP_DELAY_SECONDS}"
+      run_ollama_startup
+    ) &
+  else
+    run_ollama_startup
+  fi
+}
+
 apply_repo_defaults() {
   local defaults_root="/opt/codebase-tooling/defaults"
   if [[ "${MCP_APPLY_REPO_DEFAULTS:-false}" != "true" ]]; then
@@ -412,49 +501,14 @@ OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
 OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
 OLLAMA_FALLBACK_HOST="${OLLAMA_FALLBACK_HOST:-0.0.0.0:11434}"
-OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-true}"
+OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-false}"
 OLLAMA_ALLOW_PULL="${OLLAMA_ALLOW_PULL:-false}"
+OLLAMA_STARTUP_DELAY_SECONDS="${OLLAMA_STARTUP_DELAY_SECONDS:-0}"
 OLLAMA_STARTUP_TIMEOUT="$(sanitize_positive_int "${OLLAMA_STARTUP_TIMEOUT}" 30 "OLLAMA_STARTUP_TIMEOUT")"
+OLLAMA_STARTUP_DELAY_SECONDS="$(sanitize_nonnegative_int "${OLLAMA_STARTUP_DELAY_SECONDS}" 0 "OLLAMA_STARTUP_DELAY_SECONDS")"
 
 apply_repo_defaults
-
-if is_truthy "${OLLAMA_ENABLED}"; then
-  started=0
-  hosts=("${OLLAMA_HOST}")
-  if [[ -n "${OLLAMA_FALLBACK_HOST}" ]] && [[ "${OLLAMA_FALLBACK_HOST}" != "${OLLAMA_HOST}" ]]; then
-    hosts+=("${OLLAMA_FALLBACK_HOST}")
-  fi
-
-  for host in "${hosts[@]}"; do
-    if start_ollama_with_host "${host}"; then
-      echo "ollama ready on ${host}" >&2
-      started=1
-      break
-    fi
-    echo "ollama failed to start on ${host}; see /tmp/ollama.log" >&2
-  done
-
-  if [[ "${started}" -ne 1 ]]; then
-    echo "continuing without Ollama" >&2
-  else
-    if is_truthy "${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL}" && [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
-      echo "ensuring default Ollama model '${CODING_DEFAULT_MODEL}' is available before server startup" >&2
-      if ! ensure_ollama_model_installed "${CODING_DEFAULT_MODEL}"; then
-        echo "failed to ensure default Ollama model '${CODING_DEFAULT_MODEL}' is available before server startup" >&2
-        echo "continuing with running Ollama and current model set" >&2
-      fi
-    fi
-    (
-      if ! ensure_ollama_models_installed; then
-        echo "ollama model ensure failed in background; see logs above" >&2
-        echo "continuing with running Ollama and current model set" >&2
-      fi
-    ) &
-    echo "ollama model availability check running in background (OLLAMA_ALLOW_PULL=${OLLAMA_ALLOW_PULL})" >&2
-  fi
-else
-  echo "OLLAMA_ENABLED=false; skipping Ollama startup" >&2
-fi
-
+write_devcontainer_diagnostics
+schedule_ollama_startup
 
 exec python /app/server.py

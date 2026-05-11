@@ -53,6 +53,13 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("--device=/dev/dri", config.get("runArgs", []))
         self.assertEqual("1", config["containerEnv"]["OLLAMA_VULKAN"])
 
+    def test_devcontainer_defers_heavy_ollama_work_until_after_attach_window(self):
+        config = json.loads(
+            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("false", config["containerEnv"]["OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL"])
+        self.assertEqual("90", config["containerEnv"]["OLLAMA_STARTUP_DELAY_SECONDS"])
+
     def test_setup_script_generates_devcontainer_with_ollama_ports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
@@ -83,6 +90,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual(
             "0.0.0.0:2345", config["containerEnv"]["OLLAMA_FALLBACK_HOST"]
         )
+        self.assertEqual("false", config["containerEnv"]["OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL"])
+        self.assertEqual("90", config["containerEnv"]["OLLAMA_STARTUP_DELAY_SECONDS"])
         self.assertEqual(
             "http://127.0.0.1:2345/api/generate",
             config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
@@ -214,6 +223,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
 
     def test_dockerfile_caches_vscode_vsix_downloads(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("COPY --chown=app:app scripts/devcontainer_diagnostics.sh ./scripts/devcontainer_diagnostics.sh", dockerfile)
+        self.assertIn("/app/scripts/devcontainer_diagnostics.sh", dockerfile)
         self.assertIn(
             "--mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked",
             dockerfile,
@@ -244,6 +255,10 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("/dev/kfd", entrypoint)
         self.assertIn('seed_ollama_models_from_image_preload', entrypoint)
         self.assertIn('export OLLAMA_VULKAN=1', entrypoint)
+        self.assertIn('write_devcontainer_diagnostics', entrypoint)
+        self.assertIn('OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-false}"', entrypoint)
+        self.assertIn('OLLAMA_STARTUP_DELAY_SECONDS="${OLLAMA_STARTUP_DELAY_SECONDS:-0}"', entrypoint)
+        self.assertIn('delaying Ollama startup', entrypoint)
         before_drop = entrypoint.split(
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1
         )[0]

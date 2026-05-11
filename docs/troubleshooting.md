@@ -135,3 +135,52 @@ Checks:
 - Confirm `.devcontainer/devcontainer.json` sets `OLLAMA_VULKAN=1`.
 - Inspect `/tmp/ollama.log`; if it still says `no compatible GPUs were discovered`, run `vulkaninfo --summary` inside the container and verify a real Intel or AMD GPU is visible instead of only llvmpipe.
 - Rebuild or reopen the devcontainer after changing the config so Ollama restarts with the new environment.
+
+## VS Code Dev Containers attach fails with exit code 137 / `Stdin closed!`
+
+Symptom:
+
+```text
+Downloading VS Code Server
+Exit code 137
+Keep-alive process ended.
+Stdin closed!
+Shell server terminated (code: 137, signal: null)
+```
+
+Exit code 137 means the process received `SIGKILL`. In this devcontainer path, the supplied log is most consistent with OOM/resource pressure or an external container kill during VS Code Server installation. The Qwen3.6 production profile is memory-heavy, so the default devcontainer now defers Ollama startup/model checks during the initial attach window.
+
+Checks:
+
+- Inside a running container, inspect the startup snapshot written by the entrypoint:
+
+```bash
+cat /tmp/codebase-tooling-mcp-devcontainer-diagnostics.log
+```
+
+- After a failed attach, collect host/container evidence. Pass the container name or id shown by Docker/VS Code:
+
+```bash
+./scripts/devcontainer_diagnostics.sh <container-name-or-id> > devcontainer-exit-137-diagnostics.txt
+```
+
+The diagnostic report includes memory/swap, cgroup memory limits/current/peak/events, top RSS processes, `docker inspect` state including `OOMKilled` and `ExitCode`, recent Docker OOM/kill/die events, and kernel OOM messages when accessible.
+
+Mitigations:
+
+- Rebuild/reopen the devcontainer so the safer startup defaults apply.
+- Keep the defaults below for 32GB laptop-class hosts:
+
+```json
+"OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL": "false",
+"OLLAMA_STARTUP_DELAY_SECONDS": "90"
+```
+
+- If attach still fails, temporarily disable bundled Ollama during attach:
+
+```json
+"OLLAMA_ENABLED": "false"
+```
+
+Then start Ollama manually after VS Code attaches, or remove that override and rebuild once diagnostics show enough free memory/swap.
+- Add/enable swap or close other memory-heavy processes if `memory.events` shows `oom`/`oom_kill`, Docker inspect reports `OOMKilled=true`, or kernel logs show an OOM kill.

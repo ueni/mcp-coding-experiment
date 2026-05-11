@@ -45,3 +45,14 @@ Reasoning markers are not stop sequences because some Qwen3.6 builds emit a shor
 ## Rollback
 
 Safe rollback is configuration-only: set `CODING_DEFAULT_MODEL` and `CONTINUE_OLLAMA_MODELS` to a previously validated local model tag and restore matching Continue model YAML outside the steady-state defaults. Do not reintroduce `qwen2.5-coder:3b` as the repository default unless a new evaluation decision explicitly supersedes the Qwen3.6 production profile.
+
+## Devcontainer attach safety
+
+The devcontainer keeps the Qwen3.6 routing defaults, but it does not block VS Code Server attach on heavyweight Ollama/model checks. Generated devcontainer configs set:
+
+```json
+"OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL": "false",
+"OLLAMA_STARTUP_DELAY_SECONDS": "90"
+```
+
+This gives VS Code Remote Containers time to install/start VS Code Server before the bundled Ollama process and Qwen3.6 availability checks can compete for memory. After attach, Ollama still starts on port `2345` and the MCP server keeps using `http://127.0.0.1:2345/api/generate`. For dedicated hosts with enough memory, set `OLLAMA_STARTUP_DELAY_SECONDS=0` to start Ollama immediately.
