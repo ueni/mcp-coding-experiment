@@ -161,7 +161,7 @@ Former leaf tools remain implemented in the server for reuse and testing, but th
 
 ### 5.5 Tool Annotation Manifest
 
-Clients can call the read-only `tool_annotations` tool to inspect the machine-checkable safety manifest for the public MCP v1 surface. The manifest is generated from `TOOL_SECURITY_METADATA`, the same source used by security audit/gating helpers, and returns MCP annotation hints for every public tool in `PUBLIC_MCP_TOOL_NAMES` plus mode-level entries for public tools with mode-specific behavior. Today that mode coverage includes `task_router` and the schema-backed `workspace_transaction` core tool.
+Clients can call the read-only `tool_annotations` tool to inspect the machine-checkable safety manifest for the public MCP v1 surface. The manifest is generated from `TOOL_SECURITY_METADATA`, the same source used by security audit/gating helpers, and returns MCP annotation hints for every public tool in `PUBLIC_MCP_TOOL_NAMES` plus mode-level entries for public tools with mode-specific behavior. Today that mode coverage includes `task_router`, `test_impact_map(refresh=true)`, and the schema-backed `workspace_transaction` core tool.
 
 - `readOnlyHint`: true for analysis/inspection operations, false for mutation-capable operations.
 - `destructiveHint`: true for explicitly destructive modes such as delete/restore/rollback; non-destructive writes remain distinguishable through `readOnlyHint=false`.

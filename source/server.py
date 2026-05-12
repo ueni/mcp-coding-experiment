@@ -155,6 +155,7 @@ COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
+    "test_impact_map",
     "tool_annotations",
     "tool_output_contracts",
     *SCHEMA_BACKED_TOOL_NAMES,
