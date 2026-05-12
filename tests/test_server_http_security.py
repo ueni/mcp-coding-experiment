@@ -34,11 +34,33 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.audit_tmp.cleanup()
         super().tearDown()
 
-    def _scope(self, token: str = "", client: str = "127.0.0.1"):
+    def _scope(self, token: str = "", client: str = "127.0.0.1", path: str = "/mcp", method: str = "POST"):
         headers = []
         if token:
             headers.append((b"authorization", f"Bearer {token}".encode("ascii")))
-        return {"type": "http", "path": "/mcp", "method": "POST", "headers": headers, "client": (client, 12345)}
+        return {"type": "http", "path": path, "method": method, "headers": headers, "client": (client, 12345)}
+
+    def _middleware_json_response(self, scope):
+        messages = []
+
+        async def app(_scope, _receive, send):
+            response = self.server.JSONResponse({"downstream": True})
+            await response(_scope, _receive, send)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        asyncio.run(self.server.MCPHTTPAuthMiddleware(app)(scope, receive, send))
+        start = next(message for message in messages if message["type"] == "http.response.start")
+        body = b"".join(
+            message.get("body", b"")
+            for message in messages
+            if message["type"] == "http.response.body"
+        )
+        return start, json.loads(body.decode("utf-8"))
 
     def _audit_events(self):
         return [
@@ -73,6 +95,66 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         allowed, retry_after = self.server._http_rate_limit_allow(scope, now=102.0)
         self.assertFalse(allowed)
         self.assertGreaterEqual(retry_after, 1)
+
+    def test_well_known_mcp_manifest_is_public_and_allowlisted(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "super-secret-token"
+
+        start, payload = self._middleware_json_response(
+            self._scope(path="/.well-known/mcp-server.json", method="GET")
+        )
+
+        self.assertEqual(start["status"], 200)
+        self.assertIn((b"content-type", b"application/json"), start["headers"])
+        self.assertEqual(payload["schema"], "mcp-server-manifest.provisional.v1")
+        self.assertEqual(payload["schema_version"], "provisional-2026-05")
+        self.assertEqual(payload["server"]["name"], "codebase-tooling-mcp")
+        self.assertIn("non-final SEP", payload["specification_status"])
+        self.assertEqual(payload["health"], {"liveness": "/healthz", "readiness": "/healthz"})
+
+        transports = {entry["endpoint"]: entry for entry in payload["transports"]}
+        self.assertTrue(transports["/mcp"]["auth_required"])
+        self.assertEqual(transports["/mcp"]["auth"]["schemes"], ["bearer"])
+        self.assertIn("/.well-known/oauth-protected-resource", transports["/mcp"]["auth"]["oauth_protected_resource_metadata"])
+
+        tool_names = {tool["name"] for tool in payload["capabilities"]["tools"]}
+        self.assertIn("task_router", tool_names)
+        self.assertIn("tool_annotations", tool_names)
+        self.assertIn("tool_output_contracts", tool_names)
+        output_contracts = payload["contracts"]["tool_output_contracts"]
+        self.assertEqual(
+            output_contracts["documentation"],
+            {"title": "MCP Output Schemas", "path": "docs/mcp-output-schemas.md"},
+        )
+        self.assertIn("release_readiness", output_contracts["schema_backed_tools"])
+        task_router = next(tool for tool in payload["capabilities"]["tools"] if tool["name"] == "task_router")
+        self.assertIn("categories", task_router)
+        self.assertIn("annotations", task_router)
+        self.assertIn("modes", task_router)
+
+        payload_text = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("super-secret-token", payload_text)
+        self.assertNotIn(str(self.repo_path), payload_text)
+        self.assertNotIn(str(Path.home()), payload_text)
+        self.assertFalse(payload["privacy"]["contains_repository_contents"])
+        self.assertFalse(payload["privacy"]["contains_bearer_tokens"])
+        self.assertFalse(payload["privacy"]["contains_local_absolute_paths"])
+        self.assertFalse(payload["privacy"]["contains_environment_values"])
+        self.assertFalse(payload["privacy"]["contains_host_user_data"])
+        self.assertFalse(payload["privacy"]["contains_secrets"])
+        self.assertFalse(self.server.MCP_AUDIT_LOG_FILE.exists())
+
+    def test_mcp_endpoint_auth_is_unchanged_when_manifest_is_public(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+
+        start, payload = self._middleware_json_response(self._scope(path="/mcp", method="POST"))
+
+        self.assertEqual(start["status"], 401)
+        self.assertEqual(payload["error"], "unauthorized")
+        event = self._audit_events()[0]
+        self.assertEqual(event["tool_name"], "http_request")
+        self.assertEqual(event["arguments"], {"path": "/mcp"})
 
     def test_http_middleware_timeout_returns_504_and_audits(self):
         self.server.MCP_HTTP_AUTH_MODE = "token"

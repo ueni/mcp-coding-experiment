@@ -627,6 +627,111 @@ def _http_auth_discovery_payload() -> dict[str, Any]:
     }
 
 
+def _mcp_server_manifest_payload() -> dict[str, Any]:
+    """Return the public .well-known MCP server manifest.
+
+    This provisional discovery document is intentionally allowlisted. It exposes
+    endpoint shapes, public MCP affordances, and safety metadata only; it must
+    not derive values from repository contents, host paths, tokens, or other
+    local/private state.
+    """
+    tool_manifest = _tool_annotation_manifest()
+    public_tools = [
+        {
+            "name": entry["tool"],
+            "categories": entry.get("categories", []),
+            "mutation_capable": bool(entry.get("mutation_capable", False)),
+            "annotations": entry.get("annotations", {}),
+            **({"modes": entry["modes"]} if "modes" in entry else {}),
+        }
+        for entry in tool_manifest["tools"]
+    ]
+    return {
+        "schema": "mcp-server-manifest.provisional.v1",
+        "schema_version": "provisional-2026-05",
+        "status": "provisional",
+        "specification_status": "non-final SEP draft; field names and semantics may change",
+        "server": {
+            "name": "codebase-tooling-mcp",
+            "mcp_name": "git-repo-manager",
+            "version": None,
+        },
+        "transports": [
+            {
+                "type": "streamable-http",
+                "endpoint": "/mcp",
+                "methods": ["POST", "GET", "DELETE"],
+                "auth_required": _http_auth_required(),
+                "auth": {
+                    "mode": MCP_HTTP_AUTH_MODE,
+                    "schemes": ["bearer"] if _http_auth_required() else [],
+                    "header": "Authorization",
+                    "scopes_supported": ["mcp:read", "mcp:mutate"],
+                    "oauth_protected_resource_metadata": "/.well-known/oauth-protected-resource",
+                },
+            },
+            {
+                "type": "sse",
+                "endpoint": "/sse",
+                "methods": ["GET"],
+                "auth_required": _http_auth_required(),
+            },
+        ],
+        "health": {
+            "liveness": "/healthz",
+            "readiness": "/healthz",
+        },
+        "capabilities": {
+            "tools": public_tools,
+            "resources": [
+                {"uri_template": "repo://summary", "name": "repo_summary_resource"},
+                {"uri_template": "repo://file/{path}", "name": "repo_file_resource"},
+                {"uri_template": "repo://tree/{path}", "name": "repo_tree_resource"},
+            ],
+            "prompts": [
+                "review_changed_files",
+                "release_readiness_check",
+                "security_triage",
+                "devcontainer_health_check",
+                "snapshot_before_refactor",
+            ],
+        },
+        "contracts": {
+            "tool_annotations": {
+                "schema": tool_manifest["schema"],
+                "source": "tool_annotations MCP tool",
+            },
+            "tool_output_contracts": {
+                "schema": "tool_output_contracts.v1",
+                "source": "tool_output_contracts MCP tool",
+                "documentation": {
+                    "title": "MCP Output Schemas",
+                    "path": "docs/mcp-output-schemas.md",
+                },
+                "schema_backed_tools": sorted(SCHEMA_BACKED_TOOL_NAMES),
+            },
+        },
+        "public_data_allowlist": [
+            "server product name and MCP server name",
+            "relative HTTP endpoint paths",
+            "auth mode and supported auth scheme names",
+            "public MCP tool/resource/prompt names",
+            "tool categories, mutation flags, and MCP safety annotations",
+            "schema and contract identifiers",
+            "relative public documentation paths for schema and contract references",
+            "relative health/readiness paths",
+        ],
+        "privacy": {
+            "contains_repository_contents": False,
+            "contains_bearer_tokens": False,
+            "contains_local_absolute_paths": False,
+            "contains_environment_values": False,
+            "contains_host_user_data": False,
+            "contains_secrets": False,
+        },
+    }
+
+
 def _http_authenticate_scope(scope: dict[str, Any]) -> tuple[bool, int, str]:
     if _http_auth_insecure_local():
         if _client_is_loopback(scope):
@@ -1146,6 +1251,10 @@ class MCPHTTPAuthMiddleware:
             return
         if path == "/.well-known/oauth-protected-resource":
             response = JSONResponse(_http_auth_discovery_payload())
+            await response(scope, receive, send)
+            return
+        if method == "GET" and path == "/.well-known/mcp-server.json":
+            response = JSONResponse(_mcp_server_manifest_payload())
             await response(scope, receive, send)
             return
         allowed, retry_after = _http_rate_limit_allow(scope)
@@ -15835,6 +15944,10 @@ _apply_output_schemas_to_mcp_tools()
 _prune_public_mcp_surface()
 
 
+async def mcp_server_manifest(_request):
+    return JSONResponse(_mcp_server_manifest_payload())
+
+
 async def healthz(_request):
     runtime = _runtime_state_payload(include_ollama_probe=False)
     server_state = runtime.get("server", {})
@@ -15918,6 +16031,7 @@ starlette_app = Starlette(
     routes=[
         Route("/", root, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/.well-known/mcp-server.json", mcp_server_manifest, methods=["GET"]),
         Route("/sse", sse_events, methods=["GET"]),
         # FastMCP's streamable HTTP app serves MCP routes under `/mcp` internally.
         # Mount at root so the public MCP endpoint is exactly `/mcp`.

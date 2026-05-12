@@ -94,6 +94,18 @@ Expected result (example):
 }
 ```
 
+### Provisional MCP discovery manifest
+
+HTTP mode also serves a provisional discovery manifest at:
+
+```bash
+curl -sS http://localhost:8000/.well-known/mcp-server.json
+```
+
+The endpoint is intentionally unauthenticated so clients can run a preflight before opening an MCP session. It advertises only public, allowlisted metadata: server names, relative transport and health URLs, auth scheme requirements, public MCP tool/resource/prompt names, schema/contract identifiers, and tool risk/category annotations where available.
+
+The manifest is non-final SEP discovery work (`mcp-server-manifest.provisional.v1`), so clients should treat field names as provisional and prefer defensive parsing. It must not contain repository contents, bearer tokens, local absolute paths, environment values, host user data, or secrets. The protected MCP endpoint remains `/mcp`; the discovery manifest does not weaken bearer-token enforcement for MCP calls.
+
 ## VS Code MCP Onboarding
 
 For a complete VS Code MCP path from fresh clone/devcontainer to a verified tool call, see [VS Code MCP Onboarding](./docs/vscode-mcp-onboarding.md). The workspace task **MCP: Workspace Health Check** validates `/healthz`, `/mcp`, forwarded ports `8000`/`2345`, Ollama status, mutation mode, and HTTP bearer-token state without committing secrets.
