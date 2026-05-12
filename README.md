@@ -341,6 +341,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `CONTINUE_OLLAMA_MODELS` | `qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b` | No | Comma-separated model IDs (or empty) | Default steady-state Ollama model set expected to be present locally and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
 | `OLLAMA_ALLOW_PULL` | `false` | No | `true`, `false` | Explicit opt-in for runtime `ollama pull` of missing models. Keep `false` for offline-only startup. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
+| `OLLAMA_AUTOSTART` | `true` | No | `true`, `false` | Opt-in gate for automatic Ollama startup; generated devcontainers set `false` so VS Code attach stays stable on laptop-class hosts. |
 | `OLLAMA_STARTUP_TIMEOUT` | `30` | No | Integer seconds | Max wait time for Ollama readiness before fallback/failure logic. |
 | `OLLAMA_HOST` | `127.0.0.1:11434` | No | `host:port` | Primary bind target for `ollama serve`. The devcontainer overrides this to `0.0.0.0:2345` so the bundled Ollama service is reachable from the host on port `2345`. |
 | `OLLAMA_FALLBACK_HOST` | `0.0.0.0:11434` | No | `host:port` | Secondary bind target used if primary Ollama host fails. The devcontainer keeps this aligned to `0.0.0.0:2345`. |
@@ -352,7 +353,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
-- `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
+- `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through. Generated devcontainers set `OLLAMA_AUTOSTART=false`; set it to `true` on sufficiently provisioned hosts when you want the bundled Ollama service to start automatically.
 - The steady-state quality route is `qwen3.6-35b-a3b:iq1`, created locally from `.qwen-eval-models/Qwen3.6-35B-A3B-UD-IQ1_M.gguf` with `ollama create`; equivalent local tag aliases can be supplied with `CODING_DEFAULT_MODEL` and `CONTINUE_OLLAMA_MODELS`.
 - `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.

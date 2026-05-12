@@ -52,7 +52,8 @@ The devcontainer keeps the Qwen3.6 routing defaults, but it does not block VS Co
 
 ```json
 "OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL": "false",
+"OLLAMA_AUTOSTART": "false",
 "OLLAMA_STARTUP_DELAY_SECONDS": "90"
 ```
 
-This gives VS Code Remote Containers time to install/start VS Code Server before the bundled Ollama process and Qwen3.6 availability checks can compete for memory. After attach, Ollama still starts on port `2345` and the MCP server keeps using `http://127.0.0.1:2345/api/generate`. For dedicated hosts with enough memory, set `OLLAMA_STARTUP_DELAY_SECONDS=0` to start Ollama immediately.
+This lets VS Code Remote Containers install/start VS Code Server without the bundled Ollama process or Qwen3.6 availability checks competing for memory. The MCP server keeps `http://127.0.0.1:2345/api/generate` as its local inference endpoint for hosts that opt in. For dedicated hosts with enough memory, set `OLLAMA_AUTOSTART=true` (and optionally `OLLAMA_STARTUP_DELAY_SECONDS=0`) to start Ollama automatically.

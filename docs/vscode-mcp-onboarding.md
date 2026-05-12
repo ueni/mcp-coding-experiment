@@ -18,7 +18,7 @@ This path starts from a fresh clone or downstream repository using the devcontai
    ```
 
 3. Run **Dev Containers: Reopen in Container**.
-4. Wait for the `codebase-tooling-mcp` container to finish startup. VS Code should forward ports `8000` (MCP) and `2345` (bundled Ollama).
+4. Wait for the `codebase-tooling-mcp` container to finish startup. VS Code should forward port `8000` (MCP). Port `2345` is used when you opt in to bundled Ollama.
 5. Run **Tasks: Run Task → MCP: Workspace Health Check**.
 6. Copy `.vscode/mcp.example.json` to your user/workspace MCP config if your VS Code build expects active MCP registrations outside the repository sample, then keep the token out of git. The sample uses a password input rather than a committed secret.
 7. Make a test tool call from your MCP client against `http://localhost:8000/mcp` using `Authorization: Bearer <token>`.
@@ -28,9 +28,9 @@ This path starts from a fresh clone or downstream repository using the devcontai
 `./scripts/vscode_mcp_healthcheck.py` checks:
 
 - `GET /healthz` returns JSON and reports HTTP transport.
-- The MCP server port `8000` and Ollama port `2345` are reachable through VS Code forwarding.
+- The MCP server port `8000` is reachable through VS Code forwarding.
 - The health payload reports the expected mutation mode (`ALLOW_MUTATIONS=true` by default for editing workflows).
-- Ollama is running and `GET http://localhost:2345/api/tags` responds.
+- If `MCP_HEALTHCHECK_EXPECT_OLLAMA=true`, Ollama is running and `GET http://localhost:2345/api/tags` responds.
 - HTTP authorization matches the behavior from the token-mode server: unauthenticated MCP requests are rejected, and a request with `MCP_HTTP_BEARER_TOKEN` reaches the MCP endpoint.
 
 Useful overrides:
@@ -39,10 +39,11 @@ Useful overrides:
 MCP_HEALTHCHECK_BASE_URL=http://localhost:8000 \
 MCP_HEALTHCHECK_OLLAMA_URL=http://localhost:2345 \
 MCP_HEALTHCHECK_EXPECT_ALLOW_MUTATIONS=true \
+MCP_HEALTHCHECK_EXPECT_OLLAMA=false \
 python3 scripts/vscode_mcp_healthcheck.py
 ```
 
-The script prints remediation text for common failures: container not started, missing forwarded ports, missing token, wrong mutation mode, or Ollama not listening.
+The script prints remediation text for common failures: container not started, missing forwarded ports, missing token, wrong mutation mode, or Ollama not listening when explicitly expected.
 
 ## Downstream repository bootstrap
 

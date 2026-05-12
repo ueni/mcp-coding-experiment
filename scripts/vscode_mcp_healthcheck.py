@@ -22,6 +22,12 @@ OLLAMA_URL = os.getenv("MCP_HEALTHCHECK_OLLAMA_URL", "http://localhost:2345")
 TOKEN_ENV = os.getenv("MCP_HEALTHCHECK_TOKEN_ENV", "MCP_HTTP_BEARER_TOKEN")
 TOKEN = os.getenv(TOKEN_ENV, "")
 EXPECTED_MUTATIONS = os.getenv("MCP_HEALTHCHECK_EXPECT_ALLOW_MUTATIONS", "true").lower()
+EXPECT_OLLAMA = os.getenv("MCP_HEALTHCHECK_EXPECT_OLLAMA", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 TIMEOUT_SECONDS = float(os.getenv("MCP_HEALTHCHECK_TIMEOUT_SECONDS", "3"))
 
 
@@ -138,43 +144,47 @@ def run_checks() -> list[Check]:
         )
     )
 
-    for label, url in [("MCP forwarded port", BASE_URL), ("Ollama forwarded port", OLLAMA_URL)]:
-        host, port = _host_port(url)
-        ok = _port_open(host, port)
-        checks.append(
-            Check(
-                label,
-                ok,
-                f"{host}:{port} {'is reachable' if ok else 'is not reachable'}",
-                "In VS Code, forward ports 8000 and 2345 from the devcontainer and confirm they are not occupied by another process."
-                if not ok
-                else "",
-            )
+    host, port = _host_port(BASE_URL)
+    mcp_port_ok = _port_open(host, port)
+    checks.append(
+        Check(
+            "MCP forwarded port",
+            mcp_port_ok,
+            f"{host}:{port} {'is reachable' if mcp_port_ok else 'is not reachable'}",
+            "In VS Code, forward port 8000 from the devcontainer and confirm it is not occupied by another process."
+            if not mcp_port_ok
+            else "",
         )
+    )
 
     ollama_health_ok = ollama.get("running") is True and (
         ollama.get("configured_port_listening") is True or ollama.get("port_11434_listening") is True
     )
+    ollama_status_ok = ollama_health_ok or not EXPECT_OLLAMA
     checks.append(
         Check(
             "Ollama status",
-            ollama_health_ok,
-            "running={!r}, configured_port={!r}, configured_port_listening={!r}".format(
+            ollama_status_ok,
+            "running={!r}, configured_port={!r}, configured_port_listening={!r}, expected={!r}".format(
                 ollama.get("running"),
                 ollama.get("configured_port"),
                 ollama.get("configured_port_listening"),
+                EXPECT_OLLAMA,
             ),
-            "Check the devcontainer logs for Ollama startup. If models are missing, keep OLLAMA_ALLOW_PULL=false for offline runs or opt in explicitly after reviewing network policy.",
+            "Set MCP_HEALTHCHECK_EXPECT_OLLAMA=false for attach-only checks, or opt in with OLLAMA_AUTOSTART=true and confirm port 2345 is forwarded."
+            if not ollama_status_ok
+            else "",
         )
     )
 
     tags_status, _, _ = _request_json(f"{OLLAMA_URL.rstrip('/')}/api/tags")
+    ollama_api_ok = tags_status == 200 or not EXPECT_OLLAMA
     checks.append(
         Check(
             "Ollama API",
-            tags_status == 200,
-            f"GET {OLLAMA_URL.rstrip('/')}/api/tags returned {tags_status or 'no response'}",
-            "Forward port 2345 and confirm OLLAMA_HOST=0.0.0.0:2345 inside the devcontainer.",
+            ollama_api_ok,
+            f"GET {OLLAMA_URL.rstrip('/')}/api/tags returned {tags_status or 'no response'}; expected={EXPECT_OLLAMA!r}",
+            "Forward port 2345 and confirm OLLAMA_HOST=0.0.0.0:2345 inside the devcontainer, or set MCP_HEALTHCHECK_EXPECT_OLLAMA=false for attach-only checks.",
         )
     )
 

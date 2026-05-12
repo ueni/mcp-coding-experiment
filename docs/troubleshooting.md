@@ -148,7 +148,7 @@ Stdin closed!
 Shell server terminated (code: 137, signal: null)
 ```
 
-Exit code 137 means the process received `SIGKILL`. In this devcontainer path, the supplied log is most consistent with OOM/resource pressure or an external container kill during VS Code Server or extension installation. The Qwen3.6 production profile and large VS Code extension dependency installs are memory-heavy, so the default devcontainer now defers Ollama startup/model checks and does not auto-install Marketplace extensions during the initial attach window.
+Exit code 137 means the process received `SIGKILL`. In this devcontainer path, logs that survive through VS Code Server and Extension Host startup and then die are most consistent with OOM/resource pressure from delayed heavyweight work, especially the bundled Qwen3.6 Ollama runtime. The default devcontainer now keeps Ollama opt-in during attach and does not auto-install Marketplace extensions during the initial attach window.
 
 Checks:
 
@@ -173,16 +173,11 @@ Mitigations:
 
 ```json
 "OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL": "false",
+"OLLAMA_AUTOSTART": "false",
 "OLLAMA_STARTUP_DELAY_SECONDS": "90"
 ```
 
 - Keep `customizations.vscode.extensions` empty for initial attach. Install optional Marketplace extensions such as Python/Pylance, Docker, Continue, OpenAI ChatGPT, and Git Graph manually after the container is stable.
 
-- If attach still fails, temporarily disable bundled Ollama during attach:
-
-```json
-"OLLAMA_ENABLED": "false"
-```
-
-Then start Ollama manually after VS Code attaches, or remove that override and rebuild once diagnostics show enough free memory/swap.
+- On dedicated hosts with enough memory/swap, opt in to bundled Ollama after attach by setting `OLLAMA_AUTOSTART=true` and rebuilding/reopening. Keep `MCP_HEALTHCHECK_EXPECT_OLLAMA=false` for attach-only health checks, or set it to `true` when validating the Ollama port/API.
 - Add/enable swap or close other memory-heavy processes if `memory.events` shows `oom`/`oom_kill`, Docker inspect reports `OOMKilled=true`, or kernel logs show an OOM kill.

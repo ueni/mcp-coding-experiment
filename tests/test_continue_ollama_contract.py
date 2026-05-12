@@ -53,11 +53,12 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("--device=/dev/dri", config.get("runArgs", []))
         self.assertEqual("1", config["containerEnv"]["OLLAMA_VULKAN"])
 
-    def test_devcontainer_defers_heavy_ollama_work_until_after_attach_window(self):
+    def test_devcontainer_keeps_heavy_ollama_opt_in_for_attach_stability(self):
         config = json.loads(
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
         )
         self.assertEqual("false", config["containerEnv"]["OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL"])
+        self.assertEqual("false", config["containerEnv"]["OLLAMA_AUTOSTART"])
         self.assertEqual("90", config["containerEnv"]["OLLAMA_STARTUP_DELAY_SECONDS"])
 
     def test_devcontainer_does_not_auto_install_marketplace_extensions_on_attach(self):
@@ -97,6 +98,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             "0.0.0.0:2345", config["containerEnv"]["OLLAMA_FALLBACK_HOST"]
         )
         self.assertEqual("false", config["containerEnv"]["OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL"])
+        self.assertEqual("false", config["containerEnv"]["OLLAMA_AUTOSTART"])
         self.assertEqual("90", config["containerEnv"]["OLLAMA_STARTUP_DELAY_SECONDS"])
         self.assertEqual(
             "http://127.0.0.1:2345/api/generate",
@@ -268,6 +270,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('/tmp/codebase-tooling-mcp-devcontainer-diagnostics.log', entrypoint)
         self.assertIn('OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-false}"', entrypoint)
         self.assertIn('OLLAMA_STARTUP_DELAY_SECONDS="${OLLAMA_STARTUP_DELAY_SECONDS:-0}"', entrypoint)
+        self.assertIn('OLLAMA_AUTOSTART="${OLLAMA_AUTOSTART:-true}"', entrypoint)
+        self.assertIn('OLLAMA_ENABLED=false', entrypoint)
         self.assertIn('delaying Ollama startup', entrypoint)
         before_drop = entrypoint.split(
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1

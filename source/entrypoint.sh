@@ -361,6 +361,10 @@ write_devcontainer_diagnostics() {
 
 run_ollama_startup() {
   if is_truthy "${OLLAMA_ENABLED}"; then
+    # Refresh host-visible diagnostics immediately before Ollama starts. If the
+    # kernel OOM-kills the container while loading a model, /repo is a bind mount
+    # and this pre-start snapshot survives the dead container for host triage.
+    write_devcontainer_diagnostics
     started=0
     hosts=("${OLLAMA_HOST}")
     if [[ -n "${OLLAMA_FALLBACK_HOST}" ]] && [[ "${OLLAMA_FALLBACK_HOST}" != "${OLLAMA_HOST}" ]]; then
@@ -507,6 +511,14 @@ OLLAMA_FALLBACK_HOST="${OLLAMA_FALLBACK_HOST:-0.0.0.0:11434}"
 OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-false}"
 OLLAMA_ALLOW_PULL="${OLLAMA_ALLOW_PULL:-false}"
 OLLAMA_STARTUP_DELAY_SECONDS="${OLLAMA_STARTUP_DELAY_SECONDS:-0}"
+# A devcontainer attach must not start a large local model runtime unless the
+# user explicitly opts in. On 32 GB hosts the default production model can push
+# the container over its cgroup/host memory limit after VS Code Server is ready,
+# which surfaces as exit 137 and tears down port forwarding.
+OLLAMA_AUTOSTART="${OLLAMA_AUTOSTART:-true}"
+if ! is_truthy "${OLLAMA_AUTOSTART}"; then
+  OLLAMA_ENABLED=false
+fi
 OLLAMA_STARTUP_TIMEOUT="$(sanitize_positive_int "${OLLAMA_STARTUP_TIMEOUT}" 30 "OLLAMA_STARTUP_TIMEOUT")"
 OLLAMA_STARTUP_DELAY_SECONDS="$(sanitize_nonnegative_int "${OLLAMA_STARTUP_DELAY_SECONDS}" 0 "OLLAMA_STARTUP_DELAY_SECONDS")"
 
