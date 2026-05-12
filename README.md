@@ -110,6 +110,14 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 
 The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails.
 
+### Static test impact map workflow
+
+Use `test_impact_map` when you need a repeatable, TDAD-style view of which Python tests should cover a source change. In normal read mode it loads the repository-local artifact at `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json`, checks that it is still fresh, and returns `selected_tests`, `test_details`, `confidence`, `impacted_sources`, `coverage_gaps`, and `unmapped_changed_files` for explicit `changed_files`.
+
+Call `test_impact_map(refresh=true)` to rebuild and write the artifact. Refresh is a write-mode operation guarded by mutation settings (`ALLOW_MUTATIONS`); read/query calls do not write. The artifact is considered fresh only when it has the expected schema, is not older than `max_age_hours` (24 hours by default), and its Python source fingerprint still matches the workspace. Absent, invalid, or stale artifacts are reported through `artifact_status` instead of being silently trusted.
+
+`impact_tests` now prefers a fresh impact-map artifact. If the artifact is absent, invalid, stale, or cannot map a changed Python source, it falls back to dependency/naming heuristics and reports the fallback through `impact_map.fallback_used` plus `impact_map.artifact_status`. Both `impact_tests` and `change_impact_gate` expose `unmapped_changed_files`; treat those paths as coverage gaps that need manual review or new tests before relying on automated selection. `quality_router(mode="change_impact")` wraps the same `change_impact_gate` result, including selected tests and unmapped files.
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.

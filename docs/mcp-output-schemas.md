@@ -19,6 +19,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `workspace_transaction`
 - `policy_simulator`
 - `release_readiness`
+- `test_impact_map` (public workflow, currently documented contract rather than schema-backed core contract)
 
 The checked-in contracts live in [`source/tool_output_schemas.py`](../source/tool_output_schemas.py). The public helper tool `tool_output_contracts` returns either all contracts or one contract by `tool_name`.
 
@@ -37,6 +38,21 @@ A client-side result envelope has this shape:
 ```
 
 For direct Python tool calls, existing return types are preserved where clients already depend on them. For example, `grep` and `find_paths` still return lists; `git_status` now returns structured fields and preserves the legacy text under `raw`.
+
+### `test_impact_map` workflow output
+
+`test_impact_map` returns `test_impact_map.query.v1` in normal mode and `test_impact_map.query.compact.v1` with `output_profile="compact"`. It reads `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json` unless `refresh=true` is supplied. Refresh rebuilds that report and is write-mode/mutation-gated; ordinary queries are read-only.
+
+Freshness is explicit in `artifact_status`:
+
+- `fresh` - schema is `test_impact_map.v1`, `generated_at` is within `max_age_hours`, and `source_fingerprint` matches the current Python workspace.
+- `absent` - no report exists yet.
+- `invalid` - the report cannot be parsed or has an unexpected schema.
+- `stale` - the report is too old or the Python source fingerprint changed.
+
+The selected-test contract is intentionally conservative: `selected_tests` lists test paths, `test_details` adds per-test symbols/reasons/confidence, and `confidence` is the highest selected-test confidence. `coverage_gaps` lists source rows from the artifact with no static test mapping. `unmapped_changed_files` lists changed Python files that were missing from the artifact or had no mapped tests; callers should handle these as manual-review gaps rather than proof that no tests are needed.
+
+`impact_tests` consumes a fresh artifact first and otherwise falls back to dependency/naming heuristics. Its normal output includes `impact_map.artifact_status`, optional `impact_map.fallback_used`, artifact `coverage_gaps`, and `unmapped_changed_files`; compact output keeps `test_count`/`tests` and adds `impact_map_status` plus `unmapped_changed_files`. `change_impact_gate` and `quality_router(mode="change_impact")` expose the same selected tests and unmapped files under their gate result.
 
 ## Error shape
 
@@ -71,6 +87,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals |
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps and check-specific detail fields |
+| `test_impact_map` | `schema`, `artifact_path`, `artifact_status`, `changed_files`, `selected_tests`, `unmapped_changed_files`, `confidence` | `test_details`, `impacted_sources`, `coverage_gaps`, `generated_at` |
 
 ## IDE/client smoke fixture
 
