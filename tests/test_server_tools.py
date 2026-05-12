@@ -1276,6 +1276,84 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["schema"], "release_readiness.quick.v1")
         self.assertIn("checks", out)
         self.assertIn("tests", out["checks"])
+        self.assertIn("governance_report", out["checks"])
+        self.assertFalse(out["checks"]["governance_report"]["required"])
+
+    def test_governance_report_empty_audit_exports(self):
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        self.assertEqual(out["schema"], "governance_report.v1")
+        self.assertEqual(out["audit"]["counts"]["event_count"], 0)
+        self.assertEqual(out["audit"]["counts"]["blocked_attempt_count"], 0)
+        self.assertIn("json", out["exports"])
+        self.assertIn("markdown", out["exports"])
+        self.assertTrue((self.repo_path / out["exports"]["json"]).exists())
+        self.assertTrue((self.repo_path / out["exports"]["markdown"]).exists())
+        self.assertEqual(out["audit"]["counts"]["digest"]["chain_head"], "")
+
+    def test_governance_report_aggregates_redacted_audit_and_digest(self):
+        audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        events = [
+            {
+                "timestamp": "2026-05-12T08:00:00+00:00",
+                "tool_name": "apply_unified_diff",
+                "categories": ["write", "git mutation"],
+                "success": False,
+                "reason": "mutations disabled",
+                "arguments": {"token": "secret-value"},
+            },
+            {
+                "timestamp": "2026-05-12T08:05:00+00:00",
+                "tool_name": "command_runner",
+                "categories": ["shell/process"],
+                "success": False,
+                "reason": "HTTP session not authorized",
+                "arguments": {"cmd": "echo ok"},
+            },
+            {
+                "timestamp": "2026-05-12T08:10:00+00:00",
+                "tool_name": "docker_router",
+                "categories": ["shell/process"],
+                "success": True,
+                "reason": "",
+                "arguments": {"password": "secret-value"},
+            },
+        ]
+        audit_path.write_text("".join(self.server.json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        out = self.server.governance_report(
+            start_time="2026-05-12T07:59:00+00:00",
+            end_time="2026-05-12T08:11:00+00:00",
+            base_ref="HEAD",
+            head_ref="HEAD",
+            export=True,
+        )
+        counts = out["audit"]["counts"]
+        self.assertEqual(counts["event_count"], 3)
+        self.assertEqual(counts["sensitive_tool_call_count"], 3)
+        self.assertEqual(counts["blocked_attempt_count"], 2)
+        self.assertEqual(counts["mutation_gate_failure_count"], 1)
+        self.assertEqual(counts["http_authorization_denial_count"], 1)
+        self.assertTrue(counts["digest"]["chain_head"])
+        exported = (self.repo_path / out["exports"]["json"]).read_text(encoding="utf-8")
+        self.assertIn("<redacted>", exported)
+        self.assertNotIn("secret-value", exported)
+
+    def test_governance_report_includes_hook_and_snapshot_references(self):
+        self.server.result_handle(mode="store", tool="policy_simulator", value={"schema": "policy_simulator.v1", "ok": False, "blocking_policies": ["docs"]})
+        self.server.result_handle(mode="store", tool="release_readiness", value={"schema": "release_readiness.quick.v1", "ok": True, "checks": {}})
+        self.server.result_handle(mode="store", tool="required_tool_chain", value={"schema": "required_tool_chain.v1", "ok": False, "missing_tools": ["release_readiness"]})
+        snap_index = self.repo_path / ".codebase-tooling-mcp" / "snapshots" / "git_snapshots.json"
+        snap_index.parent.mkdir(parents=True, exist_ok=True)
+        snap_index.write_text(
+            self.server.json.dumps({"snapshots": {"snap-1": {"created_at": "2026-05-12T08:00:00+00:00", "base_head": "abc", "stash_ref": "refs/mcp-snapshots/snap-1", "stash_commit": "def"}}}),
+            encoding="utf-8",
+        )
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        self.assertEqual(out["governance_hooks"]["policy_simulator"]["count"], 1)
+        self.assertEqual(out["governance_hooks"]["release_readiness"]["ok_count"], 1)
+        self.assertEqual(out["governance_hooks"]["required_tool_chain"]["failed_count"], 1)
+        self.assertEqual(out["snapshots"]["count"], 1)
+        self.assertEqual(out["exports"], {})
 
     def test_lossless_codec_roundtrip_and_delta(self):
         payload = {

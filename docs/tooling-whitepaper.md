@@ -125,7 +125,7 @@ Public tools:
 - `task_router`
 - `tool_annotations`
 - `tool_output_contracts`
-- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
+- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`
 
 ### 5.2 Router Design Principle
 

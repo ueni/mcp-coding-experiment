@@ -31,6 +31,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workspace_transaction",
                 "policy_simulator",
                 "release_readiness",
+                "governance_report",
             ),
         )
         contracts = all_tool_output_contracts()
@@ -66,6 +67,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 run_risk_check=False,
                 run_impact_check=False,
             ),
+            "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
         }
 
         for tool_name, payload in outputs.items():

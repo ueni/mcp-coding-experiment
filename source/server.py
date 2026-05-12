@@ -210,6 +210,8 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "release_readiness": {"categories": ["read-only"]},
+    "governance_report": {"categories": ["read-only"]},
+    "audit_report": {"categories": ["read-only"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
     "docker_router": {"categories": ["shell/process"]},
@@ -708,6 +710,296 @@ def _append_audit_event(
     except OSError:
         # Audit logging must not leak arguments through exception text or crash read-only calls.
         pass
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    if not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _governance_audit_log_path() -> tuple[Path, str]:
+    configured = MCP_AUDIT_LOG_FILE
+    if configured.is_absolute():
+        resolved = configured.resolve()
+        try:
+            resolved.relative_to(REPO_PATH)
+        except ValueError:
+            return resolved, "outside_repo_boundary"
+        return resolved, "configured_absolute"
+    return _resolve_repo_path(str(configured)), "configured_relative"
+
+
+def _governance_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
+
+def _load_audit_events(start_dt: datetime | None, end_dt: datetime | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    path, source = _governance_audit_log_path()
+    meta = {
+        "configured_path": str(MCP_AUDIT_LOG_FILE),
+        "resolved_path": str(path),
+        "source": source,
+        "exists": path.exists(),
+        "events_total": 0,
+        "events_in_window": 0,
+        "malformed_lines": 0,
+    }
+    if source == "outside_repo_boundary":
+        meta["readable"] = False
+        meta["reason"] = "MCP_AUDIT_LOG_FILE resolves outside repository boundary"
+        return [], meta
+    if not path.exists():
+        meta["readable"] = True
+        return [], meta
+
+    events: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    meta["malformed_lines"] += 1
+                    continue
+                if not isinstance(event, dict):
+                    meta["malformed_lines"] += 1
+                    continue
+                meta["events_total"] += 1
+                ts = _parse_iso_datetime(str(event.get("timestamp", "")))
+                if start_dt and (ts is None or ts < start_dt):
+                    continue
+                if end_dt and (ts is None or ts > end_dt):
+                    continue
+                events.append(_redact_audit_value(event))
+    except OSError as exc:
+        meta["readable"] = False
+        meta["reason"] = type(exc).__name__
+        return [], meta
+    meta["readable"] = True
+    meta["events_in_window"] = len(events)
+    return events, meta
+
+
+def _audit_event_digest(event: dict[str, Any], previous: str) -> str:
+    canonical = json.dumps(event, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256((previous + "\n" + canonical).encode("utf-8")).hexdigest()
+
+
+def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    by_tool: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    failure_reasons: dict[str, int] = {}
+    blocked: list[dict[str, Any]] = []
+    success_count = 0
+    sensitive_count = 0
+    mutation_gate_failures = 0
+    http_auth_denials = 0
+    previous = ""
+    chain_head = ""
+
+    for event in events:
+        tool = str(event.get("tool_name", "unknown")) or "unknown"
+        categories = event.get("categories", [])
+        if not isinstance(categories, list):
+            categories = []
+        cats = [str(c) for c in categories]
+        success = bool(event.get("success", False))
+        reason = str(event.get("reason", ""))
+        by_tool[tool] = by_tool.get(tool, 0) + 1
+        for cat in cats:
+            by_category[cat] = by_category.get(cat, 0) + 1
+        if SENSITIVE_TOOL_CATEGORIES.intersection(cats):
+            sensitive_count += 1
+        if success:
+            success_count += 1
+        else:
+            key = reason or "unspecified"
+            failure_reasons[key] = failure_reasons.get(key, 0) + 1
+            blocked.append(
+                {
+                    "timestamp": str(event.get("timestamp", "")),
+                    "tool_name": tool,
+                    "categories": cats,
+                    "reason": reason,
+                }
+            )
+        reason_lower = reason.lower()
+        if "mutations disabled" in reason_lower or "mutation permission" in reason_lower:
+            mutation_gate_failures += 1
+        if "http session not authorized" in reason_lower or "bearer token" in reason_lower or "not authorized" in reason_lower:
+            http_auth_denials += 1
+        chain_head = _audit_event_digest(event, previous)
+        previous = chain_head
+
+    return {
+        "event_count": len(events),
+        "sensitive_tool_call_count": sensitive_count,
+        "success_count": success_count,
+        "blocked_attempt_count": len(events) - success_count,
+        "mutation_gate_failure_count": mutation_gate_failures,
+        "http_authorization_denial_count": http_auth_denials,
+        "by_tool": dict(sorted(by_tool.items())),
+        "by_category": dict(sorted(by_category.items())),
+        "failure_reasons": dict(sorted(failure_reasons.items())),
+        "blocked_attempts": blocked[:200],
+        "digest": {
+            "algorithm": "sha256",
+            "mode": "hash_chain_over_redacted_events",
+            "event_count": len(events),
+            "chain_head": chain_head,
+        },
+    }
+
+
+def _governance_result_store_summary() -> dict[str, Any]:
+    payload = _result_store_load()
+    rows = payload.get("results", {})
+    if not isinstance(rows, dict):
+        rows = {}
+    wanted = {"policy_simulator", "release_readiness", "required_tool_chain"}
+    out: dict[str, Any] = {
+        "policy_simulator": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
+        "release_readiness": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
+        "required_tool_chain": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
+    }
+    for rid, row in rows.items():
+        if not isinstance(row, dict):
+            continue
+        tool = str(row.get("tool", ""))
+        if tool not in wanted:
+            continue
+        value = row.get("value")
+        ok = bool(value.get("ok", False)) if isinstance(value, dict) else False
+        bucket = out[tool]
+        bucket["count"] += 1
+        bucket["ok_count" if ok else "failed_count"] += 1
+        latest = bucket.get("latest")
+        created_at = str(row.get("created_at", ""))
+        if not latest or created_at >= str(latest.get("created_at", "")):
+            details: dict[str, Any] = {}
+            if isinstance(value, dict):
+                for key in ("schema", "ok", "blocking_policies", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
+                    if key in value:
+                        details[key] = _redact_audit_value(value[key])
+            bucket["latest"] = {"result_id": str(rid), "created_at": created_at, "ok": ok, "details": details}
+    return out
+
+
+def _governance_snapshot_references(limit: int = 20) -> dict[str, Any]:
+    index = _state_snapshot_index_load()
+    snapshots = index.get("snapshots", {})
+    if not isinstance(snapshots, dict):
+        snapshots = {}
+    refs: list[dict[str, Any]] = []
+    for sid, entry in snapshots.items():
+        if not isinstance(entry, dict):
+            continue
+        refs.append(
+            {
+                "snapshot_id": str(sid),
+                "created_at": str(entry.get("created_at", "")),
+                "base_head": str(entry.get("base_head", "")),
+                "stash_ref": str(entry.get("stash_ref", "")),
+                "has_stash_commit": bool(entry.get("stash_commit")),
+            }
+        )
+    refs.sort(key=lambda row: row.get("created_at", ""), reverse=True)
+    return {"count": len(refs), "latest": refs[:limit]}
+
+
+def _latest_governance_report(max_age_hours: int = 24) -> dict[str, Any]:
+    reports_dir = _resolve_repo_path(str(REPORTS_DIR))
+    now = datetime.now(timezone.utc)
+    latest: dict[str, Any] | None = None
+    if not reports_dir.exists():
+        return {"present": False, "required": False, "max_age_hours": max_age_hours}
+    for path in sorted(reports_dir.glob("governance-report-*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("schema") != "governance_report.v1":
+            continue
+        generated = _parse_iso_datetime(str(payload.get("generated_at", "")))
+        age_hours = None
+        recent = False
+        if generated:
+            age_hours = max(0.0, (now - generated).total_seconds() / 3600)
+            recent = age_hours <= max_age_hours
+        entry = {
+            "present": True,
+            "required": False,
+            "recent": recent,
+            "max_age_hours": max_age_hours,
+            "report_id": str(payload.get("report_id", path.stem)),
+            "generated_at": str(payload.get("generated_at", "")),
+            "path": str(path.relative_to(REPO_PATH)),
+            "age_hours": round(age_hours, 3) if age_hours is not None else None,
+        }
+        if latest is None or entry["generated_at"] >= latest.get("generated_at", ""):
+            latest = entry
+    return latest or {"present": False, "required": False, "max_age_hours": max_age_hours}
+
+
+def _governance_markdown(report: dict[str, Any]) -> str:
+    counts = report.get("audit", {}).get("counts", {}) if isinstance(report.get("audit"), dict) else {}
+    lines = [
+        f"# Governance report {report.get('report_id', '')}",
+        "",
+        f"- Schema: `{report.get('schema', '')}`",
+        f"- Generated at: `{report.get('generated_at', '')}`",
+        f"- Git range: `{report.get('git', {}).get('base_ref', '')}`...`{report.get('git', {}).get('head_ref', '')}`",
+        f"- Audit events in window: {counts.get('event_count', 0)}",
+        f"- Sensitive tool calls: {counts.get('sensitive_tool_call_count', 0)}",
+        f"- Blocked attempts: {counts.get('blocked_attempt_count', 0)}",
+        f"- Mutation-gate failures: {counts.get('mutation_gate_failure_count', 0)}",
+        f"- HTTP authorization denials: {counts.get('http_authorization_denial_count', 0)}",
+        "",
+        "## Tool categories",
+    ]
+    by_category = counts.get("by_category", {}) if isinstance(counts, dict) else {}
+    if by_category:
+        lines.extend(f"- `{k}`: {v}" for k, v in sorted(by_category.items()))
+    else:
+        lines.append("- No audited tool categories found.")
+    lines.extend(["", "## Failure reasons"])
+    reasons = counts.get("failure_reasons", {}) if isinstance(counts, dict) else {}
+    if reasons:
+        lines.extend(f"- `{k}`: {v}" for k, v in sorted(reasons.items()))
+    else:
+        lines.append("- No blocked/failure reasons found.")
+    lines.extend(["", "## Governance hooks"])
+    hooks = report.get("governance_hooks", {}) if isinstance(report.get("governance_hooks"), dict) else {}
+    for name in ("policy_simulator", "release_readiness", "required_tool_chain"):
+        row = hooks.get(name, {}) if isinstance(hooks.get(name), dict) else {}
+        lines.append(f"- `{name}`: {row.get('count', 0)} recorded result(s), latest ok={row.get('latest', {}).get('ok') if isinstance(row.get('latest'), dict) else None}")
+    snapshots = report.get("snapshots", {}) if isinstance(report.get("snapshots"), dict) else {}
+    lines.extend(["", "## Snapshot / rollback references", f"- Snapshot references: {snapshots.get('count', 0)}"])
+    lines.extend(["", "## Digest", f"- Algorithm: `{counts.get('digest', {}).get('algorithm', '') if isinstance(counts.get('digest'), dict) else ''}`", f"- Chain head: `{counts.get('digest', {}).get('chain_head', '') if isinstance(counts.get('digest'), dict) else ''}`", "", "External OPA / Agent Governance Toolkit integrations are out of scope for this first slice.", ""])
+    return "\n".join(lines)
+
+
+def _write_governance_report_exports(report: dict[str, Any]) -> dict[str, str]:
+    paths = _governance_report_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    exports = {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+    report["exports"] = exports
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(_governance_markdown(report), encoding="utf-8")
+    return exports
 
 
 def _tool_annotation_from_categories(categories: list[str]) -> dict[str, Any]:
@@ -11416,6 +11708,88 @@ def smart_fix_batch(
 
 
 @mcp.tool()
+def governance_report(
+    start_time: str = "",
+    end_time: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    export: bool = True,
+) -> dict[str, Any]:
+    """Build and optionally export a redacted audit/governance report."""
+    _require_git_repo()
+    start_dt = _parse_iso_datetime(start_time) if start_time.strip() else None
+    end_dt = _parse_iso_datetime(end_time) if end_time.strip() else None
+    if start_time.strip() and start_dt is None:
+        raise ValueError("start_time must be an ISO-8601 timestamp")
+    if end_time.strip() and end_dt is None:
+        raise ValueError("end_time must be an ISO-8601 timestamp")
+    if start_dt and end_dt and start_dt > end_dt:
+        raise ValueError("start_time must be before end_time")
+
+    events, audit_meta = _load_audit_events(start_dt, end_dt)
+    counts = _aggregate_audit_events(events)
+    generated_at = _now_iso()
+    git_info = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "base_commit": _git("rev-parse", base_ref, check=False).stdout.strip(),
+        "head_commit": _git("rev-parse", head_ref, check=False).stdout.strip(),
+        "range": f"{base_ref}...{head_ref}",
+    }
+    report_seed = json.dumps(
+        {
+            "generated_at": generated_at,
+            "audit_digest": counts.get("digest", {}).get("chain_head", ""),
+            "git": git_info,
+            "window": {"start_time": start_time, "end_time": end_time},
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    report_id = f"governance-report-{_now_stamp()}-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}"
+    report: dict[str, Any] = {
+        "schema": "governance_report.v1",
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "window": {
+            "start_time": start_dt.isoformat() if start_dt else "",
+            "end_time": end_dt.isoformat() if end_dt else "",
+        },
+        "git": git_info,
+        "audit": {"source": audit_meta, "counts": counts, "redacted_events_sample": events[:25]},
+        "governance_hooks": _governance_result_store_summary(),
+        "snapshots": _governance_snapshot_references(),
+        "security": {
+            "redaction": "audit events and report summaries are passed through MCP audit redaction",
+            "repo_boundary_enforced": audit_meta.get("source") != "outside_repo_boundary",
+            "external_integrations": "out_of_scope",
+        },
+        "exports": {},
+    }
+    if export:
+        report["exports"] = _write_governance_report_exports(report)
+    return report
+
+
+@mcp.tool()
+def audit_report(
+    start_time: str = "",
+    end_time: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    export: bool = True,
+) -> dict[str, Any]:
+    """Alias for governance_report for audit-oriented MCP clients."""
+    return governance_report(
+        start_time=start_time,
+        end_time=end_time,
+        base_ref=base_ref,
+        head_ref=head_ref,
+        export=export,
+    )
+
+
+@mcp.tool()
 def release_readiness(
     base_ref: str = "HEAD~1",
     head_ref: str = "HEAD",
@@ -11518,6 +11892,11 @@ def release_readiness(
             "tests": selected[:200],
         }
 
+    result["checks"]["governance_report"] = {
+        "ok": True,
+        **_latest_governance_report(max_age_hours=24),
+    }
+
     result["finished_at"] = _now_iso()
     if summary_mode == "quick":
         return {
@@ -11529,7 +11908,7 @@ def release_readiness(
                 name: {
                     k: v
                     for k, v in data.items()
-                    if k in {"ok", "exit_code", "runner", "target", "finding_count", "risk_score", "risk_level", "missing_spdx_header_count", "missing_license_text_count", "selected_count", "needs_docs_update"}
+                    if k in {"ok", "exit_code", "runner", "target", "finding_count", "risk_score", "risk_level", "missing_spdx_header_count", "missing_license_text_count", "selected_count", "needs_docs_update", "present", "recent", "required", "max_age_hours", "report_id", "generated_at", "path", "age_hours"}
                 }
                 for name, data in result["checks"].items()
                 if isinstance(data, dict)

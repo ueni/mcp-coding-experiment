@@ -110,6 +110,8 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 
 The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails.
 
+For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot evidence, and exports JSON plus Markdown under `.codebase-tooling-mcp/reports/`. See [Governance report workflow](./docs/governance-report.md).
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.
