@@ -704,6 +704,10 @@ def _mcp_server_manifest_payload() -> dict[str, Any]:
             "tool_output_contracts": {
                 "schema": "tool_output_contracts.v1",
                 "source": "tool_output_contracts MCP tool",
+                "documentation": {
+                    "title": "MCP Output Schemas",
+                    "path": "docs/mcp-output-schemas.md",
+                },
                 "schema_backed_tools": sorted(SCHEMA_BACKED_TOOL_NAMES),
             },
         },
@@ -714,6 +718,7 @@ def _mcp_server_manifest_payload() -> dict[str, Any]:
             "public MCP tool/resource/prompt names",
             "tool categories, mutation flags, and MCP safety annotations",
             "schema and contract identifiers",
+            "relative public documentation paths for schema and contract references",
             "relative health/readiness paths",
         ],
         "privacy": {

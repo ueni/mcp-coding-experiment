@@ -121,7 +121,12 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertIn("task_router", tool_names)
         self.assertIn("tool_annotations", tool_names)
         self.assertIn("tool_output_contracts", tool_names)
-        self.assertIn("release_readiness", payload["contracts"]["tool_output_contracts"]["schema_backed_tools"])
+        output_contracts = payload["contracts"]["tool_output_contracts"]
+        self.assertEqual(
+            output_contracts["documentation"],
+            {"title": "MCP Output Schemas", "path": "docs/mcp-output-schemas.md"},
+        )
+        self.assertIn("release_readiness", output_contracts["schema_backed_tools"])
         task_router = next(tool for tool in payload["capabilities"]["tools"] if tool["name"] == "task_router")
         self.assertIn("categories", task_router)
         self.assertIn("annotations", task_router)
