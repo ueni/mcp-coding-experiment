@@ -1278,6 +1278,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("tests", out["checks"])
         self.assertIn("governance_report", out["checks"])
         self.assertFalse(out["checks"]["governance_report"]["required"])
+        self.assertTrue(out["checks"]["governance_report"].get("warning", False))
         self.assertNotIn("mcp_apps", out)
 
     def test_release_readiness_dashboard_feature_flag_preserves_off_contract(self):
@@ -1306,6 +1307,12 @@ class ServerToolsTest(ServerToolsTestBase):
                 "security": {"ok": False, "finding_count": 1},
                 "license": {"ok": True, "missing_spdx_header_count": 0},
                 "risk": {"ok": True, "risk_score": 20, "risk_level": "low"},
+                "governance_report": {
+                    "ok": True,
+                    "present": False,
+                    "required": False,
+                    "max_age_hours": 24,
+                },
             },
         }
         with patch.dict(self.server.os.environ, {"MCP_APPS_DASHBOARD_ENABLED": "true"}, clear=False):
@@ -1328,7 +1335,52 @@ class ServerToolsTest(ServerToolsTestBase):
             if item["blocking"]
         ]
         self.assertEqual(blocking, ["tests", "security"])
+        warnings = [
+            item["id"]
+            for group in data["groups"]
+            for item in group["items"]
+            if item["warning"]
+        ]
+        self.assertEqual(warnings, ["governance_report"])
+        risk_group = next(group for group in data["groups"] if group["title"] == "Risk and governance")
+        self.assertEqual(risk_group["status"], "warning")
+        governance_item = next(item for item in risk_group["items"] if item["id"] == "governance_report")
+        self.assertEqual(governance_item["status"], "warning")
+        self.assertFalse(governance_item["blocking"])
+        self.assertIn("optional governance report", governance_item["summary"])
         self.assertTrue(any("Resolve blocking release checks" in step for step in data["next_steps"]))
+
+    def test_release_readiness_dashboard_payload_preserves_explicit_warnings(self):
+        payload = {
+            "schema": "release_readiness.quick.v1",
+            "base_ref": "main",
+            "head_ref": "feature",
+            "ok": True,
+            "checks": {
+                "docs": {
+                    "ok": True,
+                    "warning": True,
+                    "warning_reason": "documentation freshness should be reviewed",
+                },
+                "governance_report": {
+                    "ok": True,
+                    "present": True,
+                    "recent": False,
+                    "required": False,
+                    "age_hours": 72,
+                    "max_age_hours": 24,
+                },
+            },
+        }
+        with patch.dict(self.server.os.environ, {"MCP_APPS_DASHBOARD_ENABLED": "true"}, clear=False):
+            out = self.server._with_release_readiness_dashboard(payload)
+
+        groups = out["mcp_apps"]["dashboard"]["data"]["groups"]
+        self.assertEqual([group["status"] for group in groups], ["warning", "warning"])
+        items = [item for group in groups for item in group["items"]]
+        self.assertTrue(all(item["warning"] for item in items))
+        self.assertFalse(any(item["blocking"] for item in items))
+        self.assertTrue(out["mcp_apps"]["dashboard"]["data"]["ok"])
 
     def test_release_readiness_dashboard_resource_is_apps_html(self):
         html = self.server.release_readiness_dashboard_resource()

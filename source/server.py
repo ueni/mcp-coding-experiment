@@ -12007,6 +12007,21 @@ def _mcp_apps_dashboard_enabled() -> bool:
 
 def _release_readiness_check_item(name: str, check: dict[str, Any]) -> dict[str, Any]:
     ok = bool(check.get("ok", False))
+    explicit_warning = bool(check.get("warning", False)) or str(
+        check.get("status", "")
+    ).lower() in {"warning", "warn"}
+    if isinstance(check.get("warnings"), list) and check.get("warnings"):
+        explicit_warning = True
+    optional_governance = name == "governance_report" and check.get("required") is False
+    stale_optional_governance = (
+        optional_governance
+        and check.get("present") is True
+        and check.get("recent") is False
+    )
+    missing_optional_governance = optional_governance and check.get("present") is False
+    warning = ok and (
+        explicit_warning or stale_optional_governance or missing_optional_governance
+    )
     fields: list[str] = []
     for key in (
         "runner",
@@ -12025,20 +12040,23 @@ def _release_readiness_check_item(name: str, check: dict[str, Any]) -> dict[str,
         "generated_at",
         "path",
         "age_hours",
+        "warning_reason",
         "error",
     ):
         if key in check and check.get(key) not in (None, ""):
             fields.append(f"{key}={check.get(key)}")
-    if name == "governance_report" and check.get("present") is False:
-        summary = "no recent governance report reference present"
+    if missing_optional_governance:
+        summary = "optional governance report is not present"
+    elif stale_optional_governance:
+        summary = "optional governance report is stale"
     else:
         summary = "; ".join(fields) if fields else ("passed" if ok else "failed")
     return {
         "id": name,
         "label": name.replace("_", " ").title(),
-        "status": "pass" if ok else "fail",
+        "status": "warning" if warning else "pass" if ok else "fail",
         "blocking": not ok,
-        "warning": False,
+        "warning": warning,
         "summary": summary,
         "details": {k: v for k, v in check.items() if k != "tests"},
     }
@@ -12233,10 +12251,16 @@ def release_readiness(
             "tests": selected[:200],
         }
 
-    result["checks"]["governance_report"] = {
+    governance_check = {
         "ok": True,
         **_latest_governance_report(max_age_hours=24),
     }
+    if governance_check.get("required") is False and (
+        governance_check.get("present") is False or governance_check.get("recent") is False
+    ):
+        governance_check["warning"] = True
+        governance_check["warning_reason"] = "optional governance report missing or stale"
+    result["checks"]["governance_report"] = governance_check
 
     result["finished_at"] = _now_iso()
     if summary_mode == "quick":
@@ -12249,7 +12273,30 @@ def release_readiness(
                 name: {
                     k: v
                     for k, v in data.items()
-                    if k in {"ok", "exit_code", "runner", "target", "finding_count", "risk_score", "risk_level", "missing_spdx_header_count", "missing_license_text_count", "selected_count", "needs_docs_update", "present", "recent", "required", "max_age_hours", "report_id", "generated_at", "path", "age_hours"}
+                    if k
+                    in {
+                        "ok",
+                        "exit_code",
+                        "runner",
+                        "target",
+                        "finding_count",
+                        "risk_score",
+                        "risk_level",
+                        "missing_spdx_header_count",
+                        "missing_license_text_count",
+                        "selected_count",
+                        "needs_docs_update",
+                        "present",
+                        "recent",
+                        "required",
+                        "max_age_hours",
+                        "report_id",
+                        "generated_at",
+                        "path",
+                        "age_hours",
+                        "warning",
+                        "warning_reason",
+                    }
                 }
                 for name, data in result["checks"].items()
                 if isinstance(data, dict)
