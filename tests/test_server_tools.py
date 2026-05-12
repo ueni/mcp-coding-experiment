@@ -1278,6 +1278,64 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("tests", out["checks"])
         self.assertIn("governance_report", out["checks"])
         self.assertFalse(out["checks"]["governance_report"]["required"])
+        self.assertNotIn("mcp_apps", out)
+
+    def test_release_readiness_dashboard_feature_flag_preserves_off_contract(self):
+        payload = {
+            "schema": "release_readiness.quick.v1",
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "ok": True,
+            "checks": {"tests": {"ok": True, "runner": "unittest"}},
+        }
+        with patch.dict(self.server.os.environ, {"MCP_APPS_DASHBOARD_ENABLED": "false"}, clear=False):
+            out = self.server._with_release_readiness_dashboard(payload)
+        self.assertEqual(out, payload)
+        self.assertIs(out, payload)
+
+    def test_release_readiness_dashboard_payload_from_representative_results(self):
+        payload = {
+            "schema": "release_readiness.v1",
+            "base_ref": "main",
+            "head_ref": "feature",
+            "ok": False,
+            "checks": {
+                "tests": {"ok": False, "runner": "unittest", "target": "tests", "exit_code": 1},
+                "impact_tests": {"ok": True, "selected_count": 2, "tests": ["tests/test_a.py", "tests/test_b.py"]},
+                "docs": {"ok": True, "needs_docs_update": False},
+                "security": {"ok": False, "finding_count": 1},
+                "license": {"ok": True, "missing_spdx_header_count": 0},
+                "risk": {"ok": True, "risk_score": 20, "risk_level": "low"},
+            },
+        }
+        with patch.dict(self.server.os.environ, {"MCP_APPS_DASHBOARD_ENABLED": "true"}, clear=False):
+            out = self.server._with_release_readiness_dashboard(payload)
+        self.assertEqual(out["schema"], "release_readiness.v1")
+        self.assertIn("mcp_apps", out)
+        app = out["mcp_apps"]
+        self.assertEqual(app["schema"], "release_readiness.dashboard.v1")
+        self.assertEqual(app["app"]["extension"], "io.modelcontextprotocol/ui")
+        self.assertEqual(app["app"]["resourceUri"], self.server.RELEASE_READINESS_DASHBOARD_RESOURCE_URI)
+        self.assertTrue(app["app"]["readOnly"])
+        self.assertEqual(app["dashboard"]["actions"], [])
+        data = app["dashboard"]["data"]
+        self.assertFalse(data["ok"])
+        self.assertIn("tests/test_a.py", data["selected_impacted_tests"])
+        blocking = [
+            item["id"]
+            for group in data["groups"]
+            for item in group["items"]
+            if item["blocking"]
+        ]
+        self.assertEqual(blocking, ["tests", "security"])
+        self.assertTrue(any("Resolve blocking release checks" in step for step in data["next_steps"]))
+
+    def test_release_readiness_dashboard_resource_is_apps_html(self):
+        html = self.server.release_readiness_dashboard_resource()
+        self.assertIn("<!doctype html>", html.lower())
+        self.assertIn("Release readiness", html)
+        self.assertIn("ui/notifications/initialized", html)
+        self.assertIn("Copy", html)
 
     def test_governance_report_empty_audit_exports(self):
         out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)

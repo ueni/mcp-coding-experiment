@@ -57,7 +57,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "risk_scoring": (),
     "workspace_transaction": (),
     "policy_simulator": (),
-    "release_readiness": ("started_at", "finished_at"),
+    "release_readiness": ("started_at", "finished_at", "mcp_apps"),
     "governance_report": ("window", "git", "snapshots", "security"),
 }
 

@@ -120,6 +120,8 @@ Call `test_impact_map(refresh=true)` to rebuild and write the artifact. Refresh 
 
 For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot evidence, and exports JSON plus Markdown under `.codebase-tooling-mcp/reports/`. See [Governance report workflow](./docs/governance-report.md).
 
+For VS Code MCP Apps-capable clients, `release_readiness` can include a read-only dashboard when `MCP_APPS_DASHBOARD_ENABLED=true`. The default is disabled so existing clients keep the same response contract. See [MCP Apps release readiness dashboard](./docs/mcp-apps-release-readiness.md).
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.
@@ -340,6 +342,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` | `60` | No | Positive integer seconds | Rate-limit window size. |
 | `MCP_HTTP_REQUEST_TIMEOUT_SECONDS` | `120` | No | Positive seconds | Non-SSE HTTP request timeout; exceeded requests return 504. |
 | `MCP_AUDIT_LOG_FILE` | `.codebase-tooling-mcp/audit/security_events.jsonl` | No | Path | Append-only JSONL audit events for sensitive tool calls and denied HTTP auth attempts. Arguments are redacted/truncated. |
+| `MCP_APPS_DASHBOARD_ENABLED` | `false` | No | `true`, `false` | Adds the prototype read-only MCP Apps dashboard payload to `release_readiness` results when enabled. |
 | `HOST` | `0.0.0.0` | No | Host/IP string | Bind address for HTTP mode. Prefer `127.0.0.1` for local development. |
 | `PORT` | `8000` | No | Integer port | HTTP listen port. |
 | `MAX_READ_BYTES` | `262144` | No | Positive integer | Max bytes read by file tools per request. |
