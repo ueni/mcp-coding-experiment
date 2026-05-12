@@ -211,7 +211,6 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "policy_simulator": {"categories": ["read-only"]},
     "release_readiness": {"categories": ["read-only"]},
     "governance_report": {"categories": ["read-only"]},
-    "audit_report": {"categories": ["read-only"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
     "docker_router": {"categories": ["shell/process"]},
@@ -11770,23 +11769,6 @@ def governance_report(
         report["exports"] = _write_governance_report_exports(report)
     return report
 
-
-@mcp.tool()
-def audit_report(
-    start_time: str = "",
-    end_time: str = "",
-    base_ref: str = "HEAD~1",
-    head_ref: str = "HEAD",
-    export: bool = True,
-) -> dict[str, Any]:
-    """Alias for governance_report for audit-oriented MCP clients."""
-    return governance_report(
-        start_time=start_time,
-        end_time=end_time,
-        base_ref=base_ref,
-        head_ref=head_ref,
-        export=export,
-    )
 
 
 @mcp.tool()

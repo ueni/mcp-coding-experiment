@@ -19,6 +19,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `workspace_transaction`
 - `policy_simulator`
 - `release_readiness`
+- `governance_report`
 
 The checked-in contracts live in [`source/tool_output_schemas.py`](../source/tool_output_schemas.py). The public helper tool `tool_output_contracts` returns either all contracts or one contract by `tool_name`.
 
@@ -71,6 +72,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals |
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps and check-specific detail fields |
+| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports` | `window`, `git`, `snapshots`, `security` |
 
 ## IDE/client smoke fixture
 

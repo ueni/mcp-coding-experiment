@@ -1290,6 +1290,21 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue((self.repo_path / out["exports"]["markdown"]).exists())
         self.assertEqual(out["audit"]["counts"]["digest"]["chain_head"], "")
 
+    def test_governance_report_absolute_audit_path_boundary(self):
+        original_audit_log = self.server.MCP_AUDIT_LOG_FILE
+        try:
+            self.server.MCP_AUDIT_LOG_FILE = self.repo_path.parent / "outside-audit-log.jsonl"
+            out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        finally:
+            self.server.MCP_AUDIT_LOG_FILE = original_audit_log
+
+        self.assertEqual(out["schema"], "governance_report.v1")
+        self.assertEqual(out["audit"]["source"]["source"], "outside_repo_boundary")
+        self.assertFalse(out["audit"]["source"]["readable"])
+        self.assertEqual(out["audit"]["counts"]["event_count"], 0)
+        self.assertFalse(out["security"]["repo_boundary_enforced"])
+        self.assertEqual(out["exports"], {})
+
     def test_governance_report_aggregates_redacted_audit_and_digest(self):
         audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
         audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1854,6 +1869,8 @@ class ServerToolsTest(ServerToolsTestBase):
             names = {item.model_dump().get("name") for item in tools}
             self.assertEqual(names, expected)
             self.assertIn("task_router", names)
+            self.assertIn("governance_report", names)
+            self.assertNotIn("audit_report", names)
             for tool_name in self.server.SCHEMA_BACKED_TOOL_NAMES:
                 self.assertIn(tool_name, names)
 
