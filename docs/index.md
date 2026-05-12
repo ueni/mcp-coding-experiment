@@ -6,6 +6,8 @@ SPDX-License-Identifier: MIT
 
 # Documentation Index
 
+- [Governance report workflow](./governance-report.md) - read-only audit/export reporting for MCP policy and tool-gate decisions.
+
 This index lists documentation ownership and status.
 
 - [Repository Overview](../README.md) (`README.md`) - Status: `canonical`

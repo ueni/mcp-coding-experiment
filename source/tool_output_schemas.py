@@ -28,6 +28,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "workspace_transaction",
     "policy_simulator",
     "release_readiness",
+    "governance_report",
 )
 
 STABLE_FIELDS: dict[str, tuple[str, ...]] = {
@@ -42,6 +43,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "workspace_transaction": ("schema", "mode", "result"),
     "policy_simulator": ("schema", "ok", "blocking_policies", "docs", "security", "risk", "license"),
     "release_readiness": ("schema", "base_ref", "head_ref", "ok", "checks"),
+    "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports"),
 }
 
 EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -56,6 +58,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "workspace_transaction": (),
     "policy_simulator": (),
     "release_readiness": ("started_at", "finished_at"),
+    "governance_report": ("window", "git", "snapshots", "security"),
 }
 
 
@@ -210,6 +213,21 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "finished_at": {"type": "string"},
             "ok": {"type": "boolean"},
             "checks": {"type": "object"},
+        },
+    ),
+    "governance_report": _object_schema(
+        ["schema", "report_id", "generated_at", "audit", "governance_hooks", "exports"],
+        {
+            "schema": {"type": "string", "const": "governance_report.v1"},
+            "report_id": {"type": "string"},
+            "generated_at": {"type": "string"},
+            "window": {"type": "object"},
+            "git": {"type": "object"},
+            "audit": {"type": "object"},
+            "governance_hooks": {"type": "object"},
+            "snapshots": {"type": "object"},
+            "security": {"type": "object"},
+            "exports": {"type": "object"},
         },
     ),
 }

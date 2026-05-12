@@ -31,11 +31,32 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workspace_transaction",
                 "policy_simulator",
                 "release_readiness",
+                "governance_report",
             ),
         )
         contracts = all_tool_output_contracts()
         self.assertEqual(len(contracts["tools"]), len(SCHEMA_BACKED_TOOL_NAMES))
         self.assertEqual(set(TOOL_OUTPUT_SCHEMAS), set(SCHEMA_BACKED_TOOL_NAMES))
+
+    def test_schema_documentation_tracks_checked_in_contracts(self):
+        docs_root = self.server.Path(__file__).resolve().parents[1]
+        schema_doc = (docs_root / "docs" / "mcp-output-schemas.md").read_text(encoding="utf-8")
+        contracts = all_tool_output_contracts()
+        by_tool = {entry["tool"]: entry for entry in contracts["tools"]}
+        table_rows = {
+            line.split("|", 3)[1].strip().strip("`"): line
+            for line in schema_doc.splitlines()
+            if line.startswith("| `")
+        }
+
+        for tool_name in SCHEMA_BACKED_TOOL_NAMES:
+            with self.subTest(tool_name=tool_name):
+                self.assertIn(f"- `{tool_name}`", schema_doc)
+                row = table_rows[tool_name]
+                for field in by_tool[tool_name]["stableFields"]:
+                    if field.startswith("<"):
+                        continue
+                    self.assertIn(f"`{field}`", row)
 
     def test_representative_success_outputs_validate_against_schemas(self):
         self.write_repo_text("src/schema_contract.py", "def schema_marker():\n    return 'marker'\n")
@@ -66,6 +87,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 run_risk_check=False,
                 run_impact_check=False,
             ),
+            "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
         }
 
         for tool_name, payload in outputs.items():
