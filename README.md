@@ -110,6 +110,14 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 
 The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails.
 
+### Static test impact map workflow
+
+Use `test_impact_map` when you need a repeatable, TDAD-style view of which Python tests should cover a source change. In normal read mode it loads the repository-local artifact at `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json`, checks that it is still fresh, and returns `selected_tests`, `test_details`, `confidence`, `impacted_sources`, `coverage_gaps`, and `unmapped_changed_files` for explicit `changed_files`.
+
+Call `test_impact_map(refresh=true)` to rebuild and write the artifact. Refresh is a write-mode operation guarded by mutation settings (`ALLOW_MUTATIONS`); read/query calls do not write. The artifact is considered fresh only when it has the expected schema, is not older than `max_age_hours` (24 hours by default), and its Python source fingerprint still matches the workspace. Absent, invalid, or stale artifacts are reported through `artifact_status` instead of being silently trusted.
+
+`impact_tests` now prefers a fresh impact-map artifact. If the artifact is absent, invalid, stale, or cannot map a changed Python source, it falls back to dependency/naming heuristics and reports the fallback through `impact_map.fallback_used` plus `impact_map.artifact_status`. Both `impact_tests` and `change_impact_gate` expose `unmapped_changed_files`; treat those paths as coverage gaps that need manual review or new tests before relying on automated selection. `quality_router(mode="change_impact")` wraps the same `change_impact_gate` result, including selected tests and unmapped files.
+
 For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot evidence, and exports JSON plus Markdown under `.codebase-tooling-mcp/reports/`. See [Governance report workflow](./docs/governance-report.md).
 
 ## Sandbox profiles for autonomous agents
@@ -391,7 +399,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 
 `task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
-`tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router` and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
+`tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
 
 ## Labs and Reports
 

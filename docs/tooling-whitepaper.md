@@ -108,6 +108,7 @@ This model allows LLMs to move from conversational ambiguity to explicit, machin
 - Mutation gating through `ALLOW_MUTATIONS`.
 - Separate read/analyze vs. mutate semantics.
 - Policy and risk tools (`security_triage`, `change_impact_gate`, `policy_simulator`).
+- Static test impact selection through `test_impact_map` and the generated `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json` artifact.
 - Output guards (`token_budget_guard`, `output_size_guard`).
 
 ### 4.3 Operational Caveat
@@ -126,6 +127,7 @@ Public tools:
 - `tool_annotations`
 - `tool_output_contracts`
 - Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`
+- Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 
 ### 5.2 Router Design Principle
 
@@ -143,13 +145,23 @@ The following router families are internal orchestration helpers, not public MCP
 - `quality_router`, `governance_router`, `workflow_router`, `runtime_guard_router`: higher-level operational flows
 - `math_router`, `document_router`, `diagram_router`: domain-specific utility families
 
-### 5.3 Internal Leaf Tools
+### 5.3 Static Test Impact Map
+
+`test_impact_map` makes the test-impact workflow explicit instead of burying it inside release gates. Its read path loads `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json`, validates freshness, and maps changed Python files to selected tests with reasons and confidence. `refresh=true` rebuilds and writes the artifact, so it is classified as write-mode and must pass the same mutation guard as other repository writes.
+
+Freshness is based on three checks: the artifact schema must be `test_impact_map.v1`, `generated_at` must be within the requested `max_age_hours` window, and `source_fingerprint` must match the current Python workspace. Stale, invalid, or absent artifacts are visible through `artifact_status`; downstream tools must not treat old mappings as authoritative.
+
+The artifact stores source rows with public symbols, mapped impacted tests, mapping reasons (`direct_import`, `reverse_import_dependent`, `pytest_naming_convention`, `source_reference_in_test`), confidence, dependent files, and `coverage_gaps` for source files with no static mapping. Query results surface `selected_tests` for automation and `unmapped_changed_files` for manual review.
+
+`impact_tests` now prefers a fresh artifact and falls back to dependency/naming heuristics when the artifact is absent, invalid, stale, or cannot map changed Python sources. `change_impact_gate` and `quality_router(mode="change_impact")` carry the selected tests and unmapped files forward so release/review decisions can distinguish tested impact from coverage gaps.
+
+### 5.4 Internal Leaf Tools
 
 Former leaf tools remain implemented in the server for reuse and testing, but they are not part of the public MCP v1 surface. This preserves feature breadth while materially reducing the exposed tool count.
 
-### 5.4 Tool Annotation Manifest
+### 5.5 Tool Annotation Manifest
 
-Clients can call the read-only `tool_annotations` tool to inspect the machine-checkable safety manifest for the public MCP v1 surface. The manifest is generated from `TOOL_SECURITY_METADATA`, the same source used by security audit/gating helpers, and returns MCP annotation hints for every public tool in `PUBLIC_MCP_TOOL_NAMES` plus mode-level entries for public tools with mode-specific behavior. Today that mode coverage includes `task_router` and the schema-backed `workspace_transaction` core tool.
+Clients can call the read-only `tool_annotations` tool to inspect the machine-checkable safety manifest for the public MCP v1 surface. The manifest is generated from `TOOL_SECURITY_METADATA`, the same source used by security audit/gating helpers, and returns MCP annotation hints for every public tool in `PUBLIC_MCP_TOOL_NAMES` plus mode-level entries for public tools with mode-specific behavior. Today that mode coverage includes `task_router`, `test_impact_map(refresh=true)`, and the schema-backed `workspace_transaction` core tool.
 
 - `readOnlyHint`: true for analysis/inspection operations, false for mutation-capable operations.
 - `destructiveHint`: true for explicitly destructive modes such as delete/restore/rollback; non-destructive writes remain distinguishable through `readOnlyHint=false`.
@@ -208,11 +220,12 @@ Restore:
 
 `release_readiness`, `required_tool_chain`, and `change_impact_gate` allow policy-gated release decisions based on:
 
-- Testing outcomes.
+- Testing outcomes, including selected tests from a fresh static impact map where available.
 - Documentation sync.
 - Security findings.
 - Risk score thresholds.
-- Required artifact/report presence.
+- Required artifact/report presence, including `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json` when the impact-map workflow is used.
+- Unmapped changed files and coverage gaps that require manual review or new tests.
 
 ### 8.3 Policy Simulation
 
@@ -223,7 +236,7 @@ Restore:
 ### 9.1 Result Handles and Persistent Reports
 
 - `result_handle` enables referential linking of prior tool outputs.
-- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison.
+- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison. `TEST_IMPACT_MAP.json` is the refreshable static Python test-impact report consumed by `test_impact_map` and preferred by `impact_tests` when fresh.
 
 ### 9.2 Replay and Memory
 

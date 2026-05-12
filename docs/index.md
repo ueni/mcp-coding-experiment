@@ -20,4 +20,4 @@ This index lists documentation ownership and status.
 - [MCP Output Schemas](./mcp-output-schemas.md) (`docs/mcp-output-schemas.md`) - Status: `canonical`
 - [Qwen3.6 Production Routing](./qwen36-production-routing.md) (`docs/qwen36-production-routing.md`) - Status: `operational guidance`
 - Bootstrap instructions for external repositories live in `README.md` under `Bootstrap Another Repository`.
-- Generated reports under `.codebase-tooling-mcp/reports/` - Status: `generated`
+- Generated reports under `.codebase-tooling-mcp/reports/`, including `TEST_IMPACT_MAP.json` for the static test-impact workflow - Status: `generated`

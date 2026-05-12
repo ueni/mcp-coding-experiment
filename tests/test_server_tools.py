@@ -1870,6 +1870,7 @@ class ServerToolsTest(ServerToolsTestBase):
             self.assertEqual(names, expected)
             self.assertIn("task_router", names)
             self.assertIn("governance_report", names)
+            self.assertIn("test_impact_map", names)
             self.assertNotIn("audit_report", names)
             for tool_name in self.server.SCHEMA_BACKED_TOOL_NAMES:
                 self.assertIn(tool_name, names)
@@ -2044,6 +2045,15 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertFalse(workspace_modes["write"]["annotations"]["destructiveHint"])
         self.assertFalse(workspace_modes["delete"]["annotations"]["readOnlyHint"])
         self.assertTrue(workspace_modes["delete"]["annotations"]["destructiveHint"])
+
+        impact_map = self.server.tool_annotations("test_impact_map")["tool"]
+        self.assertTrue(impact_map["annotations"]["readOnlyHint"])
+        self.assertFalse(impact_map["mutation_capable"])
+        impact_map_modes = {entry["mode"]: entry for entry in impact_map["modes"]}
+        self.assertEqual(set(impact_map_modes), {"refresh"})
+        self.assertFalse(impact_map_modes["refresh"]["annotations"]["readOnlyHint"])
+        self.assertTrue(impact_map_modes["refresh"]["mutation_capable"])
+        self.assertFalse(impact_map_modes["refresh"]["annotations"]["destructiveHint"])
 
 
 if __name__ == "__main__":
