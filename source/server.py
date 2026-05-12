@@ -143,6 +143,8 @@ REUSE_SPDX_REPORT = Path(".codebase-tooling-mcp/reports/REUSE.spdx")
 REUSE_LINT_REPORT = Path(".codebase-tooling-mcp/reports/REUSE_LINT.txt")
 GOLDEN_BASELINE_FILE = Path(".codebase-tooling-mcp/reports/TOOL_GOLDEN_BASELINE.json")
 FLAKY_HISTORY_FILE = Path(".codebase-tooling-mcp/reports/FLAKY_TEST_HISTORY.json")
+TEST_IMPACT_MAP_FILE = Path(".codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json")
+TEST_IMPACT_MAP_MAX_AGE_HOURS = 24
 STATE_SNAPSHOT_DIR = Path(".codebase-tooling-mcp/snapshots")
 EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
 ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
@@ -210,6 +212,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "release_readiness": {"categories": ["read-only"]},
+    "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
     "docker_router": {"categories": ["shell/process"]},
@@ -1247,6 +1250,7 @@ def review_changed_files(
         guardrails=[
             "Stay read-only; do not edit files or run mutation modes.",
             "Respect existing mutation and security gates if you later recommend fixes.",
+            "Consult `test_impact_map`/`impact_tests` before mutation or release-readiness checks; report selected tests and unmapped coverage gaps.",
             "Call out high-risk files, missing tests, and rollback considerations before suggestions.",
         ],
         requested_output=[
@@ -11244,6 +11248,176 @@ def flaky_test_detector(
     }
 
 
+def _is_python_test_path(rel: str) -> bool:
+    p = Path(rel)
+    parts = {part.lower() for part in p.parts}
+    name = p.name.lower()
+    return p.suffix == ".py" and ("tests" in parts or name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _python_module_name(rel: str) -> str:
+    path = Path(rel)
+    without_suffix = path.with_suffix("")
+    parts = [part for part in without_suffix.parts if part != "__init__"]
+    return ".".join(parts)
+
+
+def _test_impact_map_fingerprint() -> str:
+    return _fingerprint_path(REPO_PATH, recursive=True, suffixes={".py"}, max_files=5000)
+
+
+def _artifact_age_hours(payload: dict[str, Any]) -> float | None:
+    generated_at = payload.get("generated_at")
+    if not isinstance(generated_at, str) or not generated_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+
+
+def _load_test_impact_map(max_age_hours: int = TEST_IMPACT_MAP_MAX_AGE_HOURS) -> tuple[dict[str, Any] | None, str]:
+    path = _resolve_repo_path(str(TEST_IMPACT_MAP_FILE))
+    if not path.is_file():
+        return None, "absent"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "invalid"
+    if not isinstance(payload, dict) or payload.get("schema") != "test_impact_map.v1":
+        return None, "invalid"
+    age = _artifact_age_hours(payload)
+    if age is None or age > max_age_hours:
+        return payload, "stale"
+    if payload.get("source_fingerprint") != _test_impact_map_fingerprint():
+        return payload, "stale"
+    return payload, "fresh"
+
+
+def _extract_test_functions(path: Path) -> list[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return []
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            names.append(node.name)
+        elif isinstance(node, ast.ClassDef) and (node.name.endswith("Test") or node.name.startswith("Test")):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name.startswith("test"):
+                    names.append(f"{node.name}.{child.name}")
+    return sorted(names)
+
+
+def _build_test_impact_map_payload() -> dict[str, Any]:
+    dep = dependency_map(path=".", recursive=True, include_stdlib=False, output_profile="normal")
+    edges = [edge for edge in dep.get("edges", []) if isinstance(edge, dict)]
+    reverse_edges: dict[str, set[str]] = {}
+    direct_edges: dict[str, set[str]] = {}
+    for edge in edges:
+        src = str(edge.get("from", ""))
+        dst = str(edge.get("to", ""))
+        if not src or not dst:
+            continue
+        reverse_edges.setdefault(dst, set()).add(src)
+        direct_edges.setdefault(src, set()).add(dst)
+
+    py_files = sorted(
+        str(path.relative_to(REPO_PATH)).replace("\\", "/")
+        for path in _iter_candidate_files(REPO_PATH, recursive=True)
+        if path.suffix == ".py"
+    )
+    test_files = [rel for rel in py_files if _is_python_test_path(rel)]
+    test_set = set(test_files)
+    source_files = [rel for rel in py_files if rel not in test_set]
+    symbols_by_file: dict[str, list[str]] = {}
+    for sym in symbol_index(path=".", include_private=False, recursive=True, max_symbols=20000, output_profile="normal", adaptive_limits=False):
+        rel = str(sym.get("path", ""))
+        name = str(sym.get("name", ""))
+        if rel and name:
+            symbols_by_file.setdefault(rel, []).append(name)
+
+    tests_by_source: dict[str, dict[str, Any]] = {}
+    coverage_gaps: list[dict[str, Any]] = []
+    for src in source_files:
+        impacted_files: set[str] = {src}
+        queue = [src]
+        while queue:
+            cur = queue.pop(0)
+            for dependent in reverse_edges.get(cur, set()):
+                if dependent not in impacted_files:
+                    impacted_files.add(dependent)
+                    queue.append(dependent)
+        module = _python_module_name(src)
+        stem = Path(src).stem
+        mapped_tests: dict[str, dict[str, Any]] = {}
+        for test in test_files:
+            reasons: list[str] = []
+            confidence = 0.0
+            if test in impacted_files:
+                reason = "direct_import" if src in direct_edges.get(test, set()) else "reverse_import_dependent"
+                reasons.append(reason)
+                confidence = max(confidence, 0.92 if reason == "direct_import" else 0.82)
+            if Path(test).name in {f"test_{stem}.py", f"{stem}_test.py"}:
+                reasons.append("pytest_naming_convention")
+                confidence = max(confidence, 0.72)
+            try:
+                test_text = _resolve_repo_path(test).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                test_text = ""
+            needles = {module, stem, src, *symbols_by_file.get(src, [])}
+            if any(needle and needle in test_text for needle in needles):
+                reasons.append("source_reference_in_test")
+                confidence = max(confidence, 0.78)
+            if reasons:
+                mapped_tests[test] = {"path": test, "symbols": _extract_test_functions(_resolve_repo_path(test)), "reasons": sorted(set(reasons)), "confidence": round(confidence, 2)}
+        entries = sorted(mapped_tests.values(), key=lambda row: row["path"])
+        if not entries:
+            coverage_gaps.append({"path": src, "reason": "no_static_test_mapping"})
+        tests_by_source[src] = {"path": src, "symbols": sorted(set(symbols_by_file.get(src, []))), "impacted_tests": entries, "confidence": round(max([row["confidence"] for row in entries], default=0.0), 2), "mapping_reasons": sorted({reason for row in entries for reason in row["reasons"]}), "dependent_files": sorted(impacted_files - {src})}
+    return {"schema": "test_impact_map.v1", "generated_at": _now_iso(), "source_fingerprint": _test_impact_map_fingerprint(), "python_file_count": len(py_files), "source_count": len(source_files), "test_count": len(test_files), "sources": tests_by_source, "coverage_gaps": coverage_gaps}
+
+
+def _query_test_impact_map(payload: dict[str, Any], changed_files: list[str], max_tests: int = 300) -> dict[str, Any]:
+    sources = payload.get("sources", {}) if isinstance(payload.get("sources"), dict) else {}
+    selected: dict[str, dict[str, Any]] = {}
+    impacted_sources: list[dict[str, Any]] = []
+    unmapped: list[str] = []
+    for rel in changed_files:
+        if _is_python_test_path(rel):
+            selected.setdefault(
+                rel,
+                {
+                    "path": rel,
+                    "symbols": _extract_test_functions(_resolve_repo_path(rel))
+                    if _resolve_repo_path(rel).is_file()
+                    else [],
+                    "reasons": ["changed_test_file"],
+                    "confidence": 1.0,
+                },
+            )
+            continue
+        row = sources.get(rel)
+        if not isinstance(row, dict):
+            if rel.endswith(".py"):
+                unmapped.append(rel)
+            continue
+        tests = row.get("impacted_tests", []) if isinstance(row.get("impacted_tests"), list) else []
+        if not tests:
+            unmapped.append(rel)
+        for test in tests:
+            if isinstance(test, dict) and isinstance(test.get("path"), str):
+                selected.setdefault(test["path"], test)
+        impacted_sources.append({"path": rel, "symbols": row.get("symbols", []), "confidence": row.get("confidence", 0), "mapping_reasons": row.get("mapping_reasons", []), "test_count": len(tests)})
+    ordered = sorted(selected.values(), key=lambda row: row["path"])[:max_tests]
+    changed_set = set(changed_files)
+    return {"tests": [row["path"] for row in ordered], "test_details": ordered, "impacted_sources": impacted_sources, "unmapped_changed_files": sorted(set(unmapped)), "coverage_gaps": [gap for gap in payload.get("coverage_gaps", []) if isinstance(gap, dict) and gap.get("path") in changed_set], "confidence": round(max([float(row.get("confidence", 0)) for row in ordered], default=0.0), 2)}
+
+
 @mcp.tool()
 def change_impact_gate(
     base_ref: str = "HEAD~1",
@@ -11273,6 +11447,7 @@ def change_impact_gate(
 
     impacts = impact_tests(base_ref=base_ref, head_ref=head_ref, output_profile="compact")
     selected_tests = impacts.get("tests", []) if isinstance(impacts, dict) else []
+    unmapped_changed_files = impacts.get("unmapped_changed_files", []) if isinstance(impacts, dict) else []
     docs = doc_sync_check(base_ref=base_ref, head_ref=head_ref)
     risk = risk_scoring(ref=head_ref)
 
@@ -11295,6 +11470,8 @@ def change_impact_gate(
         "changed_count": len(changed),
         "critical_changed": critical_changed,
         "selected_tests": selected_tests,
+        "unmapped_changed_files": unmapped_changed_files,
+        "impact_tests": impacts,
         "docs": docs,
         "risk": {"risk_score": risk.get("risk_score"), "risk_level": risk.get("risk_level")},
         "should_block": bool(blocked_reasons),
@@ -12965,19 +13142,107 @@ def edit_transaction(
 
 
 @mcp.tool()
+def test_impact_map(
+    changed_files: list[str] | None = None,
+    refresh: bool = False,
+    max_age_hours: int = TEST_IMPACT_MAP_MAX_AGE_HOURS,
+    max_tests: int = 300,
+    output_profile: str | None = None,
+) -> dict[str, Any]:
+    """Read or refresh the static Python test impact map and query impacted tests."""
+    _require_git_repo()
+    if max_tests < 1:
+        raise ValueError("max_tests must be >= 1")
+    if max_age_hours < 0:
+        raise ValueError("max_age_hours must be >= 0")
+    profile = _default_output_profile(output_profile)
+    artifact_path = str(TEST_IMPACT_MAP_FILE)
+    if refresh:
+        _require_mutations()
+        payload = _build_test_impact_map_payload()
+        path = _resolve_repo_path(artifact_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        status = "fresh"
+    else:
+        payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+
+    changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
+    query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
+        "tests": [],
+        "test_details": [],
+        "impacted_sources": [],
+        "unmapped_changed_files": changed if changed and status != "fresh" else [],
+        "coverage_gaps": [],
+        "confidence": 0.0,
+    }
+    result = {
+        "schema": "test_impact_map.query.v1",
+        "artifact_path": artifact_path,
+        "artifact_status": status,
+        "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
+        "changed_files": changed,
+        "selected_tests": query["tests"],
+        "test_details": query["test_details"],
+        "impacted_sources": query["impacted_sources"],
+        "unmapped_changed_files": query["unmapped_changed_files"],
+        "coverage_gaps": query["coverage_gaps"],
+        "confidence": query["confidence"],
+    }
+    if profile == "compact":
+        return {
+            "schema": "test_impact_map.query.compact.v1",
+            "artifact_status": status,
+            "test_count": len(query["tests"]),
+            "selected_tests": query["tests"],
+            "unmapped_changed_files": query["unmapped_changed_files"],
+            "confidence": query["confidence"],
+        }
+    return result
+
+
+@mcp.tool()
 def impact_tests(
     base_ref: str = "HEAD~1",
     head_ref: str = "HEAD",
     max_tests: int = 300,
     output_profile: str | None = None,
 ) -> dict[str, Any]:
-    """Select impacted tests using changed files and dependency edges."""
+    """Select impacted tests using the static map when fresh, else dependency edges."""
     _require_git_repo()
     if max_tests < 1:
         raise ValueError("max_tests must be >= 1")
     profile = _default_output_profile(output_profile)
     diff_out = _git("diff", "--name-only", f"{base_ref}...{head_ref}").stdout.strip()
     changed = [line.strip() for line in diff_out.splitlines() if line.strip()]
+
+    artifact, artifact_status = _load_test_impact_map()
+    artifact_unmapped_changed_files: list[str] = []
+    artifact_coverage_gaps: list[dict[str, Any]] = []
+    if artifact:
+        mapped = _query_test_impact_map(artifact, changed, max_tests=max_tests)
+        artifact_unmapped_changed_files = mapped["unmapped_changed_files"]
+        artifact_coverage_gaps = mapped["coverage_gaps"]
+        if artifact_status == "fresh" and (mapped["tests"] or not mapped["unmapped_changed_files"]):
+            result = {
+                "base_ref": base_ref,
+                "head_ref": head_ref,
+                "changed_files": changed,
+                "impacted_files": [row["path"] for row in mapped["impacted_sources"]],
+                "tests": mapped["tests"],
+                "test_details": mapped["test_details"],
+                "impact_map": {
+                    "artifact_path": str(TEST_IMPACT_MAP_FILE),
+                    "artifact_status": artifact_status,
+                    "generated_at": artifact.get("generated_at"),
+                    "confidence": mapped["confidence"],
+                    "coverage_gaps": mapped["coverage_gaps"],
+                    "unmapped_changed_files": mapped["unmapped_changed_files"],
+                },
+            }
+            if profile == "compact":
+                return {"test_count": len(mapped["tests"]), "tests": mapped["tests"], "unmapped_changed_files": mapped["unmapped_changed_files"], "impact_map_status": artifact_status}
+            return result
 
     dep = dependency_map(path=".", recursive=True, include_stdlib=False, output_profile="normal")
     reverse_edges: dict[str, set[str]] = {}
@@ -13020,9 +13285,11 @@ def impact_tests(
         "changed_files": changed,
         "impacted_files": sorted(impacted),
         "tests": deduped,
+        "impact_map": {"artifact_path": str(TEST_IMPACT_MAP_FILE), "artifact_status": artifact_status, "fallback_used": True, "coverage_gaps": artifact_coverage_gaps, "unmapped_changed_files": artifact_unmapped_changed_files},
+        "unmapped_changed_files": artifact_unmapped_changed_files,
     }
     if profile == "compact":
-        return {"test_count": len(deduped), "tests": deduped}
+        return {"test_count": len(deduped), "tests": deduped, "unmapped_changed_files": artifact_unmapped_changed_files, "impact_map_status": artifact_status}
     return result
 
 
