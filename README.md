@@ -118,6 +118,8 @@ Call `test_impact_map(refresh=true)` to rebuild and write the artifact. Refresh 
 
 `impact_tests` now prefers a fresh impact-map artifact. If the artifact is absent, invalid, stale, or cannot map a changed Python source, it falls back to dependency/naming heuristics and reports the fallback through `impact_map.fallback_used` plus `impact_map.artifact_status`. Both `impact_tests` and `change_impact_gate` expose `unmapped_changed_files`; treat those paths as coverage gaps that need manual review or new tests before relying on automated selection. `quality_router(mode="change_impact")` wraps the same `change_impact_gate` result, including selected tests and unmapped files.
 
+For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot evidence, and exports JSON plus Markdown under `.codebase-tooling-mcp/reports/`. See [Governance report workflow](./docs/governance-report.md).
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.
