@@ -79,6 +79,8 @@ Expected result (example):
   "is_git_repo": true,
   "allow_mutations": true,
   "transport": "http",
+  "runtime_image_version": "0.0.0-local-build",
+  "mcp_coding_experiment_version": "0.0.0-local-build",
   "server": {
     "http_mode": true,
     "port": 8000,
@@ -357,6 +359,8 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `MCP_HTTP_REQUEST_TIMEOUT_SECONDS` | `120` | No | Positive seconds | Non-SSE HTTP request timeout; exceeded requests return 504. |
 | `MCP_AUDIT_LOG_FILE` | `.codebase-tooling-mcp/audit/security_events.jsonl` | No | Path | Append-only JSONL audit events for sensitive tool calls and denied HTTP auth attempts. Arguments are redacted/truncated. |
 | `MCP_APPS_DASHBOARD_ENABLED` | `false` | No | `true`, `false` | Adds the prototype read-only MCP Apps dashboard payload to `release_readiness` results when enabled. |
+| `RUNTIME_IMAGE_VERSION_COMPATIBILITY` / `RUNTIME_IMAGE_VERSION_FEATURE` / `RUNTIME_IMAGE_VERSION_BUGFIX` / `RUNTIME_IMAGE_VERSION_SUFFIX` | `0` / `0` / `0` / `-local-build` | No | Version counter/suffix strings | Independent Docker runtime image version metadata surfaced by `/healthz` as `runtime_image_version`. Build/release automation can override these Docker build args or runtime env vars. |
+| `MCP_CODING_EXPERIMENT_VERSION_COMPATIBILITY` / `MCP_CODING_EXPERIMENT_VERSION_FEATURE` / `MCP_CODING_EXPERIMENT_VERSION_BUGFIX` / `MCP_CODING_EXPERIMENT_VERSION_SUFFIX` | `0` / `0` / `0` / `-local-build` | No | Version counter/suffix strings | Independent Python MCP server version metadata surfaced by `/healthz` as `mcp_coding_experiment_version`. Build/release automation can override these Docker build args or runtime env vars. |
 | `HOST` | `0.0.0.0` | No | Host/IP string | Bind address for HTTP mode. Prefer `127.0.0.1` for local development. |
 | `PORT` | `8000` | No | Integer port | HTTP listen port. |
 | `MAX_READ_BYTES` | `262144` | No | Positive integer | Max bytes read by file tools per request. |
