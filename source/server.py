@@ -215,6 +215,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "policy_simulator": {"categories": ["read-only"]},
     "release_readiness": {"categories": ["read-only"]},
     "governance_report": {"categories": ["read-only"]},
+    "workflow_diagnostics": {"categories": ["read-only"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
@@ -971,6 +972,198 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+
+WORKFLOW_FAILURE_CATEGORIES = {
+    "auth_policy_denial",
+    "mutation_disabled",
+    "path_scope_violation",
+    "missing_snapshot_rollback",
+    "failed_readiness_test_gate",
+    "malformed_tool_output",
+    "unknown_failure",
+}
+
+
+def _diagnostic_text_blob(*values: Any) -> str:
+    return " ".join(
+        str(value).lower()
+        for value in values
+        if value not in (None, "", [], {})
+    )
+
+
+def _workflow_failure_category(step: dict[str, Any]) -> str:
+    tool = str(step.get("tool", "")).lower()
+    category = str(step.get("category", "")).lower()
+    reason = step.get("error") or step.get("reason") or ""
+    flags = step.get("policy_flags", [])
+    outputs = step.get("key_outputs", {})
+    blob = _diagnostic_text_blob(tool, category, reason, flags, outputs, step.get("redacted_args", {}))
+    if any(term in blob for term in ("mutations disabled", "mutation disabled", "allow_mutations=false")):
+        return "mutation_disabled"
+    if any(term in blob for term in ("not authorized", "unauthorized", "bearer token", "auth", "policy denied", "policy denial", "blocking_policies")):
+        return "auth_policy_denial"
+    if any(term in blob for term in ("outside repo", "outside repository", "repo boundary", "path boundary", "path/scope", "not under repo", "scope violation")):
+        return "path_scope_violation"
+    if any(term in blob for term in ("missing snapshot", "snapshot missing", "rollback missing", "rollback required", "state_snapshot", "state_restore")):
+        return "missing_snapshot_rollback"
+    if any(term in blob for term in ("readiness failed", "release_readiness", "test failed", "tests failed", "gate skipped", "required gate skipped", "required_tool_chain", "self_test")):
+        return "failed_readiness_test_gate"
+    if any(term in blob for term in ("malformed", "invalid schema", "schema invalid", "output schema", "jsondecode", "json decode", "parse error")):
+        return "malformed_tool_output"
+    return "unknown_failure"
+
+
+def _workflow_policy_flags(step: dict[str, Any], category: str) -> list[str]:
+    flags = step.get("policy_flags", [])
+    normalized = [str(flag) for flag in flags] if isinstance(flags, list) else []
+    if category != "unknown_failure" and category not in normalized:
+        normalized.append(category)
+    return normalized[:10]
+
+
+def _normalize_workflow_step(raw: dict[str, Any], index: int, source: str) -> dict[str, Any]:
+    tool = str(raw.get("tool") or raw.get("tool_name") or raw.get("name") or "unknown")
+    raw_categories = raw.get("categories", raw.get("category", []))
+    if isinstance(raw_categories, list):
+        category = ",".join(str(item) for item in raw_categories)
+    else:
+        category = str(raw_categories or "")
+    success = bool(raw.get("success", raw.get("ok", False)))
+    reason = str(raw.get("error") or raw.get("reason") or raw.get("message") or "")
+    args = raw.get("arguments", raw.get("args", {}))
+    outputs = raw.get("outputs", raw.get("output", raw.get("result", {})))
+    redacted_args = _redact_audit_value(args if isinstance(args, (dict, list, str)) else str(args))
+    redacted_outputs = _redact_audit_value(outputs if isinstance(outputs, (dict, list, str)) else str(outputs))
+    step = {
+        "step_id": str(raw.get("step_id") or raw.get("id") or f"{source}-{index + 1}"),
+        "source": source,
+        "timestamp": str(raw.get("timestamp", "")),
+        "tool": tool,
+        "category": category,
+        "success": success,
+        "error": _redact_audit_string(reason),
+        "redacted_args": redacted_args,
+        "key_outputs": redacted_outputs,
+        "policy_flags": raw.get("policy_flags", []) if isinstance(raw.get("policy_flags", []), list) else [],
+    }
+    if not success:
+        failure_category = _workflow_failure_category(step)
+        step["failure_category"] = failure_category
+        step["policy_flags"] = _workflow_policy_flags(step, failure_category)
+    return step
+
+
+def _workflow_safe_next_actions(category: str) -> list[str]:
+    actions = {
+        "auth_policy_denial": [
+            "Re-authenticate the MCP session or rerun through an authorized client before retrying.",
+            "If this was a policy denial, inspect the policy evidence and narrow the requested operation.",
+        ],
+        "mutation_disabled": [
+            "Keep analysis read-only or restart with ALLOW_MUTATIONS=true only after explicit operator approval.",
+            "Prefer planning/diff preview tools before enabling mutation-capable tools.",
+        ],
+        "path_scope_violation": [
+            "Retry with repository-relative paths under REPO_PATH.",
+            "Do not follow symlinks or absolute paths that resolve outside the mounted repository.",
+        ],
+        "missing_snapshot_rollback": [
+            "Create a state_snapshot or documented rollback point before mutation work.",
+            "Record the rollback reference in the recovery plan before retrying.",
+        ],
+        "failed_readiness_test_gate": [
+            "Inspect the failing readiness/test evidence and run the smallest targeted check first.",
+            "Do not advance release or review gates until the failed check is green or explicitly waived.",
+        ],
+        "malformed_tool_output": [
+            "Validate the tool output against its schema and capture the raw parse error.",
+            "Retry with a smaller output profile or structured output contract.",
+        ],
+        "unknown_failure": [
+            "Review the failed step evidence and rerun only the narrowest safe diagnostic.",
+            "Add a more specific failure reason to future audit events if this repeats.",
+        ],
+    }
+    return actions.get(category, actions["unknown_failure"])
+
+
+def _workflow_evidence(step: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence = [
+        {"field": "tool", "value": step.get("tool", "")},
+        {"field": "error", "value": step.get("error", "")},
+    ]
+    if step.get("policy_flags"):
+        evidence.append({"field": "policy_flags", "value": step.get("policy_flags")})
+    if step.get("timestamp"):
+        evidence.append({"field": "timestamp", "value": step.get("timestamp")})
+    return evidence
+
+
+def _workflow_redactions_applied(steps: list[dict[str, Any]]) -> list[str]:
+    encoded = json.dumps(steps, sort_keys=True, ensure_ascii=True)
+    redactions: list[str] = []
+    if "<redacted>" in encoded:
+        redactions.append("sensitive_keys_or_values")
+    if "...[truncated]" in encoded:
+        redactions.append("long_strings_truncated")
+    if "<redacted-depth>" in encoded:
+        redactions.append("nested_values_depth_limited")
+    return redactions
+
+
+def _build_workflow_diagnostics(events: list[dict[str, Any]], trajectory: list[dict[str, Any]] | None = None, limit: int = 50) -> dict[str, Any]:
+    audit_steps = [_normalize_workflow_step(event, idx, "audit") for idx, event in enumerate(events[-limit:])]
+    trajectory_steps = [
+        _normalize_workflow_step(step, idx, "trajectory")
+        for idx, step in enumerate((trajectory or [])[:limit])
+        if isinstance(step, dict)
+    ]
+    steps = audit_steps + trajectory_steps
+    failed = [step for step in steps if not step.get("success", False)]
+    categorized = [step for step in failed if step.get("failure_category") != "unknown_failure"]
+    critical = (categorized or failed or [None])[0]
+    failure_category = str(critical.get("failure_category", "") if isinstance(critical, dict) else "")
+    if not failure_category:
+        failure_category = "none"
+    category_counts: dict[str, int] = {}
+    for step in failed:
+        key = str(step.get("failure_category", "unknown_failure"))
+        category_counts[key] = category_counts.get(key, 0) + 1
+    report = {
+        "schema": "workflow_diagnostics.v1",
+        "ok": not failed,
+        "step_count": len(steps),
+        "failed_step_count": len(failed),
+        "failure_categories": dict(sorted(category_counts.items())),
+        "critical_step_candidate": critical or {},
+        "failure_category": failure_category,
+        "evidence": _workflow_evidence(critical) if isinstance(critical, dict) else [],
+        "safe_next_actions": _workflow_safe_next_actions(failure_category) if failure_category != "none" else [],
+        "redactions_applied": _workflow_redactions_applied(steps),
+        "trajectory": steps[:limit],
+    }
+    return report
+
+
+def _workflow_diagnostics_compact(report: dict[str, Any]) -> dict[str, Any]:
+    critical = report.get("critical_step_candidate", {})
+    return {
+        "schema": "workflow_diagnostics.summary.v1",
+        "ok": bool(report.get("ok", True)),
+        "failed_step_count": int(report.get("failed_step_count", 0)),
+        "failure_category": str(report.get("failure_category", "none")),
+        "critical_step_id": str(critical.get("step_id", "")) if isinstance(critical, dict) else "",
+        "critical_tool": str(critical.get("tool", "")) if isinstance(critical, dict) else "",
+        "safe_next_actions": list(report.get("safe_next_actions", []))[:3]
+        if isinstance(report.get("safe_next_actions"), list)
+        else [],
+        "redactions_applied": list(report.get("redactions_applied", []))[:5]
+        if isinstance(report.get("redactions_applied"), list)
+        else [],
+    }
+
+
 def _governance_result_store_summary() -> dict[str, Any]:
     payload = _result_store_load()
     rows = payload.get("results", {})
@@ -1088,6 +1281,20 @@ def _governance_markdown(report: dict[str, Any]) -> str:
         lines.extend(f"- `{k}`: {v}" for k, v in sorted(reasons.items()))
     else:
         lines.append("- No blocked/failure reasons found.")
+    diagnostics = report.get("workflow_diagnostics", {}) if isinstance(report.get("workflow_diagnostics"), dict) else {}
+    if diagnostics and diagnostics.get("failed_step_count", 0):
+        lines.extend(
+            [
+                "",
+                "## Workflow diagnostics",
+                f"- Failure category: `{diagnostics.get('failure_category', 'none')}`",
+                f"- Critical step: `{diagnostics.get('critical_step_id', '')}` via `{diagnostics.get('critical_tool', '')}`",
+            ]
+        )
+        actions = diagnostics.get("safe_next_actions", []) if isinstance(diagnostics.get("safe_next_actions"), list) else []
+        if actions:
+            lines.append("- Safe next actions:")
+            lines.extend(f"  - {action}" for action in actions)
     lines.extend(["", "## Governance hooks"])
     hooks = report.get("governance_hooks", {}) if isinstance(report.get("governance_hooks"), dict) else {}
     for name in ("policy_simulator", "release_readiness", "required_tool_chain"):
@@ -12041,6 +12248,39 @@ def smart_fix_batch(
 
 
 @mcp.tool()
+def workflow_diagnostics(
+    trajectory: list[dict[str, Any]] | None = None,
+    start_time: str = "",
+    end_time: str = "",
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Diagnose failed MCP workflows from redacted audit events and optional trajectory snippets."""
+    _require_git_repo()
+    if limit < 1 or limit > 200:
+        raise ValueError("limit must be between 1 and 200")
+    start_dt = _parse_iso_datetime(start_time) if start_time.strip() else None
+    end_dt = _parse_iso_datetime(end_time) if end_time.strip() else None
+    if start_time.strip() and start_dt is None:
+        raise ValueError("start_time must be an ISO-8601 timestamp")
+    if end_time.strip() and end_dt is None:
+        raise ValueError("end_time must be an ISO-8601 timestamp")
+    if start_dt and end_dt and start_dt > end_dt:
+        raise ValueError("start_time must be before end_time")
+    if trajectory is not None and not isinstance(trajectory, list):
+        raise ValueError("trajectory must be a list of step objects")
+    events, audit_meta = _load_audit_events(start_dt, end_dt)
+    report = _build_workflow_diagnostics(events, trajectory=trajectory, limit=limit)
+    report["audit_source"] = audit_meta
+    report["read_only"] = True
+    report["security"] = {
+        "redaction": "audit events and caller-supplied trajectory snippets are passed through MCP audit redaction",
+        "records_secrets": False,
+        "repo_boundary_enforced": audit_meta.get("source") != "outside_repo_boundary",
+    }
+    return report
+
+
+@mcp.tool()
 def governance_report(
     start_time: str = "",
     end_time: str = "",
@@ -12090,6 +12330,9 @@ def governance_report(
         },
         "git": git_info,
         "audit": {"source": audit_meta, "counts": counts, "redacted_events_sample": events[:25]},
+        "workflow_diagnostics": _workflow_diagnostics_compact(
+            _build_workflow_diagnostics(events, limit=50)
+        ),
         "governance_hooks": _governance_result_store_summary(),
         "snapshots": _governance_snapshot_references(),
         "security": {
