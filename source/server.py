@@ -127,6 +127,7 @@ MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TI
 MCP_AUDIT_LOG_FILE = Path(
     os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
 )
+RELEASE_READINESS_DASHBOARD_RESOURCE_URI = "ui://codebase-tooling-mcp/release-readiness-dashboard"
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
 MEMORY_FILE = Path(".codebase-tooling-mcp/memory/context_memory.json")
@@ -1600,6 +1601,52 @@ def repo_tree_resource(path: str) -> str:
         "count": len(entries),
     }
     return _mcp_resource_json(payload)
+
+
+@mcp.resource(
+    RELEASE_READINESS_DASHBOARD_RESOURCE_URI,
+    name="release_readiness_dashboard_resource",
+    description="Read-only MCP Apps dashboard template for release_readiness results.",
+    mime_type="text/html;profile=mcp-app",
+)
+def release_readiness_dashboard_resource() -> str:
+    """Return a static MCP Apps HTML view for release_readiness tool data."""
+    return """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Release readiness dashboard</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+body{margin:0;padding:16px;background:transparent;color:CanvasText;}
+.card{border:1px solid color-mix(in srgb,CanvasText 24%,transparent);border-radius:10px;padding:12px;margin:10px 0;background:color-mix(in srgb,Canvas 92%,CanvasText 8%);}
+.status{font-size:1.35rem;font-weight:700}.go{color:#22863a}.nogo{color:#cb2431}.warn{color:#b08800}.muted{opacity:.72}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.pill{display:inline-block;border-radius:999px;padding:2px 8px;margin:2px;font-size:.82rem;border:1px solid currentColor}
+pre{white-space:pre-wrap;word-break:break-word;padding:8px;border-radius:6px;background:rgba(127,127,127,.16)} button{margin-left:8px}
+</style>
+</head>
+<body>
+<main id="app"><p class="muted">Waiting for release_readiness data from the MCP host…</p></main>
+<script>
+(function(){
+  const app=document.getElementById('app');
+  function esc(v){return String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+  function copy(text){navigator.clipboard?.writeText(text).catch(()=>{});}
+  window.copyStep=copy;
+  function render(payload){
+    const data=payload?.mcp_apps?.dashboard?.data || payload?.structuredContent?.mcp_apps?.dashboard?.data || payload?.data || payload;
+    if(!data || !data.groups){return;}
+    const groups=data.groups.map(g=>`<section class="card"><h2>${esc(g.title)} <span class="pill ${g.status==='blocking'?'nogo':g.status==='warning'?'warn':'go'}">${esc(g.status)}</span></h2>${(g.items||[]).map(i=>`<div><strong>${esc(i.label)}</strong>: ${esc(i.summary)} ${i.blocking?'<span class="pill nogo">blocking</span>':''}${i.warning?'<span class="pill warn">warning</span>':''}</div>`).join('')}</section>`).join('');
+    const steps=(data.next_steps||[]).map(s=>`<pre>${esc(s)}<button onclick="copyStep(${JSON.stringify(String(s))})">Copy</button></pre>`).join('');
+    app.innerHTML=`<h1>Release readiness</h1><div class="status ${data.ok?'go':'nogo'}">${data.ok?'GO':'NO-GO'}</div><p class="muted">${esc(data.base_ref)} → ${esc(data.head_ref)} · ${esc(data.schema)}</p><div class="grid">${groups}</div>${data.rollback_reference?`<section class="card"><h2>Rollback / snapshot</h2><pre>${esc(JSON.stringify(data.rollback_reference,null,2))}</pre></section>`:''}<section class="card"><h2>Copyable next steps</h2>${steps || '<p class="muted">No suggested next steps.</p>'}</section>`;
+  }
+  window.addEventListener('message',ev=>{const msg=ev.data||{}; if(msg.method&&String(msg.method).includes('tool')) render(msg.params||msg.result||msg); else render(msg);});
+  window.parent?.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{app:'release_readiness_dashboard'}},'*');
+})();
+</script>
+</body>
+</html>"""
 
 
 def _workflow_prompt_text(
@@ -12058,6 +12105,158 @@ def governance_report(
 
 
 
+def _mcp_apps_dashboard_enabled() -> bool:
+    return os.getenv("MCP_APPS_DASHBOARD_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _release_readiness_check_item(name: str, check: dict[str, Any]) -> dict[str, Any]:
+    ok = bool(check.get("ok", False))
+    explicit_warning = bool(check.get("warning", False)) or str(
+        check.get("status", "")
+    ).lower() in {"warning", "warn"}
+    if isinstance(check.get("warnings"), list) and check.get("warnings"):
+        explicit_warning = True
+    optional_governance = name == "governance_report" and check.get("required") is False
+    stale_optional_governance = (
+        optional_governance
+        and check.get("present") is True
+        and check.get("recent") is False
+    )
+    missing_optional_governance = optional_governance and check.get("present") is False
+    warning = ok and (
+        explicit_warning or stale_optional_governance or missing_optional_governance
+    )
+    fields: list[str] = []
+    for key in (
+        "runner",
+        "target",
+        "exit_code",
+        "selected_count",
+        "needs_docs_update",
+        "finding_count",
+        "missing_spdx_header_count",
+        "missing_license_text_count",
+        "risk_level",
+        "risk_score",
+        "present",
+        "recent",
+        "report_id",
+        "generated_at",
+        "path",
+        "age_hours",
+        "warning_reason",
+        "error",
+    ):
+        if key in check and check.get(key) not in (None, ""):
+            fields.append(f"{key}={check.get(key)}")
+    if missing_optional_governance:
+        summary = "optional governance report is not present"
+    elif stale_optional_governance:
+        summary = "optional governance report is stale"
+    else:
+        summary = "; ".join(fields) if fields else ("passed" if ok else "failed")
+    return {
+        "id": name,
+        "label": name.replace("_", " ").title(),
+        "status": "warning" if warning else "pass" if ok else "fail",
+        "blocking": not ok,
+        "warning": warning,
+        "summary": summary,
+        "details": {k: v for k, v in check.items() if k != "tests"},
+    }
+
+
+def _release_readiness_dashboard_payload(result: dict[str, Any]) -> dict[str, Any]:
+    checks = result.get("checks", {}) if isinstance(result.get("checks"), dict) else {}
+    groups: list[dict[str, Any]] = []
+    for title, names in (
+        ("Release gate", ("tests", "impact_tests")),
+        ("Policy and compliance", ("docs", "security", "license")),
+        ("Risk and governance", ("risk", "governance_report")),
+    ):
+        items = [
+            _release_readiness_check_item(name, checks[name])
+            for name in names
+            if isinstance(checks.get(name), dict)
+        ]
+        if not items:
+            continue
+        has_blocking = any(item["blocking"] for item in items)
+        has_warning = any(item["warning"] for item in items)
+        groups.append(
+            {
+                "title": title,
+                "status": "blocking" if has_blocking else "warning" if has_warning else "pass",
+                "items": items,
+            }
+        )
+
+    impact = checks.get("impact_tests", {}) if isinstance(checks.get("impact_tests"), dict) else {}
+    selected_tests = impact.get("tests", []) if isinstance(impact.get("tests"), list) else []
+    next_steps = [
+        "release_readiness(summary_mode='quick')",
+        "change_impact_gate(base_ref='{}', head_ref='{}')".format(
+            result.get("base_ref", "HEAD~1"), result.get("head_ref", "HEAD")
+        ),
+        "required_tool_chain(required_tools=['release_readiness', 'change_impact_gate'])",
+    ]
+    if selected_tests:
+        next_steps.append("Run selected impacted tests: " + " ".join(str(t) for t in selected_tests[:20]))
+    if not result.get("ok", False):
+        failing = [
+            item["id"]
+            for group in groups
+            for item in group.get("items", [])
+            if item.get("blocking")
+        ]
+        next_steps.append("Resolve blocking release checks: " + ", ".join(failing))
+
+    rollback_reference = None
+    try:
+        snapshots = _governance_snapshot_references(limit=1)
+        latest = snapshots.get("latest", []) if isinstance(snapshots, dict) else []
+        if latest:
+            rollback_reference = latest[0]
+    except Exception:
+        rollback_reference = None
+
+    return {
+        "schema": "release_readiness.dashboard.v1",
+        "app": {
+            "extension": "io.modelcontextprotocol/ui",
+            "resourceUri": RELEASE_READINESS_DASHBOARD_RESOURCE_URI,
+            "mimeType": "text/html;profile=mcp-app",
+            "readOnly": True,
+        },
+        "dashboard": {
+            "data": {
+                "schema": result.get("schema"),
+                "base_ref": result.get("base_ref"),
+                "head_ref": result.get("head_ref"),
+                "ok": bool(result.get("ok", False)),
+                "groups": groups,
+                "selected_impacted_tests": selected_tests[:200],
+                "rollback_reference": rollback_reference,
+                "next_steps": next_steps,
+            },
+            "actions": [],
+        },
+    }
+
+
+def _with_release_readiness_dashboard(result: dict[str, Any]) -> dict[str, Any]:
+    if not _mcp_apps_dashboard_enabled():
+        return result
+    enriched = dict(result)
+    enriched["mcp_apps"] = _release_readiness_dashboard_payload(result)
+    return enriched
+
+
 @mcp.tool()
 def release_readiness(
     base_ref: str = "HEAD~1",
@@ -12161,14 +12360,20 @@ def release_readiness(
             "tests": selected[:200],
         }
 
-    result["checks"]["governance_report"] = {
+    governance_check = {
         "ok": True,
         **_latest_governance_report(max_age_hours=24),
     }
+    if governance_check.get("required") is False and (
+        governance_check.get("present") is False or governance_check.get("recent") is False
+    ):
+        governance_check["warning"] = True
+        governance_check["warning_reason"] = "optional governance report missing or stale"
+    result["checks"]["governance_report"] = governance_check
 
     result["finished_at"] = _now_iso()
     if summary_mode == "quick":
-        return {
+        quick_result = {
             "schema": "release_readiness.quick.v1",
             "base_ref": base_ref,
             "head_ref": head_ref,
@@ -12177,13 +12382,37 @@ def release_readiness(
                 name: {
                     k: v
                     for k, v in data.items()
-                    if k in {"ok", "exit_code", "runner", "target", "finding_count", "risk_score", "risk_level", "missing_spdx_header_count", "missing_license_text_count", "selected_count", "needs_docs_update", "present", "recent", "required", "max_age_hours", "report_id", "generated_at", "path", "age_hours"}
+                    if k
+                    in {
+                        "ok",
+                        "exit_code",
+                        "runner",
+                        "target",
+                        "finding_count",
+                        "risk_score",
+                        "risk_level",
+                        "missing_spdx_header_count",
+                        "missing_license_text_count",
+                        "selected_count",
+                        "needs_docs_update",
+                        "present",
+                        "recent",
+                        "required",
+                        "max_age_hours",
+                        "report_id",
+                        "generated_at",
+                        "path",
+                        "age_hours",
+                        "warning",
+                        "warning_reason",
+                    }
                 }
                 for name, data in result["checks"].items()
                 if isinstance(data, dict)
             },
         }
-    return result
+        return _with_release_readiness_dashboard(quick_result)
+    return _with_release_readiness_dashboard(result)
 
 
 @mcp.tool()
@@ -15928,6 +16157,21 @@ def _prune_public_mcp_surface() -> None:
             continue
 
 
+def _attach_release_readiness_app_metadata(tool: Any) -> None:
+    if not _mcp_apps_dashboard_enabled():
+        return
+    ui_meta = {
+        "resourceUri": RELEASE_READINESS_DASHBOARD_RESOURCE_URI,
+        "visibility": ["model"],
+    }
+    existing = getattr(tool, "_meta", None)
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.setdefault("ui", ui_meta)
+    tool.__dict__["_meta"] = existing
+    tool.__dict__.setdefault("meta", existing)
+
+
 def _apply_output_schemas_to_mcp_tools() -> None:
     """Attach checked-in outputSchema metadata to schema-backed FastMCP tools."""
     for name, schema in OUTPUT_SCHEMA_BY_TOOL.items():
@@ -15938,6 +16182,8 @@ def _apply_output_schemas_to_mcp_tools() -> None:
         tool.fn_metadata.output_model = _AnyToolOutput
         tool.fn_metadata.wrap_output = False
         tool.__dict__.pop("output_schema", None)
+        if name == "release_readiness":
+            _attach_release_readiness_app_metadata(tool)
 
 
 _apply_output_schemas_to_mcp_tools()
