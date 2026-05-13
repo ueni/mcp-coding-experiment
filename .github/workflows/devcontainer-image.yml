@@ -44,6 +44,28 @@ jobs:
         timeout-minutes: 150
         run: docker build --progress=plain --build-arg OLLAMA_PRELOAD_MODELS= --build-arg VSCODE_PRELOAD_EXTENSIONS= --file source/Dockerfile --tag "${TEST_IMAGE}" source
 
+      - name: Record Docker resource baseline
+        run: |
+          scripts/monitor_runtime_resources.py --image "${TEST_IMAGE}" --json | tee docker-resource-baseline.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          metrics = json.loads(Path("docker-resource-baseline.json").read_text())
+          print(
+              "Docker resource baseline: "
+              f"image_size_mib={metrics['image_size_mib']}, "
+              f"startup_memory_mib={metrics['startup_memory_mib']}, "
+              f"health_ok={metrics['health_ok']}"
+          )
+          PY
+
+      - name: Upload Docker resource baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-resource-baseline
+          path: docker-resource-baseline.json
+
       - name: Run tests with coverage in container
         run: |
           CONTAINER_NAME="codebase-tooling-mcp-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

@@ -253,6 +253,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
 
 # Keep high-churn app files in the last layers to speed iterative rebuilds.
 COPY --chown=app:app server.py ./
+COPY --chown=app:app tool_output_schemas.py version_metadata.py ./source/
 COPY --chown=app:app entrypoint.sh ./
 RUN chmod 0755 /app/entrypoint.sh
 RUN ln -sf /usr/local/bin/python3 /usr/bin/python3
