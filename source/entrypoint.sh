@@ -8,7 +8,10 @@ set -euo pipefail
 
 umask 027
 
-DEFAULT_CONTINUE_OLLAMA_MODELS="qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b"
+DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL="hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M"
+DEFAULT_OLLAMA_TEXT_ALIAS_MODEL="qwen3.6-35b-a3b:iq1"
+DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="512"
+DEFAULT_CONTINUE_OLLAMA_MODELS="${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL},qwen2.5-coder:1.5b"
 
 is_truthy() {
   case "${1:-}" in
@@ -66,6 +69,125 @@ csv_has_model() {
     fi
   done < <(iter_ollama_models "${models_csv}")
   return 1
+}
+
+ollama_manifest_path_for_model_ref() {
+  local model_ref="${1:-}"
+  local tag="latest"
+  local model_path="${model_ref}"
+  local last_segment="${model_ref##*/}"
+
+  if [[ "${last_segment}" == *:* ]]; then
+    tag="${last_segment##*:}"
+    model_path="${model_ref%:*}"
+  fi
+
+  if [[ "${model_path}" == */*/* ]]; then
+    printf '%s/manifests/%s/%s\n' "${OLLAMA_MODELS}" "${model_path}" "${tag}"
+  elif [[ "${model_path}" == */* ]]; then
+    printf '%s/manifests/registry.ollama.ai/%s/%s\n' "${OLLAMA_MODELS}" "${model_path}" "${tag}"
+  else
+    printf '%s/manifests/registry.ollama.ai/library/%s/%s\n' "${OLLAMA_MODELS}" "${model_path}" "${tag}"
+  fi
+}
+
+ollama_model_blob_path_from_manifest() {
+  local manifest_path="${1:-}"
+  python - "${manifest_path}" "${OLLAMA_MODELS}" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+models_root = pathlib.Path(sys.argv[2])
+
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"unable to read Ollama manifest {manifest_path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+for layer in manifest.get("layers", []):
+    if layer.get("mediaType") != "application/vnd.ollama.image.model":
+        continue
+    digest = str(layer.get("digest", ""))
+    if digest.startswith("sha256:"):
+        print(models_root / "blobs" / digest.replace(":", "-"))
+        raise SystemExit(0)
+
+print(f"no model blob layer found in Ollama manifest {manifest_path}", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
+ensure_ollama_text_alias_from_preloaded_model() {
+  local alias="${1:-}"
+  local source_model="${2:-}"
+  local num_ctx="${3:-}"
+  local manifest_path=""
+  local blob_path=""
+  local alias_manifest_path=""
+  local alias_blob_path=""
+  local modelfile=""
+  local create_log=""
+  local safe_alias=""
+
+  if [[ -z "${alias}" ]] || [[ -z "${source_model}" ]]; then
+    return 0
+  fi
+
+  if ! ollama show "${source_model}" >/dev/null 2>&1; then
+    if is_truthy "${OLLAMA_ALLOW_PULL:-false}"; then
+      echo "pulling Ollama source model '${source_model}' for local text alias '${alias}'" >&2
+      ollama pull "${source_model}"
+    else
+      echo "Ollama source model '${source_model}' is missing and OLLAMA_ALLOW_PULL=false; cannot create local text alias '${alias}'." >&2
+      return 1
+    fi
+  fi
+
+  manifest_path="$(ollama_manifest_path_for_model_ref "${source_model}")"
+  if [[ ! -f "${manifest_path}" ]]; then
+    echo "Ollama manifest '${manifest_path}' is missing; cannot create local text alias '${alias}'." >&2
+    return 1
+  fi
+
+  if ! blob_path="$(ollama_model_blob_path_from_manifest "${manifest_path}")"; then
+    return 1
+  fi
+  if [[ ! -f "${blob_path}" ]]; then
+    echo "Ollama model blob '${blob_path}' is missing; cannot create local text alias '${alias}'." >&2
+    return 1
+  fi
+
+  if ollama show "${alias}" >/dev/null 2>&1; then
+    alias_manifest_path="$(ollama_manifest_path_for_model_ref "${alias}")"
+    if [[ -f "${alias_manifest_path}" ]] && alias_blob_path="$(ollama_model_blob_path_from_manifest "${alias_manifest_path}")"; then
+      if [[ "${alias_blob_path}" == "${blob_path}" ]]; then
+        return 0
+      fi
+    fi
+    echo "Ollama alias '${alias}' exists but does not point at '${source_model}'; recreating it." >&2
+  fi
+
+  modelfile="$(mktemp)"
+  safe_alias="$(printf '%s' "${alias}" | tr -c 'A-Za-z0-9_.-' '_')"
+  create_log="/tmp/ollama-create-${safe_alias}.log"
+  {
+    printf 'FROM %s\n' "${blob_path}"
+    if [[ "${num_ctx}" =~ ^[0-9]+$ ]] && [[ "${num_ctx}" -gt 0 ]]; then
+      printf 'PARAMETER num_ctx %s\n' "${num_ctx}"
+    fi
+  } > "${modelfile}"
+
+  if ! ollama create "${alias}" -f "${modelfile}" >"${create_log}" 2>&1; then
+    cat "${create_log}" >&2 || true
+    rm -f "${modelfile}"
+    return 1
+  fi
+
+  rm -f "${modelfile}"
+  echo "created Ollama text-only alias '${alias}' from '${source_model}'" >&2
 }
 
 start_ollama_with_host() {
@@ -408,6 +530,9 @@ if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
 fi
 CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen3.6-35b-a3b:iq1}"
 CODING_MICRO_MODEL="${CODING_MICRO_MODEL:-qwen2.5-coder:1.5b}"
+OLLAMA_TEXT_ALIAS_SOURCE_MODEL="${OLLAMA_TEXT_ALIAS_SOURCE_MODEL:-${DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL}}"
+OLLAMA_TEXT_ALIAS_MODEL="${OLLAMA_TEXT_ALIAS_MODEL:-${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL}}"
+OLLAMA_TEXT_ALIAS_NUM_CTX="${OLLAMA_TEXT_ALIAS_NUM_CTX:-${OLLAMA_CONTEXT_LENGTH:-${DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX}}}"
 OLLAMA_STARTUP_TIMEOUT="${OLLAMA_STARTUP_TIMEOUT:-30}"
 OLLAMA_ENABLED="${OLLAMA_ENABLED:-true}"
 OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
@@ -437,6 +562,18 @@ if is_truthy "${OLLAMA_ENABLED}"; then
   if [[ "${started}" -ne 1 ]]; then
     echo "continuing without Ollama" >&2
   else
+    if [[ -n "${OLLAMA_TEXT_ALIAS_MODEL}" ]] \
+      && { [[ "${CODING_DEFAULT_MODEL:-}" == "${OLLAMA_TEXT_ALIAS_MODEL}" ]] \
+        || csv_has_model "${CONTINUE_OLLAMA_MODELS-${DEFAULT_CONTINUE_OLLAMA_MODELS}}" "${OLLAMA_TEXT_ALIAS_MODEL}"; }; then
+      if ! ensure_ollama_text_alias_from_preloaded_model \
+        "${OLLAMA_TEXT_ALIAS_MODEL}" \
+        "${OLLAMA_TEXT_ALIAS_SOURCE_MODEL}" \
+        "${OLLAMA_TEXT_ALIAS_NUM_CTX}"; then
+        echo "failed to create Ollama text-only alias '${OLLAMA_TEXT_ALIAS_MODEL}' from '${OLLAMA_TEXT_ALIAS_SOURCE_MODEL}'" >&2
+        echo "continuing with running Ollama and current model set" >&2
+      fi
+    fi
+
     if is_truthy "${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL}" && [[ -n "${CODING_DEFAULT_MODEL:-}" ]]; then
       echo "ensuring default Ollama model '${CODING_DEFAULT_MODEL}' is available before server startup" >&2
       if ! ensure_ollama_model_installed "${CODING_DEFAULT_MODEL}"; then

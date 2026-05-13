@@ -254,3 +254,41 @@ def test_setup_script_generates_token_aware_devcontainer():
 
     assert config["containerEnv"]["MCP_HTTP_BEARER_TOKEN"] == "${localEnv:MCP_HTTP_BEARER_TOKEN}"
     assert "MCP_HTTP_BEARER_TOKEN" in result.stderr
+
+
+def test_devcontainer_exit137_diagnostics_script_captures_required_evidence():
+    script = (REPO_ROOT / "scripts" / "devcontainer_exit137_diagnostics.sh").read_text(
+        encoding="utf-8"
+    )
+
+    required_snippets = [
+        "docker inspect",
+        "State.OOMKilled",
+        "State.ExitCode",
+        "/sys/fs/cgroup/memory.current",
+        "/sys/fs/cgroup/memory.peak",
+        "/sys/fs/cgroup/memory.events",
+        "ps -eo pid,ppid,user,stat,%mem,%cpu,rss,vsz,comm,args --sort=-rss",
+        "free -h",
+        "swapon --show",
+        "dmesg -T",
+        "journalctl -k",
+        "docker logs --tail",
+        "docker events --since 24h",
+    ]
+    for snippet in required_snippets:
+        assert snippet in script
+
+
+def test_troubleshooting_documents_devcontainer_exit137_collection_and_remediation():
+    troubleshooting = (REPO_ROOT / "docs" / "troubleshooting.md").read_text(encoding="utf-8")
+
+    assert "VS Code Server attach fails with exit code 137" in troubleshooting
+    assert "scripts/devcontainer_exit137_diagnostics.sh" in troubleshooting
+    assert "State.OOMKilled" in troubleshooting
+    assert "memory.current" in troubleshooting
+    assert "memory.peak" in troubleshooting
+    assert "memory.events" in troubleshooting
+    assert "Process list sorted by RSS" in troubleshooting
+    assert "32GB T14-class" in troubleshooting
+    assert "python /app/server.py" in troubleshooting
