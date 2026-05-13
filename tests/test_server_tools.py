@@ -1560,6 +1560,97 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("<redacted>", exported)
         self.assertNotIn("secret-value", exported)
 
+    def test_workflow_diagnostics_classifies_failures_and_redacts(self):
+        audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        events = [
+            {
+                "timestamp": "2026-05-12T08:00:00+00:00",
+                "tool_name": "command_runner",
+                "categories": ["shell/process"],
+                "success": False,
+                "reason": "HTTP session not authorized: bearer token rejected",
+                "arguments": {"authorization": "Bearer secret-value"},
+            },
+            {
+                "timestamp": "2026-05-12T08:01:00+00:00",
+                "tool_name": "apply_unified_diff",
+                "categories": ["write", "git mutation"],
+                "success": False,
+                "reason": "mutations disabled",
+                "arguments": {"path": "src/sample.py"},
+            },
+        ]
+        audit_path.write_text("".join(self.server.json.dumps(e) + "\n" for e in events), encoding="utf-8")
+
+        out = self.server.workflow_diagnostics(
+            trajectory=[
+                {
+                    "step_id": "caller-1",
+                    "tool": "read_snippet",
+                    "success": False,
+                    "error": "path outside repository boundary",
+                    "args": {"api_key": "secret-value"},
+                },
+                {
+                    "step_id": "caller-2",
+                    "tool": "workspace_transaction",
+                    "success": False,
+                    "error": "rollback missing before mutation retry",
+                },
+                {
+                    "step_id": "caller-3",
+                    "tool": "tool_output_contracts",
+                    "success": False,
+                    "error": "malformed tool output: invalid schema",
+                },
+            ]
+        )
+
+        self.assertEqual(out["schema"], "workflow_diagnostics.v1")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_category"], "auth_policy_denial")
+        self.assertEqual(out["critical_step_candidate"]["step_id"], "audit-1")
+        self.assertIn("auth_policy_denial", out["failure_categories"])
+        self.assertIn("mutation_disabled", out["failure_categories"])
+        self.assertIn("path_scope_violation", out["failure_categories"])
+        self.assertIn("missing_snapshot_rollback", out["failure_categories"])
+        self.assertIn("malformed_tool_output", out["failure_categories"])
+        self.assertTrue(out["safe_next_actions"])
+        encoded = self.server.json.dumps(out, sort_keys=True)
+        self.assertIn("<redacted>", encoded)
+        self.assertNotIn("secret-value", encoded)
+        self.assertIn("sensitive_keys_or_values", out["redactions_applied"])
+        self.assertFalse(out["security"]["records_secrets"])
+
+    def test_governance_report_includes_workflow_diagnostics_summary(self):
+        audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(
+            self.server.json.dumps(
+                {
+                    "timestamp": "2026-05-12T08:00:00+00:00",
+                    "tool_name": "required_tool_chain",
+                    "categories": ["read-only"],
+                    "success": False,
+                    "reason": "required gate skipped: release_readiness",
+                    "arguments": {},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        diag = out["workflow_diagnostics"]
+        self.assertEqual(diag["schema"], "workflow_diagnostics.summary.v1")
+        self.assertFalse(diag["ok"])
+        self.assertEqual(diag["failure_category"], "failed_readiness_test_gate")
+        self.assertEqual(diag["critical_tool"], "required_tool_chain")
+        exported_md = (self.repo_path / out["exports"]["markdown"]).read_text(encoding="utf-8")
+        self.assertIn("Workflow diagnostics", exported_md)
+        self.assertIn("failed_readiness_test_gate", exported_md)
+
     def test_governance_report_includes_hook_and_snapshot_references(self):
         self.server.result_handle(mode="store", tool="policy_simulator", value={"schema": "policy_simulator.v1", "ok": False, "blocking_policies": ["docs"]})
         self.server.result_handle(mode="store", tool="release_readiness", value={"schema": "release_readiness.quick.v1", "ok": True, "checks": {}})

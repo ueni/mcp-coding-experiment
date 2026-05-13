@@ -30,6 +30,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "clarification_gate",
     "release_readiness",
     "governance_report",
+    "workflow_diagnostics",
 )
 
 STABLE_FIELDS: dict[str, tuple[str, ...]] = {
@@ -46,6 +47,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "clarification_gate": ("schema", "ok_to_continue", "status", "missing_fields", "questions", "fallback_checklist", "elicitation"),
     "release_readiness": ("schema", "base_ref", "head_ref", "ok", "checks"),
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports"),
+    "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
 }
 
 EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -61,7 +63,8 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "policy_simulator": (),
     "clarification_gate": ("audit", "inputs", "decision_reasons"),
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
-    "governance_report": ("window", "git", "snapshots", "security"),
+    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics"),
+    "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
 }
 
 
@@ -243,10 +246,30 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "window": {"type": "object"},
             "git": {"type": "object"},
             "audit": {"type": "object"},
+            "workflow_diagnostics": {"type": "object"},
             "governance_hooks": {"type": "object"},
             "snapshots": {"type": "object"},
             "security": {"type": "object"},
             "exports": {"type": "object"},
+        },
+    ),
+    "workflow_diagnostics": _object_schema(
+        ["schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"],
+        {
+            "schema": {"type": "string", "const": "workflow_diagnostics.v1"},
+            "ok": {"type": "boolean"},
+            "step_count": {"type": "integer"},
+            "failed_step_count": {"type": "integer"},
+            "failure_categories": {"type": "object"},
+            "critical_step_candidate": {"type": "object"},
+            "failure_category": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "object"}},
+            "safe_next_actions": {"type": "array", "items": {"type": "string"}},
+            "redactions_applied": {"type": "array", "items": {"type": "string"}},
+            "audit_source": {"type": "object"},
+            "read_only": {"type": "boolean"},
+            "security": {"type": "object"},
+            "trajectory": {"type": "array", "items": {"type": "object"}},
         },
     ),
 }

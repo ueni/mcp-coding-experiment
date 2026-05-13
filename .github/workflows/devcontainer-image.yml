@@ -98,8 +98,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare temp directory
+        run: |
+          mkdir -p "${RUNNER_TEMP}"
+          df -h "${RUNNER_TEMP}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        env:
+          TMPDIR: ${{ runner.temp }}
 
       - name: Decide image build mode
         id: image-mode

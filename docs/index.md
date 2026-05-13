@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT
 # Documentation Index
 
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting for MCP policy and tool-gate decisions.
+- [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
 
 This index lists documentation ownership and status.
 

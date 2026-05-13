@@ -126,7 +126,7 @@ Public tools:
 - `task_router`
 - `tool_annotations`
 - `tool_output_contracts`
-- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`
+- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `workflow_diagnostics`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 
 ### 5.2 Router Design Principle
@@ -224,6 +224,7 @@ Restore:
 - Documentation sync.
 - Security findings.
 - Risk score thresholds.
+- Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
 - Required artifact/report presence, including `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json` when the impact-map workflow is used.
 - Unmapped changed files and coverage gaps that require manual review or new tests.
 

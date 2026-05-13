@@ -14,6 +14,7 @@ The first-slice schema is `governance_report.v1`. It includes:
 - hash-chain digest metadata over redacted audit events (`sha256`, no raw secrets);
 - local governance hook summaries from stored `policy_simulator`, `release_readiness`, and `required_tool_chain` results when available;
 - snapshot/rollback references from the state snapshot index when available;
+- a compact `workflow_diagnostics` summary for failed audit trajectories when blocked steps are present;
 - git base/head metadata for PR or release review.
 
 Example call:

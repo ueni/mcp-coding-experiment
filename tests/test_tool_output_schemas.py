@@ -33,6 +33,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "clarification_gate",
                 "release_readiness",
                 "governance_report",
+                "workflow_diagnostics",
             ),
         )
         contracts = all_tool_output_contracts()
@@ -96,6 +97,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 run_impact_check=False,
             ),
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
+            "workflow_diagnostics": self.server.workflow_diagnostics(),
         }
 
         for tool_name, payload in outputs.items():
