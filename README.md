@@ -365,6 +365,10 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `CONTINUE_OLLAMA_MODELS` | `qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b` | No | Comma-separated model IDs (or empty) | Default steady-state Ollama model set expected to be present locally and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
 | `OLLAMA_ALLOW_PULL` | `false` | No | `true`, `false` | Explicit opt-in for runtime `ollama pull` of missing models. Keep `false` for offline-only startup. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
+| `OLLAMA_CONTEXT_LENGTH` | `512` | No | Positive integer | Ollama server default context length. Also used as the local text alias `num_ctx` when `OLLAMA_TEXT_ALIAS_NUM_CTX` is unset. |
+| `OLLAMA_TEXT_ALIAS_SOURCE_MODEL` | `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M` | No | Ollama model ID | Source GGUF model used to create the local text-only alias. |
+| `OLLAMA_TEXT_ALIAS_MODEL` | `qwen3.6-35b-a3b:iq1` | No | Ollama model ID | Local text-only alias created from the source GGUF model so Ollama avoids projector-specific loader paths. |
+| `OLLAMA_TEXT_ALIAS_NUM_CTX` | uses `OLLAMA_CONTEXT_LENGTH` | No | Positive integer | Optional per-alias `num_ctx` override written into the generated Modelfile. |
 | `OLLAMA_STARTUP_TIMEOUT` | `30` | No | Integer seconds | Max wait time for Ollama readiness before fallback/failure logic. |
 | `OLLAMA_HOST` | `127.0.0.1:11434` | No | `host:port` | Primary bind target for `ollama serve`. The devcontainer overrides this to `0.0.0.0:2345` so the bundled Ollama service is reachable from the host on port `2345`. |
 | `OLLAMA_FALLBACK_HOST` | `0.0.0.0:11434` | No | `host:port` | Secondary bind target used if primary Ollama host fails. The devcontainer keeps this aligned to `0.0.0.0:2345`. |
@@ -377,7 +381,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
-- The steady-state quality route is `qwen3.6-35b-a3b:iq1`, created locally from `.qwen-eval-models/Qwen3.6-35B-A3B-UD-IQ1_M.gguf` with `ollama create`; equivalent local tag aliases can be supplied with `CODING_DEFAULT_MODEL` and `CONTINUE_OLLAMA_MODELS`.
+- The steady-state quality route is `qwen3.6-35b-a3b:iq1`. The devcontainer preloads `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M`, then `source/entrypoint.sh` creates a text-only local alias from the GGUF blob so Ollama avoids the HF tag's vision projector loader path.
 - `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
 - `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided. All other quality/specialist routes fall back to Qwen3.6 rather than obsolete small specialist models.
