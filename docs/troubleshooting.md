@@ -117,6 +117,74 @@ Checks:
 - Confirm the container environment includes `MCP_APPLY_REPO_DEFAULTS=true`.
 - Rebuild or reopen the devcontainer so the image entrypoint runs again.
 
+
+## VS Code Server attach fails with exit code 137
+
+Symptom:
+
+```text
+Installing VS Code Server ...
+Exit code: 137
+```
+
+Exit code `137` means the VS Code Server install process was killed with
+`SIGKILL`. For Dev Containers this is most often an out-of-memory kill during
+server extraction, extension installation, or model/bootstrap startup.
+
+Collect deterministic evidence before changing the container shape:
+
+```bash
+# From the host, replace the name/id with the affected devcontainer.
+scripts/devcontainer_exit137_diagnostics.sh <devcontainer-name-or-id> \
+  > devcontainer-exit137-diagnostics.txt
+
+# If already attached to a shell inside the container and the Docker socket is mounted:
+scripts/devcontainer_exit137_diagnostics.sh "$HOSTNAME" \
+  > /tmp/devcontainer-exit137-diagnostics.txt
+```
+
+The diagnostic report includes:
+
+- `docker inspect` OOM and exit state (`State.OOMKilled`, `State.ExitCode`,
+  `State.Error`, start/finish time, PID, memory and swap limits).
+- Cgroup memory current/peak/limit/event counters, including `memory.current`,
+  `memory.peak`, `memory.events`, `memory.events.local`, and swap counters on
+  cgroup v2 hosts, with cgroup v1 fallbacks.
+- Process list sorted by RSS so large VS Code Server, Node, Python, Ollama, or
+  package-install processes are visible.
+- Memory and swap state from `free -h`, `swapon --show`, and `/proc/meminfo`.
+- Relevant kernel and Docker OOM messages from `dmesg`, `journalctl -k`,
+  `docker logs`, and `docker events`.
+
+Diagnosis hints:
+
+- `State.OOMKilled=true`, `State.ExitCode=137`, cgroup `oom`/`oom_kill` event
+  counters, or kernel lines like `Memory cgroup out of memory` confirm an OOM
+  kill rather than a VS Code Server installer bug.
+- A cgroup `memory.max` lower than host RAM means Docker Desktop, Colima,
+  systemd slices, or the runtime imposed a tighter limit than expected.
+- High RSS for `node`, `vscode-server`, `ollama`, `python`, or package manager
+  processes identifies the competing memory user.
+
+Remediation options:
+
+- Rebuild/reopen after increasing Docker/VM memory. For the Qwen3.6 IQ1_M
+  devcontainer path, use a 32GB T14-class host or equivalent Docker memory
+  allocation when collecting final attach evidence.
+- Close other memory-heavy workloads before rebuild/reopen.
+- Keep `OLLAMA_ALLOW_PULL=false` unless runtime downloads are intentionally
+  enabled; preloaded models avoid extra memory/network pressure during attach.
+- Temporarily set `OLLAMA_ENABLED=false` to distinguish VS Code Server attach
+  memory pressure from Ollama startup/model checks, then restore Ollama for the
+  final verification path.
+- If the attach succeeds, confirm the container remains alive after VS Code
+  attaches by checking the MCP server process, for example:
+
+```bash
+docker inspect --format 'running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}}' <devcontainer-name-or-id>
+docker exec <devcontainer-name-or-id> pgrep -af 'python /app/server.py|server.py'
+```
+
 ## Ollama stays on CPU in the devcontainer
 
 Symptom:
