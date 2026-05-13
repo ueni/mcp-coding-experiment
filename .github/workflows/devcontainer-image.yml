@@ -93,10 +93,17 @@ jobs:
     needs: test
     runs-on: self-hosted
     timeout-minutes: 360
+    env:
+      TMPDIR: ${{ runner.temp }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Prepare temp directory
+        run: |
+          mkdir -p "${TMPDIR}"
+          df -h "${TMPDIR}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
