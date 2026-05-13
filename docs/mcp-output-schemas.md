@@ -18,6 +18,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `risk_scoring`
 - `workspace_transaction`
 - `policy_simulator`
+- `clarification_gate`
 - `release_readiness`
 - `governance_report`
 - `test_impact_map` (public workflow, currently documented contract rather than schema-backed core contract)
@@ -87,6 +88,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `risk_scoring` | `risk_score`, `risk_level`, `reasons`, `summary` | none |
 | `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals |
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
+| `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
 | `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports` | `window`, `git`, `snapshots`, `security` |
 | `test_impact_map` | `schema`, `artifact_path`, `artifact_status`, `changed_files`, `selected_tests`, `unmapped_changed_files`, `confidence` | `test_details`, `impacted_sources`, `coverage_gaps`, `generated_at` |
@@ -94,3 +96,5 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 ## IDE/client smoke fixture
 
 [`docs/fixtures/mcp-structured-grep-response.json`](./fixtures/mcp-structured-grep-response.json) demonstrates an IDE-style client consuming a structured `grep` quick response while still displaying the fallback text content.
+
+For uncertainty-aware workflow gating, see [Clarification Gate](./clarification-gate.md). `clarification_gate` returns both structured MCP output and an elicitation adapter/fallback checklist for clients that need missing non-sensitive fields before mutation, release, or security workflows.

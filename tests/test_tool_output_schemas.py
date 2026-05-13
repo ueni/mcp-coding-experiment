@@ -30,6 +30,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "risk_scoring",
                 "workspace_transaction",
                 "policy_simulator",
+                "clarification_gate",
                 "release_readiness",
                 "governance_report",
             ),
@@ -77,6 +78,13 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "risk_scoring": self.server.risk_scoring(),
             "workspace_transaction": self.server.workspace_transaction(mode="begin", label="schema-contract"),
             "policy_simulator": self.server.policy_simulator(base_ref="HEAD", head_ref="HEAD"),
+            "clarification_gate": self.server.clarification_gate(
+                intent="prepare a safe release",
+                target="HEAD",
+                operation="release_readiness",
+                risk_level="medium",
+                rollback_plan="read-only check",
+            ),
             "release_readiness": self.server.release_readiness(
                 base_ref="HEAD",
                 head_ref="HEAD",

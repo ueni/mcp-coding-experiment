@@ -213,6 +213,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
         },
     },
     "policy_simulator": {"categories": ["read-only"]},
+    "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
     "governance_report": {"categories": ["read-only"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
@@ -914,6 +915,14 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     sensitive_count = 0
     mutation_gate_failures = 0
     http_auth_denials = 0
+    clarification_gate = {
+        "event_count": 0,
+        "ok_to_continue_count": 0,
+        "needs_clarification_count": 0,
+        "declined_count": 0,
+        "cancelled_count": 0,
+        "missing_fields": {},
+    }
     previous = ""
     chain_head = ""
 
@@ -948,6 +957,26 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             mutation_gate_failures += 1
         if "http session not authorized" in reason_lower or "bearer token" in reason_lower or "not authorized" in reason_lower:
             http_auth_denials += 1
+        if tool == "clarification_gate":
+            clarification_gate["event_count"] += 1
+            args = event.get("arguments", {}) if isinstance(event.get("arguments"), dict) else {}
+            decision = args.get("decision", {}) if isinstance(args.get("decision"), dict) else {}
+            status = str(decision.get("status") or reason or "")
+            if bool(decision.get("ok_to_continue", False)):
+                clarification_gate["ok_to_continue_count"] += 1
+            if status == "needs_clarification":
+                clarification_gate["needs_clarification_count"] += 1
+            elif status == "declined":
+                clarification_gate["declined_count"] += 1
+            elif status == "cancelled":
+                clarification_gate["cancelled_count"] += 1
+            missing = decision.get("missing_fields", [])
+            if isinstance(missing, list):
+                field_counts = clarification_gate["missing_fields"]
+                if isinstance(field_counts, dict):
+                    for field in missing:
+                        key = str(field)[:80]
+                        field_counts[key] = int(field_counts.get(key, 0)) + 1
         chain_head = _audit_event_digest(event, previous)
         previous = chain_head
 
@@ -967,6 +996,12 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             "mode": "hash_chain_over_redacted_events",
             "event_count": len(events),
             "chain_head": chain_head,
+        },
+        "clarification_gate": {
+            **clarification_gate,
+            "missing_fields": dict(sorted(clarification_gate["missing_fields"].items()))
+            if isinstance(clarification_gate.get("missing_fields"), dict)
+            else {},
         },
     }
 
@@ -1723,8 +1758,9 @@ def release_readiness_check(
     return _workflow_prompt_text(
         title="Release readiness check",
         goal=f"Assess whether `{head_ref}` is ready to release against `{base_ref}` with `{summary_mode}` reporting.",
-        tool_chain=["quality_router(mode='release_readiness')", "release_readiness", "required_tool_chain"],
+        tool_chain=["clarification_gate(operation='release_readiness')", "quality_router(mode='release_readiness')", "release_readiness", "required_tool_chain"],
         guardrails=[
+            "Run or inspect clarification_gate first; if it returns ok_to_continue=false, render its fallback_checklist or MCP elicitation request instead of recommending release action.",
             "Do not bypass failing gates; report blockers clearly.",
             "Do not mutate files unless the user explicitly requests a follow-up fix workflow and ALLOW_MUTATIONS permits it.",
             "Keep artifacts compatible with existing structured readiness reports.",
@@ -12040,6 +12076,194 @@ def smart_fix_batch(
     }
 
 
+CLARIFICATION_GATE_ALLOWED_RISK_LEVELS = {"low", "medium", "high"}
+CLARIFICATION_GATE_SENSITIVE_FIELD_NAMES = (
+    "password",
+    "secret",
+    "token",
+    "credential",
+    "authorization",
+    "api_key",
+    "private_key",
+)
+
+
+def _clarification_missing_field(field: str, reason: str, question: str) -> dict[str, Any]:
+    return {
+        "field": field,
+        "required": True,
+        "sensitive": False,
+        "reason": reason,
+        "question": question,
+    }
+
+
+def _clarification_gate_payload(
+    *,
+    intent: str,
+    target: str,
+    operation: str,
+    risk_level: str,
+    rollback_plan: str = "",
+    user_response_action: str = "",
+    log_audit: bool = True,
+) -> dict[str, Any]:
+    normalized_intent = intent.strip()
+    normalized_target = target.strip()
+    normalized_operation = operation.strip() or "unspecified"
+    normalized_risk = risk_level.strip().lower()
+    normalized_rollback = rollback_plan.strip()
+    action = user_response_action.strip().lower()
+    if action not in {"", "accept", "decline", "cancel"}:
+        raise ValueError("user_response_action must be one of: accept, decline, cancel")
+
+    missing: list[dict[str, Any]] = []
+    if not normalized_intent:
+        missing.append(
+            _clarification_missing_field(
+                "intent",
+                "The requested outcome is empty or underspecified.",
+                "What outcome should this workflow achieve?",
+            )
+        )
+    if not normalized_target or normalized_target.lower() in {"unknown", "tbd", "?"}:
+        missing.append(
+            _clarification_missing_field(
+                "target",
+                "The repository path, diff range, release candidate, or feature area is missing.",
+                "Which file, directory, diff range, branch, or release candidate should be evaluated?",
+            )
+        )
+    if normalized_risk not in CLARIFICATION_GATE_ALLOWED_RISK_LEVELS:
+        missing.append(
+            _clarification_missing_field(
+                "risk_level",
+                "Risk level must be classified before a high-impact workflow proceeds.",
+                "Is this operation low, medium, or high risk?",
+            )
+        )
+    high_impact_terms = ("apply", "diff", "write", "delete", "move", "rollback", "restore", "release", "deploy")
+    operation_is_high_impact = normalized_risk == "high" or any(
+        term in normalized_operation.lower() for term in high_impact_terms
+    )
+    if operation_is_high_impact and not normalized_rollback:
+        missing.append(
+            _clarification_missing_field(
+                "rollback_plan",
+                "High-impact mutation or release workflows need an explicit rollback/snapshot plan.",
+                "What rollback, snapshot, or recovery plan should be used if the operation fails?",
+            )
+        )
+
+    sensitive_requested = [
+        item["field"]
+        for item in missing
+        if any(part in item["field"].lower() for part in CLARIFICATION_GATE_SENSITIVE_FIELD_NAMES)
+    ]
+    questions = [str(item["question"]) for item in missing]
+    if action == "decline":
+        status = "declined"
+        ok_to_continue = False
+        decision_reasons = ["user_declined_clarification"]
+    elif action == "cancel":
+        status = "cancelled"
+        ok_to_continue = False
+        decision_reasons = ["user_cancelled_clarification"]
+    elif missing:
+        status = "needs_clarification"
+        ok_to_continue = False
+        decision_reasons = [f"missing:{item['field']}" for item in missing]
+    else:
+        status = "ready"
+        ok_to_continue = True
+        decision_reasons = ["required_context_present", "no_sensitive_fields_requested"]
+
+    fallback_checklist = questions or ["Required intent, target, risk, and rollback context is present."]
+    elicitation_properties = {
+        item["field"]: {
+            "type": "string",
+            "title": item["field"].replace("_", " ").title(),
+            "description": item["question"],
+        }
+        for item in missing
+    }
+    elicitation = {
+        "adapter": "mcp.elicitation/create",
+        "supported_when_client_allows": True,
+        "response_actions": ["accept", "decline", "cancel"],
+        "non_sensitive_fields_only": True,
+        "request": {
+            "message": "Clarify missing non-sensitive context before continuing.",
+            "requestedSchema": {
+                "type": "object",
+                "required": [item["field"] for item in missing],
+                "properties": elicitation_properties,
+                "additionalProperties": False,
+            },
+        },
+    }
+    payload: dict[str, Any] = {
+        "schema": "clarification_gate.v1",
+        "ok_to_continue": ok_to_continue,
+        "status": status,
+        "missing_fields": missing,
+        "questions": questions,
+        "fallback_checklist": fallback_checklist,
+        "elicitation": elicitation,
+        "inputs": {
+            "operation": normalized_operation,
+            "risk_level": normalized_risk or "unspecified",
+            "target_present": bool(normalized_target),
+            "intent_present": bool(normalized_intent),
+            "rollback_plan_present": bool(normalized_rollback),
+        },
+        "decision_reasons": decision_reasons,
+        "audit": {
+            "logged": log_audit,
+            "redaction": "Audit records gate decision metadata only; user answers are not requested for sensitive fields or persisted.",
+            "sensitive_fields_requested": sensitive_requested,
+        },
+    }
+    if log_audit:
+        _append_audit_event(
+            "clarification_gate",
+            ["read-only", "governance"],
+            ok_to_continue,
+            {
+                "decision": {
+                    "status": status,
+                    "ok_to_continue": ok_to_continue,
+                    "missing_fields": [item["field"] for item in missing],
+                    "question_count": len(questions),
+                    "sensitive_fields_requested": sensitive_requested,
+                },
+                "inputs": payload["inputs"],
+            },
+            status,
+        )
+    return payload
+
+
+@mcp.tool()
+def clarification_gate(
+    intent: str,
+    target: str = "",
+    operation: str = "unspecified",
+    risk_level: str = "",
+    rollback_plan: str = "",
+    user_response_action: str = "",
+) -> dict[str, Any]:
+    """Assess underspecified risky workflow intent and return non-sensitive clarification questions."""
+    return _clarification_gate_payload(
+        intent=intent,
+        target=target,
+        operation=operation,
+        risk_level=risk_level,
+        rollback_plan=rollback_plan,
+        user_response_action=user_response_action,
+    )
+
+
 @mcp.tool()
 def governance_report(
     start_time: str = "",
@@ -12285,6 +12509,22 @@ def release_readiness(
         "ok": True,
     }
 
+    clarification = _clarification_gate_payload(
+        intent="Assess release readiness before recommending release action",
+        target=f"{base_ref}...{head_ref}",
+        operation="release_readiness",
+        risk_level="medium",
+        rollback_plan="release_readiness is read-only; require a snapshot or rollback plan before follow-up mutation/deploy workflows",
+    )
+    result["checks"]["clarification_gate"] = {
+        "ok": bool(clarification.get("ok_to_continue", False)),
+        "status": clarification.get("status", ""),
+        "missing_fields": [item.get("field", "") for item in clarification.get("missing_fields", []) if isinstance(item, dict)],
+        "question_count": len(clarification.get("questions", [])) if isinstance(clarification.get("questions"), list) else 0,
+    }
+    if not clarification.get("ok_to_continue", False):
+        result["ok"] = False
+
     if run_tests:
         test_out = self_test(
             runner=test_runner,
@@ -12405,6 +12645,9 @@ def release_readiness(
                         "age_hours",
                         "warning",
                         "warning_reason",
+                        "status",
+                        "missing_fields",
+                        "question_count",
                     }
                 }
                 for name, data in result["checks"].items()

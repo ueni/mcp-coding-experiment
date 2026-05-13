@@ -27,6 +27,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "risk_scoring",
     "workspace_transaction",
     "policy_simulator",
+    "clarification_gate",
     "release_readiness",
     "governance_report",
 )
@@ -42,6 +43,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "risk_scoring": ("risk_score", "risk_level", "reasons", "summary"),
     "workspace_transaction": ("schema", "mode", "result"),
     "policy_simulator": ("schema", "ok", "blocking_policies", "docs", "security", "risk", "license"),
+    "clarification_gate": ("schema", "ok_to_continue", "status", "missing_fields", "questions", "fallback_checklist", "elicitation"),
     "release_readiness": ("schema", "base_ref", "head_ref", "ok", "checks"),
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports"),
 }
@@ -57,6 +59,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "risk_scoring": (),
     "workspace_transaction": (),
     "policy_simulator": (),
+    "clarification_gate": ("audit", "inputs", "decision_reasons"),
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
     "governance_report": ("window", "git", "snapshots", "security"),
 }
@@ -201,6 +204,22 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "security": {"type": "object"},
             "risk": {"type": "object"},
             "license": {"type": "object"},
+        },
+    ),
+
+    "clarification_gate": _object_schema(
+        ["schema", "ok_to_continue", "status", "missing_fields", "questions", "fallback_checklist", "elicitation"],
+        {
+            "schema": {"type": "string", "const": "clarification_gate.v1"},
+            "ok_to_continue": {"type": "boolean"},
+            "status": {"type": "string", "enum": ["ready", "needs_clarification", "declined", "cancelled"]},
+            "missing_fields": {"type": "array", "items": {"type": "object"}},
+            "questions": {"type": "array", "items": {"type": "string"}},
+            "fallback_checklist": {"type": "array", "items": {"type": "string"}},
+            "elicitation": {"type": "object"},
+            "audit": {"type": "object"},
+            "inputs": {"type": "object"},
+            "decision_reasons": {"type": "array", "items": {"type": "string"}},
         },
     ),
     "release_readiness": _object_schema(

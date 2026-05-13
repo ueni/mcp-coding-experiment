@@ -15,6 +15,103 @@ from tests.server_test_support import ServerToolsTestBase
 
 class ServerToolsTest(ServerToolsTestBase):
 
+
+    def test_clarification_gate_fully_specified_intent(self):
+        out = self.server.clarification_gate(
+            intent="Apply a documented patch",
+            target="src/sample.py",
+            operation="apply_diff",
+            risk_level="high",
+            rollback_plan="workspace_transaction snapshot before applying",
+        )
+
+        self.assertEqual(out["schema"], "clarification_gate.v1")
+        self.assertTrue(out["ok_to_continue"])
+        self.assertEqual(out["status"], "ready")
+        self.assertEqual(out["missing_fields"], [])
+        self.assertEqual(out["audit"]["sensitive_fields_requested"], [])
+
+    def test_clarification_gate_missing_target_asks_non_sensitive_question(self):
+        out = self.server.clarification_gate(
+            intent="Apply a patch",
+            target="",
+            operation="apply_diff",
+            risk_level="medium",
+            rollback_plan="snapshot first",
+        )
+
+        self.assertFalse(out["ok_to_continue"])
+        self.assertEqual(out["status"], "needs_clarification")
+        self.assertIn("target", {item["field"] for item in out["missing_fields"]})
+        self.assertTrue(out["questions"])
+        self.assertFalse(any(item["sensitive"] for item in out["missing_fields"]))
+        schema = out["elicitation"]["request"]["requestedSchema"]
+        self.assertIn("target", schema["required"])
+        self.assertNotIn("password", json.dumps(schema).lower())
+
+    def test_clarification_gate_ambiguous_risk_and_rollback_intent(self):
+        out = self.server.clarification_gate(
+            intent="Release this",
+            target="HEAD",
+            operation="release",
+            risk_level="unclear",
+        )
+
+        self.assertFalse(out["ok_to_continue"])
+        fields = {item["field"] for item in out["missing_fields"]}
+        self.assertIn("risk_level", fields)
+        self.assertIn("rollback_plan", fields)
+        self.assertEqual(out["elicitation"]["response_actions"], ["accept", "decline", "cancel"])
+
+    def test_clarification_gate_decline_and_cancel_are_blocking(self):
+        declined = self.server.clarification_gate(
+            intent="Apply a patch",
+            target="src/sample.py",
+            operation="apply_diff",
+            risk_level="high",
+            rollback_plan="snapshot",
+            user_response_action="decline",
+        )
+        cancelled = self.server.clarification_gate(
+            intent="Apply a patch",
+            target="src/sample.py",
+            operation="apply_diff",
+            risk_level="high",
+            rollback_plan="snapshot",
+            user_response_action="cancel",
+        )
+
+        self.assertFalse(declined["ok_to_continue"])
+        self.assertEqual(declined["status"], "declined")
+        self.assertFalse(cancelled["ok_to_continue"])
+        self.assertEqual(cancelled["status"], "cancelled")
+
+    def test_release_readiness_consumes_clarification_gate_and_audit_summary(self):
+        out = self.server.release_readiness(
+            base_ref="HEAD",
+            head_ref="HEAD",
+            run_tests=False,
+            run_docs_check=False,
+            run_security_check=False,
+            run_license_check=False,
+            run_risk_check=False,
+            run_impact_check=False,
+        )
+        self.assertIn("clarification_gate", out["checks"])
+        self.assertTrue(out["checks"]["clarification_gate"]["ok"])
+
+        _ = self.server.clarification_gate(
+            intent="Release",
+            target="HEAD",
+            operation="release",
+            risk_level="unclear",
+        )
+        report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        summary = report["audit"]["counts"]["clarification_gate"]
+        self.assertGreaterEqual(summary["event_count"], 2)
+        self.assertGreaterEqual(summary["needs_clarification_count"], 1)
+        self.assertIn("rollback_plan", summary["missing_fields"])
+
     def test_prompt_optimize(self):
         out = self.server.prompt_optimize("Please analyze the code and make a safe fix.")
         self.assertEqual(out["schema"], "prompt_optimize.v1")
