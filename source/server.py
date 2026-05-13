@@ -98,6 +98,10 @@ from source.tool_output_schemas import (
     all_tool_output_contracts,
     tool_output_contract,
 )
+from source.version_metadata import (
+    mcp_coding_experiment_version,
+    runtime_image_version,
+)
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -16691,6 +16695,8 @@ async def healthz(_request):
             "is_git_repo": _is_git_repo(),
             "allow_mutations": ALLOW_MUTATIONS,
             "transport": MCP_TRANSPORT,
+            "runtime_image_version": runtime_image_version().rendered,
+            "mcp_coding_experiment_version": mcp_coding_experiment_version().rendered,
             "server": {
                 "http_mode": server_state.get("http_mode"),
                 "port": server_state.get("port"),
