@@ -44,6 +44,13 @@ python3 scripts/vscode_mcp_healthcheck.py
 
 The script prints remediation text for common failures: container not started, missing forwarded ports, missing token, wrong mutation mode, or Ollama not listening.
 
+
+## Clarification fallback checklist and elicitation
+
+VS Code/Copilot clients should display `clarification_gate` results before risky mutation, release, or security follow-up workflows. If `ok_to_continue=false`, render `fallback_checklist` as a blocking checklist and do not recommend mutation or release action until the missing non-sensitive fields are supplied.
+
+Clients that support MCP elicitation can translate `elicitation.request` into an `elicitation/create` request. Only ask for the flat non-sensitive fields listed in the schema, and honor `accept`, `decline`, and `cancel` actions. Never request passwords, bearer tokens, API keys, credentials, private keys, or other sensitive values through this gate.
+
 ## Downstream repository bootstrap
 
 Downstream repositories can opt into the same VS Code MCP setup with:

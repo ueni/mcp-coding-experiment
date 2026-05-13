@@ -126,7 +126,7 @@ Public tools:
 - `task_router`
 - `tool_annotations`
 - `tool_output_contracts`
-- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`, `workflow_diagnostics`
+- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `workflow_diagnostics`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 
 ### 5.2 Router Design Principle
@@ -218,7 +218,7 @@ Restore:
 
 ### 8.2 Release Governance
 
-`release_readiness`, `required_tool_chain`, and `change_impact_gate` allow policy-gated release decisions based on:
+`clarification_gate`, `release_readiness`, `required_tool_chain`, and `change_impact_gate` allow policy-gated release decisions based on:
 
 - Testing outcomes, including selected tests from a fresh static impact map where available.
 - Documentation sync.

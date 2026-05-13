@@ -132,6 +132,8 @@ Call `test_impact_map(refresh=true)` to rebuild and write the artifact. Refresh 
 
 For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot evidence, and exports JSON plus Markdown under `.codebase-tooling-mcp/reports/`. `workflow_diagnostics` turns failed audit events and optional caller-supplied trajectory snippets into a redacted critical-step/failure-category report with safe recovery actions. See [Governance report workflow](./docs/governance-report.md) and [Workflow diagnostics](./docs/workflow-diagnostics.md).
 
+For underspecified high-risk workflows, `clarification_gate` returns structured missing-field decisions, fallback checklist questions, and a non-sensitive MCP elicitation adapter before mutation or release recommendations. See [Clarification Gate](./docs/clarification-gate.md).
+
 For VS Code MCP Apps-capable clients, `release_readiness` can include a read-only dashboard when `MCP_APPS_DASHBOARD_ENABLED=true`. The default is disabled so existing clients keep the same response contract. See [MCP Apps release readiness dashboard](./docs/mcp-apps-release-readiness.md).
 
 ## Sandbox profiles for autonomous agents
