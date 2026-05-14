@@ -134,3 +134,10 @@ def test_dockerfile_copies_runtime_source_package_helpers() -> None:
 
     assert "COPY --chown=app:app server.py ./" in dockerfile
     assert "tool_output_schemas.py version_metadata.py ./source/" in dockerfile
+
+
+def test_dockerfile_deduplicates_preloaded_ollama_models() -> None:
+    dockerfile = Path("source/Dockerfile").read_text()
+
+    assert "cp -a /tmp/ollama-models/. /home/app/.ollama/models/" not in dockerfile
+    assert "ln -sfn /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models" in dockerfile

@@ -15,6 +15,7 @@ ARG OLLAMA_PRELOAD_MODELS=""
 ARG OLLAMA_PULL_TIMEOUT_SECONDS=7200
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
+ARG INSTALL_SENTENCE_TRANSFORMERS=false
 ARG RUNTIME_IMAGE_VERSION_COMPATIBILITY=0
 ARG RUNTIME_IMAGE_VERSION_FEATURE=0
 ARG RUNTIME_IMAGE_VERSION_BUGFIX=0
@@ -101,14 +102,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /app
 
-COPY requirements.txt ./
+COPY requirements.txt requirements-embedding.txt ./
 RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
-    pip install --root-user-action=ignore -r requirements.txt
+    pip install --root-user-action=ignore -r requirements.txt \
+    && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
+         pip install --root-user-action=ignore -r requirements-embedding.txt; \
+       fi
 RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
        --root-user-action=ignore \
        -r requirements.txt \
+    && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
+         /opt/codebase-tooling/coding-venv/bin/pip install --root-user-action=ignore -r requirements-embedding.txt; \
+       fi \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
        --root-user-action=ignore \
        black==26.3.0 \
@@ -216,10 +223,10 @@ RUN groupadd --gid "${APP_GID}" app \
     && echo 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app \
     && chmod 0440 /etc/sudoers.d/app \
     && visudo -cf /etc/sudoers.d/app \
-    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
+    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama \
     && cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/ \
-    && cp -a /tmp/ollama-models/. /home/app/.ollama/models/ \
     && rm -rf /tmp/ollama-models \
+    && ln -sfn /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
     && chown -R app:app /app /models /repo /home/app /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models
 
 COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
@@ -249,8 +256,8 @@ RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
       done; \
     fi; \
     for server_root in /home/app/.vscode-server /home/app/.vscode-server-insiders /home/app/.openvscode-server; do \
-      mkdir -p "${server_root}/extensions"; \
-      cp -a /opt/codebase-tooling/defaults/extensions/. "${server_root}/extensions/"; \
+      mkdir -p "${server_root}"; \
+      ln -sfn /opt/codebase-tooling/defaults/extensions "${server_root}/extensions"; \
     done; \
     chown -R app:app /opt/codebase-tooling/defaults/extensions /home/app/.vscode-server /home/app/.vscode-server-insiders /home/app/.openvscode-server
 
