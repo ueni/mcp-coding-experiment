@@ -83,6 +83,31 @@ Example output shape:
 
 Exact values vary by architecture, Docker storage driver, and base image updates. Verifier should compare future runs on the same runner class and investigate large unexplained deltas.
 
+## Startup RAM guardrail
+
+The Python server keeps heavyweight optional tool dependencies off the default import path. Document/OCR/math helpers load `sympy`, `sqlparse`, `Pillow`, `pytesseract`, `pypdf`, `python-docx`, `openpyxl`, and `xlrd` only when their corresponding tool is called. This preserves offline bootstrap because the packages remain installed in the image, but the baseline `/healthz` path does not allocate their import-time memory.
+
+A lightweight local check for this guardrail is:
+
+```bash
+/usr/bin/time -f 'max_rss_kb=%M' python - <<'PY'
+import source.server
+print('imported source.server')
+PY
+```
+
+For issue #39, Builder compared this import smoke on the same host using the existing `.venv` and `OLLAMA_ENABLED=false` baseline context:
+
+- before lazy optional imports: `max_rss_kb=79080`
+- after lazy optional imports: `max_rss_kb=78976` to `79048` across three repeated imports
+
+The local `.venv` did not have the heavyweight optional packages installed, so the direct Python import RSS stayed effectively flat. The Docker monitor path, which builds/runs the full offline image dependency set with `OLLAMA_ENABLED=false`, showed a startup sample reduction on the same host:
+
+- before image (`codebase-tooling-mcp:test`): `startup_memory_mib=145.0`, `offline_runtime_pull_allowed=false`, `health_ok=true`
+- after image (`codebase-tooling-mcp:issue39-lazy-import-smoke`): `startup_memory_mib=124.9`, `offline_runtime_pull_allowed=false`, `health_ok=true`
+
+The risk-reducing change is also covered by static tests that assert those optional imports are lazy.
+
 ## CI artifact
 
 The `Build Devcontainer Image` workflow runs the monitor immediately after building `codebase-tooling-mcp:test`. It prints a concise summary in the job log and uploads `docker-resource-baseline.json` as the `docker-resource-baseline` artifact.
