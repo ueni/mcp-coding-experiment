@@ -18,6 +18,7 @@ This index lists documentation ownership and status.
 - [Troubleshooting](./troubleshooting.md) (`docs/troubleshooting.md`) - Status: `operational runbook`
 - [Sandbox Profiles for Autonomous Coding Agents](./sandbox-profiles.md) (`docs/sandbox-profiles.md`) - Status: `operational guidance`
 - [Release Notes and Documentation Policy](./release-notes-policy.md) (`docs/release-notes-policy.md`) - Status: `canonical`
+- [Docker resource monitoring](./resource-monitoring.md) (`docs/resource-monitoring.md`) - Status: `operational verification`
 - [MCP Output Schemas](./mcp-output-schemas.md) (`docs/mcp-output-schemas.md`) - Status: `canonical`
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`
 - [Qwen3.6 Production Routing](./qwen36-production-routing.md) (`docs/qwen36-production-routing.md`) - Status: `operational guidance`
