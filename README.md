@@ -17,6 +17,10 @@ It exposes safe file, search, analysis, and Git tooling through MCP so assistant
 - Recommended MCP registration alias: `codebase-tooling-mcp`
 - Scope: one mounted repository at `REPO_PATH` (default `/repo`)
 
+## Coding agents
+
+Start with [`AGENTS.md`](./AGENTS.md) for the concise repository-owned coding-agent entrypoint. It maps agent workflow, guardrails, public MCP routers, generated artifacts, and PR expectations back to the canonical docs.
+
 ## Quickstart (60 seconds)
 
 ### 1) Build image
