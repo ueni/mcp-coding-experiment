@@ -32,7 +32,9 @@ Status records use `workflow_task.v1` and include:
 - timestamps: `created_at`, `started_at`, `updated_at`, `finished_at`,
   `expires_at`, `retention_expires_at`
 - `progress`: coarse phase/percent fields for current clients
-- `result`: compact final workflow summary when available
+- `result`: compact final workflow summary when available; large VS Code task
+  stdout/stderr/build-log details are written to redacted result artifacts and
+  referenced from this summary instead of being embedded in the status record
 - `artifact_references`: generated artifact resource links using
   `artifact_resource_link.v1`
 - `resource_links` / `_meta`: resource link for the task status artifact itself
@@ -51,8 +53,10 @@ Defaults are environment-configurable:
 - `MCP_WORKFLOW_TASK_RETENTION_DAYS=7`
 
 Non-final tasks observed after `expires_at` are marked `expired` on the next
-`task_status` read. Retention is recorded for cleanup/orchestration clients; this
-prototype does not delete task artifacts.
+`task_status` read. On task start, status records whose `retention_expires_at`
+has passed may be pruned from `.codebase-tooling-mcp/tasks/*.json`; the pruning
+is limited to task status JSON records and does not delete final result artifact
+files such as `.codebase-tooling-mcp/tasks/artifacts/*`.
 
 ## Retry
 

@@ -58,6 +58,20 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(final["ok"])
         self.assertEqual(final["progress"], 1.0)
         self.assertEqual(final["result"]["schema"], "vscode_task_run.v1")
+        self.assertNotIn("stdout", final["result"])
+        self.assertNotIn("stderr", final["result"])
+        self.assertNotIn("build_log_tail", final["result"])
+        self.assertTrue(final["artifact_references"])
+        result_link = final["result"]["artifact_references"][0]
+        self.assertEqual(
+            result_link["path"],
+            ".codebase-tooling-mcp/tasks/artifacts/unit-success-vscode-task-result.json",
+        )
+        result_artifact_path = self.repo_path / result_link["path"]
+        self.assertTrue(result_artifact_path.exists())
+        result_artifact = json.loads(result_artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(result_artifact["schema"], "workflow_task_result_artifact.v1")
+        self.assertEqual(result_artifact["result"]["stdout"], "ok")
         status_path = self.repo_path / ".codebase-tooling-mcp" / "tasks" / "unit-success.json"
         self.assertTrue(status_path.exists())
         link = final["resource_links"][0]

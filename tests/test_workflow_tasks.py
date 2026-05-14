@@ -65,6 +65,46 @@ class WorkflowTaskTests(ServerToolsTestBase):
         self.assertEqual(retry["retry_of"], first["task_id"])
         self.assertIn("retry", [event["event"] for event in retry["audit_events"]])
 
+    def test_prune_removes_retained_status_but_preserves_result_artifacts(self):
+        created_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        task_id = "retained-old"
+        self.server._write_workflow_task_status(
+            {
+                "schema": "workflow_task.v1",
+                "task_id": task_id,
+                "workflow": "vscode_task_run",
+                "status": "succeeded",
+                "state": "succeeded",
+                "ok": True,
+                "created_at": created_at,
+                "started_at": created_at,
+                "finished_at": created_at,
+                "updated_at": created_at,
+                "expires_at": (datetime.now(timezone.utc) - timedelta(days=9)).isoformat(),
+                "retention_expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+                "retry_of": "",
+                "progress": 1.0,
+                "progress_detail": {"phase": "complete", "percent": 100},
+                "arguments": {},
+                "artifact_references": [],
+                "audit_events": [],
+                "security": {"redacted": True, "contains_secrets": False, "repo_boundary_enforced": True},
+            }
+        )
+        artifact_payload = self.server._write_workflow_task_result_artifact(
+            task_id,
+            {"schema": "vscode_task_run.v1", "ok": True, "stdout": "kept", "stderr": ""},
+        )
+        status_path = self.repo_path / ".codebase-tooling-mcp" / "tasks" / f"{task_id}.json"
+        artifact_path = self.repo_path / ".codebase-tooling-mcp" / "tasks" / "artifacts" / f"{task_id}-vscode-task-result.json"
+        self.assertTrue(status_path.exists())
+        self.assertEqual(artifact_payload["task_id"], task_id)
+
+        self.server._prune_workflow_task_statuses()
+
+        self.assertFalse(status_path.exists())
+        self.assertTrue(artifact_path.exists())
+
     def test_task_status_marks_non_final_expired_tasks(self):
         created_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         task_id = "task-" + "a" * 32

@@ -2271,7 +2271,15 @@ def _prune_workflow_task_statuses() -> None:
         return
     for path in root.glob("*.json"):
         try:
-            if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < cutoff:
+            retention_expires_at = ""
+            with contextlib.suppress(Exception):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    retention_expires_at = str(payload.get("retention_expires_at") or "")
+            if retention_expires_at and _is_expired(retention_expires_at, datetime.now(timezone.utc)):
+                path.unlink()
+                continue
+            if not retention_expires_at and datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < cutoff:
                 path.unlink()
         except OSError:
             continue
@@ -2282,6 +2290,77 @@ def _workflow_task_path(task_id: str) -> Path:
         raise ValueError("task_id must be a workflow task id")
     return _workflow_tasks_dir() / f"{task_id}.json"
 
+
+
+
+def _workflow_task_result_artifacts_dir() -> Path:
+    path = _workflow_tasks_dir() / "artifacts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _workflow_task_result_artifact_path(task_id: str) -> Path:
+    _workflow_task_path(task_id)
+    return _workflow_task_result_artifacts_dir() / f"{task_id}-vscode-task-result.json"
+
+
+def _workflow_task_result_artifact_link(task_id: str, created_at: str = "") -> dict[str, Any]:
+    rel_path = str(WORKFLOW_TASKS_DIR / "artifacts" / f"{task_id}-vscode-task-result.json")
+    return _artifact_resource_link(
+        title="VS Code task run result",
+        rel_path=rel_path,
+        mime_type="application/json",
+        created_at=created_at,
+        redacted=True,
+        safety_note="Redacted VS Code task result artifact; task status stores only compact metadata and references.",
+    )
+
+
+def _write_workflow_task_result_artifact(task_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    redacted = _redact_audit_value(result)
+    path = _workflow_task_result_artifact_path(task_id)
+    tmp = path.with_suffix(".json.tmp")
+    payload = {
+        "schema": "workflow_task_result_artifact.v1",
+        "task_id": task_id,
+        "workflow": "vscode_task_run",
+        "created_at": _now_iso(),
+        "security": {
+            "redacted": True,
+            "contains_secrets": False,
+            "repo_boundary_enforced": True,
+        },
+        "result": redacted,
+    }
+    tmp.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return payload
+
+
+def _compact_vscode_task_result(result: dict[str, Any], artifact_links: list[dict[str, Any]]) -> dict[str, Any]:
+    compact: dict[str, Any] = {
+        "schema": result.get("schema", "vscode_task_run.v1"),
+        "ok": bool(result.get("ok", False)),
+        "label": _redact_audit_value(result.get("label", "")),
+        "tasks_path": _redact_audit_value(result.get("tasks_path", "")),
+        "control_profile": _redact_audit_value(result.get("control_profile", "")),
+        "cwd": _redact_audit_value(result.get("cwd", "")),
+        "exit_code": result.get("exit_code"),
+        "timeout": bool(result.get("timeout", False)),
+        "artifact_references": artifact_links,
+        "output_artifacts": {
+            "schema": "artifact_resource_links.v1",
+            "resource_links": artifact_links,
+        },
+    }
+    if result.get("proposals"):
+        compact["proposals"] = _redact_audit_value(result.get("proposals"))
+    if isinstance(result.get("error"), dict):
+        compact["error"] = _redact_audit_value(result.get("error"))
+    return compact
 
 def _workflow_task_artifact_link(task_id: str, created_at: str = "") -> dict[str, Any]:
     rel_path = str(WORKFLOW_TASKS_DIR / f"{task_id}.json")
@@ -2508,6 +2587,12 @@ def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -
             "transient_failure",
         )
 
+    artifact_payload = _write_workflow_task_result_artifact(task_id, result)
+    artifact_links = [
+        _workflow_task_result_artifact_link(
+            task_id, created_at=str(artifact_payload.get("created_at") or "")
+        )
+    ]
     finished_at = _now_iso()
     state = "succeeded" if ok else "failed"
     payload.update(
@@ -2521,7 +2606,8 @@ def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -
             "updated_at": finished_at,
             "progress": 1.0,
             "progress_detail": {"phase": "complete" if ok else "failed", "percent": 100},
-            "result": _redact_audit_value(result),
+            "result": _compact_vscode_task_result(result, artifact_links),
+            "artifact_references": artifact_links,
             "audit_events": [
                 *payload.get("audit_events", []),
                 {"event": "completed" if ok else "failed", "at": finished_at},
