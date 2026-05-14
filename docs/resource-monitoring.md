@@ -25,6 +25,7 @@ docker build \
   --progress=plain \
   --build-arg OLLAMA_PRELOAD_MODELS= \
   --build-arg VSCODE_PRELOAD_EXTENSIONS= \
+  --build-arg INSTALL_SENTENCE_TRANSFORMERS=false \
   --file source/Dockerfile \
   --tag codebase-tooling-mcp:test \
   source
@@ -82,6 +83,8 @@ Example output shape:
 ```
 
 Exact values vary by architecture, Docker storage driver, and base image updates. Verifier should compare future runs on the same runner class and investigate large unexplained deltas.
+
+The largest removable contributor in the default image was the optional `sentence-transformers` dependency chain, which pulls in PyTorch and CUDA wheels even though the runtime default is `LOCAL_EMBED_BACKEND=hash`. Keep `INSTALL_SENTENCE_TRANSFORMERS=false` for the offline bootstrap baseline; opt in only when a sentence-transformers model is also supplied locally.
 
 ## CI artifact
 
