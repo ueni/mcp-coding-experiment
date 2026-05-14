@@ -253,6 +253,26 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             dockerfile,
         )
 
+    def test_server_defers_heavy_optional_dependency_imports_until_tool_use(self):
+        server = (REPO_ROOT / "source" / "server.py").read_text(encoding="utf-8")
+        eager_imports = (
+            "import sympy as sp",
+            "import sqlparse",
+            "from PIL import Image",
+            "import pytesseract",
+            "from pypdf import PdfReader",
+            "import docx",
+            "import openpyxl",
+            "import xlrd",
+        )
+
+        for eager_import in eager_imports:
+            self.assertNotIn(eager_import, server)
+        self.assertIn("_OPTIONAL_DEPENDENCY_UNLOADED = object()", server)
+        self.assertIn("_import_optional_dependency", server)
+        self.assertIn('PdfReader = _import_optional_dependency("pypdf", "pypdf").PdfReader', server)
+        self.assertIn('Image = _import_optional_dependency("PIL.Image", "Pillow")', server)
+
     def test_entrypoint_seeds_preloaded_models_and_maps_gpu_device_groups(self):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
         self.assertIn("seed_ollama_models_from_image_preload()", entrypoint)

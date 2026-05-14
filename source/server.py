@@ -31,6 +31,7 @@ import xml.etree.ElementTree as ET
 import pty
 import select
 import concurrent.futures
+import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Callable
@@ -45,50 +46,64 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
-try:
-    import sympy as sp
-except ModuleNotFoundError:  # pragma: no cover
-    sp = None
+# Optional analysis/document/OCR dependencies are loaded lazily by the tools that
+# need them. Keeping them out of the default import path lowers server startup RAM
+# and avoids devcontainer attach pressure while preserving offline bootstrap assets.
+_OPTIONAL_DEPENDENCY_UNLOADED = object()
 
-try:
-    import sqlparse
-except ModuleNotFoundError:  # pragma: no cover
-    sqlparse = None
 
-try:
-    from PIL import Image
-except ModuleNotFoundError:  # pragma: no cover
-    Image = None
+class _LazyOptionalDependency:
+    """Proxy an installed optional dependency without importing it at startup."""
 
-try:
-    import pytesseract
-except ModuleNotFoundError:  # pragma: no cover
-    pytesseract = None
+    def __init__(self, module_name: str, package_name: str | None = None, attr_name: str | None = None) -> None:
+        self._module_name = module_name
+        self._package_name = package_name
+        self._attr_name = attr_name
+        self._value: Any = _OPTIONAL_DEPENDENCY_UNLOADED
 
-try:
-    from pypdf import PdfReader
-except ModuleNotFoundError:  # pragma: no cover
-    PdfReader = None
+    def _load(self) -> Any:
+        if self._value is _OPTIONAL_DEPENDENCY_UNLOADED:
+            module = _import_optional_dependency(self._module_name, self._package_name)
+            self._value = getattr(module, self._attr_name) if self._attr_name else module
+        return self._value
 
-try:
-    import docx
-except ModuleNotFoundError:  # pragma: no cover
-    docx = None
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
 
-try:
-    import openpyxl
-except ModuleNotFoundError:  # pragma: no cover
-    openpyxl = None
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._load()(*args, **kwargs)
 
-try:
-    import xlrd
-except ModuleNotFoundError:  # pragma: no cover
-    xlrd = None
+    def __repr__(self) -> str:
+        state = "unloaded" if self._value is _OPTIONAL_DEPENDENCY_UNLOADED else "loaded"
+        target = f"{self._module_name}.{self._attr_name}" if self._attr_name else self._module_name
+        return f"<_LazyOptionalDependency {target} ({state})>"
+
+
+sp = _LazyOptionalDependency("sympy", "sympy") if importlib.util.find_spec("sympy") else None
+sqlparse = _LazyOptionalDependency("sqlparse", "sqlparse") if importlib.util.find_spec("sqlparse") else None
+Image = _LazyOptionalDependency("PIL.Image", "Pillow") if importlib.util.find_spec("PIL") else None
+pytesseract = _LazyOptionalDependency("pytesseract", "pytesseract") if importlib.util.find_spec("pytesseract") else None
+PdfReader = _LazyOptionalDependency("pypdf", "pypdf", "PdfReader") if importlib.util.find_spec("pypdf") else None
+docx = _LazyOptionalDependency("docx", "python-docx") if importlib.util.find_spec("docx") else None
+openpyxl = _LazyOptionalDependency("openpyxl", "openpyxl") if importlib.util.find_spec("openpyxl") else None
+xlrd = _LazyOptionalDependency("xlrd", "xlrd") if importlib.util.find_spec("xlrd") else None
 
 try:
     from tree_sitter_languages import get_parser as _ts_get_parser
 except ModuleNotFoundError:  # pragma: no cover
     _ts_get_parser = None
+
+
+def _import_optional_dependency(module_name: str, package_name: str | None = None) -> Any:
+    """Import an optional dependency only when a tool first needs it."""
+    try:
+        module = __import__(module_name, fromlist=["*"])
+    except ModuleNotFoundError as exc:
+        if exc.name == module_name or exc.name == module_name.split(".", 1)[0]:
+            raise RuntimeError(f"{package_name or module_name} is not installed") from exc
+        raise
+    return module
+
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field, RootModel
@@ -2236,10 +2251,13 @@ def _truncate_with_flag(text: str, max_chars: int) -> tuple[str, bool]:
 
 
 def _read_pdf_text(path: Path, max_pages: int) -> tuple[str, dict[str, Any]]:
-    if PdfReader is None:
-        raise RuntimeError("pypdf is not installed")
+    global PdfReader
     if max_pages < 1:
         raise ValueError("max_pages must be >= 1")
+    if PdfReader is _OPTIONAL_DEPENDENCY_UNLOADED:
+        PdfReader = _import_optional_dependency("pypdf", "pypdf").PdfReader
+    if PdfReader is None:
+        raise RuntimeError("pypdf is not installed")
     reader = PdfReader(str(path))
     lines: list[str] = []
     page_count = len(reader.pages)
@@ -2252,6 +2270,9 @@ def _read_pdf_text(path: Path, max_pages: int) -> tuple[str, dict[str, Any]]:
 
 
 def _read_docx_text(path: Path) -> tuple[str, dict[str, Any]]:
+    global docx
+    if docx is _OPTIONAL_DEPENDENCY_UNLOADED:
+        docx = _import_optional_dependency("docx", "python-docx")
     if docx is None:
         raise RuntimeError("python-docx is not installed")
     document = docx.Document(str(path))
@@ -2296,10 +2317,13 @@ def _read_doc_text(path: Path) -> tuple[str, dict[str, Any]]:
 
 
 def _read_xlsx_text(path: Path, max_rows_per_sheet: int) -> tuple[str, dict[str, Any]]:
-    if openpyxl is None:
-        raise RuntimeError("openpyxl is not installed")
+    global openpyxl
     if max_rows_per_sheet < 1:
         raise ValueError("max_rows_per_sheet must be >= 1")
+    if openpyxl is _OPTIONAL_DEPENDENCY_UNLOADED:
+        openpyxl = _import_optional_dependency("openpyxl", "openpyxl")
+    if openpyxl is None:
+        raise RuntimeError("openpyxl is not installed")
     wb = openpyxl.load_workbook(filename=str(path), read_only=True, data_only=True)
     chunks: list[str] = []
     total_rows = 0
@@ -2319,10 +2343,13 @@ def _read_xlsx_text(path: Path, max_rows_per_sheet: int) -> tuple[str, dict[str,
 
 
 def _read_xls_text(path: Path, max_rows_per_sheet: int) -> tuple[str, dict[str, Any]]:
-    if xlrd is None:
-        raise RuntimeError("xlrd is not installed")
+    global xlrd
     if max_rows_per_sheet < 1:
         raise ValueError("max_rows_per_sheet must be >= 1")
+    if xlrd is _OPTIONAL_DEPENDENCY_UNLOADED:
+        xlrd = _import_optional_dependency("xlrd", "xlrd")
+    if xlrd is None:
+        raise RuntimeError("xlrd is not installed")
     wb = xlrd.open_workbook(str(path))
     chunks: list[str] = []
     total_rows = 0
@@ -2499,6 +2526,7 @@ def _read_ppt_legacy_text(path: Path, max_slides: int, max_chars_per_slide: int)
 
 
 def _image_basic_features(path: Path) -> dict[str, Any]:
+    global Image
     features: dict[str, Any] = {
         "width": 0,
         "height": 0,
@@ -2507,6 +2535,12 @@ def _image_basic_features(path: Path) -> dict[str, Any]:
         "aspect_ratio": 0.0,
         "mean_luma": None,
     }
+    if Image is _OPTIONAL_DEPENDENCY_UNLOADED:
+        try:
+            Image = _import_optional_dependency("PIL.Image", "Pillow")
+        except RuntimeError:
+            Image = None
+            return features
     if Image is None:
         return features
     try:
@@ -3687,6 +3721,9 @@ def _autocomplete_fallback(prefix: str, suffix: str) -> str:
 
 
 def _require_sympy() -> None:
+    global sp
+    if sp is _OPTIONAL_DEPENDENCY_UNLOADED:
+        sp = _import_optional_dependency("sympy", "sympy")
     if sp is None:
         raise RuntimeError("sympy is not installed in this runtime")
 
@@ -3705,6 +3742,13 @@ def _math_steps_stub(mode: str, expr: str) -> list[str]:
 
 
 def _sql_normalize(query: str) -> str:
+    global sqlparse
+    if sqlparse is _OPTIONAL_DEPENDENCY_UNLOADED:
+        try:
+            sqlparse = _import_optional_dependency("sqlparse", "sqlparse")
+        except RuntimeError:
+            sqlparse = None
+            return " ".join(query.split())
     if sqlparse is None:
         return " ".join(query.split())
     return sqlparse.format(query, keyword_case="upper", reindent=True)
@@ -8105,9 +8149,9 @@ def math_solver(
     include_steps: bool = True,
 ) -> dict[str, Any]:
     """Offline symbolic math solver with exact + numeric outputs."""
-    _require_sympy()
     if mode not in {"simplify", "solve", "differentiate", "integrate", "matrix", "optimize"}:
         raise ValueError("mode must be one of: simplify, solve, differentiate, integrate, matrix, optimize")
+    _require_sympy()
     x = sp.symbols(variable, **(assumptions or {}))
     result: dict[str, Any] = {"schema": "math_solver.v1", "mode": mode}
 
@@ -8169,9 +8213,9 @@ def math_verify(
     trials: int = 5,
 ) -> dict[str, Any]:
     """Verify algebraic identity/equality via symbolic simplification and sampling."""
-    _require_sympy()
     if trials < 1:
         raise ValueError("trials must be >= 1")
+    _require_sympy()
     lhs = _math_expr(left)
     rhs = _math_expr(right)
     diff = sp.simplify(lhs - rhs)
@@ -8383,6 +8427,11 @@ def vision_ocr_parser(
     path = _resolve_repo_path(image_path)
     if not path.is_file():
         raise FileNotFoundError(image_path)
+    global Image, pytesseract
+    if Image is _OPTIONAL_DEPENDENCY_UNLOADED:
+        Image = _import_optional_dependency("PIL.Image", "Pillow")
+    if pytesseract is _OPTIONAL_DEPENDENCY_UNLOADED:
+        pytesseract = _import_optional_dependency("pytesseract", "pytesseract")
     if Image is None or pytesseract is None:
         raise RuntimeError("vision OCR dependencies missing (Pillow/pytesseract)")
     img = Image.open(path)
@@ -8413,9 +8462,20 @@ def image_interpret(
         raise FileNotFoundError(image_path)
     profile = _default_output_profile(output_profile)
 
+    global Image, pytesseract
     warnings: list[str] = []
     features = _image_basic_features(path)
     ocr_text = ""
+    if Image is _OPTIONAL_DEPENDENCY_UNLOADED:
+        try:
+            Image = _import_optional_dependency("PIL.Image", "Pillow")
+        except RuntimeError:
+            Image = None
+    if pytesseract is _OPTIONAL_DEPENDENCY_UNLOADED:
+        try:
+            pytesseract = _import_optional_dependency("pytesseract", "pytesseract")
+        except RuntimeError:
+            pytesseract = None
     if Image is not None and pytesseract is not None:
         try:
             with Image.open(path) as img:
