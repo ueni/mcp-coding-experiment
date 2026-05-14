@@ -293,6 +293,9 @@ seed_ollama_models_from_image_preload() {
   fi
 
   mkdir -p "${OLLAMA_MODELS}"
+  if [[ "$(readlink -f "${image_models_dir}")" == "$(readlink -f "${OLLAMA_MODELS}")" ]]; then
+    return
+  fi
   if cp -an "${image_models_dir}/." "${OLLAMA_MODELS}/" 2>/dev/null; then
     return
   fi

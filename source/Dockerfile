@@ -223,9 +223,10 @@ RUN groupadd --gid "${APP_GID}" app \
     && echo 'app ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/app \
     && chmod 0440 /etc/sudoers.d/app \
     && visudo -cf /etc/sudoers.d/app \
-    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
+    && mkdir -p /models /repo/.codebase-tooling-mcp/cache /repo/.codebase-tooling-mcp/reports /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama \
     && cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/ \
     && rm -rf /tmp/ollama-models \
+    && ln -sfn /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
     && chown -R app:app /app /models /repo /home/app /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models
 
 COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
