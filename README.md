@@ -179,7 +179,7 @@ BuildKit enabled when building this image or those cache mounts will be ignored.
 
 ## Docker image size and RAM monitoring
 
-Use [`scripts/monitor_runtime_resources.py`](./scripts/monitor_runtime_resources.py) to record a repeatable local baseline for the Docker image size and startup RAM usage after `/healthz` succeeds. The CI devcontainer-image workflow also uploads `docker-resource-baseline.json` for verifier comparisons. See [Docker resource monitoring](./docs/resource-monitoring.md) for commands, output fields, and offline-bootstrap constraints.
+Use [`scripts/monitor_runtime_resources.py`](./scripts/monitor_runtime_resources.py) to record a repeatable local baseline for the Docker image size and startup RAM usage after `/healthz` succeeds. Verifiers can opt in to `--continuous` monitoring to sample RAM/VRAM until the container exits or a configured timeout is reached, with peak RAM and explicit VRAM availability in the output. The CI devcontainer-image workflow also uploads `docker-resource-baseline.json` for verifier comparisons. See [Docker resource monitoring](./docs/resource-monitoring.md) for commands, output fields, and offline-bootstrap constraints.
 
 The checked-in devcontainer passes `/dev/dri` into the container and sets
 `OLLAMA_VULKAN=1` so the bundled Ollama service can use Vulkan-capable Linux

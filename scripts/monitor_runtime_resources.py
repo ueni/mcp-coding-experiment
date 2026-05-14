@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
 #
 # SPDX-License-Identifier: MIT
-"""Lightweight Docker image size and startup RAM monitor.
+"""Lightweight Docker image size and runtime RAM/VRAM monitor.
 
-The script uses only the Docker CLI and Python standard library. It does not
-install packages or access the network, so it is safe to run during offline
-runtime/bootstrap validation once the image already exists locally.
+The script uses only the Docker CLI, optional local ``nvidia-smi``, and Python
+standard library. It does not install packages or access the network, so it is
+safe to run during offline runtime/bootstrap validation once the image already
+exists locally.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -102,6 +104,14 @@ def container_rootfs_size_bytes(container: str) -> int | None:
     return int(value)
 
 
+def container_is_running(container: str) -> bool:
+    result = run_command(
+        ["docker", "container", "inspect", container, "--format", "{{.State.Running}}"],
+        timeout=10,
+    )
+    return result.stdout.strip().lower() == "true"
+
+
 def container_memory_usage_bytes(container: str) -> int:
     result = run_command(
         ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container],
@@ -109,6 +119,36 @@ def container_memory_usage_bytes(container: str) -> int:
     )
     first_field = result.stdout.strip().split("/")[0].strip()
     return parse_docker_bytes(first_field)
+
+
+def query_vram_usage_bytes() -> tuple[int | None, str]:
+    """Return current total GPU memory usage, or an explicit unavailable reason."""
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return None, "unavailable: nvidia-smi not found"
+    try:
+        result = run_command(
+            [
+                nvidia_smi,
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            timeout=10,
+        )
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+        return None, f"unavailable: nvidia-smi failed: {exc}"
+    values: list[int] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            values.append(int(stripped) * 1024**2)
+        except ValueError:
+            return None, f"unavailable: unexpected nvidia-smi output: {stripped!r}"
+    if not values:
+        return None, "unavailable: nvidia-smi returned no GPU memory rows"
+    return sum(values), "available"
 
 
 def wait_for_health(base_url: str, *, timeout_seconds: float) -> dict[str, Any]:
@@ -156,6 +196,70 @@ def docker_run_args(args: argparse.Namespace) -> list[str]:
     return run_args
 
 
+def collect_runtime_samples(
+    container: str,
+    *,
+    continuous: bool,
+    sample_interval_seconds: float,
+    monitor_timeout_seconds: float | None,
+) -> dict[str, Any]:
+    """Collect RAM/VRAM samples until one-shot, container exit, or timeout."""
+    deadline = (
+        time.monotonic() + monitor_timeout_seconds
+        if continuous and monitor_timeout_seconds is not None
+        else None
+    )
+    started_at = time.time()
+    startup_memory_bytes: int | None = None
+    peak_memory_bytes: int | None = None
+    peak_vram_bytes: int | None = None
+    vram_status = "not_checked"
+    sample_count = 0
+    stop_reason = "one_shot"
+
+    while True:
+        try:
+            memory_bytes = container_memory_usage_bytes(container)
+        except RuntimeError:
+            if continuous and sample_count > 0:
+                stop_reason = "container_exited"
+                break
+            raise
+        vram_bytes, current_vram_status = query_vram_usage_bytes()
+        sample_count += 1
+        if startup_memory_bytes is None:
+            startup_memory_bytes = memory_bytes
+        peak_memory_bytes = max(peak_memory_bytes or 0, memory_bytes)
+        if vram_bytes is not None:
+            peak_vram_bytes = max(peak_vram_bytes or 0, vram_bytes)
+        vram_status = current_vram_status
+
+        if not continuous:
+            break
+        if not container_is_running(container):
+            stop_reason = "container_exited"
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            stop_reason = "timeout"
+            break
+        time.sleep(sample_interval_seconds)
+
+    finished_at = time.time()
+    return {
+        "monitoring_mode": "continuous" if continuous else "one_shot",
+        "monitor_stop_reason": stop_reason,
+        "monitor_duration_seconds": round(finished_at - started_at, 2),
+        "sample_count": sample_count,
+        "startup_memory_bytes": startup_memory_bytes,
+        "startup_memory_mib": bytes_to_mib(startup_memory_bytes) if startup_memory_bytes is not None else None,
+        "peak_memory_bytes": peak_memory_bytes,
+        "peak_memory_mib": bytes_to_mib(peak_memory_bytes) if peak_memory_bytes is not None else None,
+        "peak_vram_bytes": peak_vram_bytes,
+        "peak_vram_mib": bytes_to_mib(peak_vram_bytes) if peak_vram_bytes is not None else None,
+        "vram_status": vram_status,
+    }
+
+
 def collect_metrics(args: argparse.Namespace) -> dict[str, Any]:
     started = False
     image_bytes = image_size_bytes(args.image)
@@ -163,7 +267,12 @@ def collect_metrics(args: argparse.Namespace) -> dict[str, Any]:
         run_command(docker_run_args(args), timeout=30)
         started = True
         health = wait_for_health(f"http://127.0.0.1:{args.host_port}", timeout_seconds=args.timeout_seconds)
-        memory_bytes = container_memory_usage_bytes(args.container_name)
+        runtime = collect_runtime_samples(
+            args.container_name,
+            continuous=args.continuous,
+            sample_interval_seconds=args.sample_interval_seconds,
+            monitor_timeout_seconds=args.monitor_timeout_seconds,
+        )
         rootfs_bytes = container_rootfs_size_bytes(args.container_name)
         return {
             "image": args.image,
@@ -172,8 +281,7 @@ def collect_metrics(args: argparse.Namespace) -> dict[str, Any]:
             "image_size_mib": bytes_to_mib(image_bytes),
             "container_rootfs_size_bytes": rootfs_bytes,
             "container_rootfs_size_mib": bytes_to_mib(rootfs_bytes) if rootfs_bytes is not None else None,
-            "startup_memory_bytes": memory_bytes,
-            "startup_memory_mib": bytes_to_mib(memory_bytes),
+            **runtime,
             "health_ok": health.get("ok") is True,
             "transport": health.get("transport"),
             "ollama_running": (health.get("ollama") or {}).get("running"),
@@ -192,7 +300,7 @@ def collect_metrics(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Measure local Docker image size and health-check startup RAM usage."
+        description="Measure local Docker image size and runtime RAM/VRAM usage."
     )
     parser.add_argument("--image", default=os.getenv("TEST_IMAGE", "codebase-tooling-mcp:test"))
     parser.add_argument(
@@ -201,6 +309,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host-port", type=int, default=int(os.getenv("MCP_MONITOR_HOST_PORT", "18000")))
     parser.add_argument("--timeout-seconds", type=float, default=45)
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="opt in to sample RAM/VRAM until the container exits or monitor timeout is reached",
+    )
+    parser.add_argument(
+        "--sample-interval-seconds",
+        type=float,
+        default=2.0,
+        help="continuous monitoring sample interval",
+    )
+    parser.add_argument(
+        "--monitor-timeout-seconds",
+        type=float,
+        default=None,
+        help="optional stop condition for --continuous; omit to monitor until container exit",
+    )
     parser.add_argument(
         "--env",
         action="append",
@@ -215,12 +340,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.sample_interval_seconds <= 0:
+        parser.error("--sample-interval-seconds must be greater than 0")
+    if args.monitor_timeout_seconds is not None and args.monitor_timeout_seconds <= 0:
+        parser.error("--monitor-timeout-seconds must be greater than 0")
     metrics = collect_metrics(args)
     if args.json:
         print(json.dumps(metrics, indent=2, sort_keys=True))
     else:
         print("Docker resource baseline:")
         print(f"  image: {metrics['image']}")
+        print(f"  mode: {metrics['monitoring_mode']} ({metrics['monitor_stop_reason']})")
         print(f"  image size: {metrics['image_size_mib']} MiB ({metrics['image_size_bytes']} bytes)")
         if metrics["container_rootfs_size_mib"] is not None:
             print(
@@ -228,9 +358,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{metrics['container_rootfs_size_mib']} MiB ({metrics['container_rootfs_size_bytes']} bytes)"
             )
         print(
-            "  startup memory after /healthz: "
-            f"{metrics['startup_memory_mib']} MiB ({metrics['startup_memory_bytes']} bytes)"
+            "  peak RAM: "
+            f"{metrics['peak_memory_mib']} MiB ({metrics['peak_memory_bytes']} bytes)"
         )
+        if metrics["peak_vram_bytes"] is None:
+            print(f"  peak VRAM: unavailable ({metrics['vram_status']})")
+        else:
+            print(
+                "  peak VRAM: "
+                f"{metrics['peak_vram_mib']} MiB ({metrics['peak_vram_bytes']} bytes)"
+            )
+        print(f"  samples: {metrics['sample_count']}")
         print(f"  health ok: {metrics['health_ok']}")
         print(f"  ollama running: {metrics['ollama_running']} (OLLAMA_ENABLED=false for offline baseline)")
     return 0
