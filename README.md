@@ -177,6 +177,13 @@ The Dockerfile uses BuildKit cache mounts for `apt` and `pip`, so repeated
 devcontainer rebuilds can reuse downloaded package metadata and wheels. Keep
 BuildKit enabled when building this image or those cache mounts will be ignored.
 
+The default image keeps `LOCAL_EMBED_BACKEND=hash` and does not install the optional
+`sentence-transformers`/PyTorch stack, which is large and is not needed for the
+offline hash embedding path. Build with `--build-arg INSTALL_SENTENCE_TRANSFORMERS=true`
+and set `LOCAL_EMBED_BACKEND=sentence-transformers` plus `LOCAL_EMBED_MODEL` only
+when that optional backend is required; for local non-Docker installs, add
+`source/requirements-embedding.txt` to the normal requirements install.
+
 ## Docker image size and RAM monitoring
 
 Use [`scripts/monitor_runtime_resources.py`](./scripts/monitor_runtime_resources.py) to record a repeatable local baseline for the Docker image size and startup RAM usage after `/healthz` succeeds. Verifiers can opt in to `--continuous` monitoring to sample RAM/VRAM until the container exits or a configured timeout is reached, with peak RAM and explicit VRAM availability in the output. The CI devcontainer-image workflow also uploads `docker-resource-baseline.json` for verifier comparisons. See [Docker resource monitoring](./docs/resource-monitoring.md) for commands, output fields, and offline-bootstrap constraints.
@@ -288,7 +295,7 @@ For home-config portability, the generated devcontainer mounts host paths under
 `/home/app/.codex`. Startup bootstrap copies from `/host` mounts only when the
 `$HOME` targets are missing or empty.
 
-The inline autocomplete extension and the Marketplace extensions declared in the devcontainer are preloaded into the image during `docker build` for the common VS Code server extension directories, so the target
+The inline autocomplete extension and the Marketplace extensions declared in the devcontainer are preloaded into one shared image directory during `docker build` and linked from the common VS Code server extension directories, so the target
 repository does not need a local `vscode/mcp-inline-autocomplete/` copy and VS Code should not need to fetch those extensions again on container start.
 
 ## Endpoints (HTTP mode)
@@ -360,6 +367,9 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `MCP_HTTP_BEARER_TOKEN` | empty | Required for HTTP token modes | Secret string | Bearer token accepted by HTTP MCP/SSE requests. Missing token in token mode returns 403. |
 | `MCP_HTTP_RATE_LIMIT_REQUESTS` | `120` | No | Positive integer | Per-client HTTP request budget per window. Exceeded requests return 429 with `Retry-After`. |
 | `MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` | `60` | No | Positive integer seconds | Rate-limit window size. |
+| `LOCAL_EMBED_BACKEND` | `hash` | No | `hash`, `auto`, `sentence-transformers` | Offline local embedding backend. The default Docker image supports `hash`; the optional `sentence-transformers` backend requires building with `INSTALL_SENTENCE_TRANSFORMERS=true` or installing `source/requirements-embedding.txt`. |
+| `LOCAL_EMBED_MODEL` | empty | Required only for `sentence-transformers` | Model path/name | Sentence-transformers model reference. Keep empty for the default hash backend. |
+| `LOCAL_EMBED_DIM` | `256` | No | Positive integer >= 8 | Hash embedding dimension. |
 | `MCP_HTTP_REQUEST_TIMEOUT_SECONDS` | `120` | No | Positive seconds | Non-SSE HTTP request timeout; exceeded requests return 504. |
 | `MCP_AUDIT_LOG_FILE` | `.codebase-tooling-mcp/audit/security_events.jsonl` | No | Path | Append-only JSONL audit events for sensitive tool calls and denied HTTP auth attempts. Arguments are redacted/truncated. |
 | `MCP_APPS_DASHBOARD_ENABLED` | `false` | No | `true`, `false` | Adds the prototype read-only MCP Apps dashboard payload to `release_readiness` results when enabled. |

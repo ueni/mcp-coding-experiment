@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
+# Optional local embedding backend. Disabled in the default Docker image to avoid
+# bundling the large PyTorch/CUDA stack when LOCAL_EMBED_BACKEND=hash is used.
+sentence-transformers>=3,<4

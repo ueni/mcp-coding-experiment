@@ -166,6 +166,28 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('--root-user-action=ignore \\', dockerfile)
         self.assertIn('-r requirements.txt \\', dockerfile)
 
+    def test_sentence_transformers_dependency_is_optional_for_default_image(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        requirements = (REPO_ROOT / "source" / "requirements.txt").read_text(encoding="utf-8")
+        embedding_requirements = (
+            REPO_ROOT / "source" / "requirements-embedding.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("ARG INSTALL_SENTENCE_TRANSFORMERS=false", dockerfile)
+        self.assertIn("requirements-embedding.txt", dockerfile)
+        self.assertIn('if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]', dockerfile)
+        self.assertNotIn("sentence-transformers", requirements)
+        self.assertIn("sentence-transformers", embedding_requirements)
+
+    def test_preloaded_artifacts_are_not_duplicated_in_image_layers(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            'cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/',
+            dockerfile,
+        )
+        self.assertNotIn('cp -a /tmp/ollama-models/. /home/app/.ollama/models/', dockerfile)
+        self.assertIn('ln -sfn /opt/codebase-tooling/defaults/extensions "${server_root}/extensions"', dockerfile)
+
     def test_continue_model_routing_uses_qwen36_quality_profile(self):
         obsolete_models = (
             "qwen2.5-coder:3b",
