@@ -1495,6 +1495,10 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("markdown", out["exports"])
         self.assertTrue((self.repo_path / out["exports"]["json"]).exists())
         self.assertTrue((self.repo_path / out["exports"]["markdown"]).exists())
+        self.assertEqual({link["path"] for link in out["resource_links"]}, {out["exports"]["json"], out["exports"]["markdown"]})
+        self.assertTrue(all(link["uri"].startswith("repo://file/") for link in out["resource_links"]))
+        self.assertTrue(all(link.get("size_bytes", 0) > 0 for link in out["resource_links"]))
+        self.assertFalse(out["_meta"]["artifact_resources"]["safety"]["secrets_exposed"])
         self.assertEqual(out["audit"]["counts"]["digest"]["chain_head"], "")
 
     def test_governance_report_absolute_audit_path_boundary(self):
@@ -1759,6 +1763,10 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(snap["schema"], "state_snapshot.v1")
         self.assertEqual(snap["backend"], "git-stash")
         self.assertIn("snapshot_id", snap)
+        self.assertIn("resource_links", snap)
+        self.assertEqual(snap["resource_links"][0]["path"], str(self.server.STATE_SNAPSHOT_INDEX_FILE))
+        self.assertEqual(snap["resource_links"][0]["mime_type"], "application/json")
+        self.assertFalse(snap["_meta"]["artifact_resources"]["safety"]["absolute_host_paths_exposed"])
         restored = self.server.state_restore(snapshot_id=snap["snapshot_id"])
         self.assertEqual(restored["schema"], "state_restore.v1")
         self.assertEqual(restored["backend"], "git-stash")

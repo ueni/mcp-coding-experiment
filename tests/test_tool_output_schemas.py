@@ -5,7 +5,9 @@ import asyncio
 
 from source.tool_output_schemas import (
     ERROR_OUTPUT_SCHEMA,
+    RESOURCE_LINK_SCHEMA,
     SCHEMA_BACKED_TOOL_NAMES,
+    STATE_SNAPSHOT_OUTPUT_SCHEMA,
     TOOL_OUTPUT_SCHEMAS,
     all_tool_output_contracts,
     make_tool_error,
@@ -103,6 +105,22 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         for tool_name, payload in outputs.items():
             with self.subTest(tool_name=tool_name):
                 validate_against_schema(payload, TOOL_OUTPUT_SCHEMAS[tool_name])
+
+    def test_resource_link_schema_validates_generated_artifacts(self):
+        report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        self.assertGreaterEqual(len(report["resource_links"]), 2)
+        for link in report["resource_links"]:
+            validate_against_schema(link, RESOURCE_LINK_SCHEMA)
+            self.assertFalse(link["safety"]["contains_secrets"])
+            self.assertNotIn(str(self.repo_path), self.server.json.dumps(link))
+
+        snapshot = self.server.state_snapshot(label="schema-contract")
+        validate_against_schema(snapshot, STATE_SNAPSHOT_OUTPUT_SCHEMA)
+        self.assertGreaterEqual(len(snapshot["resource_links"]), 1)
+        for link in snapshot["resource_links"]:
+            validate_against_schema(link, RESOURCE_LINK_SCHEMA)
+            self.assertFalse(link["safety"]["contains_secrets"])
+            self.assertNotIn(str(self.repo_path), self.server.json.dumps(link))
 
     def test_fastmcp_advertises_checked_in_output_schemas(self):
         listed = asyncio.run(self.server.mcp.list_tools())

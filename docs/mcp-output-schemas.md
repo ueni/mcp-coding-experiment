@@ -57,6 +57,44 @@ The selected-test contract is intentionally conservative: `selected_tests` lists
 
 `impact_tests` consumes a fresh artifact first and otherwise falls back to dependency/naming heuristics. Its normal output includes `impact_map.artifact_status`, optional `impact_map.fallback_used`, artifact `coverage_gaps`, and `unmapped_changed_files`; compact output keeps `test_count`/`tests` and adds `impact_map_status` plus `unmapped_changed_files`. `change_impact_gate` and `quality_router(mode="change_impact")` expose the same selected tests and unmapped files under their gate result.
 
+
+### Artifact resource links
+
+Artifact-producing tools expose generated outputs through a compact `artifact_resource_link.v1` contract in `resource_links` and mirror the same list under `_meta.artifact_resources` for clients that prefer metadata fields. Links use repository-relative `repo://` URIs and never expose host absolute paths. Each link includes a title, URI/path when file-backed, MIME type, size when the file exists, created time, and safety metadata indicating redaction, repository-boundary enforcement, and no secret exposure.
+
+Example client response excerpt for `governance_report(export=true)`:
+
+```json
+{
+  "structuredContent": {
+    "schema": "governance_report.v1",
+    "exports": {
+      "json": ".codebase-tooling-mcp/reports/governance-report-20260514T194800Z-abcd1234.json",
+      "markdown": ".codebase-tooling-mcp/reports/governance-report-20260514T194800Z-abcd1234.md"
+    },
+    "resource_links": [
+      {
+        "schema": "artifact_resource_link.v1",
+        "title": "Governance report JSON",
+        "uri": "repo://file/.codebase-tooling-mcp%2Freports%2Fgovernance-report-20260514T194800Z-abcd1234.json",
+        "path": ".codebase-tooling-mcp/reports/governance-report-20260514T194800Z-abcd1234.json",
+        "mime_type": "application/json",
+        "size_bytes": 4096,
+        "created_at": "2026-05-14T19:48:00+00:00",
+        "safety": {
+          "redacted": true,
+          "contains_secrets": false,
+          "repo_boundary_enforced": true
+        }
+      }
+    ],
+    "_meta": {"artifact_resources": {"schema": "artifact_resource_links.v1"}}
+  }
+}
+```
+
+`state_snapshot` uses the same contract for the repository-local snapshot index. Stash commit/ref identifiers remain in the existing structured fields for rollback compatibility, but are not emitted as resource links because those Git objects may contain raw workspace changes. These links are intended to become task artifact references in future async task work, but this contract does not add async task behavior.
+
 ## Error shape
 
 All schema-backed tools share this documented error envelope for clients that normalize exceptions into structured results:
@@ -87,11 +125,11 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `read_snippet` | `path`, `start_line`, `end_line`, `content` | requested line bounds and `total_lines` |
 | `summarize_diff` | `file_count`, `total_added`, `total_deleted`, `risk_flags` | file lists, sorted churn, patches |
 | `risk_scoring` | `risk_score`, `risk_level`, `reasons`, `summary` | none |
-| `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals |
+| `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals, `resource_links`, `_meta` |
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
-| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics` |
+| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `_meta` |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |
 | `test_impact_map` | `schema`, `artifact_path`, `artifact_status`, `changed_files`, `selected_tests`, `unmapped_changed_files`, `confidence` | `test_details`, `impacted_sources`, `coverage_gaps`, `generated_at` |
 

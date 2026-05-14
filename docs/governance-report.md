@@ -15,7 +15,8 @@ The first-slice schema is `governance_report.v1`. It includes:
 - local governance hook summaries from stored `policy_simulator`, `release_readiness`, and `required_tool_chain` results when available;
 - snapshot/rollback references from the state snapshot index when available;
 - a compact `workflow_diagnostics` summary for failed audit trajectories when blocked steps are present;
-- git base/head metadata for PR or release review.
+- git base/head metadata for PR or release review;
+- `resource_links` plus `_meta.artifact_resources` entries for exported JSON and Markdown files, including repository-relative URI/path, MIME type, size when known, created time, and redaction/safety metadata.
 
 Example call:
 
@@ -37,4 +38,5 @@ Security boundaries:
 - relative audit/report paths are resolved inside `REPO_PATH`;
 - absolute audit paths outside the repository are not read by the report workflow;
 - secrets and tokens are redacted before aggregation and export;
+- resource links expose only repository-relative `repo://file/{path}` paths, never host absolute paths or raw secret-bearing inputs;
 - external OPA or Agent Governance Toolkit integrations are intentionally out of scope for this first slice.
