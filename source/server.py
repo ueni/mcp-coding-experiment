@@ -799,6 +799,27 @@ def _redact_audit_string(value: str) -> str:
     return value
 
 
+def _redact_audit_reason(value: str) -> str:
+    """Redact reason text while preserving non-secret auth policy classes.
+
+    Governance aggregation depends on stable denial classes such as "missing
+    bearer token" and "HTTP session not authorized". Those phrases are policy
+    metadata, not credentials, so keep a canonical form even when the broader
+    secret-value redactor would otherwise collapse the whole reason to
+    ``<redacted>`` because it contains words like "bearer token".
+    """
+    lower_value = value.lower()
+    if "http session not authorized" in lower_value:
+        return "HTTP session not authorized"
+    if "missing bearer token" in lower_value:
+        return "missing bearer token"
+    if "invalid bearer token" in lower_value:
+        return "invalid bearer token"
+    if "mcp_http_bearer_token is not configured" in lower_value:
+        return "HTTP auth bearer token not configured"
+    return _redact_audit_string(value)
+
+
 def _redact_audit_value(value: Any, depth: int = 0) -> Any:
     if depth > 4:
         return "<redacted-depth>"
@@ -806,7 +827,9 @@ def _redact_audit_value(value: Any, depth: int = 0) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_str = str(key)
-            if SENSITIVE_AUDIT_KEY_RE.search(key_str):
+            if key_str.lower() == "reason" and isinstance(item, str):
+                redacted[key_str] = _redact_audit_reason(item)
+            elif SENSITIVE_AUDIT_KEY_RE.search(key_str):
                 redacted[key_str] = "<redacted>"
             else:
                 redacted[key_str] = _redact_audit_value(item, depth + 1)
@@ -830,7 +853,7 @@ def _append_audit_event(
         "tool_name": tool_name,
         "categories": categories,
         "success": success,
-        "reason": _redact_audit_string(reason),
+        "reason": _redact_audit_reason(reason),
         "arguments": _redact_audit_value(arguments or {}),
     }
     try:
