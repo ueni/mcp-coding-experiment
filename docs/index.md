@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 This index lists documentation ownership and status.
 
 - [Repository Overview](../README.md) (`README.md`) - Status: `canonical`
+- [Coding-agent entrypoint](../AGENTS.md) (`AGENTS.md`) - Status: `canonical/agent guidance`
 - [JSON Settings Files](./json-settings.md) (`docs/json-settings.md`) - Status: `canonical`
 - [MCP Fun Labs](./labs.md) (`docs/labs.md`) - Status: `lab/experimental`
 - [Tooling White Paper](./tooling-whitepaper.md) (`docs/tooling-whitepaper.md`) - Status: `canonical/strategy`
