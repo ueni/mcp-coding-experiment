@@ -168,6 +168,9 @@ TEST_IMPACT_MAP_MAX_AGE_HOURS = 24
 STATE_SNAPSHOT_DIR = Path(".codebase-tooling-mcp/snapshots")
 EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
 ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
+WORKFLOW_TASKS_DIR = Path(".codebase-tooling-mcp/tasks")
+WORKFLOW_TASK_RETENTION_DAYS = max(1, int(os.getenv("MCP_WORKFLOW_TASK_RETENTION_DAYS", "7")))
+WORKFLOW_TASK_EXPIRY_HOURS = max(1, int(os.getenv("MCP_WORKFLOW_TASK_EXPIRY_HOURS", "24")))
 TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.json")
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
@@ -178,6 +181,8 @@ PUBLIC_MCP_TOOL_NAMES = {
     "test_impact_map",
     "tool_annotations",
     "tool_output_contracts",
+    "workflow_task",
+    "task_status",
     *SCHEMA_BACKED_TOOL_NAMES,
 }
 OUTPUT_SCHEMA_BY_TOOL = TOOL_OUTPUT_SCHEMAS
@@ -206,6 +211,14 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "tool_annotations": {"categories": ["read-only"]},
     "tool_output_contracts": {"categories": ["read-only"]},
+    "workflow_task": {
+        "categories": ["write", "shell/process"],
+        "mode_categories": {
+            "start": ["write", "shell/process"],
+            "status": ["read-only"],
+        },
+    },
+    "task_status": {"categories": ["read-only"]},
     "repo_info": {"categories": ["read-only"]},
     "runtime_state": {"categories": ["read-only"]},
     "git_status": {"categories": ["read-only"]},
@@ -827,8 +840,11 @@ def _redact_audit_value(value: Any, depth: int = 0) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_str = str(key)
-            if key_str.lower() == "reason" and isinstance(item, str):
+            key_lower = key_str.lower()
+            if key_lower == "reason" and isinstance(item, str):
                 redacted[key_str] = _redact_audit_reason(item)
+            elif key_lower in {"contains_secrets", "records_secrets", "secrets_exposed"} and isinstance(item, bool):
+                redacted[key_str] = item
             elif SENSITIVE_AUDIT_KEY_RE.search(key_str):
                 redacted[key_str] = "<redacted>"
             else:
@@ -2191,6 +2207,417 @@ def _artifact_meta(resource_links: list[dict[str, Any]]) -> dict[str, Any]:
             },
         }
     }
+
+
+_WORKFLOW_TASK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+_WORKFLOW_TASK_LOCK = threading.Lock()
+_WORKFLOW_TASK_FUTURES: dict[str, concurrent.futures.Future[Any]] = {}
+_WORKFLOW_TASK_ALLOWED_WORKFLOWS = {"governance_report", "vscode_task_run"}
+_WORKFLOW_TASK_FINAL_STATUSES = {"succeeded", "failed", "expired"}
+
+
+def _workflow_task_categories(workflow: str) -> list[str]:
+    if workflow == "vscode_task_run":
+        return ["write", "shell/process", "async"]
+    return ["read-only", "async"]
+
+
+def _workflow_task_stable_id(workflow: str, args: dict[str, Any], task_id: str = "") -> str:
+    if task_id:
+        _workflow_task_path(task_id)
+        return task_id
+    canonical = json.dumps(
+        {"workflow": workflow, "arguments": _redact_audit_value(args)},
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return "task-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _workflow_task_result_is_transient(result: dict[str, Any]) -> bool:
+    if result.get("timeout") is True:
+        return True
+    if result.get("ok") is True:
+        return False
+    text = "\n".join(
+        str(result.get(key, "")) for key in ("stderr", "stdout", "build_log_tail", "error")
+    ).lower()
+    markers = (
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection refused",
+        "rate limit",
+        "too many requests",
+        "docker daemon",
+        "resource temporarily unavailable",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _workflow_tasks_dir() -> Path:
+    path = _resolve_repo_path(str(WORKFLOW_TASKS_DIR))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _prune_workflow_task_statuses() -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, WORKFLOW_TASK_RETENTION_DAYS))
+    try:
+        root = _workflow_tasks_dir()
+    except Exception:
+        return
+    for path in root.glob("*.json"):
+        try:
+            if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < cutoff:
+                path.unlink()
+        except OSError:
+            continue
+
+
+def _workflow_task_path(task_id: str) -> Path:
+    if not re.fullmatch(r"(?:task-[0-9a-f]{32}|[A-Za-z0-9][A-Za-z0-9._-]{0,79})", task_id):
+        raise ValueError("task_id must be a workflow task id")
+    return _workflow_tasks_dir() / f"{task_id}.json"
+
+
+def _workflow_task_artifact_link(task_id: str, created_at: str = "") -> dict[str, Any]:
+    rel_path = str(WORKFLOW_TASKS_DIR / f"{task_id}.json")
+    return _artifact_resource_link(
+        title="Workflow task status",
+        rel_path=rel_path,
+        mime_type="application/json",
+        created_at=created_at,
+        redacted=True,
+        safety_note="Task status stores redacted workflow metadata and artifact references only; no raw secrets.",
+    )
+
+
+def _write_workflow_task_status(status: dict[str, Any]) -> dict[str, Any]:
+    redacted = _redact_audit_value(status)
+    path = _workflow_task_path(str(redacted["task_id"]))
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(redacted, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return redacted
+
+
+def _read_workflow_task_status(task_id: str) -> dict[str, Any]:
+    path = _workflow_task_path(task_id)
+    if not path.exists():
+        raise FileNotFoundError(f"workflow task not found: {task_id}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("workflow task status is invalid")
+    return payload
+
+
+def _workflow_task_expired(payload: dict[str, Any]) -> bool:
+    return _is_expired(str(payload.get("expires_at") or ""), datetime.now(timezone.utc))
+
+
+def _expire_workflow_task_if_needed(payload: dict[str, Any]) -> dict[str, Any]:
+    if str(payload.get("status")) in _WORKFLOW_TASK_FINAL_STATUSES:
+        return payload
+    if not _workflow_task_expired(payload):
+        return payload
+    payload = dict(payload)
+    payload["status"] = "expired"
+    payload["state"] = "expired"
+    payload["finished_at"] = payload.get("finished_at") or _now_iso()
+    payload["progress"] = 1.0
+    payload["progress_detail"] = {"phase": "expired", "percent": 100}
+    payload["error"] = "task expired before completion status was observed"
+    payload["audit_events"] = [
+        *payload.get("audit_events", []),
+        {"event": "expired", "at": payload["finished_at"]},
+    ]
+    _append_audit_event(
+        "workflow_task",
+        ["read-only", "async"],
+        False,
+        {"task_id": payload.get("task_id"), "workflow": payload.get("workflow"), "event": "expired"},
+        "expired",
+    )
+    return _write_workflow_task_status(payload)
+
+
+def _workflow_task_status_payload(task_id: str) -> dict[str, Any]:
+    payload = _expire_workflow_task_if_needed(_read_workflow_task_status(task_id))
+    created_at = str(payload.get("created_at") or "")
+    payload["resource_links"] = [_workflow_task_artifact_link(task_id, created_at=created_at)]
+    payload["_meta"] = _artifact_meta(payload["resource_links"])
+    return payload
+
+
+def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
+    started_at = _now_iso()
+    payload = _read_workflow_task_status(task_id)
+    payload.update(
+        {
+            "status": "running",
+            "state": "running",
+            "started_at": started_at,
+            "updated_at": started_at,
+            "progress": 0.25,
+            "progress_detail": {"phase": "running", "percent": 25},
+            "audit_events": [
+                *payload.get("audit_events", []),
+                {"event": "running", "at": started_at},
+            ],
+        }
+    )
+    _write_workflow_task_status(payload)
+    _append_audit_event(
+        "workflow_task",
+        ["read-only", "async"],
+        True,
+        {"task_id": task_id, "workflow": "governance_report", "event": "started"},
+        "started",
+    )
+    try:
+        result = governance_report(**args)
+        finished_at = _now_iso()
+        exports = result.get("exports", {}) if isinstance(result.get("exports"), dict) else {}
+        resource_links = (
+            result.get("resource_links", [])
+            if isinstance(result.get("resource_links"), list)
+            else []
+        )
+        payload.update(
+            {
+                "status": "succeeded",
+                "state": "succeeded",
+                "ok": True,
+                "finished_at": finished_at,
+                "updated_at": finished_at,
+                "progress": 1.0,
+                "progress_detail": {"phase": "complete", "percent": 100},
+                "result": {
+                    "schema": result.get("schema"),
+                    "report_id": result.get("report_id"),
+                    "generated_at": result.get("generated_at"),
+                    "exports": exports,
+                },
+                "artifact_references": resource_links,
+                "audit_events": [
+                    *payload.get("audit_events", []),
+                    {"event": "succeeded", "at": finished_at},
+                ],
+            }
+        )
+        _write_workflow_task_status(payload)
+        _append_audit_event(
+            "workflow_task",
+            ["read-only", "async"],
+            True,
+            {
+                "task_id": task_id,
+                "workflow": "governance_report",
+                "report_id": result.get("report_id"),
+                "event": "completed",
+            },
+            "completed",
+        )
+    except Exception as exc:  # pragma: no cover - defensive background failure path
+        finished_at = _now_iso()
+        payload.update(
+            {
+                "status": "failed",
+                "state": "failed",
+                "ok": False,
+                "finished_at": finished_at,
+                "updated_at": finished_at,
+                "progress": 1.0,
+                "progress_detail": {"phase": "failed", "percent": 100},
+                "error": _redact_audit_reason(type(exc).__name__),
+                "audit_events": [
+                    *payload.get("audit_events", []),
+                    {"event": "failed", "at": finished_at, "reason": type(exc).__name__},
+                ],
+            }
+        )
+        _write_workflow_task_status(payload)
+        _append_audit_event(
+            "workflow_task",
+            ["read-only", "async"],
+            False,
+            {"task_id": task_id, "workflow": "governance_report", "event": "failed"},
+            type(exc).__name__,
+        )
+
+
+
+def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
+    started_at = _now_iso()
+    payload = _read_workflow_task_status(task_id)
+    payload.update(
+        {
+            "status": "running",
+            "state": "running",
+            "started_at": started_at,
+            "updated_at": started_at,
+            "progress": 0.25,
+            "progress_detail": {"phase": "running", "percent": 25},
+            "audit_events": [
+                *payload.get("audit_events", []),
+                {"event": "running", "at": started_at},
+            ],
+        }
+    )
+    _write_workflow_task_status(payload)
+    _append_audit_event(
+        "workflow_task",
+        _workflow_task_categories("vscode_task_run"),
+        True,
+        {"task_id": task_id, "workflow": "vscode_task_run", "event": "started"},
+        "started",
+    )
+
+    retries: list[dict[str, Any]] = []
+    attempt = 0
+    result: dict[str, Any] = {}
+    ok = False
+    while attempt <= max(0, max_retries):
+        attempt += 1
+        try:
+            result = vscode_task_run(**args)
+        except Exception as exc:
+            result = {
+                "schema": "vscode_task_run.v1",
+                "ok": False,
+                "timeout": False,
+                "stderr": _redact_audit_reason(str(exc)),
+                "error": {"type": type(exc).__name__, "message": _redact_audit_reason(str(exc))},
+            }
+        ok = bool(result.get("ok", False))
+        transient = _workflow_task_result_is_transient(result)
+        if ok or attempt > max(0, max_retries) or not transient:
+            break
+        retries.append({"attempt": attempt, "reason": "transient_failure", "at": _now_iso()})
+        _append_audit_event(
+            "workflow_task",
+            _workflow_task_categories("vscode_task_run"),
+            False,
+            {"task_id": task_id, "workflow": "vscode_task_run", "event": "retry", "attempt": attempt},
+            "transient_failure",
+        )
+
+    finished_at = _now_iso()
+    state = "succeeded" if ok else "failed"
+    payload.update(
+        {
+            "status": state,
+            "state": state,
+            "ok": ok,
+            "attempt": attempt,
+            "retries": retries,
+            "finished_at": finished_at,
+            "updated_at": finished_at,
+            "progress": 1.0,
+            "progress_detail": {"phase": "complete" if ok else "failed", "percent": 100},
+            "result": _redact_audit_value(result),
+            "audit_events": [
+                *payload.get("audit_events", []),
+                {"event": "completed" if ok else "failed", "at": finished_at},
+            ],
+        }
+    )
+    _write_workflow_task_status(payload)
+    _append_audit_event(
+        "workflow_task",
+        _workflow_task_categories("vscode_task_run"),
+        ok,
+        {"task_id": task_id, "workflow": "vscode_task_run", "event": "completed" if ok else "failed"},
+        "completed" if ok else "failed",
+    )
+
+def _start_workflow_task(
+    workflow: str,
+    args: dict[str, Any],
+    retry_of: str = "",
+    task_id: str = "",
+    max_retries: int = 0,
+    restart: bool = False,
+) -> dict[str, Any]:
+    if workflow not in _WORKFLOW_TASK_ALLOWED_WORKFLOWS:
+        raise ValueError(
+            "workflow must be one of: "
+            + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+        )
+    if retry_of:
+        previous = _workflow_task_status_payload(retry_of)
+        if previous.get("workflow") != workflow:
+            raise ValueError("retry_of workflow does not match requested workflow")
+    _prune_workflow_task_statuses()
+    id_args = dict(args)
+    if retry_of:
+        id_args["retry_of"] = retry_of
+    task_id = _workflow_task_stable_id(workflow, id_args, task_id)
+    status_path = _workflow_task_path(task_id)
+    if status_path.exists() and not restart:
+        return _workflow_task_status_payload(task_id)
+    created_at = _now_iso()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(hours=max(1, WORKFLOW_TASK_EXPIRY_HOURS))
+    ).isoformat()
+    retention_expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=max(1, WORKFLOW_TASK_RETENTION_DAYS))
+    ).isoformat()
+    payload: dict[str, Any] = {
+        "schema": "workflow_task.v1",
+        "task_id": task_id,
+        "workflow": workflow,
+        "status": "pending",
+        "state": "pending",
+        "started": True,
+        "ok": False,
+        "attempt": 0,
+        "max_retries": max(0, min(3, max_retries)),
+        "retries": [],
+        "created_at": created_at,
+        "started_at": "",
+        "finished_at": "",
+        "updated_at": created_at,
+        "expires_at": expires_at,
+        "retention_expires_at": retention_expires_at,
+        "retry_of": retry_of,
+        "progress": 0.0,
+        "progress_detail": {"phase": "queued", "percent": 0},
+        "arguments": _redact_audit_value(args),
+        "artifact_references": [],
+        "audit_events": [{"event": "start", "at": created_at}],
+        "security": {
+            "redacted": True,
+            "contains_secrets": False,
+            "repo_boundary_enforced": True,
+        },
+    }
+    if retry_of:
+        payload["audit_events"].append(
+            {"event": "retry", "at": created_at, "retry_of": retry_of}
+        )
+    _write_workflow_task_status(payload)
+    runner = _run_vscode_task if workflow == "vscode_task_run" else _run_governance_report_task
+    if workflow == "vscode_task_run":
+        future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args, max(0, min(3, max_retries)))
+    else:
+        future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args)
+    with _WORKFLOW_TASK_LOCK:
+        _WORKFLOW_TASK_FUTURES[task_id] = future
+    _append_audit_event(
+        "workflow_task",
+        _workflow_task_categories(workflow),
+        True,
+        {"task_id": task_id, "workflow": workflow, "retry_of": retry_of, "event": "start"},
+        "start",
+    )
+    return _workflow_task_status_payload(task_id)
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -12746,6 +13173,76 @@ def governance_report(
                 link["size_bytes"] = json_path.stat().st_size
         json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
     return report
+
+
+@mcp.tool()
+def workflow_task(
+    action: str = "start",
+    workflow: str = "vscode_task_run",
+    task_id: str = "",
+    label: str = "",
+    tasks_path: str = ".vscode/tasks.json",
+    control_profile: str = "build",
+    timeout_seconds: int = 1800,
+    max_output_chars: int = 12000,
+    max_retries: int = 1,
+    restart: bool = False,
+    start_time: str = "",
+    end_time: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    export: bool = True,
+    retry_of: str = "",
+) -> dict[str, Any]:
+    """Start or inspect a supported persisted async workflow task."""
+    _require_git_repo()
+    if action not in {"start", "status"}:
+        raise ValueError("action must be one of: start, status")
+    if action == "status":
+        if not task_id:
+            raise ValueError("task_id is required for status")
+        return _workflow_task_status_payload(task_id)
+    if workflow == "vscode_task_run":
+        _require_mutations()
+        if not label.strip():
+            raise ValueError("label is required for vscode_task_run")
+        if timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be >= 1")
+        args = {
+            "label": label.strip(),
+            "tasks_path": tasks_path,
+            "control_profile": control_profile,
+            "timeout_seconds": timeout_seconds,
+            "max_output_chars": max_output_chars,
+        }
+    elif workflow == "governance_report":
+        args = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "export": export,
+        }
+    else:
+        raise ValueError(
+            "workflow must be one of: "
+            + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+        )
+    return _start_workflow_task(
+        workflow,
+        args,
+        retry_of=retry_of,
+        task_id=task_id,
+        max_retries=max_retries if workflow == "vscode_task_run" else 0,
+        restart=restart,
+    )
+
+
+@mcp.tool()
+def task_status(task_id: str) -> dict[str, Any]:
+    """Return persisted redacted status for an asynchronous workflow task."""
+    _require_git_repo()
+    return _workflow_task_status_payload(task_id)
 
 
 

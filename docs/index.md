@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT
 
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting for MCP policy and tool-gate decisions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
+- [Async workflow tasks](./workflow-tasks.md) - prototype MCP Tasks-style async handles for long-running repo workflows.
 
 This index lists documentation ownership and status.
 
