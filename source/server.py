@@ -50,14 +50,43 @@ except ModuleNotFoundError:  # pragma: no cover
 # need them. Keeping them out of the default import path lowers server startup RAM
 # and avoids devcontainer attach pressure while preserving offline bootstrap assets.
 _OPTIONAL_DEPENDENCY_UNLOADED = object()
-sp = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("sympy") else None
-sqlparse = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("sqlparse") else None
-Image = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("PIL") else None
-pytesseract = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("pytesseract") else None
-PdfReader = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("pypdf") else None
-docx = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("docx") else None
-openpyxl = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("openpyxl") else None
-xlrd = _OPTIONAL_DEPENDENCY_UNLOADED if importlib.util.find_spec("xlrd") else None
+
+
+class _LazyOptionalDependency:
+    """Proxy an installed optional dependency without importing it at startup."""
+
+    def __init__(self, module_name: str, package_name: str | None = None, attr_name: str | None = None) -> None:
+        self._module_name = module_name
+        self._package_name = package_name
+        self._attr_name = attr_name
+        self._value: Any = _OPTIONAL_DEPENDENCY_UNLOADED
+
+    def _load(self) -> Any:
+        if self._value is _OPTIONAL_DEPENDENCY_UNLOADED:
+            module = _import_optional_dependency(self._module_name, self._package_name)
+            self._value = getattr(module, self._attr_name) if self._attr_name else module
+        return self._value
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._load()(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        state = "unloaded" if self._value is _OPTIONAL_DEPENDENCY_UNLOADED else "loaded"
+        target = f"{self._module_name}.{self._attr_name}" if self._attr_name else self._module_name
+        return f"<_LazyOptionalDependency {target} ({state})>"
+
+
+sp = _LazyOptionalDependency("sympy", "sympy") if importlib.util.find_spec("sympy") else None
+sqlparse = _LazyOptionalDependency("sqlparse", "sqlparse") if importlib.util.find_spec("sqlparse") else None
+Image = _LazyOptionalDependency("PIL.Image", "Pillow") if importlib.util.find_spec("PIL") else None
+pytesseract = _LazyOptionalDependency("pytesseract", "pytesseract") if importlib.util.find_spec("pytesseract") else None
+PdfReader = _LazyOptionalDependency("pypdf", "pypdf", "PdfReader") if importlib.util.find_spec("pypdf") else None
+docx = _LazyOptionalDependency("docx", "python-docx") if importlib.util.find_spec("docx") else None
+openpyxl = _LazyOptionalDependency("openpyxl", "openpyxl") if importlib.util.find_spec("openpyxl") else None
+xlrd = _LazyOptionalDependency("xlrd", "xlrd") if importlib.util.find_spec("xlrd") else None
 
 try:
     from tree_sitter_languages import get_parser as _ts_get_parser
