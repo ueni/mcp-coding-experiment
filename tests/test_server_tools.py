@@ -1533,8 +1533,8 @@ class ServerToolsTest(ServerToolsTestBase):
                 "tool_name": "command_runner",
                 "categories": ["shell/process"],
                 "success": False,
-                "reason": "HTTP session not authorized",
-                "arguments": {"cmd": "echo ok"},
+                "reason": "HTTP session not authorized: Bearer secret-value rejected",
+                "arguments": {"authorization": "Bearer secret-value", "cmd": "echo ok"},
             },
             {
                 "timestamp": "2026-05-12T08:10:00+00:00",
@@ -1561,8 +1561,12 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(counts["http_authorization_denial_count"], 1)
         self.assertTrue(counts["digest"]["chain_head"])
         exported = (self.repo_path / out["exports"]["json"]).read_text(encoding="utf-8")
+        link_metadata = self.server.json.dumps(out["resource_links"], sort_keys=True)
         self.assertIn("<redacted>", exported)
         self.assertNotIn("secret-value", exported)
+        self.assertNotIn("Bearer secret-value", exported)
+        self.assertNotIn("secret-value", link_metadata)
+        self.assertNotIn("Bearer secret-value", link_metadata)
 
     def test_workflow_diagnostics_classifies_failures_and_redacts(self):
         audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"

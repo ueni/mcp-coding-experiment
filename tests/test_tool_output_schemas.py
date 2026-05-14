@@ -114,9 +114,11 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             self.assertFalse(link["safety"]["contains_secrets"])
             self.assertNotIn(str(self.repo_path), self.server.json.dumps(link))
 
+        (self.repo_path / "snapshot-change.txt").write_text("changed\n", encoding="utf-8")
         snapshot = self.server.state_snapshot(label="schema-contract")
         validate_against_schema(snapshot, STATE_SNAPSHOT_OUTPUT_SCHEMA)
-        self.assertGreaterEqual(len(snapshot["resource_links"]), 1)
+        self.assertGreaterEqual(len(snapshot["resource_links"]), 2)
+        self.assertTrue(any(link["uri"].startswith("git-ref://") for link in snapshot["resource_links"]))
         for link in snapshot["resource_links"]:
             validate_against_schema(link, RESOURCE_LINK_SCHEMA)
             self.assertFalse(link["safety"]["contains_secrets"])

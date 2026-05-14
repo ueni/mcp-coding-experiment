@@ -60,7 +60,7 @@ The selected-test contract is intentionally conservative: `selected_tests` lists
 
 ### Artifact resource links
 
-Artifact-producing tools expose generated outputs through a compact `artifact_resource_link.v1` contract in `resource_links` and mirror the same list under `_meta.artifact_resources` for clients that prefer metadata fields. Links use repository-relative `repo://` URIs and never expose host absolute paths. Each link includes a title, URI/path when file-backed, MIME type, size when the file exists, created time, and safety metadata indicating redaction, repository-boundary enforcement, and no secret exposure.
+Artifact-producing tools expose generated outputs through a compact `artifact_resource_link.v1` contract in `resource_links` and mirror the same list under `_meta.artifact_resources` for clients that prefer metadata fields. Links use repository-relative `repo://file/{path}` URIs and never expose host absolute paths. Each link includes a title, URI/path when file-backed, MIME type, size when the file exists, created time, and safety metadata indicating redaction, repository-boundary enforcement, and no secret exposure.
 
 Example client response excerpt for `governance_report(export=true)`:
 
@@ -93,7 +93,7 @@ Example client response excerpt for `governance_report(export=true)`:
 }
 ```
 
-`state_snapshot` uses the same contract for the repository-local snapshot index. Stash commit/ref identifiers remain in the existing structured fields for rollback compatibility, but are not emitted as resource links because those Git objects may contain raw workspace changes. These links are intended to become task artifact references in future async task work, but this contract does not add async task behavior.
+`state_snapshot` uses the same contract for the repository-local snapshot index and, when a stash-backed rollback object exists, adds a `git-ref://refs/mcp-snapshots/...` rollback pointer without embedding snapshot contents. These links are intended to become task artifact references in future async task work, but this contract does not add async task behavior.
 
 ## Error shape
 
