@@ -1495,6 +1495,10 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("markdown", out["exports"])
         self.assertTrue((self.repo_path / out["exports"]["json"]).exists())
         self.assertTrue((self.repo_path / out["exports"]["markdown"]).exists())
+        self.assertEqual({link["path"] for link in out["resource_links"]}, {out["exports"]["json"], out["exports"]["markdown"]})
+        self.assertTrue(all(link["uri"].startswith("repo://file/") for link in out["resource_links"]))
+        self.assertTrue(all(link.get("size_bytes", 0) > 0 for link in out["resource_links"]))
+        self.assertFalse(out["_meta"]["artifact_resources"]["safety"]["secrets_exposed"])
         self.assertEqual(out["audit"]["counts"]["digest"]["chain_head"], "")
 
     def test_governance_report_absolute_audit_path_boundary(self):
@@ -1530,7 +1534,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 "categories": ["shell/process"],
                 "success": False,
                 "reason": "HTTP session not authorized",
-                "arguments": {"cmd": "echo ok"},
+                "arguments": {"authorization": "Bearer secret-value", "cmd": "echo ok"},
             },
             {
                 "timestamp": "2026-05-12T08:10:00+00:00",
@@ -1557,8 +1561,12 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(counts["http_authorization_denial_count"], 1)
         self.assertTrue(counts["digest"]["chain_head"])
         exported = (self.repo_path / out["exports"]["json"]).read_text(encoding="utf-8")
+        link_metadata = self.server.json.dumps(out["resource_links"], sort_keys=True)
         self.assertIn("<redacted>", exported)
         self.assertNotIn("secret-value", exported)
+        self.assertNotIn("Bearer secret-value", exported)
+        self.assertNotIn("secret-value", link_metadata)
+        self.assertNotIn("Bearer secret-value", link_metadata)
 
     def test_workflow_diagnostics_classifies_failures_and_redacts(self):
         audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
@@ -1759,6 +1767,10 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(snap["schema"], "state_snapshot.v1")
         self.assertEqual(snap["backend"], "git-stash")
         self.assertIn("snapshot_id", snap)
+        self.assertIn("resource_links", snap)
+        self.assertEqual(snap["resource_links"][0]["path"], str(self.server.STATE_SNAPSHOT_INDEX_FILE))
+        self.assertEqual(snap["resource_links"][0]["mime_type"], "application/json")
+        self.assertFalse(snap["_meta"]["artifact_resources"]["safety"]["absolute_host_paths_exposed"])
         restored = self.server.state_restore(snapshot_id=snap["snapshot_id"])
         self.assertEqual(restored["schema"], "state_restore.v1")
         self.assertEqual(restored["backend"], "git-stash")

@@ -16,6 +16,7 @@ from typing import Any
 
 SCHEMA_VERSION = "tool_output_contracts.v1"
 
+
 SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "repo_info",
     "runtime_state",
@@ -46,7 +47,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "policy_simulator": ("schema", "ok", "blocking_policies", "docs", "security", "risk", "license"),
     "clarification_gate": ("schema", "ok_to_continue", "status", "missing_fields", "questions", "fallback_checklist", "elicitation"),
     "release_readiness": ("schema", "base_ref", "head_ref", "ok", "checks"),
-    "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports"),
+    "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports", "resource_links"),
     "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
 }
 
@@ -59,11 +60,11 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "read_snippet": ("requested_start_line", "requested_end_line", "total_lines"),
     "summarize_diff": ("files", "files_sorted_by_churn", "patch", "patch_unified"),
     "risk_scoring": (),
-    "workspace_transaction": (),
+    "workspace_transaction": ("resource_links", "_meta"),
     "policy_simulator": (),
     "clarification_gate": ("audit", "inputs", "decision_reasons"),
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics"),
+    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "_meta"),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
 }
 
@@ -81,6 +82,43 @@ def _object_schema(
         "additionalProperties": additional_properties,
     }
 
+
+RESOURCE_LINK_SCHEMA: dict[str, Any] = _object_schema(
+    ["schema", "title", "uri", "mime_type", "created_at", "safety"],
+    {
+        "schema": {"type": "string", "const": "artifact_resource_link.v1"},
+        "title": {"type": "string"},
+        "uri": {"type": "string"},
+        "path": {"type": "string"},
+        "mime_type": {"type": "string"},
+        "size_bytes": {"type": "integer"},
+        "created_at": {"type": "string"},
+        "safety": _object_schema(
+            ["redacted", "contains_secrets", "repo_boundary_enforced", "note"],
+            {
+                "redacted": {"type": "boolean"},
+                "contains_secrets": {"type": "boolean"},
+                "repo_boundary_enforced": {"type": "boolean"},
+                "note": {"type": "string"},
+            },
+        ),
+    },
+)
+
+STATE_SNAPSHOT_OUTPUT_SCHEMA: dict[str, Any] = _object_schema(
+    ["schema", "snapshot_id", "backend", "base_head", "stash_commit", "stash_ref", "had_changes", "resource_links", "_meta"],
+    {
+        "schema": {"type": "string", "const": "state_snapshot.v1"},
+        "snapshot_id": {"type": "string"},
+        "backend": {"type": "string"},
+        "base_head": {"type": "string"},
+        "stash_commit": {"type": "string"},
+        "stash_ref": {"type": "string"},
+        "had_changes": {"type": "boolean"},
+        "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
+        "_meta": {"type": "object"},
+    },
+)
 
 ERROR_OUTPUT_SCHEMA: dict[str, Any] = _object_schema(
     ["ok", "error"],
@@ -195,6 +233,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "schema": {"type": "string", "const": "workspace_transaction.v1"},
             "mode": {"type": "string"},
             "result": {"type": "object"},
+            "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
+            "_meta": {"type": "object"},
         },
     ),
     "policy_simulator": _object_schema(
@@ -251,6 +291,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "snapshots": {"type": "object"},
             "security": {"type": "object"},
             "exports": {"type": "object"},
+            "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
+            "_meta": {"type": "object"},
         },
     ),
     "workflow_diagnostics": _object_schema(

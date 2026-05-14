@@ -799,6 +799,27 @@ def _redact_audit_string(value: str) -> str:
     return value
 
 
+def _redact_audit_reason(value: str) -> str:
+    """Redact reason text while preserving non-secret auth policy classes.
+
+    Governance aggregation depends on stable denial classes such as "missing
+    bearer token" and "HTTP session not authorized". Those phrases are policy
+    metadata, not credentials, so keep a canonical form even when the broader
+    secret-value redactor would otherwise collapse the whole reason to
+    ``<redacted>`` because it contains words like "bearer token".
+    """
+    lower_value = value.lower()
+    if "http session not authorized" in lower_value:
+        return "HTTP session not authorized"
+    if "missing bearer token" in lower_value:
+        return "missing bearer token"
+    if "invalid bearer token" in lower_value:
+        return "invalid bearer token"
+    if "mcp_http_bearer_token is not configured" in lower_value:
+        return "HTTP auth bearer token not configured"
+    return _redact_audit_string(value)
+
+
 def _redact_audit_value(value: Any, depth: int = 0) -> Any:
     if depth > 4:
         return "<redacted-depth>"
@@ -806,7 +827,9 @@ def _redact_audit_value(value: Any, depth: int = 0) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_str = str(key)
-            if SENSITIVE_AUDIT_KEY_RE.search(key_str):
+            if key_str.lower() == "reason" and isinstance(item, str):
+                redacted[key_str] = _redact_audit_reason(item)
+            elif SENSITIVE_AUDIT_KEY_RE.search(key_str):
                 redacted[key_str] = "<redacted>"
             else:
                 redacted[key_str] = _redact_audit_value(item, depth + 1)
@@ -830,7 +853,7 @@ def _append_audit_event(
         "tool_name": tool_name,
         "categories": categories,
         "success": success,
-        "reason": _redact_audit_string(reason),
+        "reason": _redact_audit_reason(reason),
         "arguments": _redact_audit_value(arguments or {}),
     }
     try:
@@ -2111,6 +2134,63 @@ def _resolve_repo_path(rel_path: str = ".") -> Path:
     except ValueError as exc:
         raise ValueError("path escapes repository root") from exc
     return candidate
+
+
+
+def _repo_resource_uri(rel_path: str) -> str:
+    return "repo://file/" + urllib.parse.quote(rel_path, safe="")
+
+
+def _artifact_resource_link(
+    *,
+    title: str,
+    rel_path: str = "",
+    uri: str = "",
+    mime_type: str = "application/octet-stream",
+    created_at: str = "",
+    redacted: bool = True,
+    safety_note: str = "Generated artifact metadata only; repository-relative path, no host absolute path.",
+) -> dict[str, Any]:
+    if not rel_path and not uri:
+        raise ValueError("resource links require rel_path or uri")
+    link: dict[str, Any] = {
+        "schema": "artifact_resource_link.v1",
+        "title": title,
+        "uri": uri or _repo_resource_uri(rel_path),
+        "mime_type": mime_type,
+        "created_at": created_at or _now_iso(),
+        "safety": {
+            "redacted": redacted,
+            "contains_secrets": False,
+            "repo_boundary_enforced": True,
+            "note": safety_note,
+        },
+    }
+    if rel_path:
+        path = _resolve_repo_path(rel_path)
+        link["path"] = rel_path
+        if path.exists() and path.is_file():
+            stat = path.stat()
+            link["size_bytes"] = stat.st_size
+            if not created_at:
+                link["created_at"] = datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).isoformat()
+    return link
+
+
+def _artifact_meta(resource_links: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "artifact_resources": {
+            "schema": "artifact_resource_links.v1",
+            "resource_links": resource_links,
+            "safety": {
+                "absolute_host_paths_exposed": False,
+                "secrets_exposed": False,
+                "redaction_required": True,
+            },
+        }
+    }
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -12630,8 +12710,41 @@ def governance_report(
         },
         "exports": {},
     }
+    resource_links: list[dict[str, Any]] = []
     if export:
         report["exports"] = _write_governance_report_exports(report)
+        exports = report.get("exports", {}) if isinstance(report.get("exports"), dict) else {}
+        if isinstance(exports.get("json"), str):
+            resource_links.append(
+                _artifact_resource_link(
+                    title="Governance report JSON",
+                    rel_path=exports["json"],
+                    mime_type="application/json",
+                    created_at=generated_at,
+                    redacted=True,
+                    safety_note="JSON export contains redacted audit summaries only; raw secrets are not persisted.",
+                )
+            )
+        if isinstance(exports.get("markdown"), str):
+            resource_links.append(
+                _artifact_resource_link(
+                    title="Governance report Markdown",
+                    rel_path=exports["markdown"],
+                    mime_type="text/markdown",
+                    created_at=generated_at,
+                    redacted=True,
+                    safety_note="Markdown export is generated from redacted governance summary fields.",
+                )
+            )
+    report["resource_links"] = resource_links
+    report["_meta"] = _artifact_meta(resource_links)
+    if export and isinstance(report.get("exports"), dict) and isinstance(report["exports"].get("json"), str):
+        json_path = _resolve_repo_path(report["exports"]["json"])
+        json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+        for link in resource_links:
+            if link.get("path") == report["exports"]["json"]:
+                link["size_bytes"] = json_path.stat().st_size
+        json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
     return report
 
 
@@ -13263,6 +13376,27 @@ def state_snapshot(
     }
     index["snapshots"] = snapshots
     _state_snapshot_index_save(index)
+    resource_links = [
+        _artifact_resource_link(
+            title="State snapshot index",
+            rel_path=str(STATE_SNAPSHOT_INDEX_FILE),
+            mime_type="application/json",
+            created_at=snapshots[name]["created_at"],
+            redacted=True,
+            safety_note="Snapshot index is repository-local metadata; stash object contents are referenced by Git ref, not embedded.",
+        )
+    ]
+    if stash_ref:
+        resource_links.append(
+            _artifact_resource_link(
+                title="State snapshot rollback Git ref",
+                uri="git-ref://" + urllib.parse.quote(stash_ref, safe="/._-"),
+                mime_type="application/vnd.git-ref",
+                created_at=snapshots[name]["created_at"],
+                redacted=True,
+                safety_note="Rollback contents remain in Git object storage and are referenced by ref only, not embedded in metadata.",
+            )
+        )
     return {
         "schema": "state_snapshot.v1",
         "snapshot_id": name,
@@ -13271,6 +13405,8 @@ def state_snapshot(
         "stash_commit": stash_commit,
         "stash_ref": stash_ref,
         "had_changes": bool(stash_commit),
+        "resource_links": resource_links,
+        "_meta": _artifact_meta(resource_links),
     }
 
 
@@ -13419,11 +13555,16 @@ def workspace_transaction(
             create_dirs=create_dirs,
             delete_metadata=delete_metadata,
         )
-    return {
+    out = {
         "schema": "workspace_transaction.v1",
         "mode": mode,
         "result": result,
     }
+    if isinstance(result, dict) and isinstance(result.get("resource_links"), list):
+        out["resource_links"] = result["resource_links"]
+        if isinstance(result.get("_meta"), dict):
+            out["_meta"] = result["_meta"]
+    return out
 
 
 @mcp.tool()
