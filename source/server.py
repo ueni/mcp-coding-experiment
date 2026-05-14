@@ -2342,7 +2342,12 @@ def _write_workflow_task_result_artifact(task_id: str, result: dict[str, Any]) -
 def _compact_vscode_task_result(result: dict[str, Any], artifact_links: list[dict[str, Any]]) -> dict[str, Any]:
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
-    build_log_tail = str(result.get("build_log_tail") or "")
+    build_log_tail_value = result.get("build_log_tail")
+    build_log_tail = (
+        str(build_log_tail_value)
+        if build_log_tail_value is not None
+        else _summarize_build_log(stdout, stderr)
+    )
     compact: dict[str, Any] = {
         "schema": result.get("schema", "vscode_task_run.v1"),
         "ok": bool(result.get("ok", False)),
