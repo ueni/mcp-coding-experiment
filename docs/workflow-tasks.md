@@ -32,9 +32,11 @@ Status records use `workflow_task.v1` and include:
 - timestamps: `created_at`, `started_at`, `updated_at`, `finished_at`,
   `expires_at`, `retention_expires_at`
 - `progress`: coarse phase/percent fields for current clients
-- `result`: compact final workflow summary when available; large VS Code task
-  stdout/stderr/build-log details are written to redacted result artifacts and
-  referenced from this summary instead of being embedded in the status record
+- `result`: compact final workflow summary when available, including small
+  fields such as exit code, timeout state, and output character/line counts;
+  large VS Code task stdout/stderr/build-log details are written to redacted
+  result artifacts and referenced from this summary instead of being embedded in
+  the status record
 - `artifact_references`: generated artifact resource links using
   `artifact_resource_link.v1`
 - `resource_links` / `_meta`: resource link for the task status artifact itself

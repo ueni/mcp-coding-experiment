@@ -2292,7 +2292,6 @@ def _workflow_task_path(task_id: str) -> Path:
 
 
 
-
 def _workflow_task_result_artifacts_dir() -> Path:
     path = _workflow_tasks_dir() / "artifacts"
     path.mkdir(parents=True, exist_ok=True)
@@ -2341,6 +2340,9 @@ def _write_workflow_task_result_artifact(task_id: str, result: dict[str, Any]) -
 
 
 def _compact_vscode_task_result(result: dict[str, Any], artifact_links: list[dict[str, Any]]) -> dict[str, Any]:
+    stdout = str(result.get("stdout") or "")
+    stderr = str(result.get("stderr") or "")
+    build_log_tail = str(result.get("build_log_tail") or "")
     compact: dict[str, Any] = {
         "schema": result.get("schema", "vscode_task_run.v1"),
         "ok": bool(result.get("ok", False)),
@@ -2350,6 +2352,11 @@ def _compact_vscode_task_result(result: dict[str, Any], artifact_links: list[dic
         "cwd": _redact_audit_value(result.get("cwd", "")),
         "exit_code": result.get("exit_code"),
         "timeout": bool(result.get("timeout", False)),
+        "output_summary": {
+            "stdout_chars": len(stdout),
+            "stderr_chars": len(stderr),
+            "build_log_tail_lines": len(build_log_tail.splitlines()),
+        },
         "artifact_references": artifact_links,
         "output_artifacts": {
             "schema": "artifact_resource_links.v1",

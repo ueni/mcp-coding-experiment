@@ -58,6 +58,9 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(final["ok"])
         self.assertEqual(final["progress"], 1.0)
         self.assertEqual(final["result"]["schema"], "vscode_task_run.v1")
+        self.assertEqual(final["result"]["output_summary"]["stdout_chars"], 2)
+        self.assertEqual(final["result"]["output_summary"]["stderr_chars"], 0)
+        self.assertEqual(final["result"]["output_summary"]["build_log_tail_lines"], 1)
         self.assertNotIn("stdout", final["result"])
         self.assertNotIn("stderr", final["result"])
         self.assertNotIn("build_log_tail", final["result"])
@@ -74,6 +77,11 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(result_artifact["result"]["stdout"], "ok")
         status_path = self.repo_path / ".codebase-tooling-mcp" / "tasks" / "unit-success.json"
         self.assertTrue(status_path.exists())
+        persisted_status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertNotIn("stdout", persisted_status["result"])
+        self.assertNotIn("stderr", persisted_status["result"])
+        self.assertNotIn("build_log_tail", persisted_status["result"])
+        self.assertEqual(persisted_status["result"]["output_summary"]["stdout_chars"], 2)
         link = final["resource_links"][0]
         self.assertEqual(link["schema"], "artifact_resource_link.v1")
         self.assertEqual(link["path"], ".codebase-tooling-mcp/tasks/unit-success.json")
