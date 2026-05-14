@@ -84,7 +84,8 @@ Example client response excerpt for `governance_report(export=true)`:
         "safety": {
           "redacted": true,
           "contains_secrets": false,
-          "repo_boundary_enforced": true
+          "repo_boundary_enforced": true,
+          "note": "JSON export contains redacted audit summaries only; raw secrets are not persisted."
         }
       }
     ],

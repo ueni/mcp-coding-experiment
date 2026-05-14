@@ -1533,7 +1533,7 @@ class ServerToolsTest(ServerToolsTestBase):
                 "tool_name": "command_runner",
                 "categories": ["shell/process"],
                 "success": False,
-                "reason": "HTTP session not authorized: Bearer secret-value rejected",
+                "reason": "HTTP session not authorized",
                 "arguments": {"authorization": "Bearer secret-value", "cmd": "echo ok"},
             },
             {
