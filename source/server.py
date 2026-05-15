@@ -151,6 +151,8 @@ MCP_AUDIT_LOG_FILE = Path(
 RELEASE_READINESS_DASHBOARD_RESOURCE_URI = "ui://codebase-tooling-mcp/release-readiness-dashboard"
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
+PROVENANCE_SCHEMA = "mcp_artifact_provenance.v1"
+PROVENANCE_SUFFIX = ".provenance.json"
 MEMORY_FILE = Path(".codebase-tooling-mcp/memory/context_memory.json")
 MEMORY_STATS_FILE = Path(".codebase-tooling-mcp/memory/memory_stats.json")
 FAILURE_MEMORY_FILE = Path(".codebase-tooling-mcp/memory/failure_memory.json")
@@ -252,6 +254,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
     "governance_report": {"categories": ["read-only"]},
+    "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
@@ -1464,7 +1467,172 @@ def _governance_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _write_governance_report_exports(report: dict[str, Any]) -> dict[str, str]:
+def _artifact_provenance_path(artifact_rel_path: str) -> Path:
+    return _resolve_repo_path(f"{artifact_rel_path}{PROVENANCE_SUFFIX}")
+
+
+def _artifact_digest(path: Path) -> dict[str, Any]:
+    data = path.read_bytes()
+    return {
+        "algorithm": "sha256",
+        "value": hashlib.sha256(data).hexdigest(),
+        "size_bytes": len(data),
+    }
+
+
+def _artifact_schema_from_path(path: Path) -> str:
+    if path.suffix.lower() != ".json" or not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if isinstance(payload, dict):
+        return str(payload.get("schema", ""))
+    return ""
+
+
+def _git_state_for_provenance(base_ref: str = "", head_ref: str = "") -> dict[str, Any]:
+    def rev(ref: str) -> str:
+        if not ref.strip():
+            return ""
+        return _git("rev-parse", ref, check=False).stdout.strip()
+
+    return {
+        "head": _git("rev-parse", "HEAD", check=False).stdout.strip(),
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "base_commit": rev(base_ref),
+        "head_commit": rev(head_ref),
+        "dirty": bool(_git("status", "--porcelain", check=False).stdout.strip()),
+    }
+
+
+def _write_artifact_provenance_sidecars(
+    *,
+    tool_name: str,
+    artifact_paths: list[str],
+    inputs: dict[str, Any],
+    git_state: dict[str, Any] | None = None,
+    artifact_schemas: dict[str, str] | None = None,
+) -> dict[str, str]:
+    generated_at = _now_iso()
+    clean_inputs = _redact_audit_value(inputs)
+    schemas = artifact_schemas or {}
+    sidecars: dict[str, str] = {}
+    for index, artifact_rel in enumerate(artifact_paths):
+        artifact_path = _resolve_repo_path(artifact_rel)
+        if not artifact_path.exists():
+            continue
+        prev_path = artifact_paths[index - 1] if index > 0 else ""
+        next_path = artifact_paths[index + 1] if index + 1 < len(artifact_paths) else ""
+        artifact_schema = schemas.get(artifact_rel, _artifact_schema_from_path(artifact_path))
+        provenance = {
+            "schema": PROVENANCE_SCHEMA,
+            "generated_at": generated_at,
+            "tool": tool_name,
+            "workflow": tool_name,
+            "artifact": {
+                "path": artifact_rel,
+                "digest": _artifact_digest(artifact_path),
+                "schema": artifact_schema,
+            },
+            "server": {
+                "name": "codebase-tooling-mcp",
+                "provenance_schema": PROVENANCE_SCHEMA,
+            },
+            "repository": {
+                "path": str(REPO_PATH),
+                "git": git_state or _git_state_for_provenance(),
+            },
+            "invocation": {
+                "timestamp": generated_at,
+                "selected_inputs": clean_inputs,
+            },
+            "links": {
+                "previous_artifact": prev_path,
+                "next_artifact": next_path,
+            },
+            "signing": {
+                "signed": False,
+                "reason": "local provenance only; Sigstore/cosign/GitHub attestations deferred",
+            },
+        }
+        sidecar_path = _artifact_provenance_path(artifact_rel)
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_path.write_text(
+            json.dumps(provenance, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+        sidecars[artifact_rel] = str(sidecar_path.relative_to(REPO_PATH))
+    return sidecars
+
+
+def _verify_artifact_provenance_path(artifact_rel: str) -> dict[str, Any]:
+    artifact_path = _resolve_repo_path(artifact_rel)
+    sidecar_path = _artifact_provenance_path(artifact_rel)
+    result: dict[str, Any] = {
+        "artifact_path": artifact_rel,
+        "provenance_path": str(sidecar_path.relative_to(REPO_PATH)),
+        "ok": True,
+        "checks": {
+            "artifact_present": artifact_path.exists(),
+            "provenance_present": sidecar_path.exists(),
+            "digest_match": False,
+            "schema_match": True,
+            "fresh": True,
+        },
+        "findings": [],
+    }
+    if not artifact_path.exists():
+        result["ok"] = False
+        result["findings"].append("artifact_missing")
+        return result
+    if not sidecar_path.exists():
+        result["ok"] = False
+        result["findings"].append("provenance_missing")
+        return result
+    try:
+        provenance = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        result["ok"] = False
+        result["findings"].append("provenance_unreadable")
+        return result
+    if not isinstance(provenance, dict) or provenance.get("schema") != PROVENANCE_SCHEMA:
+        result["ok"] = False
+        result["findings"].append("provenance_schema_mismatch")
+        return result
+    artifact = provenance.get("artifact", {}) if isinstance(provenance.get("artifact"), dict) else {}
+    if str(artifact.get("path", "")) != artifact_rel:
+        result["ok"] = False
+        result["findings"].append("artifact_path_mismatch")
+    digest = artifact.get("digest", {}) if isinstance(artifact.get("digest"), dict) else {}
+    expected_digest = str(digest.get("value", ""))
+    actual_digest = _artifact_digest(artifact_path)["value"]
+    result["checks"]["digest_match"] = expected_digest == actual_digest
+    if expected_digest != actual_digest:
+        result["ok"] = False
+        result["findings"].append("digest_mismatch")
+    current_schema = _artifact_schema_from_path(artifact_path)
+    recorded_schema = str(artifact.get("schema", ""))
+    schema_match = not current_schema or recorded_schema == current_schema
+    result["checks"]["schema_match"] = schema_match
+    if not schema_match:
+        result["ok"] = False
+        result["findings"].append("artifact_schema_mismatch")
+    fresh = sidecar_path.stat().st_mtime >= artifact_path.stat().st_mtime
+    result["checks"]["fresh"] = fresh
+    if not fresh:
+        result["ok"] = False
+        result["findings"].append("provenance_stale")
+    return result
+
+
+def _write_governance_report_exports(
+    report: dict[str, Any],
+    *,
+    provenance_inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     paths = _governance_report_paths(str(report["report_id"]))
     json_path = _resolve_repo_path(paths["json"])
     md_path = _resolve_repo_path(paths["markdown"])
@@ -1473,6 +1641,31 @@ def _write_governance_report_exports(report: dict[str, Any]) -> dict[str, str]:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
     md_path.write_text(_governance_markdown(report), encoding="utf-8")
+    provenance = _write_artifact_provenance_sidecars(
+        tool_name="governance_report",
+        artifact_paths=[exports["json"], exports["markdown"]],
+        inputs=provenance_inputs or {},
+        git_state=_git_state_for_provenance(
+            str(report.get("git", {}).get("base_ref", "")) if isinstance(report.get("git"), dict) else "",
+            str(report.get("git", {}).get("head_ref", "")) if isinstance(report.get("git"), dict) else "",
+        ),
+        artifact_schemas={exports["json"]: str(report.get("schema", "")), exports["markdown"]: "governance_report.markdown"},
+    )
+    if provenance:
+        exports["provenance"] = provenance
+        report["exports"] = exports
+        report["provenance"] = {"sidecars": provenance, "schema": PROVENANCE_SCHEMA}
+        json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+        _write_artifact_provenance_sidecars(
+            tool_name="governance_report",
+            artifact_paths=[exports["json"], exports["markdown"]],
+            inputs=provenance_inputs or {},
+            git_state=_git_state_for_provenance(
+                str(report.get("git", {}).get("base_ref", "")) if isinstance(report.get("git"), dict) else "",
+                str(report.get("git", {}).get("head_ref", "")) if isinstance(report.get("git"), dict) else "",
+            ),
+            artifact_schemas={exports["json"]: str(report.get("schema", "")), exports["markdown"]: "governance_report.markdown"},
+        )
     return exports
 
 
@@ -13805,8 +13998,18 @@ def governance_report(
         "exports": {},
     }
     resource_links: list[dict[str, Any]] = []
+    provenance_inputs = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "export": export,
+    }
     if export:
-        report["exports"] = _write_governance_report_exports(report)
+        report["exports"] = _write_governance_report_exports(
+            report,
+            provenance_inputs=provenance_inputs,
+        )
         exports = report.get("exports", {}) if isinstance(report.get("exports"), dict) else {}
         if isinstance(exports.get("json"), str):
             resource_links.append(
@@ -13852,7 +14055,48 @@ def governance_report(
             if link.get("path") == report["exports"]["json"]:
                 link["size_bytes"] = json_path.stat().st_size
         json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+        exports = report.get("exports", {}) if isinstance(report.get("exports"), dict) else {}
+        if isinstance(exports.get("json"), str) and isinstance(exports.get("markdown"), str):
+            _write_artifact_provenance_sidecars(
+                tool_name="governance_report",
+                artifact_paths=[exports["json"], exports["markdown"]],
+                inputs=provenance_inputs,
+                git_state=_git_state_for_provenance(base_ref, head_ref),
+                artifact_schemas={exports["json"]: str(report.get("schema", "")), exports["markdown"]: "governance_report.markdown"},
+            )
     return report
+
+
+@mcp.tool()
+def artifact_provenance(
+    artifact_path: str = "",
+    include_reports: bool = True,
+    include_snapshots: bool = True,
+) -> dict[str, Any]:
+    """Read-only verification for local MCP artifact provenance sidecars."""
+    _require_git_repo()
+    artifact_paths: list[str] = []
+    if artifact_path.strip():
+        artifact_paths = [artifact_path.strip()]
+    else:
+        if include_reports:
+            reports_dir = _resolve_repo_path(str(REPORTS_DIR))
+            if reports_dir.exists():
+                for path in sorted(reports_dir.glob("*")):
+                    if path.is_file() and not path.name.endswith(PROVENANCE_SUFFIX):
+                        artifact_paths.append(str(path.relative_to(REPO_PATH)))
+        if include_snapshots:
+            snapshot_index = _resolve_repo_path(str(STATE_SNAPSHOT_INDEX_FILE))
+            if snapshot_index.exists():
+                artifact_paths.append(str(snapshot_index.relative_to(REPO_PATH)))
+    checks = [_verify_artifact_provenance_path(path) for path in artifact_paths]
+    return {
+        "schema": "artifact_provenance_report.v1",
+        "provenance_schema": PROVENANCE_SCHEMA,
+        "artifact_count": len(checks),
+        "ok": all(bool(row.get("ok", False)) for row in checks),
+        "checks": checks,
+    }
 
 
 @mcp.tool()
@@ -14553,6 +14797,14 @@ def state_snapshot(
     }
     index["snapshots"] = snapshots
     _state_snapshot_index_save(index)
+    snapshot_index_rel = str(STATE_SNAPSHOT_INDEX_FILE)
+    provenance = _write_artifact_provenance_sidecars(
+        tool_name="state_snapshot",
+        artifact_paths=[snapshot_index_rel],
+        inputs={"label": label, "include_build_dir": include_build_dir},
+        git_state=_git_state_for_provenance(head_ref="HEAD"),
+        artifact_schemas={snapshot_index_rel: "state_snapshot_index.v1"},
+    )
     resource_links = [
         _artifact_resource_link(
             title="State snapshot index",
@@ -14582,6 +14834,7 @@ def state_snapshot(
         "stash_commit": stash_commit,
         "stash_ref": stash_ref,
         "had_changes": bool(stash_commit),
+        "provenance": provenance,
         "resource_links": resource_links,
         "_meta": _artifact_meta(resource_links),
     }

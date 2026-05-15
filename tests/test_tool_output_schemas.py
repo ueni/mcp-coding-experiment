@@ -36,6 +36,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "clarification_gate",
                 "release_readiness",
                 "governance_report",
+                "artifact_provenance",
                 "workflow_diagnostics",
             ),
         )
@@ -101,6 +102,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 run_impact_check=False,
             ),
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
+            "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
         }
 
