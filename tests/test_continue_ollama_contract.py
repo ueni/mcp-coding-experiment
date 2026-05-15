@@ -454,6 +454,9 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("copy_continue_default_if_missing_or_stale()", entrypoint)
         self.assertIn("Continue Qwen3.6 profile has stale context/tool capability contract", entrypoint)
         self.assertIn("contextLength:[[:space:]]*32768", entrypoint)
+        self.assertIn("Continue model routing has stale Qwen3.6 default route", entrypoint)
+        self.assertIn("grep -A2 '^router:'", entrypoint)
+        self.assertIn("grep -A2 '^  coding:'", entrypoint)
         self.assertIn("Continue MCP server profile has stale auth header", entrypoint)
         self.assertIn("copy_continue_default_if_missing_or_stale", entrypoint)
 

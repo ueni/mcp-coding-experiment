@@ -584,6 +584,10 @@ apply_repo_defaults() {
   done < <(find "${defaults_root}/continue/models" -maxdepth 1 -type f -name '*.yaml' | sort)
   if [[ ! -f /repo/.continue/model-routing.yaml ]]; then
     cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
+  elif grep -A2 '^router:' /repo/.continue/model-routing.yaml | grep -q 'model: qwen3.6-35b-a3b:iq1' \
+    || grep -A2 '^  coding:' /repo/.continue/model-routing.yaml | grep -q 'model: qwen3.6-35b-a3b:iq1'; then
+    echo "Continue model routing has stale Qwen3.6 default route; refreshing /repo/.continue/model-routing.yaml." >&2
+    cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
   fi
 
   mkdir -p /home/app/.codex
