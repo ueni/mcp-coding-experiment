@@ -10,7 +10,7 @@ umask 027
 
 DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL="hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M"
 DEFAULT_OLLAMA_TEXT_ALIAS_MODEL="qwen3.6-35b-a3b:iq1"
-DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="512"
+DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="32768"
 DEFAULT_CONTINUE_OLLAMA_MODELS="${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL},qwen2.5-coder:1.5b"
 
 is_truthy() {
@@ -231,10 +231,18 @@ ensure_ollama_text_alias_from_preloaded_model() {
     alias_manifest_path="$(ollama_manifest_path_for_model_ref "${alias}")"
     if [[ -f "${alias_manifest_path}" ]] && alias_blob_path="$(ollama_model_blob_path_from_manifest "${alias_manifest_path}")"; then
       if [[ "${alias_blob_path}" == "${blob_path}" ]]; then
-        return 0
+        if [[ ! "${num_ctx}" =~ ^[0-9]+$ ]] || [[ "${num_ctx}" -le 0 ]] \
+          || ollama show "${alias}" --modelfile 2>/dev/null \
+            | grep -Eq "^[[:space:]]*PARAMETER[[:space:]]+num_ctx[[:space:]]+${num_ctx}([[:space:]]|$)"; then
+          return 0
+        fi
+        echo "Ollama alias '${alias}' exists with stale num_ctx; recreating it with num_ctx=${num_ctx}." >&2
+      else
+        echo "Ollama alias '${alias}' exists but does not point at '${source_model}'; recreating it." >&2
       fi
+    else
+      echo "Ollama alias '${alias}' exists but its manifest cannot be inspected; recreating it." >&2
     fi
-    echo "Ollama alias '${alias}' exists but does not point at '${source_model}'; recreating it." >&2
   fi
 
   modelfile="$(mktemp)"

@@ -437,7 +437,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `CONTINUE_OLLAMA_MODELS` | `qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b` | No | Comma-separated model IDs (or empty) | Default steady-state Ollama model set expected to be present locally and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
 | `OLLAMA_ALLOW_PULL` | `false` | No | `true`, `false` | Explicit opt-in for runtime `ollama pull` of missing models. Keep `false` for offline-only startup. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
-| `OLLAMA_CONTEXT_LENGTH` | `512` | No | Positive integer | Ollama server default context length. Also used as the local text alias `num_ctx` when `OLLAMA_TEXT_ALIAS_NUM_CTX` is unset. |
+| `OLLAMA_CONTEXT_LENGTH` | `32768` | No | Positive integer | Ollama server default context length. Also used as the local text alias `num_ctx` when `OLLAMA_TEXT_ALIAS_NUM_CTX` is unset. This must stay high enough for Continue Agent-mode tool/MCP prompts. |
 | `OLLAMA_TEXT_ALIAS_SOURCE_MODEL` | `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M` | No | Ollama model ID | Source GGUF model used to create the local text-only alias. |
 | `OLLAMA_TEXT_ALIAS_MODEL` | `qwen3.6-35b-a3b:iq1` | No | Ollama model ID | Local text-only alias created from the source GGUF model so Ollama avoids projector-specific loader paths. |
 | `OLLAMA_TEXT_ALIAS_NUM_CTX` | uses `OLLAMA_CONTEXT_LENGTH` | No | Positive integer | Optional per-alias `num_ctx` override written into the generated Modelfile. |
@@ -458,7 +458,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
 - `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided. All other quality/specialist routes fall back to Qwen3.6 rather than obsolete small specialist models.
-- Qwen3.6 endpoint calls install chat sentinel stop sequences and strip leaked `<think>...</think>` reasoning blocks plus `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` tokens before returning tool output.
+- Qwen3.6 endpoint calls install chat sentinel stop sequences and strip leaked `<think>...</think>` reasoning blocks plus `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` tokens before returning tool output. Continue model config advertises a 32768-token context window with a bounded 2048-token response budget so Agent mode can send minimal MCP/tool prompts without tripping client-side context-limit checks.
 - Setting `CONTINUE_OLLAMA_MODELS` to an empty value declares that no default bundled model set is required. In that mode, Continue may report `model not found` until models are installed manually or `OLLAMA_ALLOW_PULL=true` is used.
 - A `404` on `http://127.0.0.1:2345/v1/` does not invalidate the native Ollama integration in this repo; the native base and `/api/tags` are the relevant health checks.
 

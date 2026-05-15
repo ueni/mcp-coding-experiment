@@ -10,7 +10,12 @@ models:
       - chat
       - edit
       - apply
-    completionOptions:
+    capabilities:
+      - tool_use
+    defaultCompletionOptions:
+      contextLength: 32768
+      maxTokens: 2048
+      temperature: 0.1
       stop:
         - "<|im_start|>"
         - "<|im_end|>"

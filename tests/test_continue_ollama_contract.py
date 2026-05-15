@@ -31,6 +31,39 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertIn(f"apiBase: {NATIVE_OLLAMA_BASE}", text, str(path))
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
 
+
+    def test_qwen36_continue_agent_context_window_matches_ollama_alias(self):
+        expected_context = 32768
+        for config_path in [
+            REPO_ROOT / ".continue" / "models" / "coding-qwen3.6-35b-a3b.yaml",
+            REPO_ROOT / "source" / "defaults" / "continue" / "models" / "coding-qwen3.6-35b-a3b.yaml",
+        ]:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            model = config["models"][0]
+            options = model["defaultCompletionOptions"]
+
+            self.assertEqual("Coding - Qwen3.6 35B A3B", model["name"], str(config_path))
+            self.assertIn("tool_use", model.get("capabilities", []), str(config_path))
+            self.assertEqual(expected_context, options["contextLength"], str(config_path))
+            self.assertLess(options["maxTokens"], options["contextLength"], str(config_path))
+            self.assertLessEqual(options["maxTokens"], 2048, str(config_path))
+            self.assertIn("<|im_end|>", options["stop"], str(config_path))
+            self.assertNotIn("completionOptions", model, str(config_path))
+
+        devcontainer = json.loads(
+            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(str(expected_context), devcontainer["containerEnv"]["OLLAMA_CONTEXT_LENGTH"])
+        self.assertEqual(str(expected_context), devcontainer["containerEnv"]["OLLAMA_TEXT_ALIAS_NUM_CTX"])
+
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+        setup_repository = (REPO_ROOT / "setup-repository.sh").read_text(encoding="utf-8")
+        self.assertIn(f"OLLAMA_CONTEXT_LENGTH={expected_context}", dockerfile)
+        self.assertIn(f'DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="{expected_context}"', entrypoint)
+        self.assertIn(f'"OLLAMA_CONTEXT_LENGTH": "{expected_context}"', setup_repository)
+        self.assertIn(f'"OLLAMA_TEXT_ALIAS_NUM_CTX": "{expected_context}"', setup_repository)
+
     def test_devcontainer_does_not_override_default_ollama_model_policy(self):
         config = json.loads(
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
@@ -104,6 +137,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual(
             "0.0.0.0:2345", config["containerEnv"]["OLLAMA_FALLBACK_HOST"]
         )
+        self.assertEqual("32768", config["containerEnv"]["OLLAMA_CONTEXT_LENGTH"])
+        self.assertEqual("32768", config["containerEnv"]["OLLAMA_TEXT_ALIAS_NUM_CTX"])
         self.assertEqual(
             "http://127.0.0.1:2345/api/generate",
             config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
@@ -168,6 +203,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("CODING_DEFAULT_MODEL=qwen3.6-35b-a3b:iq1", dockerfile)
         self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
+        self.assertIn("OLLAMA_CONTEXT_LENGTH=32768", dockerfile)
         full_default_models = "qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b"
         self.assertIn(f"CONTINUE_OLLAMA_MODELS={full_default_models}", dockerfile)
         self.assertIn('ARG OLLAMA_PRELOAD_MODELS=""', dockerfile)
@@ -293,6 +329,15 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("_import_optional_dependency", server)
         self.assertIn('PdfReader = _import_optional_dependency("pypdf", "pypdf").PdfReader', server)
         self.assertIn('Image = _import_optional_dependency("PIL.Image", "Pillow")', server)
+
+    def test_entrypoint_recreates_qwen36_alias_when_num_ctx_is_stale(self):
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+
+        self.assertIn('ollama show "${alias}" --modelfile', entrypoint)
+        self.assertIn('PARAMETER[[:space:]]+num_ctx[[:space:]]+${num_ctx}', entrypoint)
+        self.assertIn("stale num_ctx", entrypoint)
+        self.assertIn("printf 'PARAMETER num_ctx %s\\n' \"${num_ctx}\"", entrypoint)
+
 
     def test_entrypoint_seeds_preloaded_models_and_maps_gpu_device_groups(self):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
