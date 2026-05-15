@@ -32,7 +32,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
 
 
-    def test_qwen36_continue_agent_context_window_matches_ollama_alias(self):
+    def test_qwen36_continue_context_window_matches_ollama_alias(self):
         expected_context = 32768
         for config_path in [
             REPO_ROOT / ".continue" / "models" / "coding-qwen3.6-35b-a3b.yaml",
@@ -43,7 +43,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             options = model["defaultCompletionOptions"]
 
             self.assertEqual("Coding - Qwen3.6 35B A3B", model["name"], str(config_path))
-            self.assertIn("tool_use", model.get("capabilities", []), str(config_path))
+            self.assertNotIn("tool_use", model.get("capabilities", []), str(config_path))
+            self.assertNotIn("capabilities", model, str(config_path))
             self.assertEqual(expected_context, options["contextLength"], str(config_path))
             self.assertLess(options["maxTokens"], options["contextLength"], str(config_path))
             self.assertLessEqual(options["maxTokens"], 2048, str(config_path))
@@ -63,6 +64,38 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn(f'DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="{expected_context}"', entrypoint)
         self.assertIn(f'"OLLAMA_CONTEXT_LENGTH": "{expected_context}"', setup_repository)
         self.assertIn(f'"OLLAMA_TEXT_ALIAS_NUM_CTX": "{expected_context}"', setup_repository)
+
+    def test_continue_agent_model_contract_uses_tool_capable_ollama_tag(self):
+        expected_context = 32768
+        known_non_tool_ollama_models = {"qwen3.6-35b-a3b:iq1"}
+        tool_models = []
+        for config_path in [
+            REPO_ROOT / ".continue" / "models" / "coding-agent-llama3.1-8b.yaml",
+            REPO_ROOT / "source" / "defaults" / "continue" / "models" / "coding-agent-llama3.1-8b.yaml",
+        ]:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            model = config["models"][0]
+            options = model["defaultCompletionOptions"]
+            self.assertEqual("Coding Agent - Llama 3.1 8B", model["name"], str(config_path))
+            self.assertEqual("llama3.1:8b", model["model"], str(config_path))
+            self.assertIn("tool_use", model.get("capabilities", []), str(config_path))
+            self.assertNotIn(model["model"], known_non_tool_ollama_models, str(config_path))
+            self.assertEqual(expected_context, options["contextLength"], str(config_path))
+            self.assertLess(options["maxTokens"], options["contextLength"], str(config_path))
+            self.assertLessEqual(options["maxTokens"], 2048, str(config_path))
+            tool_models.append(model["model"])
+
+        for models_root in [
+            REPO_ROOT / ".continue" / "models",
+            REPO_ROOT / "source" / "defaults" / "continue" / "models",
+        ]:
+            for path in models_root.glob("*.yaml"):
+                config = yaml.safe_load(path.read_text(encoding="utf-8"))
+                for model in config.get("models", []):
+                    if model.get("model") in known_non_tool_ollama_models:
+                        self.assertNotIn("tool_use", model.get("capabilities", []), str(path))
+
+        self.assertEqual(["llama3.1:8b", "llama3.1:8b"], tool_models)
 
     def test_devcontainer_does_not_override_default_ollama_model_policy(self):
         config = json.loads(
@@ -202,9 +235,10 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
     def test_dockerfile_keeps_qwen36_default_coding_model_and_micro_fast_path(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("CODING_DEFAULT_MODEL=qwen3.6-35b-a3b:iq1", dockerfile)
+        self.assertIn("CODING_AGENT_MODEL=llama3.1:8b", dockerfile)
         self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
         self.assertIn("OLLAMA_CONTEXT_LENGTH=32768", dockerfile)
-        full_default_models = "qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b"
+        full_default_models = "qwen3.6-35b-a3b:iq1,llama3.1:8b,qwen2.5-coder:1.5b"
         self.assertIn(f"CONTINUE_OLLAMA_MODELS={full_default_models}", dockerfile)
         self.assertIn('ARG OLLAMA_PRELOAD_MODELS=""', dockerfile)
         self.assertIn("OLLAMA_ALLOW_PULL=false", dockerfile)
@@ -272,6 +306,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             routing = routing_path.read_text(encoding="utf-8")
             self.assertIn("model: qwen3.6-35b-a3b:iq1", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen3.6-35b-a3b.yaml", routing, str(routing_path))
+            self.assertIn("model: llama3.1:8b", routing, str(routing_path))
+            self.assertIn("file: .continue/models/coding-agent-llama3.1-8b.yaml", routing, str(routing_path))
             self.assertIn("model: qwen2.5-coder:1.5b", routing, str(routing_path))
             self.assertIn("file: .continue/models/coding-qwen2.5-coder-1.5b.yaml", routing, str(routing_path))
             for model in obsolete_models:
@@ -282,6 +318,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             REPO_ROOT / "source" / "defaults" / "continue" / "models",
         ]:
             self.assertTrue((models_root / "coding-qwen3.6-35b-a3b.yaml").exists())
+            self.assertTrue((models_root / "coding-agent-llama3.1-8b.yaml").exists())
             self.assertTrue((models_root / "coding-qwen2.5-coder-1.5b.yaml").exists())
             self.assertFalse((models_root / "coding-qwen2.5-coder-3b.yaml").exists())
             self.assertFalse((models_root / "router-granite3.3-2b.yaml").exists())
@@ -351,7 +388,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
 
         self.assertIn("copy_continue_default_if_missing_or_stale()", entrypoint)
-        self.assertIn("Continue Qwen3.6 profile has stale contextLength", entrypoint)
+        self.assertIn("Continue Qwen3.6 profile has stale context/tool capability contract", entrypoint)
         self.assertIn("contextLength:[[:space:]]*32768", entrypoint)
         self.assertIn("Continue MCP server profile has stale auth header", entrypoint)
         self.assertIn("copy_continue_default_if_missing_or_stale", entrypoint)
@@ -461,6 +498,8 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertEqual(out["ollama"]["installed_models_count"], 0)
         self.assertFalse(out["coding"]["default_model_installed"])
         self.assertFalse(out["coding"]["default_model_in_bootstrap_list"])
+        self.assertFalse(out["coding"]["agent_model_installed"])
+        self.assertFalse(out["coding"]["agent_model_in_bootstrap_list"])
         self.assertFalse(out["coding"]["micro_model_installed"])
         self.assertFalse(out["coding"]["micro_model_in_bootstrap_list"])
         self.assertTrue(
@@ -472,7 +511,7 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         with patch.dict(
             os.environ,
             {
-                "CONTINUE_OLLAMA_MODELS": "qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b",
+                "CONTINUE_OLLAMA_MODELS": "qwen3.6-35b-a3b:iq1,llama3.1:8b,qwen2.5-coder:1.5b",
                 "OLLAMA_ALLOW_PULL": "false",
             },
             clear=False,
@@ -481,13 +520,15 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         ), patch.object(
             self.server, "CODING_DEFAULT_MODEL", "qwen3.6-35b-a3b:iq1"
         ), patch.object(
+            self.server, "CODING_AGENT_MODEL", "llama3.1:8b"
+        ), patch.object(
             self.server,
             "_fetch_ollama_tags",
             return_value={
                 "url": f"{NATIVE_OLLAMA_BASE}/api/tags",
                 "reachable": True,
                 "status": 200,
-                "model_ids": ["qwen3.6-35b-a3b:iq1"],
+                "model_ids": ["qwen3.6-35b-a3b:iq1", "llama3.1:8b"],
             },
         ), patch.object(
             self.server,
@@ -504,9 +545,11 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertEqual(out["infer"]["openai_compat_base"], f"{NATIVE_OLLAMA_BASE}/v1/")
         self.assertTrue(out["ollama"]["bootstrap_enabled"])
         self.assertFalse(out["ollama"]["runtime_pull_enabled"])
-        self.assertEqual(out["ollama"]["installed_models"], ["qwen3.6-35b-a3b:iq1"])
+        self.assertEqual(out["ollama"]["installed_models"], ["qwen3.6-35b-a3b:iq1", "llama3.1:8b"])
         self.assertTrue(out["coding"]["default_model_installed"])
         self.assertTrue(out["coding"]["default_model_in_bootstrap_list"])
+        self.assertTrue(out["coding"]["agent_model_installed"])
+        self.assertTrue(out["coding"]["agent_model_in_bootstrap_list"])
         self.assertFalse(out["coding"]["micro_model_installed"])
         self.assertTrue(out["coding"]["micro_model_in_bootstrap_list"])
         self.assertTrue(any("without /v1" in msg for msg in out["diagnostics"]))

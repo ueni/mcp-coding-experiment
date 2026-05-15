@@ -6,6 +6,9 @@ routes:
   coding:
     model: qwen3.6-35b-a3b:iq1
     file: .continue/models/coding-qwen3.6-35b-a3b.yaml
+  coding_agent:
+    model: llama3.1:8b
+    file: .continue/models/coding-agent-llama3.1-8b.yaml
   coding_micro:
     model: qwen2.5-coder:1.5b
     file: .continue/models/coding-qwen2.5-coder-1.5b.yaml

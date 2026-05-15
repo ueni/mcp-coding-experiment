@@ -288,15 +288,19 @@ ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
 TERMINAL_CAPTURE_DIR = Path(".codebase-tooling-mcp/reports/terminal")
 DEFAULT_CODING_MODEL = "qwen3.6-35b-a3b:iq1"
+DEFAULT_CODING_AGENT_MODEL = "llama3.1:8b"
 DEFAULT_CODING_MICRO_MODEL = "qwen2.5-coder:1.5b"
 DEFAULT_CONTINUE_OLLAMA_MODELS = ",".join(
     (
         DEFAULT_CODING_MODEL,
+        DEFAULT_CODING_AGENT_MODEL,
         DEFAULT_CODING_MICRO_MODEL,
     )
 )
 CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen3.6-35b-a3b.yaml"
+CODING_AGENT_MODEL_CONFIG_FILE = ".continue/models/coding-agent-llama3.1-8b.yaml"
 CODING_MICRO_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
+CODING_AGENT_ROUTE = "coding_agent"
 CODING_MICRO_ROUTE = "coding_micro"
 QWEN36_MODEL_ID_PREFIXES = ("qwen3.6", "qwen3-6", "qwen36")
 QWEN36_CHAT_SENTINEL_STOPS = [
@@ -338,6 +342,7 @@ CODING_VENV_PYTHON = os.getenv(
     "CODING_VENV_PYTHON", "/opt/codebase-tooling/coding-venv/bin/python"
 ).strip()
 CODING_DEFAULT_MODEL = os.getenv("CODING_DEFAULT_MODEL", DEFAULT_CODING_MODEL).strip()
+CODING_AGENT_MODEL = os.getenv("CODING_AGENT_MODEL", DEFAULT_CODING_AGENT_MODEL).strip()
 CODING_MICRO_MODEL = os.getenv("CODING_MICRO_MODEL", DEFAULT_CODING_MICRO_MODEL).strip()
 CODING_MICRO_MAX_PROMPT_CHARS = max(
     120,
@@ -10291,12 +10296,15 @@ def local_model_status() -> dict[str, Any]:
         },
         "coding": {
             "default_model": CODING_DEFAULT_MODEL,
+            "agent_model": CODING_AGENT_MODEL,
             "micro_model": CODING_MICRO_MODEL,
             "micro_auto_prompt_chars": CODING_MICRO_MAX_PROMPT_CHARS,
             "venv_python": str(coding_python),
             "venv_python_exists": coding_python.is_file(),
             "default_model_installed": None,
             "default_model_in_bootstrap_list": CODING_DEFAULT_MODEL in bootstrap_models,
+            "agent_model_installed": None,
+            "agent_model_in_bootstrap_list": CODING_AGENT_MODEL in bootstrap_models,
             "micro_model_installed": None,
             "micro_model_in_bootstrap_list": CODING_MICRO_MODEL in bootstrap_models,
         },
@@ -10336,6 +10344,9 @@ def local_model_status() -> dict[str, Any]:
         status["coding"]["default_model_installed"] = (
             CODING_DEFAULT_MODEL in installed_models if CODING_DEFAULT_MODEL else None
         )
+        status["coding"]["agent_model_installed"] = (
+            CODING_AGENT_MODEL in installed_models if CODING_AGENT_MODEL else None
+        )
         status["coding"]["micro_model_installed"] = (
             CODING_MICRO_MODEL in installed_models if CODING_MICRO_MODEL else None
         )
@@ -10363,6 +10374,10 @@ def local_model_status() -> dict[str, Any]:
                 diagnostics.append(
                     f"CODING_DEFAULT_MODEL '{CODING_DEFAULT_MODEL}' is not installed in Ollama."
                 )
+            if CODING_AGENT_MODEL and CODING_AGENT_MODEL not in installed_models:
+                diagnostics.append(
+                    f"Continue Agent model '{CODING_AGENT_MODEL}' is not installed in Ollama."
+                )
             if (
                 CODING_DEFAULT_MODEL
                 and status["ollama"]["bootstrap_enabled"]
@@ -10370,6 +10385,14 @@ def local_model_status() -> dict[str, Any]:
             ):
                 diagnostics.append(
                     f"CODING_DEFAULT_MODEL '{CODING_DEFAULT_MODEL}' is not included in CONTINUE_OLLAMA_MODELS."
+                )
+            if (
+                CODING_AGENT_MODEL
+                and status["ollama"]["bootstrap_enabled"]
+                and CODING_AGENT_MODEL not in bootstrap_models
+            ):
+                diagnostics.append(
+                    f"Continue Agent model '{CODING_AGENT_MODEL}' is not included in CONTINUE_OLLAMA_MODELS."
                 )
             if not status["infer"]["openai_compat_base_reachable"]:
                 diagnostics.append(

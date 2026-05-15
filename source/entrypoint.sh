@@ -10,8 +10,9 @@ umask 027
 
 DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL="hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M"
 DEFAULT_OLLAMA_TEXT_ALIAS_MODEL="qwen3.6-35b-a3b:iq1"
+DEFAULT_CODING_AGENT_MODEL="llama3.1:8b"
 DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="32768"
-DEFAULT_CONTINUE_OLLAMA_MODELS="${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL},qwen2.5-coder:1.5b"
+DEFAULT_CONTINUE_OLLAMA_MODELS="${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL},${DEFAULT_CODING_AGENT_MODEL},qwen2.5-coder:1.5b"
 
 is_truthy() {
   case "${1:-}" in
@@ -534,8 +535,8 @@ copy_continue_default_if_missing_or_stale() {
     coding-qwen3.6-35b-a3b.yaml)
       if grep -q 'name: Coding - Qwen3.6 35B A3B' "${target_path}" \
         && grep -q 'model: qwen3.6-35b-a3b:iq1' "${target_path}" \
-        && ! grep -q 'contextLength:[[:space:]]*32768' "${target_path}"; then
-        echo "Continue Qwen3.6 profile has stale contextLength; refreshing ${target_path}." >&2
+        && { ! grep -q 'contextLength:[[:space:]]*32768' "${target_path}" || grep -q 'tool_use' "${target_path}"; }; then
+        echo "Continue Qwen3.6 profile has stale context/tool capability contract; refreshing ${target_path}." >&2
         cp "${default_path}" "${target_path}"
       fi
       ;;
@@ -636,6 +637,7 @@ if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
   export OLLAMA_VULKAN=1
 fi
 CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen3.6-35b-a3b:iq1}"
+CODING_AGENT_MODEL="${CODING_AGENT_MODEL:-${DEFAULT_CODING_AGENT_MODEL}}"
 CODING_MICRO_MODEL="${CODING_MICRO_MODEL:-qwen2.5-coder:1.5b}"
 OLLAMA_TEXT_ALIAS_SOURCE_MODEL="${OLLAMA_TEXT_ALIAS_SOURCE_MODEL:-${DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL}}"
 OLLAMA_TEXT_ALIAS_MODEL="${OLLAMA_TEXT_ALIAS_MODEL:-${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL}}"
