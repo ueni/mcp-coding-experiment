@@ -516,6 +516,71 @@ stat -c '%a %U:%G' \"${{continue_dir}}\" \"${{env_file}}\"
         self.assertTrue(modes_and_owners[0].startswith("700 "), result.stdout)
         self.assertTrue(modes_and_owners[1].startswith("600 "), result.stdout)
 
+    def test_entrypoint_secures_existing_repo_continue_env_on_load_path_only(self):
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+        functions_start = entrypoint.index("read_mcp_http_bearer_token_from_env_file()")
+        functions_end = entrypoint.index("\n}\n\n_ollama_probe_url", functions_start) + 3
+        functions = entrypoint[functions_start:functions_end]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            repo_dir = tmp_path / "repo"
+            continue_dir = repo_dir / ".continue"
+            continue_env = continue_dir / ".env"
+            host_env = repo_dir / ".env"
+            chown_log = tmp_path / "chown.log"
+            continue_dir.mkdir(parents=True)
+            continue_env.write_text("MCP_HTTP_BEARER_TOKEN=from-continue\n", encoding="utf-8")
+            host_env.write_text("MCP_HTTP_BEARER_TOKEN=from-host\n", encoding="utf-8")
+            os.chmod(continue_dir, 0o700)
+            os.chmod(continue_env, 0o600)
+            os.chmod(host_env, 0o600)
+
+            patched_functions = (
+                functions.replace("/repo/.continue/.env", "__REPO_CONTINUE_ENV__")
+                .replace("/repo/.continue", "__REPO_CONTINUE_DIR__")
+                .replace("/repo/.env", "__REPO_ENV__")
+                .replace("__REPO_CONTINUE_ENV__", str(continue_env))
+                .replace("__REPO_CONTINUE_DIR__", str(continue_dir))
+                .replace("__REPO_ENV__", str(host_env))
+            )
+            script = f"""
+set -euo pipefail
+{patched_functions}
+id() {{
+  if [[ "${{1:-}}" == "-u" ]]; then printf '0\\n'; return 0; fi
+  if [[ "${{1:-}}" == "app" ]]; then return 0; fi
+  command id "$@"
+}}
+chown() {{ printf '%s\\n' "$*" >> "{chown_log}"; }}
+MCP_TRANSPORT=http
+MCP_HTTP_AUTH_MODE=token
+ensure_mcp_http_bearer_token
+printf 'token=%s\\n' "${{MCP_HTTP_BEARER_TOKEN}}"
+printf 'continue_env_mode=%s\\n' "$(stat -c '%a' "{continue_env}")"
+printf 'continue_dir_mode=%s\\n' "$(stat -c '%a' "{continue_dir}")"
+cat "{chown_log}"
+unset MCP_HTTP_BEARER_TOKEN
+rm -f "{continue_env}" "{chown_log}"
+ensure_mcp_http_bearer_token
+printf 'host_token=%s\\n' "${{MCP_HTTP_BEARER_TOKEN}}"
+if [[ -e "{chown_log}" ]]; then cat "{chown_log}"; fi
+"""
+            result = subprocess.run(
+                ["/bin/bash", "-c", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+        self.assertIn("token=from-continue", result.stdout)
+        self.assertIn("continue_env_mode=600", result.stdout)
+        self.assertIn("continue_dir_mode=700", result.stdout)
+        self.assertIn(f"app:app {continue_dir} {continue_env}", result.stdout)
+        self.assertIn("host_token=from-host", result.stdout)
+        self.assertNotIn(f"app:app {repo_dir} {host_env}", result.stdout)
+
 
 class ServerOllamaContractStatusTest(ServerToolsTestBase):
     def test_qwen36_endpoint_requests_use_template_stops_and_sanitize_output(self):

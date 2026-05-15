@@ -89,6 +89,9 @@ ensure_mcp_http_bearer_token() {
 
   for env_file in /repo/.continue/.env /repo/.env "${HOME:-/home/app}/.continue/.env"; do
     if token="$(read_mcp_http_bearer_token_from_env_file "${env_file}")"; then
+      if [[ "${env_file}" == "/repo/.continue/.env" ]]; then
+        secure_continue_env_file_for_devcontainer_user /repo/.continue "${env_file}"
+      fi
       export MCP_HTTP_BEARER_TOKEN="${token}"
       echo "MCP_HTTP_BEARER_TOKEN loaded from local secret file ${env_file}" >&2
       return
