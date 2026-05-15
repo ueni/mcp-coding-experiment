@@ -128,7 +128,7 @@ Public tools:
 - `tool_output_contracts`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `workflow_diagnostics`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `workflow_diagnostics`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 

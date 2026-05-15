@@ -32,6 +32,7 @@ import pty
 import select
 import concurrent.futures
 import importlib.util
+import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Callable
@@ -140,6 +141,7 @@ ALLOW_ORIGINS = [
 ]
 MCP_HTTP_AUTH_MODE = os.getenv("MCP_HTTP_AUTH_MODE", "token").strip().lower()
 MCP_HTTP_BEARER_TOKEN = os.getenv("MCP_HTTP_BEARER_TOKEN", "").strip()
+MCP_HTTP_AUTHORIZATION_SERVERS_RAW = os.getenv("MCP_HTTP_AUTHORIZATION_SERVERS", "").strip()
 MCP_HTTP_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_REQUESTS", "120")))
 MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60")))
 MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TIMEOUT_SECONDS", "120")))
@@ -183,6 +185,7 @@ PUBLIC_MCP_TOOL_NAMES = {
     "tool_output_contracts",
     "workflow_task",
     "task_status",
+    "roots_diagnostics",
     *SCHEMA_BACKED_TOOL_NAMES,
 }
 OUTPUT_SCHEMA_BY_TOOL = TOOL_OUTPUT_SCHEMAS
@@ -220,6 +223,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "task_status": {"categories": ["read-only"]},
     "repo_info": {"categories": ["read-only"]},
+    "roots_diagnostics": {"categories": ["read-only"]},
     "runtime_state": {"categories": ["read-only"]},
     "git_status": {"categories": ["read-only"]},
     "grep": {"categories": ["read-only"]},
@@ -650,16 +654,74 @@ def _bearer_token_from_headers(headers: list[tuple[bytes, bytes]]) -> str:
     return ""
 
 
+def _http_resource_identifier() -> str:
+    return os.getenv("MCP_HTTP_RESOURCE", "http://localhost:%s/mcp" % PORT).strip()
+
+
+def _http_protected_resource_metadata_url() -> str:
+    explicit = os.getenv("MCP_HTTP_PROTECTED_RESOURCE_METADATA_URL", "").strip()
+    if explicit:
+        return explicit
+    resource = _http_resource_identifier()
+    if resource.endswith("/mcp"):
+        return resource[: -len("/mcp")] + "/.well-known/oauth-protected-resource"
+    return "http://localhost:%s/.well-known/oauth-protected-resource" % PORT
+
+
+def _parse_http_authorization_servers(raw: str | None = None) -> list[str]:
+    value = MCP_HTTP_AUTHORIZATION_SERVERS_RAW if raw is None else raw.strip()
+    if not value:
+        return []
+    parsed: Any
+    if value.startswith("["):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        candidates = parsed
+    else:
+        candidates = value.split(",")
+    servers: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        server = candidate.strip()
+        if not server or server in seen:
+            continue
+        servers.append(server)
+        seen.add(server)
+    return servers
+
+
+def _http_oauth_resource_config_error() -> str:
+    if MCP_HTTP_AUTH_MODE != "oauth-resource":
+        return ""
+    if not _parse_http_authorization_servers():
+        return "MCP_HTTP_AUTH_MODE=oauth-resource requires MCP_HTTP_AUTHORIZATION_SERVERS with at least one issuer URL"
+    return ""
+
+
 def _http_auth_discovery_payload() -> dict[str, Any]:
-    resource = os.getenv("MCP_HTTP_RESOURCE", "http://localhost:%s/mcp" % PORT)
-    return {
-        "resource": resource,
-        "authorization_servers": [],
+    authorization_servers = _parse_http_authorization_servers()
+    payload: dict[str, Any] = {
+        "resource": _http_resource_identifier(),
+        "authorization_servers": authorization_servers,
         "bearer_methods_supported": ["header"],
         "scopes_supported": ["mcp:read", "mcp:mutate"],
         "mcp_auth_mode": MCP_HTTP_AUTH_MODE,
-        "oauth_2_1_status": "deferred: bearer-token resource-server mode is implemented; full OAuth authorization-server integration is not bundled",
+        "oauth_protected_resource_metadata": _http_protected_resource_metadata_url(),
     }
+    if MCP_HTTP_AUTH_MODE == "oauth-resource":
+        payload["oauth_2_1_status"] = "enabled: OAuth protected-resource metadata is configured for client authorization discovery"
+        config_error = _http_oauth_resource_config_error()
+        if config_error:
+            payload["configuration_error"] = config_error
+    else:
+        payload["oauth_2_1_status"] = "local-bearer: bearer-token resource protection is enabled; full OAuth authorization-server integration is not claimed"
+    return payload
 
 
 def _mcp_server_manifest_payload() -> dict[str, Any]:
@@ -774,6 +836,9 @@ def _http_authenticate_scope(scope: dict[str, Any]) -> tuple[bool, int, str]:
         return False, 403, "MCP_HTTP_AUTH_MODE=insecure-local only accepts loopback clients"
     if not _http_auth_required():
         return False, 403, f"unsupported MCP_HTTP_AUTH_MODE={MCP_HTTP_AUTH_MODE!r}"
+    config_error = _http_oauth_resource_config_error()
+    if config_error:
+        return False, 403, config_error
     if not MCP_HTTP_BEARER_TOKEN:
         return False, 403, "HTTP auth is enabled but MCP_HTTP_BEARER_TOKEN is not configured"
     token = _bearer_token_from_headers(scope.get("headers", []))
@@ -1570,7 +1635,16 @@ class MCPHTTPAuthMiddleware:
         authorized, status_code, reason = _http_authenticate_scope(scope)
         if not authorized:
             _append_audit_event("http_request", ["network"], False, {"path": path}, reason)
-            headers = {"WWW-Authenticate": 'Bearer realm="mcp"'} if status_code == 401 else None
+            headers = (
+                {
+                    "WWW-Authenticate": (
+                        'Bearer realm="mcp", resource_metadata="%s"'
+                        % _http_protected_resource_metadata_url()
+                    )
+                }
+                if status_code == 401
+                else None
+            )
             response = JSONResponse(
                 {"error": "unauthorized" if status_code == 401 else "forbidden", "detail": reason},
                 status_code=status_code,
@@ -2150,6 +2224,219 @@ def _resolve_repo_path(rel_path: str = ".") -> Path:
     except ValueError as exc:
         raise ValueError("path escapes repository root") from exc
     return candidate
+
+
+ROOTS_DIAGNOSTIC_CLASSIFICATIONS = {
+    "exact_match",
+    "repo_contains_root",
+    "root_contains_repo",
+    "multiple_roots",
+    "no_overlap",
+    "unsupported",
+    "unavailable",
+    "error",
+}
+
+
+def _roots_guidance(classification: str) -> list[str]:
+    guidance = {
+        "exact_match": [
+            "Client roots exactly match the configured repository boundary.",
+            "Repository path enforcement still comes from REPO_PATH and _resolve_repo_path.",
+        ],
+        "repo_contains_root": [
+            "The client root is a subdirectory of the configured repository.",
+            "Agents may see narrower client context than the server can inspect; keep paths repository-relative.",
+        ],
+        "root_contains_repo": [
+            "The client root contains the configured repository and may include additional host workspace context.",
+            "Only repository-relative paths under REPO_PATH are authorized by this server.",
+        ],
+        "multiple_roots": [
+            "The client advertised multiple file roots; inspect per-root relationships for mismatches.",
+            "Use one root matching REPO_PATH when possible to avoid confusing agent context.",
+        ],
+        "no_overlap": [
+            "Client file roots do not overlap the configured repository.",
+            "Reconnect the MCP client from the mounted repository workspace or adjust REPO_PATH.",
+        ],
+        "unsupported": [
+            "The active client/session does not advertise MCP roots support.",
+            "This is diagnostic only; existing repository boundary checks remain active.",
+        ],
+        "unavailable": [
+            "No request-scoped MCP session is available, so roots/list cannot be queried here.",
+            "Call roots_diagnostics through an MCP tool session for client-specific roots details.",
+        ],
+        "error": [
+            "The roots/list diagnostic could not complete successfully.",
+            "Treat this as advisory and continue relying on REPO_PATH/_resolve_repo_path for authorization.",
+        ],
+    }
+    return guidance.get(classification, guidance["error"])
+
+
+def _roots_base_payload(classification: str, fetch_status: str) -> dict[str, Any]:
+    return {
+        "schema": "roots_diagnostics.v1",
+        "read_only": True,
+        "advisory_only": True,
+        "repo_boundary_enforced": True,
+        "server_repo": {
+            "path": str(REPO_PATH),
+            "exists": REPO_PATH.exists(),
+            "is_git_repo": _is_git_repo() if REPO_PATH.exists() else False,
+        },
+        "fetch": {"status": fetch_status},
+        "roots": {
+            "total_count": 0,
+            "file_count": 0,
+            "invalid_count": 0,
+            "scheme_counts": {},
+            "redactions_applied": [],
+            "items": [],
+        },
+        "relationship": {"classification": classification, "file_root_count": 0},
+        "guidance": _roots_guidance(classification),
+        "safety": {
+            "client_paths_redacted": True,
+            "authorization_boundary": "REPO_PATH/_resolve_repo_path",
+            "note": "MCP roots diagnostics are advisory and never grant filesystem access.",
+        },
+    }
+
+
+def _classify_root_path(path: Path) -> tuple[str, str]:
+    repo = REPO_PATH.resolve()
+    root = path.resolve(strict=False)
+    if root == repo:
+        return "exact_match", "."
+    with contextlib.suppress(ValueError):
+        rel = root.relative_to(repo)
+        return "repo_contains_root", str(rel).replace("\\", "/") or "."
+    with contextlib.suppress(ValueError):
+        repo.relative_to(root)
+        return "root_contains_repo", "<redacted:root_contains_repo>"
+    return "no_overlap", "<redacted:outside_repo>"
+
+
+def _path_from_file_uri(uri: str) -> Path:
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme.lower() != "file":
+        raise ValueError("not a file URI")
+    if parsed.netloc and parsed.netloc not in {"", "localhost"}:
+        raise ValueError("remote file URI authorities are not supported")
+    raw_path = urllib.parse.unquote(parsed.path or "")
+    if not raw_path:
+        raise ValueError("file URI has no path")
+    return Path(raw_path).resolve(strict=False)
+
+
+def _summarize_roots_result(roots: list[Any]) -> dict[str, Any]:
+    payload = _roots_base_payload("unavailable", "fetched")
+    scheme_counts: dict[str, int] = {}
+    redactions: set[str] = set()
+    items: list[dict[str, Any]] = []
+    file_relationships: list[str] = []
+
+    for index, root in enumerate(roots):
+        uri = str(getattr(root, "uri", "") or "")
+        parsed = urllib.parse.urlparse(uri) if uri else urllib.parse.ParseResult("", "", "", "", "", "")
+        scheme = parsed.scheme.lower() or "<missing>"
+        scheme_counts[scheme] = scheme_counts.get(scheme, 0) + 1
+        item: dict[str, Any] = {
+            "index": index,
+            "scheme": scheme,
+            "name_present": bool(str(getattr(root, "name", "") or "")),
+        }
+        if scheme != "file":
+            item["relationship"] = "ignored_non_file_scheme"
+            redactions.add("non_file_uri_omitted")
+            items.append(item)
+            continue
+        try:
+            root_path = _path_from_file_uri(uri)
+            relationship, normalized = _classify_root_path(root_path)
+            item["relationship"] = relationship
+            item["normalized_path"] = normalized
+            if normalized.startswith("<redacted:"):
+                redactions.add("outside_repo_client_path")
+            file_relationships.append(relationship)
+        except Exception as exc:
+            item["relationship"] = "invalid"
+            item["error"] = exc.__class__.__name__
+            payload["roots"]["invalid_count"] += 1
+            redactions.add("invalid_file_uri_omitted")
+        items.append(item)
+
+    file_count = len(file_relationships)
+    if file_count > 1:
+        classification = "multiple_roots"
+    elif file_count == 1:
+        classification = file_relationships[0]
+    elif payload["roots"]["invalid_count"]:
+        classification = "error"
+    else:
+        classification = "no_overlap" if roots else "unavailable"
+    if classification not in ROOTS_DIAGNOSTIC_CLASSIFICATIONS:
+        classification = "error"
+
+    payload["roots"].update(
+        {
+            "total_count": len(roots),
+            "file_count": file_count,
+            "scheme_counts": dict(sorted(scheme_counts.items())),
+            "redactions_applied": sorted(redactions),
+            "items": items,
+        }
+    )
+    payload["relationship"] = {
+        "classification": classification,
+        "file_root_count": file_count,
+        "per_root_relationships": file_relationships,
+    }
+    payload["guidance"] = _roots_guidance(classification)
+    return payload
+
+
+def _active_mcp_session() -> Any | None:
+    try:
+        context = mcp.get_context()
+    except Exception:
+        return None
+    try:
+        session = getattr(context, "session", None)
+    except Exception:
+        session = None
+    if session is not None:
+        return session
+    try:
+        request_context = getattr(context, "request_context", None)
+        return getattr(request_context, "session", None) if request_context is not None else None
+    except Exception:
+        return None
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _client_roots_supported(session: Any) -> bool:
+    checker = getattr(session, "check_client_capability", None)
+    if checker is None:
+        return hasattr(session, "list_roots")
+    try:
+        from mcp.types import ClientCapabilities, RootsCapability
+
+        return bool(
+            await _maybe_await(
+                checker(ClientCapabilities(roots=RootsCapability()))
+            )
+        )
+    except Exception:
+        return hasattr(session, "list_roots")
 
 
 
@@ -5868,6 +6155,53 @@ def repo_info() -> dict[str, Any]:
         info["dirty"] = bool(status)
 
     return info
+
+
+@mcp.tool()
+async def roots_diagnostics(timeout_seconds: float = 1.0) -> dict[str, Any]:
+    """Read-only MCP roots diagnostic comparing client roots with REPO_PATH."""
+    if timeout_seconds <= 0:
+        timeout_seconds = 1.0
+    timeout_seconds = min(float(timeout_seconds), 5.0)
+    session = _active_mcp_session()
+    if session is None:
+        payload = _roots_base_payload("unavailable", "unavailable")
+        payload["fetch"]["reason"] = "no_active_mcp_request_session"
+        return payload
+
+    if not hasattr(session, "list_roots"):
+        payload = _roots_base_payload("unsupported", "unsupported")
+        payload["fetch"]["reason"] = "session_has_no_list_roots_api"
+        return payload
+
+    if not await _client_roots_supported(session):
+        payload = _roots_base_payload("unsupported", "unsupported")
+        payload["fetch"]["reason"] = "client_roots_capability_not_advertised"
+        return payload
+
+    try:
+        result = await asyncio.wait_for(session.list_roots(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        payload = _roots_base_payload("error", "timeout")
+        payload["fetch"]["reason"] = "roots_list_timeout"
+        return payload
+    except Exception as exc:
+        payload = _roots_base_payload("error", "error")
+        payload["fetch"].update({"reason": "roots_list_failed", "error": exc.__class__.__name__})
+        return payload
+
+    roots = getattr(result, "roots", result)
+    if roots is None:
+        roots = []
+    if not isinstance(roots, list):
+        try:
+            roots = list(roots)
+        except TypeError:
+            payload = _roots_base_payload("error", "error")
+            payload["fetch"]["reason"] = "roots_result_invalid"
+            payload["roots"]["invalid_count"] = 1
+            return payload
+    return _summarize_roots_result(roots)
 
 
 @mcp.tool()
@@ -17732,6 +18066,7 @@ async def healthz(_request):
     runtime = _runtime_state_payload(include_ollama_probe=False)
     server_state = runtime.get("server", {})
     ollama_state = runtime.get("ollama", {})
+    oauth_resource_config_error = _http_oauth_resource_config_error()
     return JSONResponse(
         {
             "ok": True,
@@ -17745,6 +18080,13 @@ async def healthz(_request):
                 "http_mode": server_state.get("http_mode"),
                 "port": server_state.get("port"),
                 "port_listening": server_state.get("port_listening"),
+            },
+            "auth": {
+                "mode": MCP_HTTP_AUTH_MODE,
+                "oauth_resource_configured": MCP_HTTP_AUTH_MODE == "oauth-resource"
+                and not bool(oauth_resource_config_error),
+                "configuration_error": oauth_resource_config_error,
+                "oauth_protected_resource_metadata": "/.well-known/oauth-protected-resource",
             },
             "ollama": {
                 "running": ollama_state.get("running"),

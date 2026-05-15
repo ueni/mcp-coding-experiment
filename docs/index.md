@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
 - [Async workflow tasks](./workflow-tasks.md) - prototype MCP Tasks-style async handles for long-running repo workflows.
 - [Adaptive observation compression](./observation-compression.md) - opt-in deterministic summaries for verbose tool/report outputs.
+- [MCP roots diagnostics](./roots-diagnostics.md) - read-only advisory diagnostics for client roots vs `REPO_PATH`.
 
 This index lists documentation ownership and status.
 
@@ -25,6 +26,7 @@ This index lists documentation ownership and status.
 - [MCP Output Schemas](./mcp-output-schemas.md) (`docs/mcp-output-schemas.md`) - Status: `canonical`
 - [Adaptive observation compression](./observation-compression.md) (`docs/observation-compression.md`) - Status: `prototype`
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`
+- [MCP roots diagnostics](./roots-diagnostics.md) (`docs/roots-diagnostics.md`) - Status: `operational guidance`
 - [Qwen3.6 Production Routing](./qwen36-production-routing.md) (`docs/qwen36-production-routing.md`) - Status: `operational guidance`
 - Bootstrap instructions for external repositories live in `README.md` under `Bootstrap Another Repository`.
 - Generated reports under `.codebase-tooling-mcp/reports/`, including `TEST_IMPACT_MAP.json` for the static test-impact workflow - Status: `generated`

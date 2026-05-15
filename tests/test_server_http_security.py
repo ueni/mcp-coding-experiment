@@ -15,6 +15,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         super().setUp()
         self._orig_auth_mode = self.server.MCP_HTTP_AUTH_MODE
         self._orig_token = self.server.MCP_HTTP_BEARER_TOKEN
+        self._orig_authorization_servers = self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW
         self._orig_rate_requests = self.server.MCP_HTTP_RATE_LIMIT_REQUESTS
         self._orig_rate_window = self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS
         self._orig_request_timeout = self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS
@@ -26,6 +27,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
     def tearDown(self):
         self.server.MCP_HTTP_AUTH_MODE = self._orig_auth_mode
         self.server.MCP_HTTP_BEARER_TOKEN = self._orig_token
+        self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = self._orig_authorization_servers
         self.server.MCP_HTTP_RATE_LIMIT_REQUESTS = self._orig_rate_requests
         self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = self._orig_rate_window
         self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS = self._orig_request_timeout
@@ -143,6 +145,86 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertFalse(payload["privacy"]["contains_host_user_data"])
         self.assertFalse(payload["privacy"]["contains_secrets"])
         self.assertFalse(self.server.MCP_AUDIT_LOG_FILE.exists())
+
+    def test_oauth_protected_resource_metadata_documents_local_bearer_mode(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "super-secret-token"
+        self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = ""
+
+        start, payload = self._middleware_json_response(
+            self._scope(path="/.well-known/oauth-protected-resource", method="GET")
+        )
+
+        self.assertEqual(start["status"], 200)
+        self.assertEqual(payload["resource"], "http://localhost:8000/mcp")
+        self.assertEqual(payload["authorization_servers"], [])
+        self.assertEqual(payload["bearer_methods_supported"], ["header"])
+        self.assertEqual(payload["mcp_auth_mode"], "token")
+        self.assertIn("local-bearer", payload["oauth_2_1_status"])
+        payload_text = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("super-secret-token", payload_text)
+
+    def test_oauth_resource_metadata_requires_and_returns_authorization_servers(self):
+        self.server.MCP_HTTP_AUTH_MODE = "oauth-resource"
+        self.server.MCP_HTTP_BEARER_TOKEN = "super-secret-token"
+        self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = (
+            '["https://auth.example.test", "https://backup.example.test"]'
+        )
+
+        start, payload = self._middleware_json_response(
+            self._scope(path="/.well-known/oauth-protected-resource", method="GET")
+        )
+
+        self.assertEqual(start["status"], 200)
+        self.assertEqual(
+            payload["authorization_servers"],
+            ["https://auth.example.test", "https://backup.example.test"],
+        )
+        self.assertEqual(payload["mcp_auth_mode"], "oauth-resource")
+        self.assertNotIn("configuration_error", payload)
+        self.assertIn("enabled", payload["oauth_2_1_status"])
+        self.assertNotIn("super-secret-token", json.dumps(payload, sort_keys=True))
+
+    def test_oauth_resource_mode_missing_authorization_servers_fails_closed(self):
+        self.server.MCP_HTTP_AUTH_MODE = "oauth-resource"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = ""
+
+        start, payload = self._middleware_json_response(self._scope("secret-token"))
+
+        self.assertEqual(start["status"], 403)
+        self.assertEqual(payload["error"], "forbidden")
+        self.assertIn("MCP_HTTP_AUTHORIZATION_SERVERS", payload["detail"])
+        event = self._audit_events()[0]
+        self.assertEqual(event["arguments"], {"path": "/mcp"})
+        self.assertIn("MCP_HTTP_AUTHORIZATION_SERVERS", event["reason"])
+
+    def test_oauth_resource_missing_authorization_servers_is_visible_in_health(self):
+        self.server.MCP_HTTP_AUTH_MODE = "oauth-resource"
+        self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = ""
+
+        response = asyncio.run(self.server.healthz(None))
+        payload = json.loads(response.body.decode("utf-8"))
+
+        self.assertEqual(payload["auth"]["mode"], "oauth-resource")
+        self.assertFalse(payload["auth"]["oauth_resource_configured"])
+        self.assertIn("MCP_HTTP_AUTHORIZATION_SERVERS", payload["auth"]["configuration_error"])
+
+    def test_unauthorized_http_response_includes_resource_metadata_challenge(self):
+        self.server.MCP_HTTP_AUTH_MODE = "oauth-resource"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = "https://auth.example.test"
+
+        start, payload = self._middleware_json_response(self._scope(path="/mcp", method="POST"))
+
+        self.assertEqual(start["status"], 401)
+        headers = dict(start["headers"])
+        self.assertIn(b"www-authenticate", headers)
+        challenge = headers[b"www-authenticate"].decode("latin-1")
+        self.assertIn('Bearer realm="mcp"', challenge)
+        self.assertIn("resource_metadata=", challenge)
+        self.assertIn("/.well-known/oauth-protected-resource", challenge)
+        self.assertEqual(payload["error"], "unauthorized")
 
     def test_mcp_endpoint_auth_is_unchanged_when_manifest_is_public(self):
         self.server.MCP_HTTP_AUTH_MODE = "token"
