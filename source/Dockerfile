@@ -128,7 +128,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
          ln -sf "/opt/codebase-tooling/coding-venv/bin/${tool}" "/usr/local/bin/${tool}"; \
        done
 
-RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-ollama-binary,target=/var/cache/buildkit/ollama,sharing=locked \
     set -eux; \
     curl_retry() { \
       curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --http1.1 "$@"; \
@@ -180,7 +180,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
       tgz) tar -xzf "${ollama_archive}" -C /usr/local ;; \
     esac
 
-RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models,sharing=locked \
     set -eux; \
     mkdir -p /tmp/ollama-models; \
     if [ -z "$(echo "${OLLAMA_PRELOAD_MODELS}" | xargs)" ]; then \
@@ -201,6 +201,10 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
     for model in "${preload_models[@]}"; do \
       model="$(echo "$model" | xargs)"; \
       if [ -n "$model" ]; then \
+        if ollama show "$model" >/dev/null 2>&1; then \
+          echo "Ollama model ${model} is already present in the BuildKit cache; skipping pull."; \
+          continue; \
+        fi; \
         pull_log="/tmp/ollama-pull-$(echo "$model" | tr -c 'A-Za-z0-9_.-' '_').log"; \
         echo "Pulling Ollama model ${model}"; \
         timeout "${OLLAMA_PULL_TIMEOUT_SECONDS}" ollama pull "$model" >"${pull_log}" 2>&1 || { \
@@ -211,6 +215,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
           wait "$pid" || true; \
           exit "$status"; \
         }; \
+        ollama show "$model" >/dev/null 2>&1; \
       fi; \
     done; \
     rm -rf /tmp/ollama-models/*; \

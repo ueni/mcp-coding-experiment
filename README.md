@@ -184,9 +184,11 @@ Inline devcontainer example (non-compose):
 }
 ```
 
-The Dockerfile uses BuildKit cache mounts for `apt` and `pip`, so repeated
-devcontainer rebuilds can reuse downloaded package metadata and wheels. Keep
-BuildKit enabled when building this image or those cache mounts will be ignored.
+The Dockerfile uses BuildKit cache mounts for `apt`, `pip`, and Ollama build
+artifacts, so repeated devcontainer rebuilds can reuse downloaded package
+metadata, wheels, the Ollama binary archive, and preloaded model blobs. Keep
+BuildKit enabled and use a persistent builder/cache store when building this image
+or those cache mounts will be ignored or lost between builds.
 
 The default image keeps `LOCAL_EMBED_BACKEND=hash` and does not install the optional
 `sentence-transformers`/PyTorch stack, which is large and is not needed for the
@@ -455,7 +457,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
 - The steady-state quality route is `qwen3.6-35b-a3b:iq1`. The devcontainer preloads `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M`, then `source/entrypoint.sh` creates a text-only local alias from the GGUF blob so Ollama avoids the HF tag's vision projector loader path.
-- `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
+- `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. The build-time preload step stores models in the stable BuildKit cache mount `id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models` and runs `ollama show` before `ollama pull`, so a persistent builder can skip already-cached models on later builds. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
 - `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided. All other quality/specialist routes fall back to Qwen3.6 rather than obsolete small specialist models.
 - Qwen3.6 endpoint calls install chat sentinel stop sequences and strip leaked `<think>...</think>` reasoning blocks plus `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` tokens before returning tool output. Continue model config advertises a 32768-token context window with a bounded 2048-token response budget so Agent mode can send minimal MCP/tool prompts without tripping client-side context-limit checks.
