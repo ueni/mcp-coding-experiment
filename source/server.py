@@ -4139,6 +4139,183 @@ def _compress_table(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {"columns": cols, "rows": rows}
 
 
+def _compressed_observation_for_rows(
+    *,
+    tool_name: str,
+    rows: list[dict[str, Any]],
+    total_count: int,
+    raw_reference: dict[str, Any],
+    rule_set: str = "deterministic_rows_v1",
+    max_signals: int = 5,
+) -> dict[str, Any]:
+    """Build a deterministic, redacted observation summary for verbose row output.
+
+    The summary never serves as the only raw copy: callers must pass either an
+    inline-return reference, a result handle, or an artifact path in
+    ``raw_reference``. Preserved signal samples use the same audit redactor used
+    for persisted workflow metadata so the compressed layer cannot expose more
+    than the corresponding raw/redacted output path.
+    """
+    path_counts: dict[str, int] = {}
+    for row in rows:
+        path = str(row.get("path", "")) if isinstance(row, dict) else ""
+        if path:
+            path_counts[path] = path_counts.get(path, 0) + 1
+    top_paths = [
+        {"path": path, "count": count}
+        for path, count in sorted(
+            path_counts.items(), key=lambda item: (-item[1], item[0])
+        )[:max_signals]
+    ]
+
+    preserved: list[dict[str, Any]] = []
+    for row in rows[:max_signals]:
+        if not isinstance(row, dict):
+            continue
+        signal = {
+            key: row[key]
+            for key in ("path", "line", "column", "match", "lineText")
+            if key in row
+        }
+        preserved.append(_redact_audit_value(signal))
+
+    omitted: list[dict[str, Any]] = []
+    if total_count > len(rows):
+        omitted.append(
+            {
+                "category": "matches_not_returned",
+                "reason_code": "pagination_or_adaptive_limit",
+                "count": total_count - len(rows),
+            }
+        )
+    if len(rows) > len(preserved):
+        omitted.append(
+            {
+                "category": "additional_returned_rows",
+                "reason_code": "sample_cap",
+                "count": len(rows) - len(preserved),
+            }
+        )
+    if any(isinstance(row, dict) and "lineText" in row for row in rows):
+        omitted.append(
+            {
+                "category": "full_line_text",
+                "reason_code": "secret_safe_signal_sampling",
+                "count": max(0, len(rows) - len(preserved)),
+            }
+        )
+
+    return {
+        "schema": "compressed_observation.v1",
+        "summary": (
+            f"{tool_name} returned {len(rows)} row(s)"
+            + (f" from {len(path_counts)} path(s)" if path_counts else "")
+            + (
+                f"; {total_count - len(rows)} additional row(s) omitted"
+                if total_count > len(rows)
+                else ""
+            )
+        ),
+        "preserved_signals": {
+            "top_paths": top_paths,
+            "sample_rows": preserved,
+            "total_count": total_count,
+            "returned_count": len(rows),
+        },
+        "omitted": omitted,
+        "raw_reference": raw_reference,
+        "rules": {
+            "rule_set": rule_set,
+            "version": 1,
+            "deterministic": True,
+            "max_preserved_signals": max_signals,
+        },
+        "provenance": {
+            "tool": tool_name,
+            "generated_by": "codebase-tooling-mcp",
+            "input_scope": "returned_rows",
+        },
+        "redaction": {
+            "applied": True,
+            "method": "mcp_audit_redaction",
+            "contains_secrets": False,
+        },
+    }
+
+
+def _compressed_observation_for_governance_report(
+    report: dict[str, Any], raw_reference: dict[str, Any]
+) -> dict[str, Any]:
+    audit = report.get("audit", {}) if isinstance(report.get("audit"), dict) else {}
+    counts = audit.get("counts", {}) if isinstance(audit.get("counts"), dict) else {}
+    event_count = int(counts.get("event_count", 0) or 0)
+    failures = (
+        counts.get("failures", {}) if isinstance(counts.get("failures"), dict) else {}
+    )
+    top_tools = counts.get("tools", {}) if isinstance(counts.get("tools"), dict) else {}
+    preserved = {
+        "event_count": event_count,
+        "failure_count": int(failures.get("count", 0) or 0),
+        "top_tools": [
+            {"tool": tool, "count": count}
+            for tool, count in sorted(
+                top_tools.items(), key=lambda item: (-int(item[1]), str(item[0]))
+            )[:5]
+        ],
+        "workflow_diagnostics": _redact_audit_value(
+            report.get("workflow_diagnostics", {})
+        ),
+        "export_paths": _redact_audit_value(report.get("exports", {})),
+    }
+    omitted = [
+        {
+            "category": "redacted_audit_events",
+            "reason_code": "sample_cap",
+            "count": max(
+                0,
+                event_count
+                - len(
+                    audit.get("redacted_events_sample", [])
+                    if isinstance(audit.get("redacted_events_sample"), list)
+                    else []
+                ),
+            ),
+        },
+        {
+            "category": "full_artifact_body",
+            "reason_code": "raw_artifact_reference",
+            "count": 1,
+        },
+    ]
+    return {
+        "schema": "compressed_observation.v1",
+        "summary": (
+            "governance_report summarized "
+            f"{event_count} redacted audit event(s) with "
+            f"{preserved['failure_count']} failure(s)"
+        ),
+        "preserved_signals": preserved,
+        "omitted": omitted,
+        "raw_reference": raw_reference,
+        "rules": {
+            "rule_set": "deterministic_governance_report_v1",
+            "version": 1,
+            "deterministic": True,
+            "max_preserved_signals": 5,
+        },
+        "provenance": {
+            "tool": "governance_report",
+            "generated_by": "codebase-tooling-mcp",
+            "input_scope": "redacted_report",
+        },
+        "redaction": {
+            "applied": True,
+            "method": "mcp_audit_redaction",
+            "contains_secrets": False,
+        },
+    }
+
+
 def _payload_size_bytes(value: Any) -> int:
     try:
         return len(json.dumps(value, ensure_ascii=True).encode("utf-8"))
@@ -7078,6 +7255,7 @@ def grep(
     adaptive_limits: bool = True,
     summary_mode: str = "full",
     store_result: bool = False,
+    compressed_observation: bool = False,
 ) -> list[dict[str, Any]]:
     """Search repository files for a regex pattern and return matches.
 
@@ -7170,19 +7348,75 @@ def grep(
             "returned": len(results),
             "paths": sorted({str(r.get("path")) for r in results if r.get("path")})[:100],
         }
+        raw_reference: dict[str, Any] = {"type": "inline_return", "scope": "quick_summary"}
+        if compressed_observation:
+            raw_rid = _result_store_put("grep", results)
+            raw_reference = {
+                "type": "result_handle",
+                "result_id": raw_rid,
+                "tool": "grep",
+                "count": len(results),
+            }
+            summary["compressed_observation"] = _compressed_observation_for_rows(
+                tool_name="grep",
+                rows=results,
+                total_count=total,
+                raw_reference=raw_reference,
+            )
         if store_result:
             rid = _result_store_put("grep", summary)
             summary["result_id"] = rid
         return [summary]
     if compress:
         compressed = _compress_table(results)
+        if compressed_observation:
+            compressed["compressed_observation"] = _compressed_observation_for_rows(
+                tool_name="grep",
+                rows=results,
+                total_count=total,
+                raw_reference={
+                    "type": "inline_return",
+                    "field": "rows",
+                    "count": len(results),
+                },
+            )
         if store_result:
             rid = _result_store_put("grep", compressed)
             compressed["result_id"] = rid
         return [compressed]
     if store_result:
         rid = _result_store_put("grep", results)
-        return [{"schema": "grep.result_handle.v1", "result_id": rid, "count": len(results)}]
+        handle = {"schema": "grep.result_handle.v1", "result_id": rid, "count": len(results)}
+        if compressed_observation:
+            handle["compressed_observation"] = _compressed_observation_for_rows(
+                tool_name="grep",
+                rows=results,
+                total_count=total,
+                raw_reference={
+                    "type": "result_handle",
+                    "result_id": rid,
+                    "tool": "grep",
+                    "count": len(results),
+                },
+            )
+        return [handle]
+    if compressed_observation:
+        return [
+            {
+                "schema": "grep.with_compressed_observation.v1",
+                "results": results,
+                "compressed_observation": _compressed_observation_for_rows(
+                    tool_name="grep",
+                    rows=results,
+                    total_count=total,
+                    raw_reference={
+                        "type": "inline_return",
+                        "field": "results",
+                        "count": len(results),
+                    },
+                ),
+            }
+        ]
     return results
 
 
@@ -13180,6 +13414,7 @@ def governance_report(
     base_ref: str = "HEAD~1",
     head_ref: str = "HEAD",
     export: bool = True,
+    compressed_observation: bool = False,
 ) -> dict[str, Any]:
     """Build and optionally export a redacted audit/governance report."""
     _require_git_repo()
@@ -13263,6 +13498,19 @@ def governance_report(
             )
     report["resource_links"] = resource_links
     report["_meta"] = _artifact_meta(resource_links)
+    if compressed_observation:
+        exports = report.get("exports", {}) if isinstance(report.get("exports"), dict) else {}
+        if isinstance(exports.get("json"), str):
+            raw_reference = {
+                "type": "artifact",
+                "path": exports["json"],
+                "mime_type": "application/json",
+            }
+        else:
+            raw_reference = {"type": "inline_return", "field": "report", "count": 1}
+        report["compressed_observation"] = _compressed_observation_for_governance_report(
+            report, raw_reference=raw_reference
+        )
     if export and isinstance(report.get("exports"), dict) and isinstance(report["exports"].get("json"), str):
         json_path = _resolve_repo_path(report["exports"]["json"])
         json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")

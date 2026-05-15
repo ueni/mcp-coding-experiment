@@ -55,7 +55,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "repo_info": ("docker", "current_branch", "head", "dirty", "max_read_bytes", "max_output_chars"),
     "runtime_state": ("server.python_server_processes", "ollama.tags_probe"),
     "git_status": ("raw",),
-    "grep": ("lineText", "schema", "total_matches", "returned", "paths", "result_id", "count"),
+    "grep": ("lineText", "schema", "total_matches", "returned", "paths", "result_id", "count", "compressed_observation"),
     "find_paths": (),
     "read_snippet": ("requested_start_line", "requested_end_line", "total_lines"),
     "summarize_diff": ("files", "files_sorted_by_churn", "patch", "patch_unified"),
@@ -64,7 +64,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "policy_simulator": (),
     "clarification_gate": ("audit", "inputs", "decision_reasons"),
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "_meta"),
+    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "compressed_observation", "_meta"),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
 }
 
@@ -81,6 +81,43 @@ def _object_schema(
         "properties": properties,
         "additionalProperties": additional_properties,
     }
+
+
+COMPRESSED_OBSERVATION_SCHEMA: dict[str, Any] = _object_schema(
+    ["schema", "summary", "preserved_signals", "omitted", "raw_reference", "rules", "provenance", "redaction"],
+    {
+        "schema": {"type": "string", "const": "compressed_observation.v1"},
+        "summary": {"type": "string"},
+        "preserved_signals": {"type": "object"},
+        "omitted": {"type": "array", "items": {"type": "object"}},
+        "raw_reference": {"type": "object"},
+        "rules": _object_schema(
+            ["rule_set", "version", "deterministic"],
+            {
+                "rule_set": {"type": "string"},
+                "version": {"type": "integer"},
+                "deterministic": {"type": "boolean"},
+                "max_preserved_signals": {"type": "integer"},
+            },
+        ),
+        "provenance": _object_schema(
+            ["tool", "generated_by", "input_scope"],
+            {
+                "tool": {"type": "string"},
+                "generated_by": {"type": "string"},
+                "input_scope": {"type": "string"},
+            },
+        ),
+        "redaction": _object_schema(
+            ["applied", "method", "contains_secrets"],
+            {
+                "applied": {"type": "boolean"},
+                "method": {"type": "string"},
+                "contains_secrets": {"type": "boolean"},
+            },
+        ),
+    },
+)
 
 
 RESOURCE_LINK_SCHEMA: dict[str, Any] = _object_schema(
@@ -189,6 +226,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "paths": {"type": "array", "items": {"type": "string"}},
                 "result_id": {"type": "string"},
                 "count": {"type": "integer"},
+                "results": {"type": "array", "items": {"type": "object"}},
+                "compressed_observation": COMPRESSED_OBSERVATION_SCHEMA,
             },
         ),
     },
@@ -234,6 +273,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "mode": {"type": "string"},
             "result": {"type": "object"},
             "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
+            "compressed_observation": COMPRESSED_OBSERVATION_SCHEMA,
             "_meta": {"type": "object"},
         },
     ),
