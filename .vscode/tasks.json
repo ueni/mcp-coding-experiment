@@ -62,6 +62,8 @@
         "MCP_TRANSPORT=http",
         "-e",
         "ALLOW_MUTATIONS=true",
+        "-e",
+        "MCP_HTTP_BEARER_TOKEN",
         "-v",
         "${workspaceFolder}:/repo",
         "codebase-tooling-mcp:latest"

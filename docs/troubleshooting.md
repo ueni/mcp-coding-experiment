@@ -80,7 +80,21 @@ Symptom:
 
 Checks:
 
-- For HTTP mode, set `MCP_HTTP_BEARER_TOKEN` and send `Authorization: Bearer <token>`.
+- For HTTP mode, set `MCP_HTTP_BEARER_TOKEN` before starting the server and send
+  `Authorization: Bearer <token>` from the client.
+- For Continue IDE MCP, keep the server token out of tracked YAML and make the
+  same value resolvable as `${{ secrets.MCP_HTTP_BEARER_TOKEN }}`. Use Continue
+  Settings > Secrets for personal IDE use, or a local secret source such as
+  `.env`, `.continue/.env`, or `~/.continue/.env` with
+  `MCP_HTTP_BEARER_TOKEN=<token>`.
+- If Continue reports `unresolved secrets: MCP_HTTP_BEARER_TOKEN`, the IDE could
+  not resolve the client-side secret. If `/mcp` also reports
+  `MCP_HTTP_BEARER_TOKEN is not configured`, restart or rebuild the server after
+  exporting the same token into its environment.
+- In devcontainers, an empty `${localEnv:MCP_HTTP_BEARER_TOKEN}` usually means
+  VS Code was launched without that environment variable. Rebuild/reopen the
+  container after setting it, or let the entrypoint generate `.continue/.env` on
+  the next startup and use that local file as the Continue secret source.
 - If `MCP_HTTP_AUTH_MODE=oauth-resource`, also set `MCP_HTTP_AUTHORIZATION_SERVERS` to a JSON list or comma-separated list of issuer URLs, for example `MCP_HTTP_AUTHORIZATION_SERVERS='["https://auth.example.test"]'`. Without it, protected MCP endpoints fail closed with 403 and `/healthz` reports `auth.configuration_error`.
 - OAuth-capable MCP clients should read `/.well-known/oauth-protected-resource`; 401 responses include a `WWW-Authenticate` `resource_metadata` parameter pointing at that document.
 - If unauthenticated HTTP is intentional for a throwaway local test, set `MCP_HTTP_AUTH_MODE=insecure-local` and bind `HOST=127.0.0.1`; do not forward that port from VS Code, a devcontainer, SSH, or a tunnel.

@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 from tests.server_test_support import ServerToolsTestBase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,23 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             "source=${localEnv:HOME}/.docker,target=/host/.docker,type=bind,consistency=cached,readOnly=true",
             config["mounts"],
         )
+
+    def test_continue_mcp_config_sends_bearer_header_via_secret_reference(self):
+        for config_path in [
+            REPO_ROOT / ".continue" / "mcpServers" / "codebase-tooling-mcp.yaml",
+            REPO_ROOT / "source" / "defaults" / "continue" / "codebase-tooling-mcp.yaml",
+        ]:
+            text = config_path.read_text(encoding="utf-8")
+            config = yaml.safe_load(text)
+            auth_header = config["mcpServers"][0]["requestOptions"]["headers"]["Authorization"]
+
+            self.assertEqual(
+                auth_header,
+                "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}",
+                str(config_path),
+            )
+            self.assertNotIn("secret-token", text)
+            self.assertNotIn("MCP_HTTP_BEARER_TOKEN=", text)
 
     def test_devcontainer_exposes_dri_device_for_vulkan_ollama(self):
         config = json.loads(
@@ -290,6 +309,19 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1
         )[0]
         self.assertIn("maybe_fix_gpu_device_groups", before_drop)
+
+    def test_entrypoint_bootstraps_missing_http_bearer_token_to_local_continue_env(self):
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+
+        self.assertIn("ensure_mcp_http_bearer_token()", entrypoint)
+        self.assertIn("read_mcp_http_bearer_token_from_env_file", entrypoint)
+        self.assertIn("MCP_HTTP_BEARER_TOKEN generated into local secret file", entrypoint)
+        self.assertIn("/repo/.continue/.env", entrypoint)
+        self.assertIn("openssl rand -hex 32", entrypoint)
+        self.assertLess(
+            entrypoint.index("ensure_mcp_http_bearer_token"),
+            entrypoint.index("exec python /app/server.py"),
+        )
 
 
 class ServerOllamaContractStatusTest(ServerToolsTestBase):

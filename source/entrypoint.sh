@@ -32,6 +32,73 @@ sanitize_positive_int() {
   echo "${fallback}"
 }
 
+read_mcp_http_bearer_token_from_env_file() {
+  local env_file="${1:-}"
+  local line=""
+  local token=""
+  if [[ -z "${env_file}" || ! -r "${env_file}" ]]; then
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "${line}" in
+      MCP_HTTP_BEARER_TOKEN=*)
+        token="${line#MCP_HTTP_BEARER_TOKEN=}"
+        token="${token%"${token##*[![:space:]]}"}"
+        token="${token%\"}"
+        token="${token#\"}"
+        token="${token%\'}"
+        token="${token#\'}"
+        if [[ -n "${token}" ]]; then
+          printf '%s\n' "${token}"
+          return 0
+        fi
+        ;;
+    esac
+  done < "${env_file}"
+  return 1
+}
+
+ensure_mcp_http_bearer_token() {
+  local transport="${MCP_TRANSPORT:-stdio}"
+  local auth_mode="${MCP_HTTP_AUTH_MODE:-token}"
+  local token=""
+  local env_file=""
+  case "${transport}" in
+    http|streamable-http|streamable_http) ;;
+    *) return ;;
+  esac
+  case "${auth_mode}" in
+    token|bearer|oauth-resource) ;;
+    *) return ;;
+  esac
+  if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
+    return
+  fi
+
+  for env_file in /repo/.continue/.env /repo/.env "${HOME:-/home/app}/.continue/.env"; do
+    if token="$(read_mcp_http_bearer_token_from_env_file "${env_file}")"; then
+      export MCP_HTTP_BEARER_TOKEN="${token}"
+      echo "MCP_HTTP_BEARER_TOKEN loaded from local secret file ${env_file}" >&2
+      return
+    fi
+  done
+
+  if [[ -d /repo && -w /repo ]] && command -v openssl >/dev/null 2>&1; then
+    token="$(openssl rand -hex 32)"
+    mkdir -p /repo/.continue
+    env_file="/repo/.continue/.env"
+    if [[ -f "${env_file}" ]]; then
+      printf '\nMCP_HTTP_BEARER_TOKEN=%s\n' "${token}" >> "${env_file}"
+    else
+      printf 'MCP_HTTP_BEARER_TOKEN=%s\n' "${token}" > "${env_file}"
+    fi
+    chmod 600 "${env_file}" || true
+    export MCP_HTTP_BEARER_TOKEN="${token}"
+    echo "MCP_HTTP_BEARER_TOKEN generated into local secret file ${env_file}" >&2
+  fi
+}
+
 _ollama_probe_url() {
   local host_port="${1:-127.0.0.1:11434}"
   local host="${host_port%:*}"
@@ -544,6 +611,7 @@ OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-true}"
 OLLAMA_ALLOW_PULL="${OLLAMA_ALLOW_PULL:-false}"
 OLLAMA_STARTUP_TIMEOUT="$(sanitize_positive_int "${OLLAMA_STARTUP_TIMEOUT}" 30 "OLLAMA_STARTUP_TIMEOUT")"
 
+ensure_mcp_http_bearer_token
 apply_repo_defaults
 
 if is_truthy "${OLLAMA_ENABLED}"; then

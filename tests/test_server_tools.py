@@ -2419,6 +2419,10 @@ class ServerToolsTest(ServerToolsTestBase):
             self.assertNotIn("audit_report", names)
             for tool_name in self.server.SCHEMA_BACKED_TOOL_NAMES:
                 self.assertIn(tool_name, names)
+            for item in tools:
+                output_schema = item.model_dump().get("outputSchema")
+                if output_schema is not None:
+                    self.assertEqual(output_schema.get("type"), "object", item.model_dump().get("name"))
 
         asyncio.run(run_checks())
 

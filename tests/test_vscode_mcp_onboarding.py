@@ -127,6 +127,16 @@ def test_vscode_healthcheck_task_points_at_checked_in_script():
     assert HEALTHCHECK_SCRIPT.exists()
 
 
+def test_docker_run_task_passes_http_bearer_token_without_literal_secret():
+    tasks = json.loads((REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
+    task = next(task for task in tasks["tasks"] if task["label"] == "Docker: Run Container")
+
+    args = task["args"]
+    token_index = args.index("MCP_HTTP_BEARER_TOKEN")
+    assert args[token_index - 1] == "-e"
+    assert "MCP_HTTP_BEARER_TOKEN=" not in args
+
+
 def test_vscode_devcontainer_smoke_task_points_at_checked_in_script():
     tasks = json.loads((REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
     task = next(task for task in tasks["tasks"] if task["label"] == "Devcontainer: CI Smoke Test")
@@ -221,6 +231,41 @@ def test_healthcheck_authorization_state_fails_when_token_request_has_auth_error
 
     assert auth_check.ok is False
     assert "with $MCP_HTTP_BEARER_TOKEN=403" in auth_check.detail
+    assert "Continue Settings > Secrets" in auth_check.remediation
+    assert "${{ secrets.MCP_HTTP_BEARER_TOKEN }}" in auth_check.remediation
+
+
+def test_healthcheck_authorization_state_reports_continue_secret_sources_when_token_missing(monkeypatch):
+    healthcheck = _load_healthcheck_module()
+    monkeypatch.setattr(healthcheck, "TOKEN", "")
+    monkeypatch.setattr(healthcheck, "TOKEN_ENV", "MCP_HTTP_BEARER_TOKEN")
+    monkeypatch.setattr(healthcheck, "_port_open", lambda _host, _port: True)
+
+    def fake_request_json(url):
+        if url.endswith("/healthz"):
+            return (
+                200,
+                {
+                    "ok": True,
+                    "transport": "http",
+                    "allow_mutations": True,
+                    "server": {"http_mode": True},
+                    "ollama": {"running": True, "configured_port": 2345, "configured_port_listening": True},
+                },
+                "",
+            )
+        return 200, {}, ""
+
+    monkeypatch.setattr(healthcheck, "_request_json", fake_request_json)
+    monkeypatch.setattr(healthcheck, "_request_status", lambda *_args, **_kwargs: (403, "MCP_HTTP_BEARER_TOKEN is not configured"))
+
+    auth_check = next(check for check in healthcheck.run_checks() if check.name == "HTTP authorization state")
+
+    assert auth_check.ok is False
+    assert "no $MCP_HTTP_BEARER_TOKEN set" in auth_check.detail
+    assert "Continue Settings > Secrets" in auth_check.remediation
+    assert "workspace .continue/.env" in auth_check.remediation
+    assert "${{ secrets.MCP_HTTP_BEARER_TOKEN }}" in auth_check.remediation
 
 
 def test_healthcheck_authorization_state_passes_only_for_rejection_then_endpoint_reached(monkeypatch):

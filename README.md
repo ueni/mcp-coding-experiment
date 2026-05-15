@@ -213,6 +213,7 @@ services:
     build: ./source
     environment:
       MCP_TRANSPORT: http
+      MCP_HTTP_BEARER_TOKEN: ${MCP_HTTP_BEARER_TOKEN:?set MCP_HTTP_BEARER_TOKEN before docker compose up}
       ALLOW_MUTATIONS: "true"
       REPO_PATH: /repo
       HOST: 0.0.0.0
@@ -226,6 +227,7 @@ services:
 Run it with:
 
 ```bash
+export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
 docker compose up --build
 ```
 
@@ -291,6 +293,24 @@ That generated Codex entry uses the server key `codebase-tooling-mcp`:
 url = "http://localhost:8000/mcp"
 bearer_token_env_var = "MCP_HTTP_BEARER_TOKEN"
 ```
+
+The checked-in Continue MCP server config sends
+`Authorization: Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}`. The same token
+must be configured in two places: as `MCP_HTTP_BEARER_TOKEN` when the MCP server
+starts, and as a Continue secret named `MCP_HTTP_BEARER_TOKEN` so the IDE can
+build the Authorization header. For personal IDE use, set the Continue secret in
+Continue Settings > Secrets or store it in a local secret source such as
+`.env`, `.continue/.env`, or `~/.continue/.env`:
+
+```dotenv
+MCP_HTTP_BEARER_TOKEN=<same token used to start the server>
+```
+
+Do not commit `.env` files or paste token values into tracked MCP config.
+When the devcontainer starts in HTTP token mode with an empty
+`MCP_HTTP_BEARER_TOKEN`, the entrypoint reuses one of those local secret files or
+generates `.continue/.env` automatically so the server does not start in a
+permanently unauthorized state.
 
 The `.gitignore` bootstrap is intentionally one-time. A marker file
 `.gitignore_codebase_tooling_mcp.touched` is created on first apply; after that,

@@ -18293,13 +18293,34 @@ def _attach_release_readiness_app_metadata(tool: Any) -> None:
     tool.__dict__.setdefault("meta", existing)
 
 
+def _mcp_client_compatible_output_schema(tool_name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """Return an MCP-advertised outputSchema accepted by object-root clients.
+
+    Some existing public tools intentionally return bare lists for Python and
+    legacy MCP callers. Continue validates every advertised outputSchema root as
+    an object, so preserve the precise legacy schema under an extension key while
+    advertising an object-root compatibility schema for tools/list.
+    """
+    if schema.get("type") == "object":
+        return schema
+    return {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "result": schema,
+        },
+        "x-codebase-tooling-mcp-legacy-output-schema": schema,
+        "description": f"{tool_name} returns the legacy payload directly; object root is advertised for MCP client compatibility.",
+    }
+
+
 def _apply_output_schemas_to_mcp_tools() -> None:
     """Attach checked-in outputSchema metadata to schema-backed FastMCP tools."""
     for name, schema in OUTPUT_SCHEMA_BY_TOOL.items():
         tool = mcp._tool_manager.get_tool(name)  # FastMCP has no public setter for outputSchema.
         if tool is None:
             continue
-        tool.fn_metadata.output_schema = schema
+        tool.fn_metadata.output_schema = _mcp_client_compatible_output_schema(name, schema)
         tool.fn_metadata.output_model = _AnyToolOutput
         tool.fn_metadata.wrap_output = False
         tool.__dict__.pop("output_schema", None)
