@@ -186,7 +186,11 @@ Remediation options:
 
 - Rebuild/reopen after increasing Docker/VM memory. For the Qwen3.6 IQ1_M
   devcontainer path, use a 32GB T14-class host or equivalent Docker memory
-  allocation when collecting final attach evidence.
+  allocation when collecting final attach evidence. A ThinkPad T14 Gen 1 AMD
+  with 16GB RAM may be marginal for VS Code + devcontainer + Ollama, especially
+  with `llama3.1:8b` Agent mode and a 32768 context; reduce the context to
+  8192/16384 or use a smaller verified tool-capable Agent model if one is
+  configured locally.
 - Close other memory-heavy workloads before rebuild/reopen.
 - Keep `OLLAMA_ALLOW_PULL=false` unless runtime downloads are intentionally
   enabled; preloaded models avoid extra memory/network pressure during attach.

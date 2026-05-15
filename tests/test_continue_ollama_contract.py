@@ -69,6 +69,20 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         expected_context = 32768
         known_non_tool_ollama_models = {"qwen3.6-35b-a3b:iq1"}
         tool_models = []
+
+        devcontainer = json.loads(
+            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
+        )
+        preload_models = devcontainer["build"]["args"]["OLLAMA_PRELOAD_MODELS"].split(",")
+        self.assertIn("llama3.1:8b", preload_models)
+        self.assertEqual("llama3.1:8b", devcontainer["containerEnv"]["CODING_AGENT_MODEL"])
+
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("CODING_AGENT_MODEL=llama3.1:8b", dockerfile)
+        self.assertIn(
+            "CONTINUE_OLLAMA_MODELS=qwen3.6-35b-a3b:iq1,llama3.1:8b,qwen2.5-coder:1.5b",
+            dockerfile,
+        )
         for config_path in [
             REPO_ROOT / ".continue" / "models" / "coding-agent-llama3.1-8b.yaml",
             REPO_ROOT / "source" / "defaults" / "continue" / "models" / "coding-agent-llama3.1-8b.yaml",
@@ -254,6 +268,45 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models', readme)
         self.assertIn('--cache-to=type=local,dest=.buildx-cache,mode=max', readme)
         self.assertIn('--cache-from=type=local,src=.buildx-cache', readme)
+
+    def test_docs_call_out_t14_agent_mode_memory_limits(self):
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        qwen_doc = (REPO_ROOT / "docs" / "qwen36-production-routing.md").read_text(encoding="utf-8")
+        troubleshooting = (REPO_ROOT / "docs" / "troubleshooting.md").read_text(encoding="utf-8")
+        combined = "\n".join([readme, qwen_doc, troubleshooting])
+
+        self.assertIn("ThinkPad T14 Gen 1 AMD", combined)
+        self.assertIn("16GB", combined)
+        self.assertIn("32GB RAM", combined)
+        self.assertIn("32768 context", combined)
+        self.assertIn("8192", combined)
+        self.assertIn("16384", combined)
+        self.assertIn("smaller verified tool-capable Agent model", combined)
+        self.assertIn("does not currently include a smaller verified", combined)
+        self.assertIn("Do not treat the Qwen3.6 35B", readme)
+
+    def test_dockerfile_apt_buildkit_cache_mounts_survive_debian_clean_hook(self):
+        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "--mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,sharing=locked",
+            dockerfile,
+        )
+        self.assertIn(
+            "--mount=type=cache,id=codebase-tooling-apt-lists,target=/var/lib/apt/lists,sharing=locked",
+            dockerfile,
+        )
+        self.assertIn("rm -f /etc/apt/apt.conf.d/docker-clean", dockerfile)
+        self.assertLess(
+            dockerfile.index("rm -f /etc/apt/apt.conf.d/docker-clean"),
+            dockerfile.index("apt-get install -y --no-install-recommends"),
+        )
+
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("codebase-tooling-apt-cache", readme)
+        self.assertIn("codebase-tooling-apt-lists", readme)
+        self.assertIn("/etc/apt/apt.conf.d/docker-clean", readme)
+        self.assertIn("same persistent builder/cache store", readme)
 
     def test_dockerfile_uses_python_313_trixie_base_image(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")

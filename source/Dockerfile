@@ -69,9 +69,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST_CA_CERT_FILE= \
     MCP_APPLY_REPO_DEFAULTS=false
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=codebase-tooling-apt-lists,target=/var/lib/apt/lists,sharing=locked \
     set -eux; \
+    rm -f /etc/apt/apt.conf.d/docker-clean; \
     apt-get update; \
     packages=( \
         antiword \

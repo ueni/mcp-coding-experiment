@@ -186,11 +186,16 @@ Inline devcontainer example (non-compose):
 
 The Dockerfile uses BuildKit cache mounts for `apt`, `pip`, and Ollama build
 artifacts, so repeated devcontainer rebuilds can reuse downloaded package
-metadata, wheels, the Ollama binary archive, and preloaded model blobs. Keep
-BuildKit enabled and use a persistent builder/cache store when building this image
-or those cache mounts will be ignored or lost between builds. With `docker buildx`
-on ephemeral builders, persist the cache explicitly with matching import/export
-options, for example `--cache-to=type=local,dest=.buildx-cache,mode=max` and
+metadata, wheels, the Ollama binary archive, and preloaded model blobs. The `apt`
+mounts use stable explicit IDs (`codebase-tooling-apt-cache` for
+`/var/cache/apt` and `codebase-tooling-apt-lists` for `/var/lib/apt/lists`) and
+the build removes Debian slim's `/etc/apt/apt.conf.d/docker-clean` hook before
+installing packages so downloaded `.deb` archives can remain in the cache mount.
+Keep BuildKit enabled and use the same persistent builder/cache store when
+building this image or those cache mounts will be ignored or lost between builds.
+With `docker buildx` on ephemeral builders, persist the cache explicitly with
+matching import/export options, for example
+`--cache-to=type=local,dest=.buildx-cache,mode=max` and
 `--cache-from=type=local,src=.buildx-cache`.
 
 The default image keeps `LOCAL_EMBED_BACKEND=hash` and does not install the optional
@@ -461,7 +466,9 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
 - The steady-state quality route is `qwen3.6-35b-a3b:iq1`. The devcontainer preloads `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M`, then `source/entrypoint.sh` creates a text-only local alias from the GGUF blob so Ollama avoids the HF tag's vision projector loader path.
-- Continue Agent/tool-calling mode should use the separate `Coding Agent - Llama 3.1 8B` profile (`llama3.1:8b`). The local `qwen3.6-35b-a3b:iq1` profile is kept for chat/edit/apply and intentionally does not advertise `tool_use`, because that Ollama tag rejects tool calls with `does not support tools`.
+- Continue Agent/tool-calling mode should use the separate `Coding Agent - Llama 3.1 8B` profile (`llama3.1:8b`). The local `qwen3.6-35b-a3b:iq1` profile is kept for chat/edit/apply and intentionally does not advertise `tool_use`, because that Ollama tag rejects tool calls with `does not support tools`. The checked-in devcontainer preloads `llama3.1:8b`, sets `CODING_AGENT_MODEL=llama3.1:8b`, and enables `MCP_APPLY_REPO_DEFAULTS=true` so startup can copy the generated `.continue/models/coding-agent-llama3.1-8b.yaml` profile plus routing into the repository defaults.
+- Hardware note: `llama3.1:8b` Agent mode can be marginal on a ThinkPad T14 Gen 1 AMD, especially with 16GB RAM while VS Code, the devcontainer, and Ollama all run with a 32768 context window. Treat 32GB RAM (or equivalent Docker memory allocation) as the recommended local target for 8B Agent mode. On 16GB-class hosts, reduce the context window to 8192 or 16384, disable/preload fewer models, or choose a smaller verified tool-capable Agent model if one is introduced; this repo does not currently include a smaller verified tool-capable Agent default. Do not treat the Qwen3.6 35B chat/edit/apply profile as practical on that host class unless it is preloaded/accelerated and enough memory is available.
+- Existing host or repository `.continue` config may stay stale until refreshed. After pulling this change, rebuild/reopen the devcontainer and either keep `MCP_APPLY_REPO_DEFAULTS=true` or rerun `setup-repository.sh` / manually copy the `source/defaults/continue` files so the host-visible `.continue` config includes the Llama 3.1 Agent profile and routing.
 - `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. The build-time preload step stores models in the stable BuildKit cache mount `id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models` and runs `ollama show` before `ollama pull`, so a persistent builder can skip already-cached models on later builds. On throwaway/remote builders, use `docker buildx` cache import/export (`--cache-to=...` and `--cache-from=...`) or the preload cache will still be empty on the next build. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
 - `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided. All other quality/specialist routes fall back to Qwen3.6 rather than obsolete small specialist models.
