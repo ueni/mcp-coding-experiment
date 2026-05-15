@@ -43,7 +43,8 @@ HTTP mode requires bearer-token authorization by default. Generate a local token
 export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
 
 docker run --rm \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
+  -p 127.0.0.1:2345:2345 \
   -e MCP_TRANSPORT=http \
   -e MCP_HTTP_BEARER_TOKEN="$MCP_HTTP_BEARER_TOKEN" \
   -e ALLOW_MUTATIONS=true \
@@ -168,7 +169,11 @@ Inline devcontainer example (non-compose):
     "dockerfile": "../source/Dockerfile"
   },
   "workspaceFolder": "/repo",
-  "runArgs": ["--device=/dev/dri"],
+  "runArgs": [
+    "-p", "127.0.0.1:8000:8000",
+    "-p", "127.0.0.1:2345:2345",
+    "--device=/dev/dri"
+  ],
   "containerEnv": {
     "MCP_TRANSPORT": "http",
     "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
@@ -219,7 +224,8 @@ services:
       HOST: 0.0.0.0
       PORT: "8000"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:2345:2345"
     volumes:
       - .:/repo
 ```
@@ -445,6 +451,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 ## Continue + Ollama Contract
 
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
+- The devcontainer publishes `127.0.0.1:2345:2345` so Continue can reach the bundled Ollama service even when its extension host runs outside the container. If Continue reports `ECONNREFUSED 127.0.0.1:2345`, rebuild/reopen the devcontainer and confirm `curl http://127.0.0.1:2345/api/tags` works from the same side where Continue is running.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
 - The steady-state quality route is `qwen3.6-35b-a3b:iq1`. The devcontainer preloads `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M`, then `source/entrypoint.sh` creates a text-only local alias from the GGUF blob so Ollama avoids the HF tag's vision projector loader path.

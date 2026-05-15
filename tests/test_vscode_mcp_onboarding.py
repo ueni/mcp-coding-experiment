@@ -135,6 +135,8 @@ def test_docker_run_task_passes_http_bearer_token_without_literal_secret():
     token_index = args.index("MCP_HTTP_BEARER_TOKEN")
     assert args[token_index - 1] == "-e"
     assert "MCP_HTTP_BEARER_TOKEN=" not in args
+    assert "127.0.0.1:8000:8000" in args
+    assert "127.0.0.1:2345:2345" in args
 
 
 def test_vscode_devcontainer_smoke_task_points_at_checked_in_script():
@@ -304,6 +306,8 @@ def test_devcontainer_passes_http_bearer_token_from_local_env():
 
     assert config["containerEnv"]["MCP_HTTP_BEARER_TOKEN"] == "${localEnv:MCP_HTTP_BEARER_TOKEN}"
     assert config["containerEnv"]["MCP_TRANSPORT"] == "http"
+    assert "127.0.0.1:8000:8000" in config["runArgs"]
+    assert "127.0.0.1:2345:2345" in config["runArgs"]
 
 
 def test_setup_script_generates_token_aware_devcontainer():
@@ -321,6 +325,8 @@ def test_setup_script_generates_token_aware_devcontainer():
         config = json.loads((repo_root / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8"))
 
     assert config["containerEnv"]["MCP_HTTP_BEARER_TOKEN"] == "${localEnv:MCP_HTTP_BEARER_TOKEN}"
+    assert "127.0.0.1:8000:8000" in config["runArgs"]
+    assert "127.0.0.1:2345:2345" in config["runArgs"]
     assert "MCP_HTTP_BEARER_TOKEN" in result.stderr
 
 

@@ -18,7 +18,7 @@ This path starts from a fresh clone or downstream repository using the devcontai
    ```
 
 3. Run **Dev Containers: Reopen in Container**.
-4. Wait for the `codebase-tooling-mcp` container to finish startup. VS Code should forward ports `8000` (MCP) and `2345` (bundled Ollama).
+4. Wait for the `codebase-tooling-mcp` container to finish startup. The devcontainer publishes loopback ports `8000` (MCP) and `2345` (bundled Ollama), and VS Code should also show them as forwarded ports.
 5. Run **Tasks: Run Task → MCP: Workspace Health Check**.
 6. After building the local image (`codebase-tooling-mcp:test`), run **Tasks: Run Task → Devcontainer: CI Smoke Test** to start the same image, run the MCP health check, and exercise a bounded model prompt when a local model is already present.
 7. Copy `.vscode/mcp.example.json` to your user/workspace MCP config if your VS Code build expects active MCP registrations outside the repository sample, then keep the token out of git. The sample uses a password input rather than a committed secret.
@@ -29,7 +29,7 @@ This path starts from a fresh clone or downstream repository using the devcontai
 `./scripts/vscode_mcp_healthcheck.py` checks:
 
 - `GET /healthz` returns JSON and reports HTTP transport.
-- The MCP server port `8000` and Ollama port `2345` are reachable through VS Code forwarding.
+- The MCP server port `8000` and Ollama port `2345` are reachable from localhost.
 - The health payload reports the expected mutation mode (`ALLOW_MUTATIONS=true` by default for editing workflows).
 - Ollama is running and `GET http://localhost:2345/api/tags` responds.
 - HTTP authorization matches the behavior from the token-mode server: unauthenticated MCP requests are rejected, and a request with `MCP_HTTP_BEARER_TOKEN` reaches the MCP endpoint.
@@ -50,7 +50,7 @@ The script prints remediation text for common failures: container not started, m
 `./scripts/devcontainer_smoke_test.py` is the CI/local smoke test for the VS Code devcontainer path. It validates:
 
 - `.devcontainer/devcontainer.json` points at `../source/Dockerfile` and `../source`.
-- The devcontainer exposes HTTP MCP/Ollama environment and forwards ports `8000` and `2345`.
+- The devcontainer exposes HTTP MCP/Ollama environment and publishes/forwards ports `8000` and `2345`.
 - `.vscode/tasks.json` contains the MCP health check task.
 - A container started from the built image becomes healthy and passes `scripts/vscode_mcp_healthcheck.py`.
 - A bounded Ollama prompt returns a non-empty response when a model is already installed; otherwise the test prints an explicit skip unless required.

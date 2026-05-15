@@ -96,6 +96,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             )
 
         self.assertEqual([8000, 2345], config["forwardPorts"])
+        self.assertIn("127.0.0.1:8000:8000", config.get("runArgs", []))
+        self.assertIn("127.0.0.1:2345:2345", config.get("runArgs", []))
         self.assertIn("--security-opt=seccomp=unconfined", config.get("runArgs", []))
         self.assertIn("--security-opt=apparmor=unconfined", config.get("runArgs", []))
         self.assertEqual("0.0.0.0:2345", config["containerEnv"]["OLLAMA_HOST"])

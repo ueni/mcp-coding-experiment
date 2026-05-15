@@ -87,6 +87,10 @@ if [ "$ENABLE_VULKAN_GPU" = auto ]; then
 fi
 
 DEVCONTAINER_RUNARGS_BLOCK='  "runArgs": [
+    "-p",
+    "127.0.0.1:8000:8000",
+    "-p",
+    "127.0.0.1:2345:2345",
     "--security-opt=seccomp=unconfined",
     "--security-opt=apparmor=unconfined"'
 DEVCONTAINER_GPU_ENV_BLOCK=""

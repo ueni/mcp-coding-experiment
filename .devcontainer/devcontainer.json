@@ -13,6 +13,10 @@
   "containerUser": "root",
   "workspaceFolder": "/repo",
   "runArgs": [
+    "-p",
+    "127.0.0.1:8000:8000",
+    "-p",
+    "127.0.0.1:2345:2345",
     "--security-opt=seccomp=unconfined",
     "--security-opt=apparmor=unconfined",
     "--device=/dev/dri"
