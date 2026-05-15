@@ -179,6 +179,7 @@ def _validate_vscode_tasks(tasks: dict[str, Any]) -> None:
     for key in {
         "TEST_IMAGE",
         "MCP_SMOKE_REQUIRE_MODEL_PROMPT",
+        "MCP_SMOKE_HOST_PORT_MODE",
         "OLLAMA_ALLOW_PULL",
         "MCP_SMOKE_SERVER_STARTUP_TIMEOUT_SECONDS",
         "MCP_SMOKE_MODEL_TIMEOUT_SECONDS",
@@ -258,6 +259,40 @@ print(f'MODEL_PROMPT_OK: model={model!r} response_chars={len(text)}')
 """
 
 
+def _smoke_run_args(raw_run_args: list[Any], host_port_mode: str) -> list[str]:
+    """Return docker run args for smoke runs without requiring fixed host ports."""
+    run_args: list[str] = []
+    iterator = iter(raw_run_args)
+    for run_arg in iterator:
+        if run_arg in {"-p", "--publish"}:
+            try:
+                publish = next(iterator)
+            except StopIteration as exc:
+                raise SmokeFailure(
+                    "devcontainer runArgs contains a publish flag without a value"
+                ) from exc
+            if not isinstance(publish, str):
+                raise SmokeFailure("devcontainer runArgs publish value must be a string")
+            if host_port_mode == "none":
+                continue
+            if host_port_mode == "ephemeral" and publish in {
+                "127.0.0.1:8000:8000",
+                "127.0.0.1:2345:2345",
+            }:
+                host_ip, _host_port, container_port = publish.split(":", 2)
+                publish = f"{host_ip}::{container_port}"
+            run_args.extend([str(run_arg), publish])
+            continue
+        if run_arg == "--device=/dev/dri" and not Path("/dev/dri").exists():
+            print(
+                "SMOKE_NOTICE: /dev/dri is unavailable on this runner; "
+                "skipping devcontainer GPU device passthrough"
+            )
+            continue
+        run_args.append(str(run_arg))
+    return run_args
+
+
 def _container_logs(name: str) -> None:
     try:
         _run(["docker", "logs", "--tail", "200", name], check=False)
@@ -283,11 +318,10 @@ def _start_container(args: argparse.Namespace, config: dict[str, Any]) -> str:
     ]
     for key, value in sorted(env.items()):
         command.extend(["--env", f"{key}={value}"])
-    for run_arg in config.get("runArgs", []):
-        if run_arg == "--device=/dev/dri" and not Path("/dev/dri").exists():
-            print("SMOKE_NOTICE: /dev/dri is unavailable on this runner; skipping devcontainer GPU device passthrough")
-            continue
-        command.append(run_arg)
+    raw_run_args = config.get("runArgs", [])
+    if not isinstance(raw_run_args, list):
+        raise SmokeFailure(".devcontainer/devcontainer.json runArgs must be a list")
+    command.extend(_smoke_run_args(raw_run_args, args.host_port_mode))
     command.append(args.image)
 
     _run(command)
@@ -348,6 +382,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--healthcheck-timeout-seconds", type=float, default=float(os.getenv("MCP_HEALTHCHECK_TIMEOUT_SECONDS", "3")))
     parser.add_argument("--ollama-startup-timeout-seconds", type=int, default=int(os.getenv("OLLAMA_STARTUP_TIMEOUT", "30")))
     parser.add_argument("--model-timeout-seconds", type=float, default=float(os.getenv("MCP_SMOKE_MODEL_TIMEOUT_SECONDS", "30")))
+    parser.add_argument(
+        "--host-port-mode",
+        choices=("ephemeral", "fixed", "none"),
+        default=os.getenv("MCP_SMOKE_HOST_PORT_MODE", "ephemeral"),
+        help=(
+            "how to handle devcontainer publish runArgs during smoke runs; "
+            "ephemeral keeps container ports exposed on random localhost host ports to avoid CI collisions"
+        ),
+    )
     return parser.parse_args(argv)
 
 

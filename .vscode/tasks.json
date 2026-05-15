@@ -146,6 +146,7 @@
         "cwd": "${workspaceFolder}",
         "env": {
           "TEST_IMAGE": "codebase-tooling-mcp:test",
+          "MCP_SMOKE_HOST_PORT_MODE": "ephemeral",
           "MCP_SMOKE_REQUIRE_MODEL_PROMPT": "false",
           "OLLAMA_ALLOW_PULL": "false",
           "MCP_SMOKE_SERVER_STARTUP_TIMEOUT_SECONDS": "90",

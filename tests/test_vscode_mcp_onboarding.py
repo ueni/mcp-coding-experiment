@@ -36,6 +36,15 @@ def _load_healthcheck_module():
     return module
 
 
+def _load_smoke_module():
+    spec = importlib.util.spec_from_file_location("devcontainer_smoke_test", SMOKE_SCRIPT)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
 
 def test_vscode_discovers_curated_mcp_workflow_prompts():
     server = _load_server_module()
@@ -147,6 +156,7 @@ def test_vscode_devcontainer_smoke_task_points_at_checked_in_script():
     assert task["command"] == "python3"
     assert "${workspaceFolder}/scripts/devcontainer_smoke_test.py" in task["args"]
     assert task["options"]["env"]["OLLAMA_ALLOW_PULL"] == "false"
+    assert task["options"]["env"]["MCP_SMOKE_HOST_PORT_MODE"] == "ephemeral"
     assert SMOKE_SCRIPT.exists()
 
 
@@ -159,6 +169,35 @@ def test_devcontainer_smoke_script_uses_safe_model_prompt_defaults():
     assert "num_predict" in script
     assert "OLLAMA_ALLOW_PULL" in script
     assert "false" in script
+
+
+def test_devcontainer_smoke_uses_ephemeral_host_ports_by_default():
+    smoke = _load_smoke_module()
+
+    args = smoke._smoke_run_args(
+        [
+            "-p",
+            "127.0.0.1:8000:8000",
+            "-p",
+            "127.0.0.1:2345:2345",
+            "--security-opt=seccomp=unconfined",
+        ],
+        "ephemeral",
+    )
+
+    assert "127.0.0.1:8000:8000" not in args
+    assert "127.0.0.1:2345:2345" not in args
+    assert "127.0.0.1::8000" in args
+    assert "127.0.0.1::2345" in args
+    assert "--security-opt=seccomp=unconfined" in args
+
+
+def test_devcontainer_smoke_can_preserve_fixed_host_ports_for_local_debugging():
+    smoke = _load_smoke_module()
+
+    args = smoke._smoke_run_args(["-p", "127.0.0.1:8000:8000"], "fixed")
+
+    assert args == ["-p", "127.0.0.1:8000:8000"]
 
 
 def test_healthcheck_requires_unauthenticated_mcp_auth_rejection():
