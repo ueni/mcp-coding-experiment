@@ -169,6 +169,23 @@ def wait_for_health(base_url: str, *, timeout_seconds: float) -> dict[str, Any]:
     raise TimeoutError(f"timed out waiting for {url}: {last_error}")
 
 
+def _docker_publish_arg(host_port: int, container_port: int = 8000) -> str:
+    if host_port < 0:
+        raise ValueError("host port must be 0 or a positive integer")
+    if host_port == 0:
+        return f"127.0.0.1::{container_port}"
+    return f"127.0.0.1:{host_port}:{container_port}"
+
+
+def docker_mapped_host_port(container_name: str, container_port: int = 8000) -> int:
+    result = run_command(["docker", "port", container_name, f"{container_port}/tcp"], timeout=10)
+    first = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    try:
+        return int(first.rsplit(":", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"could not determine mapped host port for {container_port}/tcp: {first!r}") from exc
+
+
 def docker_run_args(args: argparse.Namespace) -> list[str]:
     run_args = [
         "docker",
@@ -178,7 +195,7 @@ def docker_run_args(args: argparse.Namespace) -> list[str]:
         "--name",
         args.container_name,
         "--publish",
-        f"127.0.0.1:{args.host_port}:8000",
+        _docker_publish_arg(args.host_port),
         "--env",
         "MCP_TRANSPORT=http",
         "--env",
@@ -266,7 +283,8 @@ def collect_metrics(args: argparse.Namespace) -> dict[str, Any]:
     try:
         run_command(docker_run_args(args), timeout=30)
         started = True
-        health = wait_for_health(f"http://127.0.0.1:{args.host_port}", timeout_seconds=args.timeout_seconds)
+        host_port = docker_mapped_host_port(args.container_name) if args.host_port == 0 else args.host_port
+        health = wait_for_health(f"http://127.0.0.1:{host_port}", timeout_seconds=args.timeout_seconds)
         runtime = collect_runtime_samples(
             args.container_name,
             continuous=args.continuous,
@@ -307,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--container-name",
         default=f"codebase-tooling-mcp-monitor-{os.getpid()}",
     )
-    parser.add_argument("--host-port", type=int, default=int(os.getenv("MCP_MONITOR_HOST_PORT", "18000")))
+    parser.add_argument("--host-port", type=int, default=int(os.getenv("MCP_MONITOR_HOST_PORT", "0")), help="host port for health checks; 0 lets Docker allocate a free port")
     parser.add_argument("--timeout-seconds", type=float, default=45)
     parser.add_argument(
         "--continuous",
