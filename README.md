@@ -142,6 +142,8 @@ For underspecified high-risk workflows, `clarification_gate` returns structured 
 
 For VS Code MCP Apps-capable clients, `release_readiness` can include a read-only dashboard when `MCP_APPS_DASHBOARD_ENABLED=true`. The default is disabled so existing clients keep the same response contract. See [MCP Apps release readiness dashboard](./docs/mcp-apps-release-readiness.md).
 
+For MCP client workspace boundary checks, `roots_diagnostics` compares request-scoped MCP Roots with the configured `REPO_PATH` and reports advisory, redacted relationship states without changing authorization. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.
@@ -459,11 +461,13 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `tool_annotations`
 - `tool_output_contracts`
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
-- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
 
 `task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
 `workflow_task()` starts the prototype async wrapper for long-running workflows. Initial supported workflows are `governance_report` and `vscode_task_run`; status is persisted under `.codebase-tooling-mcp/tasks/`, can be read with `task_status()`, and returns repository-relative artifact resource links. VS Code task logs are kept in redacted result artifacts referenced by the compact task status. See [Workflow task prototype](./docs/workflow-tasks.md).
+
+`roots_diagnostics()` is a read-only advisory setup diagnostic that feature-detects MCP client roots support and compares available `file://` roots with `REPO_PATH`. It returns redacted relationship metadata (`exact_match`, overlaps, multiple roots, no overlap, unsupported, unavailable, or error) without exposing absolute client paths outside the repository and without changing `_resolve_repo_path` enforcement. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
 
 `tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
 
