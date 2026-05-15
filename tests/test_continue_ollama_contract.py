@@ -472,10 +472,49 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("MCP_HTTP_BEARER_TOKEN generated into local secret file", entrypoint)
         self.assertIn("/repo/.continue/.env", entrypoint)
         self.assertIn("openssl rand -hex 32", entrypoint)
+        self.assertIn("secure_continue_env_file_for_devcontainer_user", entrypoint)
+        self.assertIn('chown app:app "${continue_dir}" "${env_file}"', entrypoint)
+        self.assertIn('chmod 700 "${continue_dir}"', entrypoint)
+        self.assertIn('chmod 600 "${env_file}"', entrypoint)
+        self.assertIn(
+            'secure_continue_env_file_for_devcontainer_user /repo/.continue "${env_file}"',
+            entrypoint,
+        )
         self.assertLess(
             entrypoint.index("ensure_mcp_http_bearer_token"),
             entrypoint.index("exec python /app/server.py"),
         )
+
+    def test_entrypoint_continue_env_permission_helper_tightens_existing_secret_file(self):
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+        helper_start = entrypoint.index("secure_continue_env_file_for_devcontainer_user()")
+        helper_end = entrypoint.index("\n}\n\nensure_mcp_http_bearer_token", helper_start) + 3
+        helper = entrypoint[helper_start:helper_end]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = f"""
+set -euo pipefail
+{helper}
+continue_dir=\"{tmpdir}/.continue\"
+env_file=\"${{continue_dir}}/.env\"
+mkdir -p \"${{continue_dir}}\"
+printf 'EXISTING=true\\n' > \"${{env_file}}\"
+chmod 755 \"${{continue_dir}}\" \"${{env_file}}\"
+secure_continue_env_file_for_devcontainer_user \"${{continue_dir}}\" \"${{env_file}}\"
+stat -c '%a %U:%G' \"${{continue_dir}}\" \"${{env_file}}\"
+"""
+            result = subprocess.run(
+                ["/bin/bash", "-c", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+        modes_and_owners = result.stdout.strip().splitlines()
+        self.assertEqual(2, len(modes_and_owners), result.stdout)
+        self.assertTrue(modes_and_owners[0].startswith("700 "), result.stdout)
+        self.assertTrue(modes_and_owners[1].startswith("600 "), result.stdout)
 
 
 class ServerOllamaContractStatusTest(ServerToolsTestBase):

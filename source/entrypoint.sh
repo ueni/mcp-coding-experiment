@@ -60,6 +60,16 @@ read_mcp_http_bearer_token_from_env_file() {
   return 1
 }
 
+secure_continue_env_file_for_devcontainer_user() {
+  local continue_dir="${1:-/repo/.continue}"
+  local env_file="${2:-${continue_dir}/.env}"
+  if [[ "$(id -u)" -eq 0 ]] && id app >/dev/null 2>&1; then
+    chown app:app "${continue_dir}" "${env_file}" || true
+  fi
+  chmod 700 "${continue_dir}" || true
+  chmod 600 "${env_file}" || true
+}
+
 ensure_mcp_http_bearer_token() {
   local transport="${MCP_TRANSPORT:-stdio}"
   local auth_mode="${MCP_HTTP_AUTH_MODE:-token}"
@@ -94,7 +104,7 @@ ensure_mcp_http_bearer_token() {
     else
       printf 'MCP_HTTP_BEARER_TOKEN=%s\n' "${token}" > "${env_file}"
     fi
-    chmod 600 "${env_file}" || true
+    secure_continue_env_file_for_devcontainer_user /repo/.continue "${env_file}"
     export MCP_HTTP_BEARER_TOKEN="${token}"
     echo "MCP_HTTP_BEARER_TOKEN generated into local secret file ${env_file}" >&2
   fi
