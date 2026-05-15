@@ -338,6 +338,14 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("stale num_ctx", entrypoint)
         self.assertIn("printf 'PARAMETER num_ctx %s\\n' \"${num_ctx}\"", entrypoint)
 
+    def test_entrypoint_refreshes_stale_repo_continue_defaults(self):
+        entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
+
+        self.assertIn("copy_continue_default_if_missing_or_stale()", entrypoint)
+        self.assertIn("Continue Qwen3.6 profile has stale contextLength", entrypoint)
+        self.assertIn("contextLength:[[:space:]]*32768", entrypoint)
+        self.assertIn("Continue MCP server profile has stale auth header", entrypoint)
+        self.assertIn("copy_continue_default_if_missing_or_stale", entrypoint)
 
     def test_entrypoint_seeds_preloaded_models_and_maps_gpu_device_groups(self):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")

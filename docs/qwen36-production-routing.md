@@ -36,6 +36,8 @@ Keep `OLLAMA_ALLOW_PULL=false` for offline-only startup. If the Qwen3.6 tag is l
 
 The Qwen3.6 Continue model profile declares `defaultCompletionOptions.contextLength: 32768`, `maxTokens: 2048`, and `capabilities: [tool_use]`. The devcontainer and text-only Ollama alias use the same `32768` `num_ctx` value (`OLLAMA_CONTEXT_LENGTH` / `OLLAMA_TEXT_ALIAS_NUM_CTX`). Keep these values aligned: a low alias context such as 512 can make Continue Agent mode fail before generation with `Message exceeds context limit` even for trivial prompts once MCP/tool instructions are included.
 
+When `MCP_APPLY_REPO_DEFAULTS=true`, startup refreshes the repository-managed Qwen3.6 Continue profile if it still points at `qwen3.6-35b-a3b:iq1` but lacks the `32768` context window. This preserves custom unrelated model files while repairing stale repo defaults copied before the context-window fix.
+
 ## Output hygiene
 
 Qwen3.6 endpoint requests use a chat template and default stop sequences for chat sentinels:

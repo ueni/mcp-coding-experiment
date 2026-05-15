@@ -519,6 +519,35 @@ maybe_fix_gpu_device_groups() {
   done
 }
 
+copy_continue_default_if_missing_or_stale() {
+  local default_path="$1"
+  local target_path="$2"
+  local target_name
+  target_name=$(basename "${target_path}")
+
+  if [[ ! -f "${target_path}" ]]; then
+    cp "${default_path}" "${target_path}"
+    return
+  fi
+
+  case "${target_name}" in
+    coding-qwen3.6-35b-a3b.yaml)
+      if grep -q 'name: Coding - Qwen3.6 35B A3B' "${target_path}" \
+        && grep -q 'model: qwen3.6-35b-a3b:iq1' "${target_path}" \
+        && ! grep -q 'contextLength:[[:space:]]*32768' "${target_path}"; then
+        echo "Continue Qwen3.6 profile has stale contextLength; refreshing ${target_path}." >&2
+        cp "${default_path}" "${target_path}"
+      fi
+      ;;
+    codebase-tooling-mcp.yaml)
+      if grep -q 'secret-token' "${target_path}"; then
+        echo "Continue MCP server profile has stale auth header; refreshing ${target_path}." >&2
+        cp "${default_path}" "${target_path}"
+      fi
+      ;;
+  esac
+}
+
 apply_repo_defaults() {
   local defaults_root="/opt/codebase-tooling/defaults"
   if [[ "${MCP_APPLY_REPO_DEFAULTS:-false}" != "true" ]]; then
@@ -529,15 +558,15 @@ apply_repo_defaults() {
   fi
 
   mkdir -p /repo/.continue/mcpServers
-  if [[ ! -f /repo/.continue/mcpServers/codebase-tooling-mcp.yaml ]]; then
-    cp "${defaults_root}/continue/codebase-tooling-mcp.yaml" /repo/.continue/mcpServers/codebase-tooling-mcp.yaml
-  fi
+  copy_continue_default_if_missing_or_stale \
+    "${defaults_root}/continue/codebase-tooling-mcp.yaml" \
+    /repo/.continue/mcpServers/codebase-tooling-mcp.yaml
   mkdir -p /repo/.continue/models
   while IFS= read -r model_path; do
     model_name=$(basename "${model_path}")
-    if [[ ! -f "/repo/.continue/models/${model_name}" ]]; then
-      cp "${model_path}" "/repo/.continue/models/${model_name}"
-    fi
+    copy_continue_default_if_missing_or_stale \
+      "${model_path}" \
+      "/repo/.continue/models/${model_name}"
   done < <(find "${defaults_root}/continue/models" -maxdepth 1 -type f -name '*.yaml' | sort)
   if [[ ! -f /repo/.continue/model-routing.yaml ]]; then
     cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
