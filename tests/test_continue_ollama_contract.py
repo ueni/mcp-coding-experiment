@@ -366,14 +366,31 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             REPO_ROOT / "source" / "defaults" / "continue" / "model-routing.yaml",
         ]:
             routing = routing_path.read_text(encoding="utf-8")
-            self.assertIn("model: llama3.1:8b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/coding-agent-llama3.1-8b.yaml", routing, str(routing_path))
-            self.assertIn("high_quality_chat_edit:", routing, str(routing_path))
-            self.assertIn("model: qwen3.6-35b-a3b:iq1", routing, str(routing_path))
-            self.assertIn("file: .continue/models/coding-qwen3.6-35b-a3b.yaml", routing, str(routing_path))
-            self.assertIn("file: .continue/models/coding-agent-llama3.1-8b.yaml", routing, str(routing_path))
-            self.assertIn("model: qwen2.5-coder:1.5b", routing, str(routing_path))
-            self.assertIn("file: .continue/models/coding-qwen2.5-coder-1.5b.yaml", routing, str(routing_path))
+            config = yaml.safe_load(routing)
+            routes = config["routes"]
+
+            self.assertEqual("llama3.1:8b", config["router"]["model"], str(routing_path))
+            self.assertEqual(
+                ".continue/models/coding-agent-llama3.1-8b.yaml",
+                config["router"]["file"],
+                str(routing_path),
+            )
+            self.assertEqual("llama3.1:8b", routes["coding"]["model"], str(routing_path))
+            self.assertEqual("llama3.1:8b", routes["coding_agent"]["model"], str(routing_path))
+            self.assertEqual("qwen2.5-coder:1.5b", routes["coding_micro"]["model"], str(routing_path))
+            self.assertEqual(
+                "qwen3.6-35b-a3b:iq1",
+                routes["high_quality_chat_edit"]["model"],
+                str(routing_path),
+            )
+            self.assertEqual(
+                ".continue/models/coding-qwen3.6-35b-a3b.yaml",
+                routes["high_quality_chat_edit"]["file"],
+                str(routing_path),
+            )
+            for default_route in ("router", "coding", "coding_agent"):
+                route = config[default_route] if default_route == "router" else routes[default_route]
+                self.assertNotEqual("qwen3.6-35b-a3b:iq1", route["model"], str(routing_path))
             for model in obsolete_models:
                 self.assertNotIn(model, routing, str(routing_path))
 
