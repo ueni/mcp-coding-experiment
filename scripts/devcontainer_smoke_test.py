@@ -41,14 +41,18 @@ class SmokeFailure(RuntimeError):
 def _redact_command(command: list[str]) -> str:
     redacted: list[str] = []
     sensitive_markers = ("TOKEN=", "PASSWORD=", "SECRET=", "KEY=")
+    previous = ""
     for item in command:
-        if any(marker in item.upper() for marker in sensitive_markers):
+        if previous == "-c" and "\n" in item:
+            redacted.append("<inline-python>")
+        elif any(marker in item.upper() for marker in sensitive_markers):
             if "=" in item:
                 redacted.append(item.split("=", 1)[0] + "=<redacted>")
             else:
                 redacted.append("<redacted>")
         else:
             redacted.append(item)
+        previous = item
     return " ".join(redacted)
 
 
