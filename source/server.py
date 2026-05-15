@@ -140,6 +140,7 @@ ALLOW_ORIGINS = [
 ]
 MCP_HTTP_AUTH_MODE = os.getenv("MCP_HTTP_AUTH_MODE", "token").strip().lower()
 MCP_HTTP_BEARER_TOKEN = os.getenv("MCP_HTTP_BEARER_TOKEN", "").strip()
+MCP_HTTP_AUTHORIZATION_SERVERS_RAW = os.getenv("MCP_HTTP_AUTHORIZATION_SERVERS", "").strip()
 MCP_HTTP_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_REQUESTS", "120")))
 MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60")))
 MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TIMEOUT_SECONDS", "120")))
@@ -650,16 +651,74 @@ def _bearer_token_from_headers(headers: list[tuple[bytes, bytes]]) -> str:
     return ""
 
 
+def _http_resource_identifier() -> str:
+    return os.getenv("MCP_HTTP_RESOURCE", "http://localhost:%s/mcp" % PORT).strip()
+
+
+def _http_protected_resource_metadata_url() -> str:
+    explicit = os.getenv("MCP_HTTP_PROTECTED_RESOURCE_METADATA_URL", "").strip()
+    if explicit:
+        return explicit
+    resource = _http_resource_identifier()
+    if resource.endswith("/mcp"):
+        return resource[: -len("/mcp")] + "/.well-known/oauth-protected-resource"
+    return "http://localhost:%s/.well-known/oauth-protected-resource" % PORT
+
+
+def _parse_http_authorization_servers(raw: str | None = None) -> list[str]:
+    value = MCP_HTTP_AUTHORIZATION_SERVERS_RAW if raw is None else raw.strip()
+    if not value:
+        return []
+    parsed: Any
+    if value.startswith("["):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        candidates = parsed
+    else:
+        candidates = value.split(",")
+    servers: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        server = candidate.strip()
+        if not server or server in seen:
+            continue
+        servers.append(server)
+        seen.add(server)
+    return servers
+
+
+def _http_oauth_resource_config_error() -> str:
+    if MCP_HTTP_AUTH_MODE != "oauth-resource":
+        return ""
+    if not _parse_http_authorization_servers():
+        return "MCP_HTTP_AUTH_MODE=oauth-resource requires MCP_HTTP_AUTHORIZATION_SERVERS with at least one issuer URL"
+    return ""
+
+
 def _http_auth_discovery_payload() -> dict[str, Any]:
-    resource = os.getenv("MCP_HTTP_RESOURCE", "http://localhost:%s/mcp" % PORT)
-    return {
-        "resource": resource,
-        "authorization_servers": [],
+    authorization_servers = _parse_http_authorization_servers()
+    payload: dict[str, Any] = {
+        "resource": _http_resource_identifier(),
+        "authorization_servers": authorization_servers,
         "bearer_methods_supported": ["header"],
         "scopes_supported": ["mcp:read", "mcp:mutate"],
         "mcp_auth_mode": MCP_HTTP_AUTH_MODE,
-        "oauth_2_1_status": "deferred: bearer-token resource-server mode is implemented; full OAuth authorization-server integration is not bundled",
+        "oauth_protected_resource_metadata": _http_protected_resource_metadata_url(),
     }
+    if MCP_HTTP_AUTH_MODE == "oauth-resource":
+        payload["oauth_2_1_status"] = "enabled: OAuth protected-resource metadata is configured for client authorization discovery"
+        config_error = _http_oauth_resource_config_error()
+        if config_error:
+            payload["configuration_error"] = config_error
+    else:
+        payload["oauth_2_1_status"] = "local-bearer: bearer-token resource protection is enabled; full OAuth authorization-server integration is not claimed"
+    return payload
 
 
 def _mcp_server_manifest_payload() -> dict[str, Any]:
@@ -774,6 +833,9 @@ def _http_authenticate_scope(scope: dict[str, Any]) -> tuple[bool, int, str]:
         return False, 403, "MCP_HTTP_AUTH_MODE=insecure-local only accepts loopback clients"
     if not _http_auth_required():
         return False, 403, f"unsupported MCP_HTTP_AUTH_MODE={MCP_HTTP_AUTH_MODE!r}"
+    config_error = _http_oauth_resource_config_error()
+    if config_error:
+        return False, 403, config_error
     if not MCP_HTTP_BEARER_TOKEN:
         return False, 403, "HTTP auth is enabled but MCP_HTTP_BEARER_TOKEN is not configured"
     token = _bearer_token_from_headers(scope.get("headers", []))
@@ -1570,7 +1632,16 @@ class MCPHTTPAuthMiddleware:
         authorized, status_code, reason = _http_authenticate_scope(scope)
         if not authorized:
             _append_audit_event("http_request", ["network"], False, {"path": path}, reason)
-            headers = {"WWW-Authenticate": 'Bearer realm="mcp"'} if status_code == 401 else None
+            headers = (
+                {
+                    "WWW-Authenticate": (
+                        'Bearer realm="mcp", resource_metadata="%s"'
+                        % _http_protected_resource_metadata_url()
+                    )
+                }
+                if status_code == 401
+                else None
+            )
             response = JSONResponse(
                 {"error": "unauthorized" if status_code == 401 else "forbidden", "detail": reason},
                 status_code=status_code,
@@ -17484,6 +17555,7 @@ async def healthz(_request):
     runtime = _runtime_state_payload(include_ollama_probe=False)
     server_state = runtime.get("server", {})
     ollama_state = runtime.get("ollama", {})
+    oauth_resource_config_error = _http_oauth_resource_config_error()
     return JSONResponse(
         {
             "ok": True,
@@ -17497,6 +17569,13 @@ async def healthz(_request):
                 "http_mode": server_state.get("http_mode"),
                 "port": server_state.get("port"),
                 "port_listening": server_state.get("port_listening"),
+            },
+            "auth": {
+                "mode": MCP_HTTP_AUTH_MODE,
+                "oauth_resource_configured": MCP_HTTP_AUTH_MODE == "oauth-resource"
+                and not bool(oauth_resource_config_error),
+                "configuration_error": oauth_resource_config_error,
+                "oauth_protected_resource_metadata": "/.well-known/oauth-protected-resource",
             },
             "ollama": {
                 "running": ollama_state.get("running"),

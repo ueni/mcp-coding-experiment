@@ -317,6 +317,21 @@ python source/server.py
 curl -H "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN" http://localhost:8000/mcp
 ```
 
+The default `token`/`bearer` modes are simple local bearer-token protection. Their `/.well-known/oauth-protected-resource` response is public and intentionally returns an empty `authorization_servers` list; those modes do not claim full OAuth authorization-server discovery.
+
+For MCP/OAuth clients that need RFC 9728 protected resource metadata, use `oauth-resource` mode and configure at least one authorization server issuer URL:
+
+```bash
+export MCP_HTTP_AUTH_MODE=oauth-resource
+export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+export MCP_HTTP_AUTHORIZATION_SERVERS='["https://auth.example.test"]'
+python source/server.py
+
+curl -sS http://localhost:8000/.well-known/oauth-protected-resource
+```
+
+In `oauth-resource` mode, missing `MCP_HTTP_AUTHORIZATION_SERVERS` fails closed for protected MCP endpoints and is reported under `/healthz` `auth.configuration_error`. Unauthorized MCP requests include a `WWW-Authenticate: Bearer ... resource_metadata="..."` challenge so clients can discover the protected-resource metadata document.
+
 For throwaway local-only experiments, unauthenticated HTTP is still available only by explicit opt-in:
 
 ```bash
@@ -367,8 +382,11 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `MCP_TRANSPORT` | `http` | No | `http`, `stdio`, `direct`, `streamable-http`, `streamable_http` | Selects server transport mode. |
 | `REPO_PATH` | `/repo` | No | Absolute path | Root path tools may operate on. |
 | `ALLOW_MUTATIONS` | `false` (recommended default) | No | `true`, `false` | Enables/disables write and git-mutating operations. |
-| `MCP_HTTP_AUTH_MODE` | `token` | No | `token`, `bearer`, `oauth-resource`, `insecure-local`, `disabled`, `off`, `none` | HTTP auth mode. Token/bearer modes require `Authorization: Bearer ...`; insecure modes are explicit local-only escapes. Stdio is unaffected. |
+| `MCP_HTTP_AUTH_MODE` | `token` | No | `token`, `bearer`, `oauth-resource`, `insecure-local`, `disabled`, `off`, `none` | HTTP auth mode. Token/bearer modes require `Authorization: Bearer ...` and are local/simple bearer modes; `oauth-resource` also publishes RFC 9728 protected-resource metadata. Insecure modes are explicit local-only escapes. Stdio is unaffected. |
 | `MCP_HTTP_BEARER_TOKEN` | empty | Required for HTTP token modes | Secret string | Bearer token accepted by HTTP MCP/SSE requests. Missing token in token mode returns 403. |
+| `MCP_HTTP_AUTHORIZATION_SERVERS` | empty | Required for `oauth-resource` mode | JSON string list or comma-separated issuer URLs | Authorization server issuer URLs returned as `authorization_servers` by `/.well-known/oauth-protected-resource`. Missing values in `oauth-resource` mode fail closed and appear in `/healthz` diagnostics. |
+| `MCP_HTTP_RESOURCE` | `http://localhost:$PORT/mcp` | No | Absolute resource URI | Resource identifier advertised by the protected-resource metadata document. |
+| `MCP_HTTP_PROTECTED_RESOURCE_METADATA_URL` | derived from `MCP_HTTP_RESOURCE` | No | Absolute URL | URL placed in 401 `WWW-Authenticate` challenges as `resource_metadata`. |
 | `MCP_HTTP_RATE_LIMIT_REQUESTS` | `120` | No | Positive integer | Per-client HTTP request budget per window. Exceeded requests return 429 with `Retry-After`. |
 | `MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` | `60` | No | Positive integer seconds | Rate-limit window size. |
 | `LOCAL_EMBED_BACKEND` | `hash` | No | `hash`, `auto`, `sentence-transformers` | Offline local embedding backend. The default Docker image supports `hash`; the optional `sentence-transformers` backend requires building with `INSTALL_SENTENCE_TRANSFORMERS=true` or installing `source/requirements-embedding.txt`. |
