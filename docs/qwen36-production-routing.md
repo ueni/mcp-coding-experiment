@@ -32,6 +32,10 @@ export CONTINUE_OLLAMA_MODELS="your-qwen36-tag,qwen2.5-coder:1.5b"
 
 Keep `OLLAMA_ALLOW_PULL=false` for offline-only startup. If the Qwen3.6 tag is local/private, pre-create it with `ollama create` or mount/seed the model store before startup; GitHub-hosted CI intentionally builds with `OLLAMA_PRELOAD_MODELS=` so CI does not require private GGUF artifacts.
 
+## Continue Agent context window
+
+The Qwen3.6 Continue model profile declares `defaultCompletionOptions.contextLength: 32768`, `maxTokens: 2048`, and `capabilities: [tool_use]`. The devcontainer and text-only Ollama alias use the same `32768` `num_ctx` value (`OLLAMA_CONTEXT_LENGTH` / `OLLAMA_TEXT_ALIAS_NUM_CTX`). Keep these values aligned: a low alias context such as 512 can make Continue Agent mode fail before generation with `Message exceeds context limit` even for trivial prompts once MCP/tool instructions are included.
+
 ## Output hygiene
 
 Qwen3.6 endpoint requests use a chat template and default stop sequences for chat sentinels:
