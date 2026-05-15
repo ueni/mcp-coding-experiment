@@ -12,6 +12,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HEALTHCHECK_SCRIPT = REPO_ROOT / "scripts" / "vscode_mcp_healthcheck.py"
+SMOKE_SCRIPT = REPO_ROOT / "scripts" / "devcontainer_smoke_test.py"
 SERVER_SCRIPT = REPO_ROOT / "source" / "server.py"
 
 
@@ -124,6 +125,28 @@ def test_vscode_healthcheck_task_points_at_checked_in_script():
     assert task["command"] == "python3"
     assert "${workspaceFolder}/scripts/vscode_mcp_healthcheck.py" in task["args"]
     assert HEALTHCHECK_SCRIPT.exists()
+
+
+def test_vscode_devcontainer_smoke_task_points_at_checked_in_script():
+    tasks = json.loads((REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
+    task = next(task for task in tasks["tasks"] if task["label"] == "Devcontainer: CI Smoke Test")
+
+    assert task["type"] == "process"
+    assert task["command"] == "python3"
+    assert "${workspaceFolder}/scripts/devcontainer_smoke_test.py" in task["args"]
+    assert task["options"]["env"]["OLLAMA_ALLOW_PULL"] == "false"
+    assert SMOKE_SCRIPT.exists()
+
+
+def test_devcontainer_smoke_script_uses_safe_model_prompt_defaults():
+    script = SMOKE_SCRIPT.read_text(encoding="utf-8")
+
+    assert "OLLAMA_ALLOW_PULL" in script
+    assert "MCP_SMOKE_REQUIRE_MODEL_PROMPT" in script
+    assert "MODEL_PROMPT_SKIP: no local Ollama models" in script
+    assert "num_predict" in script
+    assert "OLLAMA_ALLOW_PULL" in script
+    assert "false" in script
 
 
 def test_healthcheck_requires_unauthenticated_mcp_auth_rejection():

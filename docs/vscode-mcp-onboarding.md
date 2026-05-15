@@ -20,8 +20,9 @@ This path starts from a fresh clone or downstream repository using the devcontai
 3. Run **Dev Containers: Reopen in Container**.
 4. Wait for the `codebase-tooling-mcp` container to finish startup. VS Code should forward ports `8000` (MCP) and `2345` (bundled Ollama).
 5. Run **Tasks: Run Task → MCP: Workspace Health Check**.
-6. Copy `.vscode/mcp.example.json` to your user/workspace MCP config if your VS Code build expects active MCP registrations outside the repository sample, then keep the token out of git. The sample uses a password input rather than a committed secret.
-7. Make a test tool call from your MCP client against `http://localhost:8000/mcp` using `Authorization: Bearer <token>`.
+6. After building the local image (`codebase-tooling-mcp:test`), run **Tasks: Run Task → Devcontainer: CI Smoke Test** to start the same image, run the MCP health check, and exercise a bounded model prompt when a local model is already present.
+7. Copy `.vscode/mcp.example.json` to your user/workspace MCP config if your VS Code build expects active MCP registrations outside the repository sample, then keep the token out of git. The sample uses a password input rather than a committed secret.
+8. Make a test tool call from your MCP client against `http://localhost:8000/mcp` using `Authorization: Bearer <token>`.
 
 ## What the health check verifies
 
@@ -43,6 +44,46 @@ python3 scripts/vscode_mcp_healthcheck.py
 ```
 
 The script prints remediation text for common failures: container not started, missing forwarded ports, missing token, wrong mutation mode, or Ollama not listening.
+
+## Devcontainer CI smoke test
+
+`./scripts/devcontainer_smoke_test.py` is the CI/local smoke test for the VS Code devcontainer path. It validates:
+
+- `.devcontainer/devcontainer.json` points at `../source/Dockerfile` and `../source`.
+- The devcontainer exposes HTTP MCP/Ollama environment and forwards ports `8000` and `2345`.
+- `.vscode/tasks.json` contains the MCP health check task.
+- A container started from the built image becomes healthy and passes `scripts/vscode_mcp_healthcheck.py`.
+- A bounded Ollama prompt returns a non-empty response when a model is already installed; otherwise the test prints an explicit skip unless required.
+
+Default local/CI execution never pulls model assets:
+
+```bash
+TEST_IMAGE=codebase-tooling-mcp:test \
+MCP_SMOKE_REQUIRE_MODEL_PROMPT=false \
+OLLAMA_ALLOW_PULL=false \
+python3 scripts/devcontainer_smoke_test.py
+```
+
+To require a real prompt against a preinstalled model, opt in explicitly. The script checks `/api/tags`, bounds generation with `num_predict`, and uses `ollama pull` only when `OLLAMA_ALLOW_PULL=true` is set for an explicit local run:
+
+```bash
+TEST_IMAGE=codebase-tooling-mcp:test \
+MCP_SMOKE_MODEL_NAME=qwen2.5-coder:1.5b \
+MCP_SMOKE_REQUIRE_MODEL_PROMPT=true \
+OLLAMA_ALLOW_PULL=false \
+python3 scripts/devcontainer_smoke_test.py
+```
+
+GitHub Actions runs the smoke test after building the devcontainer image with these controls:
+
+| Input/env var | Default | Behavior |
+| --- | --- | --- |
+| `smoke_model_name` / `MCP_SMOKE_MODEL_NAME` | empty | Use this installed model tag for the bounded prompt; empty uses the first installed model or skips when none exist. |
+| `require_smoke_model_prompt` / `MCP_SMOKE_REQUIRE_MODEL_PROMPT` | `false` | Fail instead of skip if no real local model prompt can run. |
+| `allow_smoke_ollama_pull` / `OLLAMA_ALLOW_PULL` | `false` | Permit runtime model pulls only for explicit opt-in runs; pull requests keep this off. |
+| `MCP_SMOKE_SERVER_STARTUP_TIMEOUT_SECONDS` | `90` | Maximum time to wait for the devcontainer server health endpoint. |
+| `MCP_SMOKE_MODEL_TIMEOUT_SECONDS` | `30` | Timeout for the bounded prompt request. |
+| `preload_ollama_models` | `false` | Existing workflow input for opt-in model preloading; pull-request validation keeps this off to avoid uncontrolled model pulls. |
 
 
 ## Clarification fallback checklist and elicitation

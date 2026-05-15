@@ -18,6 +18,9 @@ env/
 .ruff_cache/
 .codebase-tooling-mcp/
 
+# Local model assets used for explicit smoke-test runs
+.qwen-eval-models/
+
 # Local environment files
 .env
 .env.*

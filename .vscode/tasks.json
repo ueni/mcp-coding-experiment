@@ -129,6 +129,26 @@
         "cwd": "${workspaceFolder}"
       },
       "problemMatcher": []
+    },
+    {
+      "label": "Devcontainer: CI Smoke Test",
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/scripts/devcontainer_smoke_test.py"
+      ],
+      "group": "test",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "TEST_IMAGE": "codebase-tooling-mcp:test",
+          "MCP_SMOKE_REQUIRE_MODEL_PROMPT": "false",
+          "OLLAMA_ALLOW_PULL": "false",
+          "MCP_SMOKE_SERVER_STARTUP_TIMEOUT_SECONDS": "90",
+          "MCP_SMOKE_MODEL_TIMEOUT_SECONDS": "30"
+        }
+      },
+      "problemMatcher": []
     }
   ]
 }
