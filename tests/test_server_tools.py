@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 import unittest
 import urllib.parse
 import zipfile
@@ -14,6 +15,109 @@ from unittest.mock import patch
 from tests.server_test_support import ServerToolsTestBase
 
 class ServerToolsTest(ServerToolsTestBase):
+
+    def _wait_for_workflow_task(self, task_id: str, terminal: set[str] | None = None):
+        terminal = terminal or {"succeeded", "failed", "expired"}
+        for _ in range(50):
+            status = self.server.task_status(task_id)
+            if status["state"] in terminal:
+                return status
+            time.sleep(0.02)
+        self.fail(f"workflow task did not reach terminal state: {task_id}")
+
+    def test_workflow_task_persists_succeeded_status_and_resource_link(self):
+        original_audit_log = self.server.MCP_AUDIT_LOG_FILE
+        self.server.MCP_AUDIT_LOG_FILE = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
+        try:
+            with patch.object(
+                self.server,
+                "vscode_task_run",
+                return_value={
+                    "schema": "vscode_task_run.v1",
+                    "ok": True,
+                    "label": "MCP: Workspace Health Check",
+                    "stdout": "ok",
+                    "stderr": "",
+                    "timeout": False,
+                },
+            ):
+                started = self.server.workflow_task(
+                    label="MCP: Workspace Health Check",
+                    max_retries=0,
+                    task_id="unit-success",
+                    restart=True,
+                )
+                self.assertEqual(started["schema"], "workflow_task.v1")
+                self.assertIn(started["state"], {"pending", "running", "succeeded"})
+                self.assertTrue(started["started"])
+                final = self._wait_for_workflow_task("unit-success")
+        finally:
+            self.server.MCP_AUDIT_LOG_FILE = original_audit_log
+
+        self.assertEqual(final["state"], "succeeded")
+        self.assertTrue(final["ok"])
+        self.assertEqual(final["progress"], 1.0)
+        self.assertEqual(final["result"]["schema"], "vscode_task_run.v1")
+        self.assertEqual(final["result"]["output_summary"]["stdout_chars"], 2)
+        self.assertEqual(final["result"]["output_summary"]["stderr_chars"], 0)
+        self.assertEqual(final["result"]["output_summary"]["build_log_tail_lines"], 1)
+        self.assertNotIn("stdout", final["result"])
+        self.assertNotIn("stderr", final["result"])
+        self.assertNotIn("build_log_tail", final["result"])
+        self.assertTrue(final["artifact_references"])
+        result_link = final["result"]["artifact_references"][0]
+        self.assertEqual(
+            result_link["path"],
+            ".codebase-tooling-mcp/tasks/artifacts/unit-success-vscode-task-result.json",
+        )
+        result_artifact_path = self.repo_path / result_link["path"]
+        self.assertTrue(result_artifact_path.exists())
+        result_artifact = json.loads(result_artifact_path.read_text(encoding="utf-8"))
+        self.assertEqual(result_artifact["schema"], "workflow_task_result_artifact.v1")
+        self.assertEqual(result_artifact["result"]["stdout"], "ok")
+        status_path = self.repo_path / ".codebase-tooling-mcp" / "tasks" / "unit-success.json"
+        self.assertTrue(status_path.exists())
+        persisted_status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertNotIn("stdout", persisted_status["result"])
+        self.assertNotIn("stderr", persisted_status["result"])
+        self.assertNotIn("build_log_tail", persisted_status["result"])
+        self.assertEqual(persisted_status["result"]["output_summary"]["stdout_chars"], 2)
+        link = final["resource_links"][0]
+        self.assertEqual(link["schema"], "artifact_resource_link.v1")
+        self.assertEqual(link["path"], ".codebase-tooling-mcp/tasks/unit-success.json")
+        self.assertTrue(link["uri"].startswith("repo://file/"))
+        self.assertNotIn(str(self.repo_path), json.dumps(link))
+        audit_text = (self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"event": "start"', audit_text)
+        self.assertIn('"event": "completed"', audit_text)
+
+    def test_workflow_task_retries_transient_failure(self):
+        calls = {"count": 0}
+
+        def fake_vscode_task_run(**_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return {
+                    "schema": "vscode_task_run.v1",
+                    "ok": False,
+                    "timeout": True,
+                    "stderr": "timed out waiting for docker daemon",
+                }
+            return {"schema": "vscode_task_run.v1", "ok": True, "timeout": False}
+
+        with patch.object(self.server, "vscode_task_run", side_effect=fake_vscode_task_run):
+            self.server.workflow_task(
+                label="Docker: build",
+                max_retries=1,
+                task_id="unit-retry",
+                restart=True,
+            )
+            final = self._wait_for_workflow_task("unit-retry")
+
+        self.assertEqual(final["state"], "succeeded")
+        self.assertEqual(final["attempt"], 2)
+        self.assertEqual(len(final["retries"]), 1)
+        self.assertEqual(final["retries"][0]["reason"], "transient_failure")
 
 
     def test_clarification_gate_fully_specified_intent(self):

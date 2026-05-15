@@ -136,7 +136,7 @@ Call `test_impact_map(refresh=true)` to rebuild and write the artifact. Refresh 
 
 `impact_tests` now prefers a fresh impact-map artifact. If the artifact is absent, invalid, stale, or cannot map a changed Python source, it falls back to dependency/naming heuristics and reports the fallback through `impact_map.fallback_used` plus `impact_map.artifact_status`. Both `impact_tests` and `change_impact_gate` expose `unmapped_changed_files`; treat those paths as coverage gaps that need manual review or new tests before relying on automated selection. `quality_router(mode="change_impact")` wraps the same `change_impact_gate` result, including selected tests and unmapped files.
 
-For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot evidence, and exports JSON plus Markdown under `.codebase-tooling-mcp/reports/`. `workflow_diagnostics` turns failed audit events and optional caller-supplied trajectory snippets into a redacted critical-step/failure-category report with safe recovery actions. See [Governance report workflow](./docs/governance-report.md) and [Workflow diagnostics](./docs/workflow-diagnostics.md).
+For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot evidence, and exports JSON plus Markdown under `.codebase-tooling-mcp/reports/`. `workflow_task` can start the governance report asynchronously and persist a redacted MCP Tasks-style status handle under `.codebase-tooling-mcp/tasks/`; poll it with `task_status`. `workflow_diagnostics` turns failed audit events and optional caller-supplied trajectory snippets into a redacted critical-step/failure-category report with safe recovery actions. See [Governance report workflow](./docs/governance-report.md), [Async workflow tasks](./docs/workflow-tasks.md), and [Workflow diagnostics](./docs/workflow-diagnostics.md).
 
 For underspecified high-risk workflows, `clarification_gate` returns structured missing-field decisions, fallback checklist questions, and a non-sensitive MCP elicitation adapter before mutation or release recommendations. See [Clarification Gate](./docs/clarification-gate.md).
 
@@ -376,6 +376,8 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `LOCAL_EMBED_DIM` | `256` | No | Positive integer >= 8 | Hash embedding dimension. |
 | `MCP_HTTP_REQUEST_TIMEOUT_SECONDS` | `120` | No | Positive seconds | Non-SSE HTTP request timeout; exceeded requests return 504. |
 | `MCP_AUDIT_LOG_FILE` | `.codebase-tooling-mcp/audit/security_events.jsonl` | No | Path | Append-only JSONL audit events for sensitive tool calls and denied HTTP auth attempts. Arguments are redacted/truncated. |
+| `MCP_WORKFLOW_TASK_EXPIRY_HOURS` | `24` | No | Positive integer hours | Marks non-terminal async workflow task statuses as `expired` after this interval. |
+| `MCP_WORKFLOW_TASK_RETENTION_DAYS` | `7` | No | Positive integer days | Retention window recorded on persisted `.codebase-tooling-mcp/tasks/` status files. |
 | `MCP_APPS_DASHBOARD_ENABLED` | `false` | No | `true`, `false` | Adds the prototype read-only MCP Apps dashboard payload to `release_readiness` results when enabled. |
 | `RUNTIME_IMAGE_VERSION_COMPATIBILITY` / `RUNTIME_IMAGE_VERSION_FEATURE` / `RUNTIME_IMAGE_VERSION_BUGFIX` / `RUNTIME_IMAGE_VERSION_SUFFIX` | `0` / `0` / `0` / `-local-build` | No | Version counter/suffix strings | Independent Docker runtime image version metadata surfaced by `/healthz` as `runtime_image_version`. Build/release automation can override these Docker build args or runtime env vars. |
 | `MCP_CODING_EXPERIMENT_VERSION_COMPATIBILITY` / `MCP_CODING_EXPERIMENT_VERSION_FEATURE` / `MCP_CODING_EXPERIMENT_VERSION_BUGFIX` / `MCP_CODING_EXPERIMENT_VERSION_SUFFIX` | `0` / `0` / `0` / `-local-build` | No | Version counter/suffix strings | Independent Python MCP server version metadata surfaced by `/healthz` as `mcp_coding_experiment_version`. Build/release automation can override these Docker build args or runtime env vars. |
@@ -438,11 +440,14 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `task_router`
 - `tool_annotations`
 - `tool_output_contracts`
+- `workflow_task` and `task_status` for the prototype persisted async task wrapper
 - Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`
 
 `task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
-`tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
+`workflow_task()` starts the prototype async wrapper for long-running workflows. Initial supported workflows are `governance_report` and `vscode_task_run`; status is persisted under `.codebase-tooling-mcp/tasks/`, can be read with `task_status()`, and returns repository-relative artifact resource links. VS Code task logs are kept in redacted result artifacts referenced by the compact task status. See [Workflow task prototype](./docs/workflow-tasks.md).
+
+`tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
 
 ## Labs and Reports
 
@@ -452,6 +457,7 @@ See [MCP Fun Labs](./docs/labs.md) for command examples and expected outputs.
 ## Documentation
 
 - [Documentation Index](./docs/index.md)
+- [Workflow task prototype](./docs/workflow-tasks.md)
 - [Tooling White Paper](./docs/tooling-whitepaper.md)
 - [JSON Settings Files](./docs/json-settings.md)
 - [MCP Fun Labs](./docs/labs.md)
