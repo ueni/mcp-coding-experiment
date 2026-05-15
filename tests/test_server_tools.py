@@ -334,6 +334,55 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out[0]["schema"], "grep.quick.v1")
         self.assertIn("result_id", out[0])
 
+    def test_grep_compressed_observation_is_opt_in_deterministic_and_redacted(self):
+        self.write_repo_text(
+            "src/secrets.py",
+            "alpha_token = 'token=abc123-secret-value'\nalpha_safe = 1\n",
+        )
+        first = self.server.grep(
+            pattern="alpha",
+            path="src",
+            output_profile="verbose",
+            compressed_observation=True,
+            adaptive_limits=False,
+        )[0]
+        second = self.server.grep(
+            pattern="alpha",
+            path="src",
+            output_profile="verbose",
+            compressed_observation=True,
+            adaptive_limits=False,
+        )[0]
+
+        self.assertEqual(first["schema"], "grep.with_compressed_observation.v1")
+        self.assertIn("results", first)
+        observation = first["compressed_observation"]
+        self.assertEqual(observation, second["compressed_observation"])
+        self.assertEqual(observation["schema"], "compressed_observation.v1")
+        self.assertEqual(observation["raw_reference"]["type"], "inline_return")
+        self.assertTrue(observation["rules"]["deterministic"])
+        encoded_observation = json.dumps(observation, sort_keys=True)
+        encoded_raw = json.dumps(first["results"], sort_keys=True)
+        self.assertIn("abc123-secret-value", encoded_raw)
+        self.assertNotIn("abc123-secret-value", encoded_observation)
+        self.assertIn("<redacted>", encoded_observation)
+
+    def test_grep_quick_compressed_observation_keeps_raw_handle(self):
+        out = self.server.grep(
+            pattern="alpha",
+            path="src",
+            summary_mode="quick",
+            compressed_observation=True,
+            output_profile="compact",
+        )[0]
+        observation = out["compressed_observation"]
+        self.assertEqual(observation["raw_reference"]["type"], "result_handle")
+        fetched = self.server.result_handle(
+            mode="fetch", result_id=observation["raw_reference"]["result_id"]
+        )
+        self.assertEqual(fetched["tool"], "grep")
+        self.assertGreaterEqual(len(fetched["value"]), 1)
+
     def test_semantic_find_quick_compress(self):
         out = self.server.semantic_find(
             query="alpha sample",
@@ -1663,6 +1712,7 @@ class ServerToolsTest(ServerToolsTestBase):
             base_ref="HEAD",
             head_ref="HEAD",
             export=True,
+            compressed_observation=True,
         )
         counts = out["audit"]["counts"]
         self.assertEqual(counts["event_count"], 3)
@@ -1678,6 +1728,13 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertNotIn("Bearer secret-value", exported)
         self.assertNotIn("secret-value", link_metadata)
         self.assertNotIn("Bearer secret-value", link_metadata)
+        observation = out["compressed_observation"]
+        self.assertEqual(observation["schema"], "compressed_observation.v1")
+        self.assertEqual(observation["raw_reference"]["type"], "artifact")
+        self.assertEqual(observation["raw_reference"]["path"], out["exports"]["json"])
+        encoded_observation = self.server.json.dumps(observation, sort_keys=True)
+        self.assertNotIn("secret-value", encoded_observation)
+        self.assertTrue(observation["rules"]["deterministic"])
 
     def test_workflow_diagnostics_classifies_failures_and_redacts(self):
         audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"

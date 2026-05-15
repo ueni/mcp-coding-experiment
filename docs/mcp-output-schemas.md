@@ -60,6 +60,10 @@ The selected-test contract is intentionally conservative: `selected_tests` lists
 `impact_tests` consumes a fresh artifact first and otherwise falls back to dependency/naming heuristics. Its normal output includes `impact_map.artifact_status`, optional `impact_map.fallback_used`, artifact `coverage_gaps`, and `unmapped_changed_files`; compact output keeps `test_count`/`tests` and adds `impact_map_status` plus `unmapped_changed_files`. `change_impact_gate` and `quality_router(mode="change_impact")` expose the same selected tests and unmapped files under their gate result.
 
 
+### Adaptive observation compression
+
+Verbose tools and reports may expose an opt-in `compressed_observation` field using `compressed_observation.v1`. The field is disabled by default and must never be the only copy of raw data. It includes a deterministic `summary`, `preserved_signals`, `omitted` categories with reason codes, a `raw_reference`, rule metadata, provenance, and redaction metadata. See [Adaptive observation compression](./observation-compression.md) for client guidance and candidate expansion paths.
+
 ### Artifact resource links
 
 Artifact-producing tools expose generated outputs through a compact `artifact_resource_link.v1` contract in `resource_links` and mirror the same list under `_meta.artifact_resources` for clients that prefer metadata fields. Links use repository-relative `repo://file/{path}` URIs and never expose host absolute paths. Each link includes a title, URI/path when file-backed, MIME type, size when the file exists, created time, and safety metadata indicating redaction, repository-boundary enforcement, and no secret exposure.
@@ -126,7 +130,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `roots_diagnostics` | `schema`, `read_only`, `advisory_only`, `server_repo`, `fetch`, `roots`, `relationship`, `guidance` | safety metadata and redacted per-root relationship details |
 | `runtime_state` | `schema`, `timestamp`, `transport`, `server`, `sse`, `ollama`, `docker` | process counts and dependency probe details |
 | `git_status` | `status`, `short` | `raw` |
-| `grep` | match rows: `path`, `line`, `column`, `match` | `lineText`, quick summaries, result handles |
+| `grep` | match rows: `path`, `line`, `column`, `match` | `lineText`, quick summaries, result handles, opt-in `compressed_observation` |
 | `find_paths` | array items as repository-relative paths | none |
 | `read_snippet` | `path`, `start_line`, `end_line`, `content` | requested line bounds and `total_lines` |
 | `summarize_diff` | `file_count`, `total_added`, `total_deleted`, `risk_flags` | file lists, sorted churn, patches |
@@ -135,7 +139,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
-| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `provenance`, `_meta` |
+| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `provenance`, opt-in `compressed_observation`, `_meta` |
 | `artifact_provenance` | `schema`, `provenance_schema`, `artifact_count`, `ok`, `checks` | none |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |
 | `test_impact_map` | `schema`, `artifact_path`, `artifact_status`, `changed_files`, `selected_tests`, `unmapped_changed_files`, `confidence` | `test_details`, `impacted_sources`, `coverage_gaps`, `generated_at` |
