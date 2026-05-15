@@ -142,6 +142,8 @@ For underspecified high-risk workflows, `clarification_gate` returns structured 
 
 For VS Code MCP Apps-capable clients, `release_readiness` can include a read-only dashboard when `MCP_APPS_DASHBOARD_ENABLED=true`. The default is disabled so existing clients keep the same response contract. See [MCP Apps release readiness dashboard](./docs/mcp-apps-release-readiness.md).
 
+For MCP client workspace boundary checks, `roots_diagnostics` compares request-scoped MCP Roots with the configured `REPO_PATH` and reports advisory, redacted relationship states without changing authorization. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.
@@ -317,6 +319,21 @@ python source/server.py
 curl -H "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN" http://localhost:8000/mcp
 ```
 
+The default `token`/`bearer` modes are simple local bearer-token protection. Their `/.well-known/oauth-protected-resource` response is public and intentionally returns an empty `authorization_servers` list; those modes do not claim full OAuth authorization-server discovery.
+
+For MCP/OAuth clients that need RFC 9728 protected resource metadata, use `oauth-resource` mode and configure at least one authorization server issuer URL:
+
+```bash
+export MCP_HTTP_AUTH_MODE=oauth-resource
+export MCP_HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+export MCP_HTTP_AUTHORIZATION_SERVERS='["https://auth.example.test"]'
+python source/server.py
+
+curl -sS http://localhost:8000/.well-known/oauth-protected-resource
+```
+
+In `oauth-resource` mode, missing `MCP_HTTP_AUTHORIZATION_SERVERS` fails closed for protected MCP endpoints and is reported under `/healthz` `auth.configuration_error`. Unauthorized MCP requests include a `WWW-Authenticate: Bearer ... resource_metadata="..."` challenge so clients can discover the protected-resource metadata document.
+
 For throwaway local-only experiments, unauthenticated HTTP is still available only by explicit opt-in:
 
 ```bash
@@ -367,8 +384,11 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `MCP_TRANSPORT` | `http` | No | `http`, `stdio`, `direct`, `streamable-http`, `streamable_http` | Selects server transport mode. |
 | `REPO_PATH` | `/repo` | No | Absolute path | Root path tools may operate on. |
 | `ALLOW_MUTATIONS` | `false` (recommended default) | No | `true`, `false` | Enables/disables write and git-mutating operations. |
-| `MCP_HTTP_AUTH_MODE` | `token` | No | `token`, `bearer`, `oauth-resource`, `insecure-local`, `disabled`, `off`, `none` | HTTP auth mode. Token/bearer modes require `Authorization: Bearer ...`; insecure modes are explicit local-only escapes. Stdio is unaffected. |
+| `MCP_HTTP_AUTH_MODE` | `token` | No | `token`, `bearer`, `oauth-resource`, `insecure-local`, `disabled`, `off`, `none` | HTTP auth mode. Token/bearer modes require `Authorization: Bearer ...` and are local/simple bearer modes; `oauth-resource` also publishes RFC 9728 protected-resource metadata. Insecure modes are explicit local-only escapes. Stdio is unaffected. |
 | `MCP_HTTP_BEARER_TOKEN` | empty | Required for HTTP token modes | Secret string | Bearer token accepted by HTTP MCP/SSE requests. Missing token in token mode returns 403. |
+| `MCP_HTTP_AUTHORIZATION_SERVERS` | empty | Required for `oauth-resource` mode | JSON string list or comma-separated issuer URLs | Authorization server issuer URLs returned as `authorization_servers` by `/.well-known/oauth-protected-resource`. Missing values in `oauth-resource` mode fail closed and appear in `/healthz` diagnostics. |
+| `MCP_HTTP_RESOURCE` | `http://localhost:$PORT/mcp` | No | Absolute resource URI | Resource identifier advertised by the protected-resource metadata document. |
+| `MCP_HTTP_PROTECTED_RESOURCE_METADATA_URL` | derived from `MCP_HTTP_RESOURCE` | No | Absolute URL | URL placed in 401 `WWW-Authenticate` challenges as `resource_metadata`. |
 | `MCP_HTTP_RATE_LIMIT_REQUESTS` | `120` | No | Positive integer | Per-client HTTP request budget per window. Exceeded requests return 429 with `Retry-After`. |
 | `MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` | `60` | No | Positive integer seconds | Rate-limit window size. |
 | `LOCAL_EMBED_BACKEND` | `hash` | No | `hash`, `auto`, `sentence-transformers` | Offline local embedding backend. The default Docker image supports `hash`; the optional `sentence-transformers` backend requires building with `INSTALL_SENTENCE_TRANSFORMERS=true` or installing `source/requirements-embedding.txt`. |
@@ -441,11 +461,13 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `tool_annotations`
 - `tool_output_contracts`
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
-- Schema-backed core tools: `repo_info`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`
 
 `task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
 `workflow_task()` starts the prototype async wrapper for long-running workflows. Initial supported workflows are `governance_report` and `vscode_task_run`; status is persisted under `.codebase-tooling-mcp/tasks/`, can be read with `task_status()`, and returns repository-relative artifact resource links. VS Code task logs are kept in redacted result artifacts referenced by the compact task status. See [Workflow task prototype](./docs/workflow-tasks.md).
+
+`roots_diagnostics()` is a read-only advisory setup diagnostic that feature-detects MCP client roots support and compares available `file://` roots with `REPO_PATH`. It returns redacted relationship metadata (`exact_match`, overlaps, multiple roots, no overlap, unsupported, unavailable, or error) without exposing absolute client paths outside the repository and without changing `_resolve_repo_path` enforcement. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
 
 `tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
 
