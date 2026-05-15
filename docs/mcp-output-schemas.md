@@ -21,6 +21,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `clarification_gate`
 - `release_readiness`
 - `governance_report`
+- `artifact_provenance`
 - `workflow_diagnostics`
 - `test_impact_map` (public workflow, currently documented contract rather than schema-backed core contract)
 
@@ -96,6 +97,8 @@ Example client response excerpt for `governance_report(export=true)`:
 
 `state_snapshot` uses the same contract for the repository-local snapshot index and, when a stash-backed rollback object exists, adds a `git-ref://refs/mcp-snapshots/...` rollback pointer without embedding snapshot contents. These links are intended to become task artifact references in future async task work, but this contract does not add async task behavior.
 
+`governance_report(export=true)` and `state_snapshot` also write local `mcp_artifact_provenance.v1` sidecars next to their generated artifacts. The read-only `artifact_provenance` helper verifies artifact presence, sidecar presence, SHA-256 digest match, schema match, and freshness without mutating artifacts.
+
 ## Error shape
 
 All schema-backed tools share this documented error envelope for clients that normalize exceptions into structured results:
@@ -130,7 +133,8 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
-| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `_meta` |
+| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `provenance`, `_meta` |
+| `artifact_provenance` | `schema`, `provenance_schema`, `artifact_count`, `ok`, `checks` | none |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |
 | `test_impact_map` | `schema`, `artifact_path`, `artifact_status`, `changed_files`, `selected_tests`, `unmapped_changed_files`, `confidence` | `test_details`, `impacted_sources`, `coverage_gaps`, `generated_at` |
 

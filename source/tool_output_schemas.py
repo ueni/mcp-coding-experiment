@@ -31,6 +31,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "clarification_gate",
     "release_readiness",
     "governance_report",
+    "artifact_provenance",
     "workflow_diagnostics",
 )
 
@@ -48,6 +49,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "clarification_gate": ("schema", "ok_to_continue", "status", "missing_fields", "questions", "fallback_checklist", "elicitation"),
     "release_readiness": ("schema", "base_ref", "head_ref", "ok", "checks"),
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports", "resource_links"),
+    "artifact_provenance": ("schema", "provenance_schema", "artifact_count", "ok", "checks"),
     "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
 }
 
@@ -64,7 +66,8 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "policy_simulator": (),
     "clarification_gate": ("audit", "inputs", "decision_reasons"),
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "_meta"),
+    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "provenance", "_meta"),
+    "artifact_provenance": (),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
 }
 
@@ -291,8 +294,19 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "snapshots": {"type": "object"},
             "security": {"type": "object"},
             "exports": {"type": "object"},
+            "provenance": {"type": "object"},
             "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
             "_meta": {"type": "object"},
+        },
+    ),
+    "artifact_provenance": _object_schema(
+        ["schema", "provenance_schema", "artifact_count", "ok", "checks"],
+        {
+            "schema": {"type": "string", "const": "artifact_provenance_report.v1"},
+            "provenance_schema": {"type": "string", "const": "mcp_artifact_provenance.v1"},
+            "artifact_count": {"type": "integer"},
+            "ok": {"type": "boolean"},
+            "checks": {"type": "array", "items": {"type": "object"}},
         },
     ),
     "workflow_diagnostics": _object_schema(

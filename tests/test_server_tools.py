@@ -1599,6 +1599,13 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("markdown", out["exports"])
         self.assertTrue((self.repo_path / out["exports"]["json"]).exists())
         self.assertTrue((self.repo_path / out["exports"]["markdown"]).exists())
+        self.assertIn("provenance", out["exports"])
+        self.assertTrue((self.repo_path / out["exports"]["provenance"][out["exports"]["json"]]).exists())
+        self.assertTrue((self.repo_path / out["exports"]["provenance"][out["exports"]["markdown"]]).exists())
+        provenance = self.server.artifact_provenance(artifact_path=out["exports"]["json"])
+        self.assertTrue(provenance["ok"])
+        self.assertEqual(provenance["artifact_count"], 1)
+        self.assertTrue(provenance["checks"][0]["checks"]["digest_match"])
         self.assertEqual({link["path"] for link in out["resource_links"]}, {out["exports"]["json"], out["exports"]["markdown"]})
         self.assertTrue(all(link["uri"].startswith("repo://file/") for link in out["resource_links"]))
         self.assertTrue(all(link.get("size_bytes", 0) > 0 for link in out["resource_links"]))
@@ -1780,6 +1787,68 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["snapshots"]["count"], 1)
         self.assertEqual(out["exports"], {})
 
+    def test_governance_report_writes_and_verifies_provenance_sidecars(self):
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        json_artifact = out["exports"]["json"]
+        md_artifact = out["exports"]["markdown"]
+        provenance = out["exports"]["provenance"]
+
+        self.assertIn(json_artifact, provenance)
+        self.assertIn(md_artifact, provenance)
+        sidecar = json.loads((self.repo_path / provenance[json_artifact]).read_text(encoding="utf-8"))
+        self.assertEqual(sidecar["schema"], "mcp_artifact_provenance.v1")
+        self.assertEqual(sidecar["tool"], "governance_report")
+        self.assertEqual(sidecar["artifact"]["path"], json_artifact)
+        self.assertEqual(sidecar["artifact"]["schema"], "governance_report.v1")
+        self.assertEqual(sidecar["repository"]["git"]["head_ref"], "HEAD")
+        self.assertTrue(sidecar["repository"]["git"]["head"])
+
+        verify = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertTrue(verify["ok"])
+        self.assertEqual(verify["checks"][0]["findings"], [])
+
+    def test_artifact_provenance_flags_missing_stale_digest_and_schema_mismatch(self):
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        json_artifact = out["exports"]["json"]
+        artifact_path = self.repo_path / json_artifact
+        sidecar_path = self.repo_path / out["exports"]["provenance"][json_artifact]
+
+        sidecar_path.unlink()
+        missing = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertFalse(missing["ok"])
+        self.assertIn("provenance_missing", missing["checks"][0]["findings"])
+
+        self.server._write_artifact_provenance_sidecars(
+            tool_name="governance_report",
+            artifact_paths=[json_artifact],
+            inputs={"token": "super-secret-value"},
+            git_state=self.server._git_state_for_provenance(base_ref="HEAD", head_ref="HEAD"),
+            artifact_schemas={json_artifact: "governance_report.v1"},
+        )
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        sidecar["artifact"]["schema"] = "wrong.schema"
+        sidecar_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        artifact_path.write_text(artifact_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        stale = self.server.artifact_provenance(artifact_path=json_artifact)
+        findings = stale["checks"][0]["findings"]
+        self.assertFalse(stale["ok"])
+        self.assertIn("digest_mismatch", findings)
+        self.assertIn("artifact_schema_mismatch", findings)
+        self.assertIn("provenance_stale", findings)
+
+    def test_state_snapshot_writes_provenance_and_redacts_selected_inputs(self):
+        snap = self.server.state_snapshot(label="token=super-secret-value", include_build_dir=False)
+        snapshot_index = ".codebase-tooling-mcp/snapshots/git_snapshots.json"
+        self.assertIn(snapshot_index, snap["provenance"])
+        sidecar_text = (self.repo_path / snap["provenance"][snapshot_index]).read_text(encoding="utf-8")
+        self.assertNotIn("super-secret-value", sidecar_text)
+        sidecar = json.loads(sidecar_text)
+        self.assertEqual(sidecar["artifact"]["schema"], "state_snapshot_index.v1")
+        self.assertEqual(sidecar["tool"], "state_snapshot")
+        self.assertEqual(sidecar["invocation"]["selected_inputs"]["label"], "<redacted>")
+        verify = self.server.artifact_provenance(artifact_path=snapshot_index)
+        self.assertTrue(verify["ok"])
+
     def test_lossless_codec_roundtrip_and_delta(self):
         payload = {
             "title": "release checklist",
@@ -1874,6 +1943,11 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("resource_links", snap)
         self.assertEqual(snap["resource_links"][0]["path"], str(self.server.STATE_SNAPSHOT_INDEX_FILE))
         self.assertEqual(snap["resource_links"][0]["mime_type"], "application/json")
+        self.assertIn(str(self.server.STATE_SNAPSHOT_INDEX_FILE), snap["provenance"])
+        snap_provenance = self.server.artifact_provenance(
+            artifact_path=str(self.server.STATE_SNAPSHOT_INDEX_FILE), include_reports=False
+        )
+        self.assertTrue(snap_provenance["ok"])
         self.assertFalse(snap["_meta"]["artifact_resources"]["safety"]["absolute_host_paths_exposed"])
         restored = self.server.state_restore(snapshot_id=snap["snapshot_id"])
         self.assertEqual(restored["schema"], "state_restore.v1")
