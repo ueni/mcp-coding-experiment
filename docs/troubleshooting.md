@@ -187,12 +187,12 @@ Remediation options:
 - Rebuild/reopen after increasing Docker/VM memory. For default local Agent/MCP
   workflows, `llama3.1:8b` is the expected model; Qwen3.6 IQ1_M is an optional
   high-quality chat/edit profile for stronger hosts, not a T14-class default.
-  Treat 32GB RAM (or equivalent Docker memory allocation) as the recommended
-  32GB T14-class local target for 8B Agent mode. A ThinkPad T14 Gen 1 AMD with
-  16GB RAM may be marginal for VS Code + devcontainer + Ollama, especially with
-  `llama3.1:8b` Agent mode and a 32768 context; reduce the context to
-  8192/16384 or use a smaller verified tool-capable Agent model if one is
-  configured locally.
+  Treat a 32GB T14-class host, or an equivalent Docker/VM memory allocation, as
+  the recommended local target for the default `llama3.1:8b` Agent/MCP path. A
+  ThinkPad T14 Gen 1 AMD with 16GB RAM may be marginal for VS Code +
+  devcontainer + Ollama, especially with `llama3.1:8b` Agent mode and a 32768
+  context; reduce the context to 8192/16384 or use a smaller verified
+  tool-capable Agent model if one is configured locally.
 - Close other memory-heavy workloads before rebuild/reopen.
 - Keep `OLLAMA_ALLOW_PULL=false` unless runtime downloads are intentionally
   enabled; preloaded models avoid extra memory/network pressure during attach.
