@@ -287,17 +287,17 @@ APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
 TERMINAL_CAPTURE_DIR = Path(".codebase-tooling-mcp/reports/terminal")
-DEFAULT_CODING_MODEL = "qwen3.6-35b-a3b:iq1"
+DEFAULT_CODING_MODEL = "llama3.1:8b"
 DEFAULT_CODING_AGENT_MODEL = "llama3.1:8b"
 DEFAULT_CODING_MICRO_MODEL = "qwen2.5-coder:1.5b"
 DEFAULT_CONTINUE_OLLAMA_MODELS = ",".join(
     (
         DEFAULT_CODING_MODEL,
-        DEFAULT_CODING_AGENT_MODEL,
         DEFAULT_CODING_MICRO_MODEL,
     )
 )
-CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen3.6-35b-a3b.yaml"
+CODING_MODEL_CONFIG_FILE = ".continue/models/coding-agent-llama3.1-8b.yaml"
+QWEN36_MODEL_CONFIG_FILE = ".continue/models/coding-qwen3.6-35b-a3b.yaml"
 CODING_AGENT_MODEL_CONFIG_FILE = ".continue/models/coding-agent-llama3.1-8b.yaml"
 CODING_MICRO_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
 CODING_AGENT_ROUTE = "coding_agent"
@@ -10978,24 +10978,24 @@ def _prompt_optimize_mode_for_task(task: str) -> str:
 
 
 def _default_continue_model_routing() -> dict[str, Any]:
-    qwen_model = CODING_DEFAULT_MODEL or DEFAULT_CODING_MODEL
-    qwen_route = {'model': qwen_model, 'file': CODING_MODEL_CONFIG_FILE}
+    coding_model = CODING_DEFAULT_MODEL or DEFAULT_CODING_MODEL
+    coding_route = {'model': coding_model, 'file': CODING_MODEL_CONFIG_FILE}
+    qwen_route = {'model': 'qwen3.6-35b-a3b:iq1', 'file': QWEN36_MODEL_CONFIG_FILE}
     return {
         'source': None,
         'loaded': False,
-        'router': dict(qwen_route),
+        'router': dict(coding_route),
         'routes': {
-            'coding': dict(qwen_route),
+            'coding': dict(coding_route),
             CODING_MICRO_ROUTE: {
                 'model': CODING_MICRO_MODEL or DEFAULT_CODING_MICRO_MODEL,
                 'file': CODING_MICRO_MODEL_CONFIG_FILE,
             },
-            'refactor': dict(qwen_route),
-            'review': dict(qwen_route),
-            'security': dict(qwen_route),
-            'math': dict(qwen_route),
-            'vision': dict(qwen_route),
-            'research': dict(qwen_route),
+            CODING_AGENT_ROUTE: {
+                'model': CODING_AGENT_MODEL or DEFAULT_CODING_AGENT_MODEL,
+                'file': CODING_AGENT_MODEL_CONFIG_FILE,
+            },
+            'high_quality_chat_edit': dict(qwen_route),
         },
     }
 

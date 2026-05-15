@@ -4,7 +4,7 @@
     "context": "../source",
     "dockerfile": "../source/Dockerfile",
     "args": {
-      "OLLAMA_PRELOAD_MODELS": "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M,llama3.1:8b,qwen2.5-coder:1.5b",
+      "OLLAMA_PRELOAD_MODELS": "llama3.1:8b,qwen2.5-coder:1.5b",
       "OLLAMA_PULL_TIMEOUT_SECONDS": "7200"
     }
   },
@@ -32,9 +32,7 @@
     "OLLAMA_HOST": "0.0.0.0:2345",
     "OLLAMA_FALLBACK_HOST": "0.0.0.0:2345",
     "OLLAMA_CONTEXT_LENGTH": "32768",
-    "OLLAMA_TEXT_ALIAS_SOURCE_MODEL": "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M",
-    "OLLAMA_TEXT_ALIAS_MODEL": "qwen3.6-35b-a3b:iq1",
-    "CODING_DEFAULT_MODEL": "qwen3.6-35b-a3b:iq1",
+    "CODING_DEFAULT_MODEL": "llama3.1:8b",
     "CODING_AGENT_MODEL": "llama3.1:8b",
     "LOCAL_INFER_ENDPOINT": "http://127.0.0.1:2345/api/generate",
     "OLLAMA_TEXT_ALIAS_NUM_CTX": "32768"
