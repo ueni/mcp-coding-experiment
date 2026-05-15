@@ -216,6 +216,10 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('ollama pull "$model"', dockerfile)
         self.assertIn('/opt/codebase-tooling/preloaded-ollama-models', dockerfile)
         self.assertIn('cp -a /tmp/ollama-models/. /opt/codebase-tooling/preloaded-ollama-models/', dockerfile)
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn('id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models', readme)
+        self.assertIn('--cache-to=type=local,dest=.buildx-cache,mode=max', readme)
+        self.assertIn('--cache-from=type=local,src=.buildx-cache', readme)
 
     def test_dockerfile_uses_python_313_trixie_base_image(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
