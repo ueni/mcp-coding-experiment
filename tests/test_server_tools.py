@@ -1770,6 +1770,19 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(decisions["release.readiness.remains-read-only"], "allow")
         self.assertEqual(decisions["secret.audit-arguments-redact-sensitive-values"], "redact")
 
+    def test_policy_insight_replay_detects_decision_drift(self):
+        bank = self.server.json.loads(
+            self.server.json.dumps(self.server._load_policy_insight_bank())
+        )
+        bank["insights"][0]["expected_decision"] = "allow"
+        with patch.object(self.server, "_load_policy_insight_bank", return_value=bank):
+            replay = self.server._policy_insight_replay_report()
+        self.assertFalse(replay["ok"])
+        drifted = replay["results"][0]
+        self.assertEqual(drifted["expected_decision"], "allow")
+        self.assertEqual(drifted["actual_decision"], "deny")
+        self.assertFalse(drifted["matched"])
+
     def test_policy_insights_public_summary_is_read_only_and_redacted(self):
         out = self.server.policy_insights()
         self.assertEqual(out["schema"], "mcp_policy_insights_summary.v1")
