@@ -1315,8 +1315,12 @@ def _otel_spans_path() -> Path | None:
 def _otel_redact_paths(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _otel_redact_paths(item) for key, item in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_otel_redact_paths(item) for item in value[:25]]
+    if isinstance(value, set):
+        return [_otel_redact_paths(item) for item in sorted(value, key=str)[:25]]
+    if isinstance(value, os.PathLike):
+        return _otel_redact_paths(os.fspath(value))
     if isinstance(value, str):
         redacted = value
         repo_text = str(REPO_PATH)
@@ -1328,8 +1332,26 @@ def _otel_redact_paths(value: Any) -> Any:
     return value
 
 
+def _otel_json_safe_value(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return "<redacted-depth>"
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, dict):
+        return {str(key): _otel_json_safe_value(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_otel_json_safe_value(item, depth + 1) for item in value[:25]]
+    if isinstance(value, str):
+        return value
+    return _otel_redact_paths(_redact_audit_string(str(value)))
+
+
 def _otel_safe_value(value: Any) -> Any:
-    return _otel_redact_paths(_redact_audit_value(value))
+    return _otel_json_safe_value(_otel_redact_paths(_redact_audit_value(value)))
 
 
 def _otel_safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
@@ -1419,11 +1441,13 @@ class _OtelSpan:
         }
         if self.status_description:
             payload["status"]["description"] = self.status_description
-        _otel_write_span(payload)
-        if self._span_token is not None:
-            _OTEL_CURRENT_SPAN_ID.reset(self._span_token)
-        if self._correlation_token is not None:
-            _OTEL_CORRELATION_ID.reset(self._correlation_token)
+        try:
+            _otel_write_span(payload)
+        finally:
+            if self._span_token is not None:
+                _OTEL_CURRENT_SPAN_ID.reset(self._span_token)
+            if self._correlation_token is not None:
+                _OTEL_CORRELATION_ID.reset(self._correlation_token)
         return False
 
 
@@ -1437,6 +1461,18 @@ def _otel_span(
     return _OtelSpan(name, attributes, kind=kind, correlation_id=correlation_id)
 
 
+@contextlib.contextmanager
+def _otel_correlation_context(correlation_id: str):
+    if not correlation_id or not _otel_should_record():
+        yield
+        return
+    token = _OTEL_CORRELATION_ID.set(correlation_id)
+    try:
+        yield
+    finally:
+        _OTEL_CORRELATION_ID.reset(token)
+
+
 def _otel_write_span(payload: dict[str, Any]) -> None:
     path = _otel_spans_path()
     if path is None:
@@ -1446,7 +1482,7 @@ def _otel_write_span(payload: dict[str, Any]) -> None:
         with _OTEL_SPANS_LOCK:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
-    except OSError:
+    except Exception:
         # Tracing must never make a tool call fail or leak local paths through exceptions.
         pass
 
@@ -3533,7 +3569,7 @@ def _workflow_task_status_payload(task_id: str) -> dict[str, Any]:
     return payload
 
 
-def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
+def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> None:
     started_at = _now_iso()
     payload = _read_workflow_task_status(task_id)
     payload.update(
@@ -3645,8 +3681,13 @@ def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
         )
 
 
+def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
+    with _otel_correlation_context(task_id):
+        _run_governance_report_task_inner(task_id, args)
 
-def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
+
+
+def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
     started_at = _now_iso()
     payload = _read_workflow_task_status(task_id)
     payload.update(
@@ -3752,6 +3793,12 @@ def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -
         status="succeeded" if ok else "failed",
         artifact_refs=[str(link.get("path")) for link in artifact_links if isinstance(link.get("path"), str)],
     )
+
+
+def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
+    with _otel_correlation_context(task_id):
+        _run_vscode_task_inner(task_id, args, max_retries=max_retries)
+
 
 def _start_workflow_task(
     workflow: str,
@@ -15441,8 +15488,7 @@ def workflow_diagnostics(
     return report
 
 
-@mcp.tool()
-def governance_report(
+def _governance_report_impl(
     start_time: str = "",
     end_time: str = "",
     base_ref: str = "HEAD~1",
@@ -15450,7 +15496,6 @@ def governance_report(
     export: bool = True,
     compressed_observation: bool = False,
 ) -> dict[str, Any]:
-    """Build and optionally export a redacted audit/governance report."""
     _require_git_repo()
     start_dt = _parse_iso_datetime(start_time) if start_time.strip() else None
     end_dt = _parse_iso_datetime(end_time) if end_time.strip() else None
@@ -15575,12 +15620,44 @@ def governance_report(
 
 
 @mcp.tool()
-def artifact_provenance(
+def governance_report(
+    start_time: str = "",
+    end_time: str = "",
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    export: bool = True,
+    compressed_observation: bool = False,
+) -> dict[str, Any]:
+    """Build and optionally export a redacted audit/governance report."""
+    arguments = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "export": export,
+        "compressed_observation": compressed_observation,
+    }
+    with _otel_span(
+        "mcp.tool.governance_report",
+        _otel_tool_attributes("governance_report", arguments),
+    ) as span:
+        result = _governance_report_impl(
+            start_time=start_time,
+            end_time=end_time,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            export=export,
+            compressed_observation=compressed_observation,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+def _artifact_provenance_impl(
     artifact_path: str = "",
     include_reports: bool = True,
     include_snapshots: bool = True,
 ) -> dict[str, Any]:
-    """Read-only verification for local MCP artifact provenance sidecars."""
     _require_git_repo()
     artifact_paths: list[str] = []
     if artifact_path.strip():
@@ -15607,6 +15684,31 @@ def artifact_provenance(
 
 
 @mcp.tool()
+def artifact_provenance(
+    artifact_path: str = "",
+    include_reports: bool = True,
+    include_snapshots: bool = True,
+) -> dict[str, Any]:
+    """Read-only verification for local MCP artifact provenance sidecars."""
+    arguments = {
+        "artifact_path": artifact_path,
+        "include_reports": include_reports,
+        "include_snapshots": include_snapshots,
+    }
+    with _otel_span(
+        "mcp.tool.artifact_provenance",
+        _otel_tool_attributes("artifact_provenance", arguments),
+    ) as span:
+        result = _artifact_provenance_impl(
+            artifact_path=artifact_path,
+            include_reports=include_reports,
+            include_snapshots=include_snapshots,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
 def workflow_task(
     action: str = "start",
     workflow: str = "vscode_task_run",
@@ -15629,10 +15731,11 @@ def workflow_task(
     action = str(action or "start").strip().lower() or "start"
     workflow = str(workflow or "vscode_task_run").strip()
     trace_task_id = task_id.strip()
+    trace_categories = ["read-only"] if action == "status" else _workflow_task_categories(workflow)
     attrs = _otel_tool_attributes(
         "workflow_task",
         {"action": action, "workflow": workflow, "task_id": trace_task_id},
-        _workflow_task_categories(workflow),
+        trace_categories,
     )
     attrs.update(
         {
