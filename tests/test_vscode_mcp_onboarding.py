@@ -345,8 +345,10 @@ def test_devcontainer_passes_http_bearer_token_from_local_env():
 
     assert config["containerEnv"]["MCP_HTTP_BEARER_TOKEN"] == "${localEnv:MCP_HTTP_BEARER_TOKEN}"
     assert config["containerEnv"]["MCP_TRANSPORT"] == "http"
+    assert config["containerEnv"]["OLLAMA_VULKAN"] == "0"
     assert "127.0.0.1:8000:8000" in config["runArgs"]
     assert "127.0.0.1:2345:2345" in config["runArgs"]
+    assert "--device=/dev/dri" not in config["runArgs"]
 
 
 def test_setup_script_generates_token_aware_devcontainer():
@@ -364,8 +366,10 @@ def test_setup_script_generates_token_aware_devcontainer():
         config = json.loads((repo_root / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8"))
 
     assert config["containerEnv"]["MCP_HTTP_BEARER_TOKEN"] == "${localEnv:MCP_HTTP_BEARER_TOKEN}"
+    assert config["containerEnv"]["OLLAMA_VULKAN"] == "0"
     assert "127.0.0.1:8000:8000" in config["runArgs"]
     assert "127.0.0.1:2345:2345" in config["runArgs"]
+    assert "--device=/dev/dri" not in config["runArgs"]
     assert "MCP_HTTP_BEARER_TOKEN" in result.stderr
 
 
@@ -403,5 +407,6 @@ def test_troubleshooting_documents_devcontainer_exit137_collection_and_remediati
     assert "memory.peak" in troubleshooting
     assert "memory.events" in troubleshooting
     assert "Process list sorted by RSS" in troubleshooting
-    assert "32GB T14-class" in troubleshooting
+    assert "compact `qwen2.5-coder:1.5b` profile" in troubleshooting
+    assert "16384/32768" in troubleshooting
     assert "python /app/server.py" in troubleshooting

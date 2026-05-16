@@ -8,11 +8,11 @@ set -euo pipefail
 
 umask 027
 
-DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL="hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M"
-DEFAULT_OLLAMA_TEXT_ALIAS_MODEL="qwen3.6-35b-a3b:iq1"
-DEFAULT_CODING_AGENT_MODEL="llama3.1:8b"
-DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="32768"
-DEFAULT_CONTINUE_OLLAMA_MODELS="${DEFAULT_CODING_AGENT_MODEL},qwen2.5-coder:1.5b"
+DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL=""
+DEFAULT_OLLAMA_TEXT_ALIAS_MODEL=""
+DEFAULT_CODING_AGENT_MODEL="qwen2.5-coder:1.5b"
+DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="8192"
+DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:1.5b"
 
 is_truthy() {
   case "${1:-}" in
@@ -545,14 +545,6 @@ copy_continue_default_if_missing_or_stale() {
   fi
 
   case "${target_name}" in
-    coding-qwen3.6-35b-a3b.yaml)
-      if grep -q 'name: Coding - Qwen3.6 35B A3B' "${target_path}" \
-        && grep -q 'model: qwen3.6-35b-a3b:iq1' "${target_path}" \
-        && { ! grep -q 'contextLength:[[:space:]]*32768' "${target_path}" || grep -q 'tool_use' "${target_path}"; }; then
-        echo "Continue Qwen3.6 profile has stale context/tool capability contract; refreshing ${target_path}." >&2
-        cp "${default_path}" "${target_path}"
-      fi
-      ;;
     codebase-tooling-mcp.yaml)
       if grep -q 'secret-token' "${target_path}"; then
         echo "Continue MCP server profile has stale auth header; refreshing ${target_path}." >&2
@@ -560,6 +552,15 @@ copy_continue_default_if_missing_or_stale() {
       fi
       ;;
   esac
+}
+
+remove_retired_continue_model_default() {
+  local target_path="$1"
+  local model_name="$2"
+  if [[ -f "${target_path}" ]] && grep -q "model: ${model_name}" "${target_path}"; then
+    echo "Removing retired Continue model profile ${target_path}." >&2
+    rm -f "${target_path}"
+  fi
 }
 
 apply_repo_defaults() {
@@ -576,6 +577,12 @@ apply_repo_defaults() {
     "${defaults_root}/continue/codebase-tooling-mcp.yaml" \
     /repo/.continue/mcpServers/codebase-tooling-mcp.yaml
   mkdir -p /repo/.continue/models
+  remove_retired_continue_model_default \
+    /repo/.continue/models/coding-agent-llama3.1-8b.yaml \
+    "llama3.1:8b"
+  remove_retired_continue_model_default \
+    /repo/.continue/models/coding-qwen3.6-35b-a3b.yaml \
+    "qwen3.6-35b-a3b:iq1"
   while IFS= read -r model_path; do
     model_name=$(basename "${model_path}")
     copy_continue_default_if_missing_or_stale \
@@ -584,9 +591,9 @@ apply_repo_defaults() {
   done < <(find "${defaults_root}/continue/models" -maxdepth 1 -type f -name '*.yaml' | sort)
   if [[ ! -f /repo/.continue/model-routing.yaml ]]; then
     cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
-  elif grep -A2 '^router:' /repo/.continue/model-routing.yaml | grep -q 'model: qwen3.6-35b-a3b:iq1' \
-    || grep -A2 '^  coding:' /repo/.continue/model-routing.yaml | grep -q 'model: qwen3.6-35b-a3b:iq1'; then
-    echo "Continue model routing has stale Qwen3.6 default route; refreshing /repo/.continue/model-routing.yaml." >&2
+  elif grep -q 'model: llama3.1:8b' /repo/.continue/model-routing.yaml \
+    || grep -q 'model: qwen3.6-35b-a3b:iq1' /repo/.continue/model-routing.yaml; then
+    echo "Continue model routing references retired bundled model profiles; refreshing /repo/.continue/model-routing.yaml." >&2
     cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
   fi
 
@@ -650,10 +657,8 @@ fi
 export HOME="${HOME:-/home/app}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
 seed_ollama_models_from_image_preload
-if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
-  export OLLAMA_VULKAN=1
-fi
-CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-llama3.1:8b}"
+export OLLAMA_VULKAN="${OLLAMA_VULKAN:-0}"
+CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:1.5b}"
 CODING_AGENT_MODEL="${CODING_AGENT_MODEL:-${DEFAULT_CODING_AGENT_MODEL}}"
 CODING_MICRO_MODEL="${CODING_MICRO_MODEL:-qwen2.5-coder:1.5b}"
 OLLAMA_TEXT_ALIAS_SOURCE_MODEL="${OLLAMA_TEXT_ALIAS_SOURCE_MODEL:-${DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL}}"

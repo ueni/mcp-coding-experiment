@@ -287,38 +287,26 @@ APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
 ROOT_CAUSE_FILE = Path(".codebase-tooling-mcp/memory/root_cause_memory.json")
 STATE_SNAPSHOT_INDEX_FILE = STATE_SNAPSHOT_DIR / "git_snapshots.json"
 TERMINAL_CAPTURE_DIR = Path(".codebase-tooling-mcp/reports/terminal")
-DEFAULT_CODING_MODEL = "llama3.1:8b"
-DEFAULT_CODING_AGENT_MODEL = "llama3.1:8b"
+DEFAULT_CODING_MODEL = "qwen2.5-coder:1.5b"
+DEFAULT_CODING_AGENT_MODEL = "qwen2.5-coder:1.5b"
 DEFAULT_CODING_MICRO_MODEL = "qwen2.5-coder:1.5b"
 DEFAULT_CONTINUE_OLLAMA_MODELS = ",".join(
     (
         DEFAULT_CODING_MODEL,
-        DEFAULT_CODING_MICRO_MODEL,
     )
 )
-CODING_MODEL_CONFIG_FILE = ".continue/models/coding-agent-llama3.1-8b.yaml"
-QWEN36_MODEL_CONFIG_FILE = ".continue/models/coding-qwen3.6-35b-a3b.yaml"
-CODING_AGENT_MODEL_CONFIG_FILE = ".continue/models/coding-agent-llama3.1-8b.yaml"
+CODING_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
+CODING_AGENT_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
 CODING_MICRO_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
 CODING_AGENT_ROUTE = "coding_agent"
 CODING_MICRO_ROUTE = "coding_micro"
-QWEN36_MODEL_ID_PREFIXES = ("qwen3.6", "qwen3-6", "qwen36")
-QWEN36_CHAT_SENTINEL_STOPS = [
+MODEL_STRIP_TOKENS = [
     "<|im_start|>",
     "<|im_end|>",
     "<|endoftext|>",
-]
-QWEN36_STRIP_TOKENS = [
-    *QWEN36_CHAT_SENTINEL_STOPS,
     "<think>",
     "</think>",
 ]
-QWEN36_TEMPLATE = """{{ if .System }}<|im_start|>system
-{{ .System }}<|im_end|>
-{{ end }}<|im_start|>user
-{{ .Prompt }}<|im_end|>
-<|im_start|>assistant
-"""
 MICRO_CODING_TASK_HINTS = {
     "coding_micro",
     "micro coding",
@@ -4878,13 +4866,8 @@ def _local_embed_vectors(
     )
 
 
-def _is_qwen36_model(model: str) -> bool:
-    normalized = str(model or "").strip().lower()
-    return normalized.startswith(QWEN36_MODEL_ID_PREFIXES)
-
-
 def _model_default_stop_sequences(model: str) -> list[str]:
-    return list(QWEN36_CHAT_SENTINEL_STOPS) if _is_qwen36_model(model) else []
+    return []
 
 
 def _sanitize_model_output(text: str) -> str:
@@ -4892,7 +4875,7 @@ def _sanitize_model_output(text: str) -> str:
     out = re.sub(r"(?is)<think>.*?</think>\s*", "", out)
     out = re.sub(r"(?is)^.*?</think>\s*", "", out)
     out = re.sub(r"(?is)<think>.*$", "", out)
-    for token in QWEN36_STRIP_TOKENS:
+    for token in MODEL_STRIP_TOKENS:
         out = out.replace(token, "")
     return out
 
@@ -4916,8 +4899,6 @@ def _local_infer_via_endpoint(
         "stream": False,
         "options": options,
     }
-    if _is_qwen36_model(model):
-        payload["template"] = QWEN36_TEMPLATE
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         LOCAL_INFER_ENDPOINT,
@@ -5998,6 +5979,123 @@ def _fetch_ollama_tags(timeout: float = 3.0) -> dict[str, Any]:
         if isinstance(model_id, str) and model_id and model_id not in model_ids:
             model_ids.append(model_id)
     result["model_ids"] = model_ids
+    return result
+
+
+def _continue_agent_probe_tools() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "repo_status",
+                "description": "Return a short repository status summary.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Short status request.",
+                        }
+                    },
+                    "required": ["summary"],
+                },
+            },
+        }
+    ]
+
+
+def _probe_ollama_chat(model: str, timeout: float = 10.0) -> dict[str, Any]:
+    chat_url = f"{_ollama_native_base_url()}/api/chat"
+    result: dict[str, Any] = {
+        "url": chat_url,
+        "model": model,
+        "mode": "continue_agent",
+        "reachable": False,
+        "ok": False,
+    }
+    if not model:
+        result["error"] = "No model configured for chat probe"
+        return result
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Call the repo_status tool now with summary set to status. Do not answer in normal text.",
+            }
+        ],
+        "tools": _continue_agent_probe_tools(),
+        "stream": True,
+        "options": {"num_predict": 64, "temperature": 0},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        chat_url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with _urlopen_with_host_certs(req, timeout=timeout) as resp:
+            result["reachable"] = True
+            result["status"] = int(getattr(resp, "status", 200))
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        result["reachable"] = True
+        result["status"] = int(getattr(exc, "code", 0) or 0)
+        body = ""
+        with contextlib.suppress(Exception):
+            body = exc.read().decode("utf-8", errors="replace")
+            if body:
+                result["body"] = _trim_text(body, max_chars=1200)
+        result["error"] = str(exc)
+        with contextlib.suppress(Exception):
+            parsed_error = json.loads(body) if body else {}
+            if isinstance(parsed_error, dict) and isinstance(parsed_error.get("error"), str):
+                result["error"] = parsed_error["error"]
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    if body:
+        result["body"] = _trim_text(body, max_chars=1200)
+    try:
+        parsed_events = (
+            [json.loads(line) for line in body.splitlines() if line.strip()]
+            if body and "\n" in body
+            else ([json.loads(body)] if body else [])
+        )
+    except json.JSONDecodeError:
+        result["parse_error"] = "Invalid JSON from /api/chat"
+        return result
+
+    tool_calls: list[Any] = []
+    for parsed in parsed_events:
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+            result["error"] = parsed["error"]
+            return result
+        message = parsed.get("message") if isinstance(parsed, dict) else None
+        event_tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if isinstance(event_tool_calls, list):
+            tool_calls.extend(event_tool_calls)
+    tool_call_names: list[str] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        function = tool_call.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            tool_call_names.append(function["name"])
+    result["tool_call_count"] = len(tool_call_names)
+    result["tool_call_names"] = tool_call_names
+    result["ok"] = (
+        200 <= int(result.get("status", 0)) < 300
+        and "repo_status" in tool_call_names
+    )
+    if not result["ok"] and 200 <= int(result.get("status", 0)) < 300:
+        result["error"] = "Agent-mode tool call response did not include repo_status"
     return result
 
 
@@ -10292,6 +10390,7 @@ def local_model_status() -> dict[str, Any]:
             "endpoint": LOCAL_INFER_ENDPOINT,
             "native_api_base": native_api_base,
             "tags_url": _ollama_tags_url(),
+            "chat_url": f"{native_api_base}/api/chat",
             "openai_compat_base": openai_compat_base,
         },
         "coding": {
@@ -10351,6 +10450,33 @@ def local_model_status() -> dict[str, Any]:
             CODING_MICRO_MODEL in installed_models if CODING_MICRO_MODEL else None
         )
 
+        chat_probe_model = CODING_AGENT_MODEL or CODING_DEFAULT_MODEL or LOCAL_INFER_MODEL
+        if chat_probe_model and chat_probe_model in installed_models:
+            chat_probe = _probe_ollama_chat(chat_probe_model, timeout=10.0)
+            status["infer"]["chat_probe"] = chat_probe
+            status["infer"]["agent_probe"] = chat_probe
+            status["infer"]["chat_reachable"] = chat_probe.get("reachable", False)
+            status["infer"]["chat_ok"] = chat_probe.get("ok", False)
+            status["infer"]["agent_ok"] = chat_probe.get("ok", False)
+            if "status" in chat_probe:
+                status["infer"]["chat_status"] = chat_probe["status"]
+                status["infer"]["agent_status"] = chat_probe["status"]
+            if "error" in chat_probe:
+                status["infer"]["chat_error"] = chat_probe["error"]
+                status["infer"]["agent_error"] = chat_probe["error"]
+        else:
+            skipped_probe = {
+                "url": status["infer"]["chat_url"],
+                "model": chat_probe_model,
+                "mode": "continue_agent",
+                "reachable": None,
+                "ok": None,
+                "skipped": True,
+                "reason": "probe_model_not_installed",
+            }
+            status["infer"]["chat_probe"] = skipped_probe
+            status["infer"]["agent_probe"] = skipped_probe
+
         if not status["infer"]["endpoint_reachable"]:
             diagnostics.append(
                 "Native Ollama tags endpoint is unreachable. Local inference diagnostics are incomplete until the endpoint responds."
@@ -10396,10 +10522,36 @@ def local_model_status() -> dict[str, Any]:
                 )
             if not status["infer"]["openai_compat_base_reachable"]:
                 diagnostics.append(
-                    f"Native Ollama is reachable at {native_api_base}, but the /v1/ root is not. Continue's ollama provider should use apiBase {native_api_base} without /v1."
+                    f"Native Ollama is reachable at {native_api_base}, but the /v1/ root is not. Continue's generic config.json /v1 hint does not apply to this repo's checked-in provider: ollama config; use apiBase {native_api_base} without /v1."
                 )
+            chat_probe = status["infer"].get("chat_probe")
+            if isinstance(chat_probe, dict):
+                if chat_probe.get("skipped"):
+                    diagnostics.append(
+                        f"Ollama chat probe skipped because configured model '{chat_probe.get('model')}' is not installed."
+                    )
+                elif not chat_probe.get("ok"):
+                    detail = (
+                        chat_probe.get("error")
+                        or chat_probe.get("body")
+                        or "unknown error"
+                    )
+                    diagnostics.append(
+                        f"Ollama /api/chat Agent-mode probe failed for model '{chat_probe.get('model')}'. Continue Agent/tool use may fail until the model runner is healthy. Detail: {_trim_text(str(detail), max_chars=300)}"
+                    )
     else:
         status["infer"]["endpoint_reachable"] = None
+        skipped_probe = {
+            "url": status["infer"]["chat_url"],
+            "model": CODING_AGENT_MODEL or CODING_DEFAULT_MODEL or LOCAL_INFER_MODEL,
+            "mode": "continue_agent",
+            "reachable": None,
+            "ok": None,
+            "skipped": True,
+            "reason": "local_infer_backend_not_endpoint",
+        }
+        status["infer"]["chat_probe"] = skipped_probe
+        status["infer"]["agent_probe"] = skipped_probe
         diagnostics.append(
             "LOCAL_INFER_BACKEND is not 'endpoint'; Ollama endpoint diagnostics were skipped."
         )
@@ -10980,22 +11132,20 @@ def _prompt_optimize_mode_for_task(task: str) -> str:
 def _default_continue_model_routing() -> dict[str, Any]:
     coding_model = CODING_DEFAULT_MODEL or DEFAULT_CODING_MODEL
     coding_route = {'model': coding_model, 'file': CODING_MODEL_CONFIG_FILE}
-    qwen_route = {'model': 'qwen3.6-35b-a3b:iq1', 'file': QWEN36_MODEL_CONFIG_FILE}
     return {
         'source': None,
         'loaded': False,
         'router': dict(coding_route),
         'routes': {
             'coding': dict(coding_route),
-            CODING_MICRO_ROUTE: {
-                'model': CODING_MICRO_MODEL or DEFAULT_CODING_MICRO_MODEL,
-                'file': CODING_MICRO_MODEL_CONFIG_FILE,
-            },
             CODING_AGENT_ROUTE: {
                 'model': CODING_AGENT_MODEL or DEFAULT_CODING_AGENT_MODEL,
                 'file': CODING_AGENT_MODEL_CONFIG_FILE,
             },
-            'high_quality_chat_edit': dict(qwen_route),
+            CODING_MICRO_ROUTE: {
+                'model': CODING_MICRO_MODEL or DEFAULT_CODING_MICRO_MODEL,
+                'file': CODING_MICRO_MODEL_CONFIG_FILE,
+            },
         },
     }
 

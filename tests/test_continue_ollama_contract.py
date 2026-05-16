@@ -7,6 +7,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,93 +32,54 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertIn(f"apiBase: {NATIVE_OLLAMA_BASE}", text, str(path))
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
 
-
-    def test_qwen36_continue_context_window_matches_ollama_alias(self):
-        expected_context = 32768
-        for config_path in [
-            REPO_ROOT / ".continue" / "models" / "coding-qwen3.6-35b-a3b.yaml",
-            REPO_ROOT / "source" / "defaults" / "continue" / "models" / "coding-qwen3.6-35b-a3b.yaml",
-        ]:
-            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            model = config["models"][0]
-            options = model["defaultCompletionOptions"]
-
-            self.assertEqual("Coding - Qwen3.6 35B A3B", model["name"], str(config_path))
-            self.assertNotIn("tool_use", model.get("capabilities", []), str(config_path))
-            self.assertNotIn("capabilities", model, str(config_path))
-            self.assertEqual(expected_context, options["contextLength"], str(config_path))
-            self.assertLess(options["maxTokens"], options["contextLength"], str(config_path))
-            self.assertLessEqual(options["maxTokens"], 2048, str(config_path))
-            self.assertIn("<|im_end|>", options["stop"], str(config_path))
-            self.assertNotIn("completionOptions", model, str(config_path))
+    def test_continue_model_contract_uses_compact_default_profile(self):
+        expected_context = 8192
 
         devcontainer = json.loads(
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
         )
+        preload_models_arg = devcontainer["build"]["args"]["OLLAMA_PRELOAD_MODELS"]
+        preload_models = [
+            model.strip()
+            for model in preload_models_arg.split(",")
+            if model.strip()
+        ]
+        self.assertEqual(["qwen2.5-coder:1.5b"], preload_models)
+        self.assertEqual("qwen2.5-coder:1.5b", devcontainer["containerEnv"]["CODING_DEFAULT_MODEL"])
+        self.assertEqual("qwen2.5-coder:1.5b", devcontainer["containerEnv"]["CODING_AGENT_MODEL"])
         self.assertEqual(str(expected_context), devcontainer["containerEnv"]["OLLAMA_CONTEXT_LENGTH"])
         self.assertEqual(str(expected_context), devcontainer["containerEnv"]["OLLAMA_TEXT_ALIAS_NUM_CTX"])
 
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
         setup_repository = (REPO_ROOT / "setup-repository.sh").read_text(encoding="utf-8")
+        self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:1.5b", dockerfile)
+        self.assertIn("CODING_AGENT_MODEL=qwen2.5-coder:1.5b", dockerfile)
+        self.assertIn("CONTINUE_OLLAMA_MODELS=qwen2.5-coder:1.5b", dockerfile)
         self.assertIn(f"OLLAMA_CONTEXT_LENGTH={expected_context}", dockerfile)
         self.assertIn(f'DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="{expected_context}"', entrypoint)
         self.assertIn(f'"OLLAMA_CONTEXT_LENGTH": "{expected_context}"', setup_repository)
         self.assertIn(f'"OLLAMA_TEXT_ALIAS_NUM_CTX": "{expected_context}"', setup_repository)
+        self.assertIn('"CODING_DEFAULT_MODEL": "qwen2.5-coder:1.5b"', setup_repository)
+        self.assertIn('"CODING_AGENT_MODEL": "qwen2.5-coder:1.5b"', setup_repository)
 
-    def test_continue_agent_model_contract_uses_tool_capable_ollama_tag(self):
-        expected_context = 32768
-        known_non_tool_ollama_models = {"qwen3.6-35b-a3b:iq1"}
-        tool_models = []
-
-        devcontainer = json.loads(
-            (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
-        )
-        preload_models = devcontainer["build"]["args"]["OLLAMA_PRELOAD_MODELS"].split(",")
-        self.assertIn("llama3.1:8b", preload_models)
-        self.assertIn("qwen2.5-coder:1.5b", preload_models)
-        self.assertNotIn("hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M", preload_models)
-        self.assertNotIn("qwen3.6-35b-a3b:iq1", preload_models)
-        self.assertEqual("llama3.1:8b", devcontainer["containerEnv"]["CODING_DEFAULT_MODEL"])
-        self.assertEqual("llama3.1:8b", devcontainer["containerEnv"]["CODING_AGENT_MODEL"])
-
-        dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("CODING_AGENT_MODEL=llama3.1:8b", dockerfile)
-        self.assertIn(
-            "CONTINUE_OLLAMA_MODELS=llama3.1:8b,qwen2.5-coder:1.5b",
-            dockerfile,
-        )
-        self.assertNotIn(
-            "CONTINUE_OLLAMA_MODELS=qwen3.6-35b-a3b:iq1,llama3.1:8b",
-            dockerfile,
-        )
         for config_path in [
-            REPO_ROOT / ".continue" / "models" / "coding-agent-llama3.1-8b.yaml",
-            REPO_ROOT / "source" / "defaults" / "continue" / "models" / "coding-agent-llama3.1-8b.yaml",
+            REPO_ROOT / ".continue" / "models" / "coding-qwen2.5-coder-1.5b.yaml",
+            REPO_ROOT / "source" / "defaults" / "continue" / "models" / "coding-qwen2.5-coder-1.5b.yaml",
         ]:
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             model = config["models"][0]
-            options = model["defaultCompletionOptions"]
-            self.assertEqual("Coding Agent - Llama 3.1 8B", model["name"], str(config_path))
-            self.assertEqual("llama3.1:8b", model["model"], str(config_path))
-            self.assertIn("tool_use", model.get("capabilities", []), str(config_path))
-            self.assertNotIn(model["model"], known_non_tool_ollama_models, str(config_path))
-            self.assertEqual(expected_context, options["contextLength"], str(config_path))
-            self.assertLess(options["maxTokens"], options["contextLength"], str(config_path))
-            self.assertLessEqual(options["maxTokens"], 2048, str(config_path))
-            tool_models.append(model["model"])
+            self.assertEqual("Coding Micro - Qwen2.5 Coder 1.5B", model["name"], str(config_path))
+            self.assertEqual("qwen2.5-coder:1.5b", model["model"], str(config_path))
+            self.assertNotIn("tool_use", model.get("capabilities", []), str(config_path))
 
         for models_root in [
             REPO_ROOT / ".continue" / "models",
             REPO_ROOT / "source" / "defaults" / "continue" / "models",
         ]:
-            for path in models_root.glob("*.yaml"):
-                config = yaml.safe_load(path.read_text(encoding="utf-8"))
-                for model in config.get("models", []):
-                    if model.get("model") in known_non_tool_ollama_models:
-                        self.assertNotIn("tool_use", model.get("capabilities", []), str(path))
-
-        self.assertEqual(["llama3.1:8b", "llama3.1:8b"], tool_models)
+            self.assertTrue((models_root / "coding-qwen2.5-coder-1.5b.yaml").exists())
+            self.assertFalse((models_root / "coding-agent-llama3.1-8b.yaml").exists())
+            self.assertFalse((models_root / "coding-qwen3.6-35b-a3b.yaml").exists())
 
     def test_devcontainer_does_not_override_default_ollama_model_policy(self):
         config = json.loads(
@@ -153,12 +115,12 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertNotIn("secret-token", text)
             self.assertNotIn("MCP_HTTP_BEARER_TOKEN=", text)
 
-    def test_devcontainer_exposes_dri_device_for_vulkan_ollama(self):
+    def test_devcontainer_keeps_vulkan_ollama_opt_in(self):
         config = json.loads(
             (REPO_ROOT / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8")
         )
-        self.assertIn("--device=/dev/dri", config.get("runArgs", []))
-        self.assertEqual("1", config["containerEnv"]["OLLAMA_VULKAN"])
+        self.assertNotIn("--device=/dev/dri", config.get("runArgs", []))
+        self.assertEqual("0", config["containerEnv"]["OLLAMA_VULKAN"])
 
     def test_setup_script_generates_devcontainer_with_ollama_ports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -188,13 +150,15 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("127.0.0.1:2345:2345", config.get("runArgs", []))
         self.assertIn("--security-opt=seccomp=unconfined", config.get("runArgs", []))
         self.assertIn("--security-opt=apparmor=unconfined", config.get("runArgs", []))
+        self.assertNotIn("--device=/dev/dri", config.get("runArgs", []))
+        self.assertEqual("0", config["containerEnv"]["OLLAMA_VULKAN"])
         self.assertEqual("0.0.0.0:2345", config["containerEnv"]["OLLAMA_HOST"])
         self.assertEqual(
             "0.0.0.0:2345", config["containerEnv"]["OLLAMA_FALLBACK_HOST"]
         )
-        self.assertEqual("32768", config["containerEnv"]["OLLAMA_CONTEXT_LENGTH"])
-        self.assertEqual("32768", config["containerEnv"]["OLLAMA_TEXT_ALIAS_NUM_CTX"])
-        self.assertEqual("llama3.1:8b", config["containerEnv"]["CODING_DEFAULT_MODEL"])
+        self.assertEqual("8192", config["containerEnv"]["OLLAMA_CONTEXT_LENGTH"])
+        self.assertEqual("8192", config["containerEnv"]["OLLAMA_TEXT_ALIAS_NUM_CTX"])
+        self.assertEqual("qwen2.5-coder:1.5b", config["containerEnv"]["CODING_DEFAULT_MODEL"])
         self.assertEqual(
             "http://127.0.0.1:2345/api/generate",
             config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
@@ -255,15 +219,17 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertNotIn("CODEX_DISABLE_INNER_SANDBOX", entrypoint)
         self.assertNotIn('sandbox_mode = "danger-full-access"', entrypoint)
 
-    def test_dockerfile_keeps_llama31_default_coding_model_and_micro_fast_path(self):
+    def test_dockerfile_keeps_compact_default_coding_model(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("CODING_DEFAULT_MODEL=llama3.1:8b", dockerfile)
-        self.assertIn("CODING_AGENT_MODEL=llama3.1:8b", dockerfile)
+        self.assertIn("CODING_DEFAULT_MODEL=qwen2.5-coder:1.5b", dockerfile)
+        self.assertIn("CODING_AGENT_MODEL=qwen2.5-coder:1.5b", dockerfile)
         self.assertIn("CODING_MICRO_MODEL=qwen2.5-coder:1.5b", dockerfile)
-        self.assertIn("OLLAMA_CONTEXT_LENGTH=32768", dockerfile)
-        full_default_models = "llama3.1:8b,qwen2.5-coder:1.5b"
+        self.assertIn("OLLAMA_CONTEXT_LENGTH=8192", dockerfile)
+        full_default_models = "qwen2.5-coder:1.5b"
         self.assertIn(f"CONTINUE_OLLAMA_MODELS={full_default_models}", dockerfile)
-        self.assertIn('ARG OLLAMA_PRELOAD_MODELS=""', dockerfile)
+        self.assertIn("OLLAMA_TEXT_ALIAS_SOURCE_MODEL= \\", dockerfile)
+        self.assertIn("OLLAMA_TEXT_ALIAS_MODEL= \\", dockerfile)
+        self.assertIn('ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:1.5b"', dockerfile)
         self.assertIn("OLLAMA_ALLOW_PULL=false", dockerfile)
         self.assertIn('OLLAMA_MODELS=/var/cache/buildkit/ollama-models', dockerfile)
         self.assertIn('id=codebase-tooling-ollama-binary', dockerfile)
@@ -278,21 +244,22 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('--cache-to=type=local,dest=.buildx-cache,mode=max', readme)
         self.assertIn('--cache-from=type=local,src=.buildx-cache', readme)
 
-    def test_docs_call_out_t14_agent_mode_memory_limits(self):
+    def test_docs_describe_compact_default_model_policy(self):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        qwen_doc = (REPO_ROOT / "docs" / "qwen36-production-routing.md").read_text(encoding="utf-8")
         troubleshooting = (REPO_ROOT / "docs" / "troubleshooting.md").read_text(encoding="utf-8")
-        combined = "\n".join([readme, qwen_doc, troubleshooting])
+        docs_index = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+        combined = "\n".join([readme, troubleshooting])
 
-        self.assertIn("ThinkPad T14 Gen 1 AMD", combined)
-        self.assertIn("16GB", combined)
-        self.assertIn("32GB RAM", combined)
-        self.assertIn("32768 context", combined)
+        self.assertIn("qwen2.5-coder:1.5b", combined)
+        self.assertIn("compact", combined)
         self.assertIn("8192", combined)
         self.assertIn("16384", combined)
-        self.assertIn("smaller verified tool-capable Agent model", combined)
-        self.assertIn("does not currently include a smaller verified", combined)
-        self.assertIn("Do not treat the Qwen3.6 35B", readme)
+        self.assertIn("verified tool-capable Agent model", combined)
+        self.assertIn("preloads `qwen2.5-coder:1.5b`", combined)
+        self.assertIn("forgot to add '/v1'", troubleshooting)
+        self.assertIn("provider: ollama", troubleshooting)
+        self.assertIn("http://127.0.0.1:2345/api/tags", troubleshooting)
+        self.assertNotIn("qwen36-production-routing.md", docs_index)
 
     def test_dockerfile_apt_buildkit_cache_mounts_survive_debian_clean_hook(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -354,7 +321,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertNotIn('cp -a /tmp/ollama-models/. /home/app/.ollama/models/', dockerfile)
         self.assertIn('ln -sfn /opt/codebase-tooling/defaults/extensions "${server_root}/extensions"', dockerfile)
 
-    def test_continue_model_routing_uses_llama31_default_and_optional_qwen36_profile(self):
+    def test_continue_model_routing_uses_compact_default_profile(self):
         obsolete_models = (
             "qwen2.5-coder:3b",
             "granite3.3:2b",
@@ -373,28 +340,16 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             config = yaml.safe_load(routing)
             routes = config["routes"]
 
-            self.assertEqual("llama3.1:8b", config["router"]["model"], str(routing_path))
+            self.assertEqual("qwen2.5-coder:1.5b", config["router"]["model"], str(routing_path))
             self.assertEqual(
-                ".continue/models/coding-agent-llama3.1-8b.yaml",
+                ".continue/models/coding-qwen2.5-coder-1.5b.yaml",
                 config["router"]["file"],
                 str(routing_path),
             )
-            self.assertEqual("llama3.1:8b", routes["coding"]["model"], str(routing_path))
-            self.assertEqual("llama3.1:8b", routes["coding_agent"]["model"], str(routing_path))
+            self.assertEqual("qwen2.5-coder:1.5b", routes["coding"]["model"], str(routing_path))
+            self.assertEqual("qwen2.5-coder:1.5b", routes["coding_agent"]["model"], str(routing_path))
             self.assertEqual("qwen2.5-coder:1.5b", routes["coding_micro"]["model"], str(routing_path))
-            self.assertEqual(
-                "qwen3.6-35b-a3b:iq1",
-                routes["high_quality_chat_edit"]["model"],
-                str(routing_path),
-            )
-            self.assertEqual(
-                ".continue/models/coding-qwen3.6-35b-a3b.yaml",
-                routes["high_quality_chat_edit"]["file"],
-                str(routing_path),
-            )
-            for default_route in ("router", "coding", "coding_agent"):
-                route = config[default_route] if default_route == "router" else routes[default_route]
-                self.assertNotEqual("qwen3.6-35b-a3b:iq1", route["model"], str(routing_path))
+            self.assertNotIn("high_quality_chat_edit", routes)
             for model in obsolete_models:
                 self.assertNotIn(model, routing, str(routing_path))
 
@@ -402,9 +357,9 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             REPO_ROOT / ".continue" / "models",
             REPO_ROOT / "source" / "defaults" / "continue" / "models",
         ]:
-            self.assertTrue((models_root / "coding-qwen3.6-35b-a3b.yaml").exists())
-            self.assertTrue((models_root / "coding-agent-llama3.1-8b.yaml").exists())
             self.assertTrue((models_root / "coding-qwen2.5-coder-1.5b.yaml").exists())
+            self.assertFalse((models_root / "coding-qwen3.6-35b-a3b.yaml").exists())
+            self.assertFalse((models_root / "coding-agent-llama3.1-8b.yaml").exists())
             self.assertFalse((models_root / "coding-qwen2.5-coder-3b.yaml").exists())
             self.assertFalse((models_root / "router-granite3.3-2b.yaml").exists())
             self.assertFalse((models_root / "research-llama3.2-1b.yaml").exists())
@@ -470,9 +425,11 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn('PdfReader = _import_optional_dependency("pypdf", "pypdf").PdfReader', server)
         self.assertIn('Image = _import_optional_dependency("PIL.Image", "Pillow")', server)
 
-    def test_entrypoint_recreates_qwen36_alias_when_num_ctx_is_stale(self):
+    def test_entrypoint_keeps_text_alias_optional(self):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
 
+        self.assertIn('DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL=""', entrypoint)
+        self.assertIn('DEFAULT_OLLAMA_TEXT_ALIAS_MODEL=""', entrypoint)
         self.assertIn('ollama show "${alias}" --modelfile', entrypoint)
         self.assertIn('PARAMETER[[:space:]]+num_ctx[[:space:]]+${num_ctx}', entrypoint)
         self.assertIn("stale num_ctx", entrypoint)
@@ -482,11 +439,9 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         entrypoint = (REPO_ROOT / "source" / "entrypoint.sh").read_text(encoding="utf-8")
 
         self.assertIn("copy_continue_default_if_missing_or_stale()", entrypoint)
-        self.assertIn("Continue Qwen3.6 profile has stale context/tool capability contract", entrypoint)
-        self.assertIn("contextLength:[[:space:]]*32768", entrypoint)
-        self.assertIn("Continue model routing has stale Qwen3.6 default route", entrypoint)
-        self.assertIn("grep -A2 '^router:'", entrypoint)
-        self.assertIn("grep -A2 '^  coding:'", entrypoint)
+        self.assertIn("remove_retired_continue_model_default()", entrypoint)
+        self.assertIn("Continue model routing references retired bundled model profiles", entrypoint)
+        self.assertIn("model: qwen2.5-coder:1.5b", (REPO_ROOT / "source" / "defaults" / "continue" / "model-routing.yaml").read_text(encoding="utf-8"))
         self.assertIn("Continue MCP server profile has stale auth header", entrypoint)
         self.assertIn("copy_continue_default_if_missing_or_stale", entrypoint)
 
@@ -502,7 +457,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("/dev/dri/card*", entrypoint)
         self.assertIn("/dev/kfd", entrypoint)
         self.assertIn('seed_ollama_models_from_image_preload', entrypoint)
-        self.assertIn('export OLLAMA_VULKAN=1', entrypoint)
+        self.assertIn('export OLLAMA_VULKAN="${OLLAMA_VULKAN:-0}"', entrypoint)
         before_drop = entrypoint.split(
             'exec su -m -s /bin/bash app -c "/app/entrypoint.sh --as-app"', 1
         )[0]
@@ -627,7 +582,88 @@ if [[ -e "{chown_log}" ]]; then cat "{chown_log}"; fi
 
 
 class ServerOllamaContractStatusTest(ServerToolsTestBase):
-    def test_qwen36_endpoint_requests_use_template_stops_and_sanitize_output(self):
+    def test_agent_probe_uses_continue_tool_call_shape(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "model": "qwen2.5-coder:1.5b",
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "repo_status",
+                                        "arguments": {"summary": "status"},
+                                    }
+                                }
+                            ],
+                        },
+                        "done": True,
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["timeout"] = timeout
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse()
+
+        with patch.object(
+            self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
+        ), patch.object(self.server, "_urlopen_with_host_certs", side_effect=fake_urlopen):
+            out = self.server._probe_ollama_chat("qwen2.5-coder:1.5b")
+
+        payload = captured["payload"]
+        self.assertEqual(f"{NATIVE_OLLAMA_BASE}/api/chat", captured["url"])
+        self.assertEqual("qwen2.5-coder:1.5b", payload["model"])
+        self.assertTrue(payload["stream"])
+        self.assertEqual(0, payload["options"]["temperature"])
+        self.assertIn("tools", payload)
+        self.assertEqual("function", payload["tools"][0]["type"])
+        self.assertEqual("repo_status", payload["tools"][0]["function"]["name"])
+        self.assertEqual("continue_agent", out["mode"])
+        self.assertEqual(["repo_status"], out["tool_call_names"])
+        self.assertTrue(out["ok"])
+
+    def test_ollama_chat_probe_extracts_http_error_body(self):
+        error_body = json.dumps(
+            {
+                "error": "model runner has unexpectedly stopped, this may be due to resource limitations"
+            }
+        ).encode("utf-8")
+        body_file = tempfile.SpooledTemporaryFile()
+        body_file.write(error_body)
+        body_file.seek(0)
+        http_error = urllib.error.HTTPError(
+            f"{NATIVE_OLLAMA_BASE}/api/chat",
+            500,
+            "Internal Server Error",
+            hdrs={},
+            fp=body_file,
+        )
+
+        with patch.object(
+            self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
+        ), patch.object(self.server, "_urlopen_with_host_certs", side_effect=http_error):
+            out = self.server._probe_ollama_chat("qwen2.5-coder:1.5b")
+
+        self.assertTrue(out["reachable"])
+        self.assertEqual(500, out["status"])
+        self.assertFalse(out["ok"])
+        self.assertIn("model runner has unexpectedly stopped", out["error"])
+
+    def test_endpoint_sanitizes_chat_sentinel_output(self):
         captured = {}
 
         class FakeResponse:
@@ -652,18 +688,15 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         with patch.object(self.server, "_urlopen_with_host_certs", side_effect=fake_urlopen):
             output = self.server._local_infer_via_endpoint(
                 prompt="hello",
-                model="qwen3.6-35b-a3b:iq1",
+                model="qwen2.5-coder:1.5b",
                 max_tokens=32,
                 temperature=0.1,
                 system="system prompt",
             )
 
         self.assertEqual(output, "actual answer")
-        self.assertIn("template", captured["payload"])
-        self.assertIn("<|im_start|>user", captured["payload"]["template"])
-        self.assertIn("<|im_end|>", captured["payload"]["options"]["stop"])
-        self.assertNotIn("<think>", captured["payload"]["options"]["stop"])
-        self.assertNotIn("</think>", captured["payload"]["options"]["stop"])
+        self.assertNotIn("template", captured["payload"])
+        self.assertNotIn("stop", captured["payload"]["options"])
 
     def test_local_model_status_reports_bootstrap_opt_out(self):
         with patch.dict(os.environ, {"CONTINUE_OLLAMA_MODELS": ""}, clear=False), patch.object(
@@ -671,7 +704,7 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         ), patch.object(
             self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
         ), patch.object(
-            self.server, "CODING_DEFAULT_MODEL", "llama3.1:8b"
+            self.server, "CODING_DEFAULT_MODEL", "qwen2.5-coder:1.5b"
         ), patch.object(
             self.server,
             "_fetch_ollama_tags",
@@ -688,6 +721,17 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
                 "url": f"{NATIVE_OLLAMA_BASE}/v1/",
                 "reachable": False,
                 "error": "HTTP Error 404: Not Found",
+            },
+        ), patch.object(
+            self.server,
+            "_probe_ollama_chat",
+            return_value={
+                "url": f"{NATIVE_OLLAMA_BASE}/api/chat",
+                "model": "qwen2.5-coder:1.5b",
+                "reachable": None,
+                "ok": None,
+                "skipped": True,
+                "reason": "probe_model_not_installed",
             },
         ):
             out = self.server.local_model_status()
@@ -707,21 +751,24 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
             any("no default bundled model set is declared" in msg for msg in out["diagnostics"])
         )
         self.assertTrue(any("without /v1" in msg for msg in out["diagnostics"]))
+        self.assertTrue(any("generic config.json /v1 hint" in msg for msg in out["diagnostics"]))
+        self.assertTrue(out["infer"]["chat_probe"]["skipped"])
+        self.assertTrue(out["infer"]["agent_probe"]["skipped"])
 
     def test_local_model_status_reports_native_contract_and_installed_default(self):
         with patch.dict(
             os.environ,
             {
-                "CONTINUE_OLLAMA_MODELS": "llama3.1:8b,qwen2.5-coder:1.5b",
+                "CONTINUE_OLLAMA_MODELS": "qwen2.5-coder:1.5b",
                 "OLLAMA_ALLOW_PULL": "false",
             },
             clear=False,
         ), patch.object(self.server, "LOCAL_INFER_BACKEND", "endpoint"), patch.object(
             self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
         ), patch.object(
-            self.server, "CODING_DEFAULT_MODEL", "llama3.1:8b"
+            self.server, "CODING_DEFAULT_MODEL", "qwen2.5-coder:1.5b"
         ), patch.object(
-            self.server, "CODING_AGENT_MODEL", "llama3.1:8b"
+            self.server, "CODING_AGENT_MODEL", "qwen2.5-coder:1.5b"
         ), patch.object(
             self.server,
             "_fetch_ollama_tags",
@@ -729,7 +776,7 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
                 "url": f"{NATIVE_OLLAMA_BASE}/api/tags",
                 "reachable": True,
                 "status": 200,
-                "model_ids": ["llama3.1:8b"],
+                "model_ids": ["qwen2.5-coder:1.5b"],
             },
         ), patch.object(
             self.server,
@@ -739,6 +786,16 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
                 "reachable": False,
                 "error": "HTTP Error 404: Not Found",
             },
+        ), patch.object(
+            self.server,
+            "_probe_ollama_chat",
+            return_value={
+                "url": f"{NATIVE_OLLAMA_BASE}/api/chat",
+                "model": "qwen2.5-coder:1.5b",
+                "reachable": True,
+                "status": 200,
+                "ok": True,
+            },
         ):
             out = self.server.local_model_status()
 
@@ -746,11 +803,70 @@ class ServerOllamaContractStatusTest(ServerToolsTestBase):
         self.assertEqual(out["infer"]["openai_compat_base"], f"{NATIVE_OLLAMA_BASE}/v1/")
         self.assertTrue(out["ollama"]["bootstrap_enabled"])
         self.assertFalse(out["ollama"]["runtime_pull_enabled"])
-        self.assertEqual(out["ollama"]["installed_models"], ["llama3.1:8b"])
+        self.assertEqual(out["ollama"]["installed_models"], ["qwen2.5-coder:1.5b"])
         self.assertTrue(out["coding"]["default_model_installed"])
         self.assertTrue(out["coding"]["default_model_in_bootstrap_list"])
         self.assertTrue(out["coding"]["agent_model_installed"])
         self.assertTrue(out["coding"]["agent_model_in_bootstrap_list"])
-        self.assertFalse(out["coding"]["micro_model_installed"])
+        self.assertTrue(out["coding"]["micro_model_installed"])
         self.assertTrue(out["coding"]["micro_model_in_bootstrap_list"])
+        self.assertEqual(f"{NATIVE_OLLAMA_BASE}/api/chat", out["infer"]["chat_url"])
+        self.assertTrue(out["infer"]["chat_ok"])
+        self.assertTrue(out["infer"]["agent_ok"])
         self.assertTrue(any("without /v1" in msg for msg in out["diagnostics"]))
+        self.assertTrue(any("generic config.json /v1 hint" in msg for msg in out["diagnostics"]))
+
+    def test_local_model_status_reports_ollama_chat_runner_failure(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CONTINUE_OLLAMA_MODELS": "qwen2.5-coder:1.5b",
+                "OLLAMA_ALLOW_PULL": "false",
+            },
+            clear=False,
+        ), patch.object(self.server, "LOCAL_INFER_BACKEND", "endpoint"), patch.object(
+            self.server, "LOCAL_INFER_ENDPOINT", f"{NATIVE_OLLAMA_BASE}/api/generate"
+        ), patch.object(
+            self.server, "CODING_DEFAULT_MODEL", "qwen2.5-coder:1.5b"
+        ), patch.object(
+            self.server, "CODING_AGENT_MODEL", "qwen2.5-coder:1.5b"
+        ), patch.object(
+            self.server,
+            "_fetch_ollama_tags",
+            return_value={
+                "url": f"{NATIVE_OLLAMA_BASE}/api/tags",
+                "reachable": True,
+                "status": 200,
+                "model_ids": ["qwen2.5-coder:1.5b"],
+            },
+        ), patch.object(
+            self.server,
+            "_probe_http",
+            return_value={
+                "url": f"{NATIVE_OLLAMA_BASE}/v1/",
+                "reachable": False,
+                "error": "HTTP Error 404: Not Found",
+            },
+        ), patch.object(
+            self.server,
+            "_probe_ollama_chat",
+            return_value={
+                "url": f"{NATIVE_OLLAMA_BASE}/api/chat",
+                "model": "qwen2.5-coder:1.5b",
+                "reachable": True,
+                "status": 500,
+                "ok": False,
+                "error": "model runner has unexpectedly stopped, this may be due to resource limitations or an internal error",
+            },
+        ):
+            out = self.server.local_model_status()
+
+        self.assertFalse(out["infer"]["chat_ok"])
+        self.assertFalse(out["infer"]["agent_ok"])
+        self.assertEqual(500, out["infer"]["chat_status"])
+        self.assertEqual(500, out["infer"]["agent_status"])
+        self.assertIn("model runner has unexpectedly stopped", out["infer"]["chat_error"])
+        self.assertIn("model runner has unexpectedly stopped", out["infer"]["agent_error"])
+        self.assertTrue(
+            any("Ollama /api/chat Agent-mode probe failed" in msg for msg in out["diagnostics"])
+        )

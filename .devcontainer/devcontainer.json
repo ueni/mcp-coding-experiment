@@ -4,7 +4,7 @@
     "context": "../source",
     "dockerfile": "../source/Dockerfile",
     "args": {
-      "OLLAMA_PRELOAD_MODELS": "llama3.1:8b,qwen2.5-coder:1.5b",
+      "OLLAMA_PRELOAD_MODELS": "qwen2.5-coder:1.5b",
       "OLLAMA_PULL_TIMEOUT_SECONDS": "7200"
     }
   },
@@ -18,8 +18,7 @@
     "-p",
     "127.0.0.1:2345:2345",
     "--security-opt=seccomp=unconfined",
-    "--security-opt=apparmor=unconfined",
-    "--device=/dev/dri"
+    "--security-opt=apparmor=unconfined"
   ],
   "containerEnv": {
     "DOCKER_HOST": "unix:///var/run/docker.sock",
@@ -28,14 +27,14 @@
     "MCP_TRANSPORT": "http",
     "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "ALLOW_MUTATIONS": "true",
-    "OLLAMA_VULKAN": "1",
+    "OLLAMA_VULKAN": "0",
     "OLLAMA_HOST": "0.0.0.0:2345",
     "OLLAMA_FALLBACK_HOST": "0.0.0.0:2345",
-    "OLLAMA_CONTEXT_LENGTH": "32768",
-    "CODING_DEFAULT_MODEL": "llama3.1:8b",
-    "CODING_AGENT_MODEL": "llama3.1:8b",
+    "OLLAMA_CONTEXT_LENGTH": "8192",
+    "CODING_DEFAULT_MODEL": "qwen2.5-coder:1.5b",
+    "CODING_AGENT_MODEL": "qwen2.5-coder:1.5b",
     "LOCAL_INFER_ENDPOINT": "http://127.0.0.1:2345/api/generate",
-    "OLLAMA_TEXT_ALIAS_NUM_CTX": "32768"
+    "OLLAMA_TEXT_ALIAS_NUM_CTX": "8192"
   },
   "forwardPorts": [
     8000,

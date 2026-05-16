@@ -171,14 +171,13 @@ Inline devcontainer example (non-compose):
   "workspaceFolder": "/repo",
   "runArgs": [
     "-p", "127.0.0.1:8000:8000",
-    "-p", "127.0.0.1:2345:2345",
-    "--device=/dev/dri"
+    "-p", "127.0.0.1:2345:2345"
   ],
   "containerEnv": {
     "MCP_TRANSPORT": "http",
     "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "ALLOW_MUTATIONS": "true",
-    "OLLAMA_VULKAN": "1"
+    "OLLAMA_VULKAN": "0"
   },
   "forwardPorts": [8000, 2345]
 }
@@ -216,13 +215,12 @@ when that optional backend is required; for local non-Docker installs, add
 
 Use [`scripts/monitor_runtime_resources.py`](./scripts/monitor_runtime_resources.py) to record a repeatable local baseline for the Docker image size and startup RAM usage after `/healthz` succeeds. Verifiers can opt in to `--continuous` monitoring to sample RAM/VRAM until the container exits or a configured timeout is reached, with peak RAM and explicit VRAM availability in the output. The CI devcontainer-image workflow also uploads `docker-resource-baseline.json` for verifier comparisons. See [Docker resource monitoring](./docs/resource-monitoring.md) for commands, output fields, and offline-bootstrap constraints.
 
-The checked-in devcontainer passes `/dev/dri` into the container and sets
-`OLLAMA_VULKAN=1` so the bundled Ollama service can use Vulkan-capable Linux
-GPUs. The image now bundles a Vulkan-capable Ollama release, and
-`source/entrypoint.sh` maps the matching device groups onto the `app` user
-before Ollama starts.
-Hosts without `/dev/dri` should remove that `runArgs` entry or use the setup
-script with `--disable-vulkan-gpu` when bootstrapping another repository.
+The checked-in devcontainer keeps `OLLAMA_VULKAN=0` by default because the
+Vulkan backend can be unstable on some integrated GPU/driver combinations. The
+image still bundles Vulkan-capable Ollama userspace, and `source/entrypoint.sh`
+maps matching device groups onto the `app` user when GPU devices are passed
+through. Use `setup-repository.sh --enable-vulkan-gpu` only after validating the
+host GPU path.
 
 Inside the container, the `app` user can run `sudo` without a password.
 
@@ -282,11 +280,9 @@ To add this MCP setup to another repository using the published image
 curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh
 ```
 
-The setup script auto-enables Vulkan GPU passthrough for the bundled Ollama
-service when `/dev/dri` exists on the host, writes `OLLAMA_VULKAN=1` into the
-generated devcontainer, and also adds `/dev/kfd` when it is present on AMD
-hosts. Use `--enable-vulkan-gpu` or `--disable-vulkan-gpu` to override that
-detection:
+The setup script keeps Vulkan GPU passthrough disabled by default for stable
+local Agent mode. Pass `--enable-vulkan-gpu` to add `/dev/dri`, set
+`OLLAMA_VULKAN=1`, and also add `/dev/kfd` when it is present on AMD hosts:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh -s -- --enable-vulkan-gpu
@@ -448,16 +444,16 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `PORT` | `8000` | No | Integer port | HTTP listen port. |
 | `MAX_READ_BYTES` | `262144` | No | Positive integer | Max bytes read by file tools per request. |
 | `MAX_OUTPUT_CHARS` | `200000` | No | Positive integer | Output truncation limit for tool responses. |
-| `CODING_DEFAULT_MODEL` | `llama3.1:8b` | No | Ollama model ID | Primary local coding model used by `coding_infer`, specialist task routes, and the default quality route. |
-| `CODING_AGENT_MODEL` | `llama3.1:8b` | No | Ollama model ID | Agent-capable local model profile advertised to Continue for tool-calling/Agent mode. |
-| `CODING_MICRO_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Small fast-path coding model used only for explicit `micro_coding` requests and short auto-routed autocomplete-like coding prompts. |
+| `CODING_DEFAULT_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Primary local coding model used by `coding_infer`, specialist task routes, and the default quality route. |
+| `CODING_AGENT_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Local model route used for Continue Agent-mode requests when no custom Agent-capable profile is configured. |
+| `CODING_MICRO_MODEL` | `qwen2.5-coder:1.5b` | No | Ollama model ID | Small fast-path coding model used for explicit `micro_coding` requests and short auto-routed autocomplete-like coding prompts. |
 | `CODING_MICRO_MAX_PROMPT_CHARS` | `600` | No | Positive integer | Maximum normalized prompt size for automatic micro-coding selection. |
-| `CONTINUE_OLLAMA_MODELS` | `llama3.1:8b,qwen2.5-coder:1.5b` | No | Comma-separated model IDs (or empty) | Default steady-state Ollama model set expected to be present locally and seeded into the runtime model directory. Set to empty to declare no default bundled model set. Add Qwen3.6 only for manual high-quality chat/edit opt-in on stronger hosts. |
+| `CONTINUE_OLLAMA_MODELS` | `qwen2.5-coder:1.5b` | No | Comma-separated model IDs (or empty) | Default steady-state Ollama model set expected to be present locally and seeded into the runtime model directory. Set to empty to declare no default bundled model set. |
 | `OLLAMA_ALLOW_PULL` | `false` | No | `true`, `false` | Explicit opt-in for runtime `ollama pull` of missing models. Keep `false` for offline-only startup. |
 | `OLLAMA_ENABLED` | `true` | No | `true`, `false` | Enables/disables Ollama startup in `entrypoint.sh`. |
-| `OLLAMA_CONTEXT_LENGTH` | `32768` | No | Positive integer | Ollama server default context length. Also used as the local text alias `num_ctx` when `OLLAMA_TEXT_ALIAS_NUM_CTX` is unset. This must stay high enough for Continue Agent-mode tool/MCP prompts. |
-| `OLLAMA_TEXT_ALIAS_SOURCE_MODEL` | `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M` | No | Ollama model ID | Source GGUF model used to create the local text-only alias. |
-| `OLLAMA_TEXT_ALIAS_MODEL` | `qwen3.6-35b-a3b:iq1` | No | Ollama model ID | Local text-only alias created from the source GGUF model so Ollama avoids projector-specific loader paths. |
+| `OLLAMA_CONTEXT_LENGTH` | `8192` | No | Positive integer | Ollama server default context length. Also used as the local text alias `num_ctx` when `OLLAMA_TEXT_ALIAS_NUM_CTX` is unset. Increase only on hosts with enough memory for larger Agent-mode prompts. |
+| `OLLAMA_TEXT_ALIAS_SOURCE_MODEL` | empty | No | Ollama model ID | Optional source model used to create a local text-only alias when `OLLAMA_TEXT_ALIAS_MODEL` is set. |
+| `OLLAMA_TEXT_ALIAS_MODEL` | empty | No | Ollama model ID | Optional local text-only alias created from `OLLAMA_TEXT_ALIAS_SOURCE_MODEL`. |
 | `OLLAMA_TEXT_ALIAS_NUM_CTX` | uses `OLLAMA_CONTEXT_LENGTH` | No | Positive integer | Optional per-alias `num_ctx` override written into the generated Modelfile. |
 | `OLLAMA_STARTUP_TIMEOUT` | `30` | No | Integer seconds | Max wait time for Ollama readiness before fallback/failure logic. |
 | `OLLAMA_HOST` | `127.0.0.1:11434` | No | `host:port` | Primary bind target for `ollama serve`. The devcontainer overrides this to `0.0.0.0:2345` so the bundled Ollama service is reachable from the host on port `2345`. |
@@ -471,15 +467,15 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
 - The devcontainer publishes `127.0.0.1:2345:2345` so Continue can reach the bundled Ollama service even when its extension host runs outside the container. If Continue reports `ECONNREFUSED 127.0.0.1:2345`, rebuild/reopen the devcontainer and confirm `curl http://127.0.0.1:2345/api/tags` works from the same side where Continue is running.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
-- `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), and `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs when `/dev/dri` is passed through.
-- The steady-state local development route is `llama3.1:8b` for `coding_infer`, Continue Agent/tool-calling, and specialist task routes. The devcontainer preloads `llama3.1:8b` plus the tiny `qwen2.5-coder:1.5b` micro fast path, and does not preload Qwen3.6 by default. This keeps local Agent/MCP workflows faster and lowers disk/RAM pressure on laptop-class hosts.
-- The local `qwen3.6-35b-a3b:iq1` profile remains available only for explicit high-quality chat/edit/apply opt-in on stronger hosts. It intentionally does not advertise `tool_use`, because that Ollama tag rejects tool calls with `does not support tools`; do not route default Agent/tool behavior to it.
-- Hardware note: `llama3.1:8b` Agent mode can be marginal on a ThinkPad T14 Gen 1 AMD, especially with 16GB RAM while VS Code, the devcontainer, and Ollama all run with a 32768 context window. Treat 32GB RAM (or equivalent Docker memory allocation) as the recommended local target for 8B Agent mode. On 16GB-class hosts, reduce the context window to 8192 or 16384, disable/preload fewer models, or choose a smaller verified tool-capable Agent model if one is introduced; this repo does not currently include a smaller verified tool-capable Agent default. Do not treat the Qwen3.6 35B chat/edit/apply profile as practical on that host class unless it is manually preloaded/accelerated and enough memory is available.
-- Existing host or repository `.continue` config may stay stale until refreshed. After pulling this change, rebuild/reopen the devcontainer and either keep `MCP_APPLY_REPO_DEFAULTS=true` or rerun `setup-repository.sh` / manually copy the `source/defaults/continue` files so the host-visible `.continue` config includes the Llama 3.1 Agent profile and routing.
-- `source/Dockerfile` preloads the default model set declared by `OLLAMA_PRELOAD_MODELS` into the image when those tags are pullable or already available to the build. The build-time preload step stores models in the stable BuildKit cache mount `id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models` and runs `ollama show` before `ollama pull`, so a persistent builder can skip already-cached models on later builds. On throwaway/remote builders, use `docker buildx` cache import/export (`--cache-to=...` and `--cache-from=...`) or the preload cache will still be empty on the next build. GitHub-hosted CI uses an empty preload build arg so validation does not depend on private/local GGUF artifacts.
+- `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), but the checked-in devcontainer keeps `OLLAMA_VULKAN=0` for stability. `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs only when `/dev/dri` is explicitly passed through and `OLLAMA_VULKAN=1` is set.
+- The steady-state local development route is `qwen2.5-coder:1.5b` for `coding_infer`, Continue routing, and specialist task routes. The checked-in VS Code devcontainer preloads that model with `OLLAMA_PRELOAD_MODELS=qwen2.5-coder:1.5b`, so fresh containers have the Continue model available without runtime pulls.
+- Agent-mode tool calling may require a custom local model profile with verified tool support. The repository no longer ships a separate bundled Agent model profile.
+- Hardware note: the repository default context is `8192` to reduce runner pressure on laptop-class hosts. Raise the context to `16384` or `32768` only after confirming enough memory for the selected local model and client workload.
+- Existing host or repository `.continue` config may stay stale until refreshed. After pulling this change, rebuild/reopen the devcontainer and either keep `MCP_APPLY_REPO_DEFAULTS=true` or rerun `setup-repository.sh` / manually copy the `source/defaults/continue` files so the host-visible `.continue` config includes the compact default model profile and routing.
+- `source/Dockerfile` preloads the model set declared by `OLLAMA_PRELOAD_MODELS` into the image; the default is `qwen2.5-coder:1.5b`. The build-time preload step stores models in the stable BuildKit cache mount `id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models` and runs `ollama show` before `ollama pull`, so a persistent builder can skip already-cached models on later builds. On throwaway/remote builders, use `docker buildx` cache import/export (`--cache-to=...` and `--cache-from=...`) or the preload cache will still be empty on the next build. CI validation jobs may override the build arg to empty when they need a no-model image path.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
-- `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the smaller coder, and short coding prompts can auto-select it when no explicit model override is provided. All other quality/specialist routes fall back to Llama 3.1 8B rather than obsolete small specialist models or the optional Qwen3.6 profile.
-- Qwen3.6 endpoint calls install chat sentinel stop sequences and strip leaked `<think>...</think>` reasoning blocks plus `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` tokens before returning tool output. The optional Qwen3.6 Continue model config advertises a 32768-token context window with a bounded 2048-token response budget, but Agent mode should select the default Llama 3.1 agent profile for MCP/tool prompts.
+- `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the compact coder, and short coding prompts can auto-select it when no explicit model override is provided.
+- Endpoint inference strips common chat sentinel and reasoning marker tokens before returning tool output.
 - Setting `CONTINUE_OLLAMA_MODELS` to an empty value declares that no default bundled model set is required. In that mode, Continue may report `model not found` until models are installed manually or `OLLAMA_ALLOW_PULL=true` is used.
 - A `404` on `http://127.0.0.1:2345/v1/` does not invalidate the native Ollama integration in this repo; the native base and `/api/tags` are the relevant health checks.
 
