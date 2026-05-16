@@ -256,6 +256,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "governance_report": {"categories": ["read-only"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
+    "interaction_smell_audit": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
@@ -13899,6 +13900,156 @@ def clarification_gate(
         rollback_plan=rollback_plan,
         user_response_action=user_response_action,
     )
+
+
+INTERACTION_SMELL_RULES: dict[str, dict[str, Any]] = {
+    "intent_drift": {
+        "terms": ("instead", "switch to", "unrelated", "new goal", "different task", "intent drift"),
+        "confidence": 0.72,
+        "next_action": "Route through task_router(mode='task') or clarification_gate before changing the original workflow intent.",
+        "path": "clarification_gate",
+    },
+    "ignored_historical_constraint": {
+        "terms": ("earlier constraint", "historical constraint", "as agreed", "previously required", "must still"),
+        "confidence": 0.76,
+        "next_action": "Rebuild a state_snapshot of prior constraints and confirm the invariant before proceeding.",
+        "path": "state_snapshot",
+    },
+    "ignored_no_mutation_constraint": {
+        "terms": ("do not edit", "don't edit", "no mutation", "read-only", "do not modify", "without changing files"),
+        "action_terms": ("apply_unified_diff", "write_file", "edit", "mutate", "commit", "delete"),
+        "confidence": 0.86,
+        "next_action": "Stop mutation-capable steps; use change_impact_gate and a rollback/snapshot plan before any approved write.",
+        "path": "change_impact_gate",
+    },
+    "ignored_no_secret_constraint": {
+        "terms": ("no secret", "no secrets", "do not expose secret", "don't print token", "redact", "credential", "private key"),
+        "action_terms": ("secret", "token", "api_key", "authorization", "credential", "private key"),
+        "confidence": 0.88,
+        "next_action": "Redact evidence and run workflow_diagnostics/security review before sharing outputs.",
+        "path": "workflow_diagnostics",
+    },
+    "missing_validation": {
+        "terms": ("needs test", "validate", "run tests", "verify", "release", "ready for review"),
+        "action_terms": ("skipped tests", "no validation", "without testing", "not run", "untested"),
+        "confidence": 0.78,
+        "next_action": "Run release_readiness or the smallest focused validation gate before handoff.",
+        "path": "release_readiness",
+    },
+    "contradictory_prior_plan": {
+        "terms": ("plan:", "prior plan", "first", "then", "do not"),
+        "action_terms": ("contradict", "opposite", "instead", "skip", "ignore plan", "before"),
+        "confidence": 0.74,
+        "next_action": "Pause and restate the active plan; use clarification_gate if the operator must choose between contradictory steps.",
+        "path": "clarification_gate",
+    },
+}
+
+
+def _interaction_step_text(step: dict[str, Any]) -> str:
+    fields = [
+        step.get("role"),
+        step.get("tool"),
+        step.get("name"),
+        step.get("intent"),
+        step.get("content"),
+        step.get("message"),
+        step.get("error"),
+        step.get("action"),
+        step.get("args"),
+        step.get("arguments"),
+        step.get("outputs"),
+        step.get("result"),
+    ]
+    return _diagnostic_text_blob(*fields)
+
+
+def _interaction_evidence(step: dict[str, Any], index: int) -> dict[str, Any]:
+    text = _interaction_step_text(step)
+    redacted = _redact_audit_string(text[:240])
+    return {
+        "step_id": str(step.get("step_id") or step.get("id") or f"trajectory-{index + 1}"),
+        "role": str(step.get("role", "")),
+        "tool": str(step.get("tool") or step.get("name") or ""),
+        "snippet": redacted,
+    }
+
+
+def _extract_interaction_constraints(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    constraints: list[dict[str, Any]] = []
+    for idx, step in enumerate(steps):
+        text = _interaction_step_text(step)
+        for category, rule in INTERACTION_SMELL_RULES.items():
+            if any(term in text for term in rule["terms"]):
+                constraints.append(
+                    {
+                        "category": category,
+                        "confidence": rule["confidence"],
+                        "evidence": [_interaction_evidence(step, idx)],
+                    }
+                )
+    return constraints[:25]
+
+
+def _build_interaction_smell_audit(trajectory: list[dict[str, Any]], persist_trajectory: bool = False) -> dict[str, Any]:
+    steps = [step for step in trajectory if isinstance(step, dict)][:50]
+    constraints = _extract_interaction_constraints(steps)
+    full_text = "\n".join(_interaction_step_text(step) for step in steps)
+    smells: list[dict[str, Any]] = []
+    for category, rule in INTERACTION_SMELL_RULES.items():
+        has_constraint = any(constraint["category"] == category for constraint in constraints)
+        action_terms = rule.get("action_terms", ())
+        action_seen = any(term in full_text for term in action_terms) if action_terms else has_constraint
+        if has_constraint and action_seen:
+            evidence = [
+                item["evidence"][0]
+                for item in constraints
+                if item["category"] == category and item.get("evidence")
+            ][:3]
+            smells.append(
+                {
+                    "category": category,
+                    "confidence": rule["confidence"],
+                    "evidence": evidence,
+                    "safe_next_action": rule["next_action"],
+                    "recommended_path": rule["path"],
+                }
+            )
+    redacted_steps = _redact_audit_value(steps)
+    return {
+        "schema": "interaction_smell_audit.v1",
+        "ok": not smells,
+        "smells": smells,
+        "extracted_constraints": constraints,
+        "safe_next_actions": [smell["safe_next_action"] for smell in smells],
+        "redactions_applied": _workflow_redactions_applied(redacted_steps if isinstance(redacted_steps, list) else []),
+        "recommendations": [
+            {"path": smell["recommended_path"], "reason": smell["category"]}
+            for smell in smells
+        ],
+        "read_only": True,
+        "storage": {
+            "trajectory_persisted": False,
+            "persist_trajectory_requested": bool(persist_trajectory),
+            "note": "Caller trajectory is analyzed in memory only; this tool does not persist it.",
+        },
+        "security": {
+            "redacts_sensitive_snippets": True,
+            "records_secrets": False,
+            "repo_boundary_enforced": True,
+        },
+    }
+
+
+@mcp.tool()
+def interaction_smell_audit(
+    trajectory: list[dict[str, Any]],
+    persist_trajectory: bool = False,
+) -> dict[str, Any]:
+    """Audit multi-turn agent trajectories for invariant/constraint interaction smells."""
+    if not isinstance(trajectory, list):
+        raise ValueError("trajectory must be a list of step objects")
+    return _build_interaction_smell_audit(trajectory, persist_trajectory=persist_trajectory)
 
 
 @mcp.tool()

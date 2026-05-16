@@ -34,6 +34,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "governance_report",
     "artifact_provenance",
     "workflow_diagnostics",
+    "interaction_smell_audit",
 )
 
 STABLE_FIELDS: dict[str, tuple[str, ...]] = {
@@ -53,6 +54,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports", "resource_links"),
     "artifact_provenance": ("schema", "provenance_schema", "artifact_count", "ok", "checks"),
     "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
+    "interaction_smell_audit": ("schema", "ok", "smells", "extracted_constraints", "safe_next_actions", "redactions_applied"),
 }
 
 EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -72,6 +74,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "provenance", "compressed_observation", "_meta"),
     "artifact_provenance": (),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
+    "interaction_smell_audit": ("recommendations", "security", "read_only", "storage"),
 }
 
 
@@ -384,6 +387,21 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "read_only": {"type": "boolean"},
             "security": {"type": "object"},
             "trajectory": {"type": "array", "items": {"type": "object"}},
+        },
+    ),
+    "interaction_smell_audit": _object_schema(
+        ["schema", "ok", "smells", "extracted_constraints", "safe_next_actions", "redactions_applied"],
+        {
+            "schema": {"type": "string", "const": "interaction_smell_audit.v1"},
+            "ok": {"type": "boolean"},
+            "smells": {"type": "array", "items": {"type": "object"}},
+            "extracted_constraints": {"type": "array", "items": {"type": "object"}},
+            "safe_next_actions": {"type": "array", "items": {"type": "string"}},
+            "redactions_applied": {"type": "array", "items": {"type": "string"}},
+            "recommendations": {"type": "array", "items": {"type": "object"}},
+            "security": {"type": "object"},
+            "read_only": {"type": "boolean"},
+            "storage": {"type": "object"},
         },
     ),
 }

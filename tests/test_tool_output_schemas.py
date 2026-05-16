@@ -38,6 +38,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "governance_report",
                 "artifact_provenance",
                 "workflow_diagnostics",
+                "interaction_smell_audit",
             ),
         )
         contracts = all_tool_output_contracts()
@@ -104,11 +105,41 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
+            "interaction_smell_audit": self.server.interaction_smell_audit(
+                trajectory=[
+                    {"role": "user", "content": "Please keep this read-only and run tests before review."},
+                    {"role": "assistant", "content": "I edited the file and skipped tests."},
+                ]
+            ),
         }
 
         for tool_name, payload in outputs.items():
             with self.subTest(tool_name=tool_name):
                 validate_against_schema(payload, TOOL_OUTPUT_SCHEMAS[tool_name])
+
+    def test_interaction_smell_audit_detects_constraint_smells_and_redacts(self):
+        payload = self.server.interaction_smell_audit(
+            trajectory=[
+                {"role": "user", "content": "Original intent: review docs only; do not edit, no secrets, run tests."},
+                {"role": "assistant", "content": "Instead I will edit files and print token=secret-value."},
+                {"role": "assistant", "content": "No validation: skipped tests before marking ready for review."},
+                {"role": "user", "content": "Earlier constraint must still hold; plan: first inspect then ask before writes."},
+                {"role": "assistant", "content": "Ignore plan and commit before inspection."},
+            ]
+        )
+        validate_against_schema(payload, TOOL_OUTPUT_SCHEMAS["interaction_smell_audit"])
+        categories = {smell["category"] for smell in payload["smells"]}
+        self.assertIn("intent_drift", categories)
+        self.assertIn("ignored_historical_constraint", categories)
+        self.assertIn("ignored_no_mutation_constraint", categories)
+        self.assertIn("ignored_no_secret_constraint", categories)
+        self.assertIn("missing_validation", categories)
+        self.assertIn("contradictory_prior_plan", categories)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["storage"]["trajectory_persisted"])
+        self.assertIn("<redacted>", self.server.json.dumps(payload))
+        recommended_paths = {item["path"] for item in payload["recommendations"]}
+        self.assertTrue({"clarification_gate", "state_snapshot", "change_impact_gate", "release_readiness", "workflow_diagnostics"}.issubset(recommended_paths))
 
     def test_resource_link_schema_validates_generated_artifacts(self):
         report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
