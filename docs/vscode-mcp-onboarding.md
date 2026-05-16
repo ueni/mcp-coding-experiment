@@ -24,6 +24,12 @@ This path starts from a fresh clone or downstream repository using the devcontai
 7. Copy `.vscode/mcp.example.json` to your user/workspace MCP config if your VS Code build expects active MCP registrations outside the repository sample, then keep the token out of git. The sample uses a password input rather than a committed secret.
 8. Make a test tool call from your MCP client against `http://localhost:8000/mcp` using `Authorization: Bearer <token>`.
 
+The checked-in devcontainer preloads `qwen2.5-coder:1.5b` during
+`docker build` with `OLLAMA_PRELOAD_MODELS=qwen2.5-coder:1.5b`. Use a
+persistent BuildKit cache so repeated rebuilds can reuse the downloaded model
+blob. Validation jobs that need a no-model image can override the build arg to
+an empty value.
+
 ## What the health check verifies
 
 `./scripts/vscode_mcp_healthcheck.py` checks:
@@ -53,9 +59,10 @@ The script prints remediation text for common failures: container not started, m
 - The devcontainer exposes HTTP MCP/Ollama environment and publishes/forwards ports `8000` and `2345`.
 - `.vscode/tasks.json` contains the MCP health check task.
 - A container started from the built image becomes healthy and passes `scripts/vscode_mcp_healthcheck.py`.
-- A bounded Ollama prompt returns a non-empty response when a model is already installed; otherwise the test prints an explicit skip unless required.
+- A bounded streaming native Ollama `/api/chat` request with a tool schema returns a tool call when a model is already installed, preferring `CODING_AGENT_MODEL` when it is present locally; otherwise the test prints an explicit skip unless required.
 
-Default local/CI execution never pulls model assets:
+The smoke test never pulls model assets by default; it uses a model already
+present in the image/container or skips the prompt check:
 
 ```bash
 TEST_IMAGE=codebase-tooling-mcp:test \
@@ -64,7 +71,7 @@ OLLAMA_ALLOW_PULL=false \
 python3 scripts/devcontainer_smoke_test.py
 ```
 
-To require a real prompt against a preinstalled model, opt in explicitly. The script checks `/api/tags`, bounds generation with `num_predict`, and uses `ollama pull` only when `OLLAMA_ALLOW_PULL=true` is set for an explicit local run:
+To require a real Agent-mode prompt against a preinstalled model, opt in explicitly. The script checks `/api/tags`, sends a streaming native `/api/chat` tool-call request like Continue's Ollama provider, bounds generation with `num_predict`, and uses `ollama pull` only when `OLLAMA_ALLOW_PULL=true` is set for an explicit local run:
 
 ```bash
 TEST_IMAGE=codebase-tooling-mcp:test \
@@ -83,7 +90,7 @@ GitHub Actions runs the smoke test after building the devcontainer image with th
 | `allow_smoke_ollama_pull` / `OLLAMA_ALLOW_PULL` | `false` | Permit runtime model pulls only for explicit opt-in runs; pull requests keep this off. |
 | `MCP_SMOKE_SERVER_STARTUP_TIMEOUT_SECONDS` | `90` | Maximum time to wait for the devcontainer server health endpoint. |
 | `MCP_SMOKE_MODEL_TIMEOUT_SECONDS` | `30` | Timeout for the bounded prompt request. |
-| `preload_ollama_models` | `false` | Existing workflow input for opt-in model preloading; pull-request validation keeps this off to avoid uncontrolled model pulls. |
+| `preload_ollama_models` | `false` | Workflow input for validation-image model preloading; pull-request validation keeps this off and passes an empty build arg to exercise the no-model path. Published images still use the Dockerfile default preload. |
 
 
 ## Clarification fallback checklist and elicitation

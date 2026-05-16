@@ -166,6 +166,14 @@ def test_devcontainer_smoke_script_uses_safe_model_prompt_defaults():
     assert "OLLAMA_ALLOW_PULL" in script
     assert "MCP_SMOKE_REQUIRE_MODEL_PROMPT" in script
     assert "MODEL_PROMPT_SKIP: no local Ollama models" in script
+    assert "preferred_model = os.getenv('CODING_AGENT_MODEL', '').strip()" in script
+    assert "preferred_model if preferred_model in models else models[0]" in script
+    assert "base + '/api/chat'" in script
+    assert "'tools': [{" in script
+    assert "'stream': True" in script
+    assert "'repo_status'" in script
+    assert "'repo_status' not in tool_names" in script
+    assert "MODEL_AGENT_OK" in script
     assert "num_predict" in script
     assert "OLLAMA_ALLOW_PULL" in script
     assert "false" in script
