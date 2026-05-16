@@ -34,6 +34,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "governance_report",
     "artifact_provenance",
     "workflow_diagnostics",
+    "interaction_invariant_audit",
 )
 
 STABLE_FIELDS: dict[str, tuple[str, ...]] = {
@@ -53,6 +54,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports", "resource_links"),
     "artifact_provenance": ("schema", "provenance_schema", "artifact_count", "ok", "checks"),
     "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
+    "interaction_invariant_audit": ("schema", "read_only", "advisory_only", "ok_to_continue", "confidence", "extracted_invariants", "suspected_smells", "safe_next_actions", "linked_gates"),
 }
 
 EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -72,6 +74,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "provenance", "compressed_observation", "_meta"),
     "artifact_provenance": (),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
+    "interaction_invariant_audit": ("security", "redactions_applied", "input_summary"),
 }
 
 
@@ -384,6 +387,23 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "read_only": {"type": "boolean"},
             "security": {"type": "object"},
             "trajectory": {"type": "array", "items": {"type": "object"}},
+        },
+    ),
+    "interaction_invariant_audit": _object_schema(
+        ["schema", "read_only", "advisory_only", "ok_to_continue", "confidence", "extracted_invariants", "suspected_smells", "safe_next_actions", "linked_gates"],
+        {
+            "schema": {"type": "string", "const": "interaction_invariant_audit.v1"},
+            "read_only": {"type": "boolean", "const": True},
+            "advisory_only": {"type": "boolean", "const": True},
+            "ok_to_continue": {"type": "boolean"},
+            "confidence": {"type": "number"},
+            "extracted_invariants": {"type": "array", "items": {"type": "object"}},
+            "suspected_smells": {"type": "array", "items": {"type": "object"}},
+            "safe_next_actions": {"type": "array", "items": {"type": "string"}},
+            "linked_gates": {"type": "object"},
+            "redactions_applied": {"type": "array", "items": {"type": "string"}},
+            "security": {"type": "object"},
+            "input_summary": {"type": "object"},
         },
     ),
 }

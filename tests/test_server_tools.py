@@ -190,6 +190,57 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertFalse(cancelled["ok_to_continue"])
         self.assertEqual(cancelled["status"], "cancelled")
 
+    def test_interaction_invariant_audit_flags_intent_drift(self):
+        out = self.server.interaction_invariant_audit(
+            task_summary="Read-only audit of the routing behavior before making changes",
+            recent_notes=["Instead I rewrote everything and added a new feature."],
+        )
+
+        self.assertEqual(out["schema"], "interaction_invariant_audit.v1")
+        self.assertTrue(out["read_only"])
+        self.assertTrue(out["advisory_only"])
+        self.assertFalse(out["ok_to_continue"])
+        categories = {item["category"] for item in out["suspected_smells"]}
+        self.assertIn("intent_drift", categories)
+        self.assertIn("clarification_gate", out["linked_gates"])
+
+    def test_interaction_invariant_audit_flags_no_mutation_and_secret_constraints(self):
+        out = self.server.interaction_invariant_audit(
+            task_summary="Keep this read-only; no mutation and no secret exposure.",
+            recent_notes=[
+                "I edited source/server.py and committed it.",
+                "authorization: Bearer ghp_1234567890abcdefTOKEN",
+            ],
+        )
+
+        categories = [item["category"] for item in out["suspected_smells"]]
+        self.assertGreaterEqual(categories.count("ignored_historical_instruction"), 2)
+        self.assertIn("mutation_mode", {item["id"] for item in out["extracted_invariants"]})
+        self.assertIn("secret_safety", {item["id"] for item in out["extracted_invariants"]})
+        self.assertNotIn("ghp_1234567890abcdefTOKEN", self.server.json.dumps(out))
+        self.assertFalse(out["security"]["stores_conversation_logs_by_default"])
+
+    def test_interaction_invariant_audit_flags_missing_validation(self):
+        out = self.server.interaction_invariant_audit(
+            task_summary="Run tests with pytest before readiness summary.",
+            recent_notes=["Ready for release; skipped tests because this looked small."],
+        )
+
+        categories = {item["category"] for item in out["suspected_smells"]}
+        self.assertIn("missing_validation", categories)
+        self.assertIn("change_impact_gate", " ".join(out["safe_next_actions"]))
+        self.assertIn("release_readiness", out["linked_gates"])
+
+    def test_interaction_invariant_audit_flags_contradictory_prior_plan(self):
+        out = self.server.interaction_invariant_audit(
+            task_summary="Follow the prior plan and ask before changing scope.",
+            recent_notes=["Prior plan: no deploy. Instead I deployed, which contradicts the promise."],
+        )
+
+        categories = {item["category"] for item in out["suspected_smells"]}
+        self.assertIn("contradicted_prior_response", categories)
+        self.assertFalse(out["ok_to_continue"])
+
     def test_release_readiness_consumes_clarification_gate_and_audit_summary(self):
         out = self.server.release_readiness(
             base_ref="HEAD",

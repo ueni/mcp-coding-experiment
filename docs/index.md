@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT
 
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting for MCP policy and tool-gate decisions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
+- [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [Async workflow tasks](./workflow-tasks.md) - prototype MCP Tasks-style async handles for long-running repo workflows.
 - [Adaptive observation compression](./observation-compression.md) - opt-in deterministic summaries for verbose tool/report outputs.
 - [MCP roots diagnostics](./roots-diagnostics.md) - read-only advisory diagnostics for client roots vs `REPO_PATH`.
