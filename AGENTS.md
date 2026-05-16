@@ -25,8 +25,15 @@ manual.
 - Start high-level requests with public tool `task_router(mode="task", prompt=...)`.
   It classifies the request and dispatches to the right specialist flow. If unsure
   which existing workflow/prompt/tool fits a task, first call the read-only
-  selector `task_router(mode="workflow_select", prompt=...)`; see
+  selector `task_router(mode="workflow_select", prompt=..., execution_mode="auto")`; see
   [`docs/workflow-selection.md`](./docs/workflow-selection.md).
+- Choose the agent execution profile deliberately: `online-cloud-assisted` uses a
+  cloud model for primary reasoning while MCP provides compact context, audit,
+  memory, checks, token savings, and local autocomplete; `offline-onboard-only`
+  keeps model-dependent behavior local with bounded JSON decisions and the
+  inspect -> workflow selection -> context retrieval -> patch proposal ->
+  controlled apply -> checks -> summary loop. See
+  [`docs/execution-modes.md`](./docs/execution-modes.md).
 - Use `quality_router` for test/quality workflows, including `self_test`,
   `self_check`, `change_impact`, `release_readiness`, flaky-test, required-tool,
   spec-to-test, and smart-fix modes.

@@ -126,7 +126,16 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 - `devcontainer_health_check` - VS Code/devcontainer MCP endpoint, auth, port, and Ollama diagnostics.
 - `snapshot_before_refactor` - pre-refactor snapshot and rollback planning before mutation work.
 
-The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails. When unsure which workflow to use, call `task_router(mode="workflow_select", prompt="...")` first; it returns read-only, ranked workflow cards with confidence and caveats. See [Workflow selection cards](./docs/workflow-selection.md).
+The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails. When unsure which workflow to use, call `task_router(mode="workflow_select", prompt="...", execution_mode="auto")` first; it returns read-only, ranked workflow cards with confidence, caveats, and online/offline execution-mode guidance. See [Workflow selection cards](./docs/workflow-selection.md).
+
+## Agent execution modes
+
+`codebase-tooling-mcp` defines two profiles on the same workflow-card/router path:
+
+- `online-cloud-assisted` (`MCP_AGENT_EXECUTION_MODE=online`): a cloud model handles primary reasoning for quality and speed while MCP supplies compact repository context, audit traces, project/repo memory, deterministic prechecks, token-saving summaries/compression, and local/offline autocomplete.
+- `offline-onboard-only` (`MCP_AGENT_EXECUTION_MODE=offline`): no cloud model is required; local models make bounded structured decisions while MCP orchestrates inspect -> workflow selection -> context retrieval -> patch proposal -> controlled apply -> checks -> summary with confidence thresholds, clarification/escalation paths, and hard iteration limits.
+
+Use cloud mode for quality/speed/audit/token savings. Use offline mode for privacy/availability with scripted agent emulation. See [Agent execution modes](./docs/execution-modes.md).
 
 ### Static test impact map workflow
 
@@ -394,6 +403,8 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `LOCAL_EMBED_BACKEND` | `hash` | No | `hash`, `auto`, `sentence-transformers` | Offline local embedding backend. The default Docker image supports `hash`; the optional `sentence-transformers` backend requires building with `INSTALL_SENTENCE_TRANSFORMERS=true` or installing `source/requirements-embedding.txt`. |
 | `LOCAL_EMBED_MODEL` | empty | Required only for `sentence-transformers` | Model path/name | Sentence-transformers model reference. Keep empty for the default hash backend. |
 | `LOCAL_EMBED_DIM` | `256` | No | Positive integer >= 8 | Hash embedding dimension. |
+| `MCP_AGENT_EXECUTION_MODE` | `online` | No | `online`, `offline` | Default agent execution mode used by workflow selection. `online` is cloud-assisted with MCP context/audit/token savings; `offline` is onboard-only with bounded local JSON decisions and deterministic orchestration. |
+| `MCP_AGENT_PROFILE` | derived from mode | No | `online-cloud-assisted`, `offline-onboard-only` | Optional profile-name alias for the execution-mode contract. |
 | `MCP_HTTP_REQUEST_TIMEOUT_SECONDS` | `120` | No | Positive seconds | Non-SSE HTTP request timeout; exceeded requests return 504. |
 | `MCP_AUDIT_LOG_FILE` | `.codebase-tooling-mcp/audit/security_events.jsonl` | No | Path | Append-only JSONL audit events for sensitive tool calls and denied HTTP auth attempts. Arguments are redacted/truncated. |
 | `MCP_WORKFLOW_TASK_EXPIRY_HOURS` | `24` | No | Positive integer hours | Marks non-terminal async workflow task statuses as `expired` after this interval. |
@@ -463,7 +474,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
 - Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `interaction_invariant_audit`
 
-`task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `mode="workflow_select"` as a read-only preflight when an agent is unsure which workflow/prompt/tool to choose. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
+`task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `mode="workflow_select"` plus `execution_mode="online" | "offline" | "auto"` as a read-only preflight when an agent is unsure which workflow/prompt/tool to choose. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
 `workflow_task()` starts the prototype async wrapper for long-running workflows. Initial supported workflows are `governance_report` and `vscode_task_run`; status is persisted under `.codebase-tooling-mcp/tasks/`, can be read with `task_status()`, and returns repository-relative artifact resource links. VS Code task logs are kept in redacted result artifacts referenced by the compact task status. See [Workflow task prototype](./docs/workflow-tasks.md).
 
@@ -480,6 +491,7 @@ See [MCP Fun Labs](./docs/labs.md) for command examples and expected outputs.
 
 - [Documentation Index](./docs/index.md)
 - [Workflow task prototype](./docs/workflow-tasks.md)
+- [Agent execution modes](./docs/execution-modes.md)
 - [Tooling White Paper](./docs/tooling-whitepaper.md)
 - [JSON Settings Files](./docs/json-settings.md)
 - [MCP Fun Labs](./docs/labs.md)
