@@ -38,6 +38,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "governance_report",
                 "artifact_provenance",
                 "workflow_diagnostics",
+                "workflow_lineage",
                 "interaction_invariant_audit",
             ),
         )
@@ -67,6 +68,8 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
 
     def test_representative_success_outputs_validate_against_schemas(self):
         self.write_repo_text("src/schema_contract.py", "def schema_marker():\n    return 'marker'\n")
+
+        lineage_report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
 
         outputs = {
             "repo_info": self.server.repo_info(),
@@ -105,6 +108,9 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
+            "workflow_lineage": self.server.workflow_lineage(
+                manifest_path=lineage_report["exports"]["lineage"]
+            ),
             "interaction_invariant_audit": self.server.interaction_invariant_audit(
                 task_summary="Read-only audit before mutation; run tests before readiness.",
                 recent_notes=["No mutation happened yet."],
