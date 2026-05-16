@@ -148,6 +148,20 @@ MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TI
 MCP_AUDIT_LOG_FILE = Path(
     os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
 )
+MCP_OTEL_TRACING_ENABLED = os.getenv("MCP_OTEL_TRACING_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+MCP_OTEL_EXPORTER = os.getenv("MCP_OTEL_EXPORTER", "").strip().lower()
+MCP_OTEL_SPANS_FILE = Path(
+    os.getenv("MCP_OTEL_SPANS_FILE", ".codebase-tooling-mcp/traces/otel_spans.jsonl")
+)
+MCP_OTEL_SERVICE_NAME = (
+    os.getenv("MCP_OTEL_SERVICE_NAME", "codebase-tooling-mcp").strip()
+    or "codebase-tooling-mcp"
+)
 RELEASE_READINESS_DASHBOARD_RESOURCE_URI = "ui://codebase-tooling-mcp/release-readiness-dashboard"
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
@@ -286,6 +300,13 @@ SENSITIVE_AUDIT_VALUE_RE = re.compile(
 _HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
     "http_request_authorized", default=None
 )
+_OTEL_CURRENT_SPAN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "mcp_otel_current_span_id", default=""
+)
+_OTEL_CORRELATION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "mcp_otel_correlation_id", default=""
+)
+_OTEL_SPANS_LOCK = threading.Lock()
 _HTTP_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
 _HTTP_RATE_LIMIT_LOCK = threading.Lock()
 APPROVAL_POINTS_FILE = Path(".codebase-tooling-mcp/memory/approval_points.json")
@@ -1252,6 +1273,9 @@ def _append_audit_event(
         "reason": _redact_audit_reason(reason),
         "arguments": _redact_audit_value(arguments or {}),
     }
+    correlation_id = _OTEL_CORRELATION_ID.get()
+    if correlation_id:
+        event["correlation_id"] = _redact_audit_string(correlation_id)
     try:
         MCP_AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with MCP_AUDIT_LOG_FILE.open("a", encoding="utf-8") as fh:
@@ -1259,6 +1283,260 @@ def _append_audit_event(
     except OSError:
         # Audit logging must not leak arguments through exception text or crash read-only calls.
         pass
+
+
+_OTEL_LOCAL_EXPORTERS = {"json", "jsonl", "local", "test"}
+_OTEL_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
+)
+
+
+def _otel_exporter_name() -> str:
+    configured = str(MCP_OTEL_EXPORTER or "").strip().lower()
+    if configured:
+        return configured
+    return "jsonl" if MCP_OTEL_TRACING_ENABLED else "none"
+
+
+def _otel_should_record() -> bool:
+    return bool(MCP_OTEL_TRACING_ENABLED) and _otel_exporter_name() in _OTEL_LOCAL_EXPORTERS
+
+
+def _otel_spans_path() -> Path | None:
+    configured = Path(MCP_OTEL_SPANS_FILE)
+    path = configured.resolve() if configured.is_absolute() else (REPO_PATH / configured).resolve()
+    try:
+        path.relative_to(REPO_PATH)
+    except ValueError:
+        return None
+    return path
+
+
+def _otel_redact_paths(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _otel_redact_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_otel_redact_paths(item) for item in value[:25]]
+    if isinstance(value, str):
+        redacted = value
+        repo_text = str(REPO_PATH)
+        if repo_text and repo_text in redacted:
+            redacted = redacted.replace(repo_text, "<repo>")
+        if redacted.startswith("/") and not redacted.startswith("//"):
+            return "<redacted:path>"
+        return _OTEL_ABSOLUTE_PATH_RE.sub("<redacted:path>", redacted)
+    return value
+
+
+def _otel_safe_value(value: Any) -> Any:
+    return _otel_redact_paths(_redact_audit_value(value))
+
+
+def _otel_safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        safe[str(key)] = _otel_safe_value(value)
+    return safe
+
+
+class _OtelSpan:
+    def __init__(
+        self,
+        name: str,
+        attributes: dict[str, Any] | None = None,
+        *,
+        kind: str = "INTERNAL",
+        correlation_id: str = "",
+    ) -> None:
+        self.name = name
+        self.kind = kind
+        self.attributes = _otel_safe_attributes(attributes or {})
+        self.requested_correlation_id = correlation_id
+        self.enabled = _otel_should_record()
+        self.start_time = ""
+        self.start_perf = 0.0
+        self.span_id = ""
+        self.trace_id = ""
+        self.parent_span_id = ""
+        self.correlation_id = ""
+        self.status_code = "OK"
+        self.status_description = ""
+        self._span_token: contextvars.Token[str] | None = None
+        self._correlation_token: contextvars.Token[str] | None = None
+
+    def __enter__(self) -> "_OtelSpan":
+        if not self.enabled:
+            return self
+        self.start_time = _now_iso()
+        self.start_perf = time.perf_counter()
+        self.span_id = uuid.uuid4().hex[:16]
+        self.parent_span_id = _OTEL_CURRENT_SPAN_ID.get()
+        self.correlation_id = (
+            str(self.requested_correlation_id or "").strip()
+            or str(self.attributes.get("mcp.correlation_id") or "").strip()
+            or _OTEL_CORRELATION_ID.get()
+            or self.span_id
+        )
+        self.trace_id = hashlib.sha256(self.correlation_id.encode("utf-8")).hexdigest()[:32]
+        self.attributes["mcp.correlation_id"] = _otel_safe_value(self.correlation_id)
+        self._span_token = _OTEL_CURRENT_SPAN_ID.set(self.span_id)
+        self._correlation_token = _OTEL_CORRELATION_ID.set(self.correlation_id)
+        return self
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        if value is None:
+            return
+        self.attributes[str(key)] = _otel_safe_value(value)
+
+    def set_status(self, code: str, description: str = "") -> None:
+        self.status_code = code
+        self.status_description = _redact_audit_reason(description) if description else ""
+
+    def __exit__(self, exc_type: Any, exc: BaseException | None, tb: Any) -> bool:
+        if not self.enabled:
+            return False
+        if exc is not None:
+            self.set_status("ERROR", exc.__class__.__name__)
+            self.set_attribute("error.type", exc.__class__.__name__)
+        end_time = _now_iso()
+        duration_ms = max(0.0, (time.perf_counter() - self.start_perf) * 1000.0)
+        payload: dict[str, Any] = {
+            "schema": "mcp_otel_span.local_json.v1",
+            "name": self.name,
+            "kind": self.kind,
+            "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
+            "correlation_id": _otel_safe_value(self.correlation_id),
+            "start_time": self.start_time,
+            "end_time": end_time,
+            "duration_ms": round(duration_ms, 3),
+            "status": {"code": self.status_code},
+            "resource": {"service.name": _otel_safe_value(MCP_OTEL_SERVICE_NAME)},
+            "attributes": _otel_safe_attributes(self.attributes),
+        }
+        if self.status_description:
+            payload["status"]["description"] = self.status_description
+        _otel_write_span(payload)
+        if self._span_token is not None:
+            _OTEL_CURRENT_SPAN_ID.reset(self._span_token)
+        if self._correlation_token is not None:
+            _OTEL_CORRELATION_ID.reset(self._correlation_token)
+        return False
+
+
+def _otel_span(
+    name: str,
+    attributes: dict[str, Any] | None = None,
+    *,
+    kind: str = "INTERNAL",
+    correlation_id: str = "",
+) -> _OtelSpan:
+    return _OtelSpan(name, attributes, kind=kind, correlation_id=correlation_id)
+
+
+def _otel_write_span(payload: dict[str, Any]) -> None:
+    path = _otel_spans_path()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _OTEL_SPANS_LOCK:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
+    except OSError:
+        # Tracing must never make a tool call fail or leak local paths through exceptions.
+        pass
+
+
+def _otel_tool_attributes(
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    categories: list[str] | None = None,
+) -> dict[str, Any]:
+    categories = categories if categories is not None else _tool_categories(tool_name, arguments)
+    attrs: dict[str, Any] = {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.system": "mcp",
+        "gen_ai.tool.name": tool_name,
+        "mcp.schema": "mcp.tool_execution.v1",
+        "mcp.tool.name": tool_name,
+        "mcp.tool.categories": sorted(str(item) for item in categories),
+        "mcp.content_capture.enabled": False,
+    }
+    if arguments:
+        mode = arguments.get("mode") or arguments.get("action")
+        if mode:
+            attrs["mcp.tool.mode"] = str(mode)
+        if arguments.get("execution_mode"):
+            attrs["mcp.execution_mode.requested"] = str(arguments["execution_mode"])
+    return attrs
+
+
+def _otel_set_result_attributes(span: _OtelSpan, result: Any) -> None:
+    if not isinstance(result, dict):
+        return
+    if isinstance(result.get("schema"), str):
+        span.set_attribute("mcp.response.schema", result["schema"])
+    if isinstance(result.get("ok"), bool):
+        span.set_attribute("mcp.response.ok", result["ok"])
+    if isinstance(result.get("status"), str):
+        span.set_attribute("mcp.response.status", result["status"])
+    if isinstance(result.get("state"), str):
+        span.set_attribute("mcp.response.state", result["state"])
+    exports = result.get("exports")
+    if isinstance(exports, dict):
+        refs = [value for value in exports.values() if isinstance(value, str)]
+        if refs:
+            span.set_attribute("mcp.artifact.refs", refs[:5])
+
+
+def _otel_record_policy_gate(
+    tool_name: str,
+    categories: list[str],
+    decision: str,
+    reason: str,
+    arguments: dict[str, Any] | None = None,
+) -> None:
+    attrs = _otel_tool_attributes(tool_name, arguments, categories)
+    attrs.update(
+        {
+            "mcp.schema": "mcp.policy_gate.v1",
+            "mcp.policy.decision": decision,
+            "mcp.policy.reason": _redact_audit_reason(reason),
+            "mcp.security.mutation_required": bool(MUTATION_TOOL_CATEGORIES.intersection(categories)),
+            "mcp.http.authorized": _http_request_authorized_for_tools(),
+        }
+    )
+    with _otel_span("mcp.policy_gate", attrs) as span:
+        if decision != "allow":
+            span.set_status("ERROR", reason)
+
+
+def _otel_record_workflow_lifecycle(
+    task_id: str,
+    workflow: str,
+    event: str,
+    *,
+    success: bool = True,
+    status: str = "",
+    artifact_refs: list[str] | None = None,
+) -> None:
+    attrs = {
+        "mcp.schema": "mcp.workflow_task.lifecycle.v1",
+        "mcp.workflow.name": workflow,
+        "mcp.workflow.task_id": task_id,
+        "mcp.workflow.event": event,
+        "mcp.workflow.status": status or event,
+        "mcp.content_capture.enabled": False,
+    }
+    if artifact_refs:
+        attrs["mcp.artifact.refs"] = artifact_refs[:5]
+    with _otel_span("mcp.workflow_task.lifecycle", attrs, correlation_id=task_id) as span:
+        if not success:
+            span.set_status("ERROR", status or event)
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
@@ -2055,11 +2333,13 @@ def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None
     mutating = bool(MUTATION_TOOL_CATEGORIES.intersection(categories))
     if mutating and not ALLOW_MUTATIONS:
         _append_audit_event(tool_name, categories, False, arguments, "mutations disabled")
+        _otel_record_policy_gate(tool_name, categories, "deny", "mutations disabled", arguments)
         raise PermissionError(
             f"{tool_name} requires mutation permission; set ALLOW_MUTATIONS=true and use an authorized HTTP session."
         )
     if _inside_http_request() and sensitive and not _http_request_authorized_for_tools():
         _append_audit_event(tool_name, categories, False, arguments, "HTTP session not authorized")
+        _otel_record_policy_gate(tool_name, categories, "deny", "HTTP session not authorized", arguments)
         raise PermissionError(f"{tool_name} requires an authorized HTTP session")
     return categories
 
@@ -2087,24 +2367,32 @@ def _run_with_tool_security_audit(
     arguments: dict[str, Any],
     action: Callable[[], Any],
 ) -> Any:
-    categories = _require_tool_security_gate(tool_name, arguments)
-    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
-    try:
-        result = action()
-    except Exception as exc:
+    categories = _tool_categories(tool_name, arguments)
+    with _otel_span(
+        f"mcp.tool.{tool_name}",
+        _otel_tool_attributes(tool_name, arguments, categories),
+    ) as span:
+        categories = _require_tool_security_gate(tool_name, arguments)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+        try:
+            result = action()
+        except Exception as exc:
+            if sensitive:
+                _append_audit_event(tool_name, categories, False, arguments, type(exc).__name__)
+            raise
+        _otel_set_result_attributes(span, result)
         if sensitive:
-            _append_audit_event(tool_name, categories, False, arguments, type(exc).__name__)
-        raise
-    if sensitive:
-        success = _tool_result_success(result)
-        _append_audit_event(
-            tool_name,
-            categories,
-            success,
-            arguments,
-            "" if success else _tool_result_failure_reason(result),
-        )
-    return result
+            success = _tool_result_success(result)
+            span.set_attribute("mcp.response.ok", success)
+            _append_audit_event(
+                tool_name,
+                categories,
+                success,
+                arguments,
+                "" if success else _tool_result_failure_reason(result),
+            )
+        return result
 
 
 class MCPHTTPAuthMiddleware:
@@ -3227,6 +3515,13 @@ def _expire_workflow_task_if_needed(payload: dict[str, Any]) -> dict[str, Any]:
         {"task_id": payload.get("task_id"), "workflow": payload.get("workflow"), "event": "expired"},
         "expired",
     )
+    _otel_record_workflow_lifecycle(
+        str(payload.get("task_id") or ""),
+        str(payload.get("workflow") or ""),
+        "expired",
+        success=False,
+        status="expired",
+    )
     return _write_workflow_task_status(payload)
 
 
@@ -3263,6 +3558,7 @@ def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
         {"task_id": task_id, "workflow": "governance_report", "event": "started"},
         "started",
     )
+    _otel_record_workflow_lifecycle(task_id, "governance_report", "started", status="running")
     try:
         result = governance_report(**args)
         finished_at = _now_iso()
@@ -3307,6 +3603,13 @@ def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
             },
             "completed",
         )
+        _otel_record_workflow_lifecycle(
+            task_id,
+            "governance_report",
+            "completed",
+            status="succeeded",
+            artifact_refs=[str(link.get("path")) for link in resource_links if isinstance(link.get("path"), str)],
+        )
     except Exception as exc:  # pragma: no cover - defensive background failure path
         finished_at = _now_iso()
         payload.update(
@@ -3332,6 +3635,13 @@ def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
             False,
             {"task_id": task_id, "workflow": "governance_report", "event": "failed"},
             type(exc).__name__,
+        )
+        _otel_record_workflow_lifecycle(
+            task_id,
+            "governance_report",
+            "failed",
+            success=False,
+            status=type(exc).__name__,
         )
 
 
@@ -3361,6 +3671,7 @@ def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -
         {"task_id": task_id, "workflow": "vscode_task_run", "event": "started"},
         "started",
     )
+    _otel_record_workflow_lifecycle(task_id, "vscode_task_run", "started", status="running")
 
     retries: list[dict[str, Any]] = []
     attempt = 0
@@ -3389,6 +3700,13 @@ def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -
             False,
             {"task_id": task_id, "workflow": "vscode_task_run", "event": "retry", "attempt": attempt},
             "transient_failure",
+        )
+        _otel_record_workflow_lifecycle(
+            task_id,
+            "vscode_task_run",
+            "retry",
+            success=False,
+            status="transient_failure",
         )
 
     artifact_payload = _write_workflow_task_result_artifact(task_id, result)
@@ -3425,6 +3743,14 @@ def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -
         ok,
         {"task_id": task_id, "workflow": "vscode_task_run", "event": "completed" if ok else "failed"},
         "completed" if ok else "failed",
+    )
+    _otel_record_workflow_lifecycle(
+        task_id,
+        "vscode_task_run",
+        "completed" if ok else "failed",
+        success=ok,
+        status="succeeded" if ok else "failed",
+        artifact_refs=[str(link.get("path")) for link in artifact_links if isinstance(link.get("path"), str)],
     )
 
 def _start_workflow_task(
@@ -3507,6 +3833,7 @@ def _start_workflow_task(
         {"task_id": task_id, "workflow": workflow, "retry_of": retry_of, "event": "start"},
         "start",
     )
+    _otel_record_workflow_lifecycle(task_id, workflow, "start", status="pending")
     return _workflow_task_status_payload(task_id)
 
 
@@ -13090,44 +13417,63 @@ def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
     selected_mode, selected_mode_source = _resolve_agent_execution_mode(execution_mode, query)
-    tokens = _workflow_selection_tokens(query)
-    scored: list[dict[str, Any]] = []
-    max_score = 1.0
-    for card in WORKFLOW_CARDS:
-        details = _workflow_card_score(card, query, tokens, selected_mode, selected_mode_source)
-        max_score = max(max_score, float(details["score"]))
-        scored.append({"card": card, **details})
-    scored.sort(key=lambda row: (float(row["score"]), str(row["card"].get("id", ""))), reverse=True)
-
-    matches: list[dict[str, Any]] = []
-    for row in scored[: min(top_k, len(scored))]:
-        card = _workflow_card_public(row["card"], execution_mode=selected_mode)
-        score = float(row["score"])
-        confidence = round(min(0.99, score / max(max_score, 6.0)), 2)
-        if score <= 0:
-            confidence = 0.05
-        matches.append(
-            {
-                **card,
-                "score": round(score, 2),
-                "confidence": confidence,
-                "match_reasons": row["reasons"],
-            }
-        )
-    return {
-        "schema": WORKFLOW_SELECT_SCHEMA_VERSION,
-        "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
-        "execution_mode_schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
-        "execution_mode": selected_mode,
-        "execution_mode_source": selected_mode_source,
-        "execution_mode_profile": _agent_execution_mode_profile(selected_mode),
-        "query": query,
-        "read_only": True,
-        "selection_mode": "ranked_keyword_cards",
-        "cards_available": len(WORKFLOW_CARDS),
-        "matches": matches,
-        "caveats": _workflow_selection_caveats(matches, tokens, selected_mode, selected_mode_source),
+    attrs = {
+        "mcp.schema": "mcp.workflow_selection.v1",
+        "mcp.workflow.name": "workflow_select",
+        "mcp.workflow.mode": "workflow_select",
+        "mcp.execution_mode": selected_mode,
+        "mcp.execution_mode.requested": execution_mode,
+        "mcp.execution_mode.source": selected_mode_source,
+        "mcp.workflow.top_k": min(top_k, len(WORKFLOW_CARDS)),
+        "mcp.input.prompt.length": len(query),
+        "mcp.content_capture.enabled": False,
     }
+    with _otel_span("mcp.workflow.select", attrs) as span:
+        tokens = _workflow_selection_tokens(query)
+        span.set_attribute("mcp.input.prompt.token_count", len(tokens))
+        scored: list[dict[str, Any]] = []
+        max_score = 1.0
+        for card in WORKFLOW_CARDS:
+            details = _workflow_card_score(card, query, tokens, selected_mode, selected_mode_source)
+            max_score = max(max_score, float(details["score"]))
+            scored.append({"card": card, **details})
+        scored.sort(key=lambda row: (float(row["score"]), str(row["card"].get("id", ""))), reverse=True)
+
+        matches: list[dict[str, Any]] = []
+        for row in scored[: min(top_k, len(scored))]:
+            card = _workflow_card_public(row["card"], execution_mode=selected_mode)
+            score = float(row["score"])
+            confidence = round(min(0.99, score / max(max_score, 6.0)), 2)
+            if score <= 0:
+                confidence = 0.05
+            matches.append(
+                {
+                    **card,
+                    "score": round(score, 2),
+                    "confidence": confidence,
+                    "match_reasons": row["reasons"],
+                }
+            )
+        if matches:
+            span.set_attribute("mcp.workflow.top_match", matches[0].get("id", ""))
+            span.set_attribute("mcp.workflow.top_match.confidence", matches[0].get("confidence", 0.0))
+        span.set_attribute("mcp.workflow.match_count", len(matches))
+        result = {
+            "schema": WORKFLOW_SELECT_SCHEMA_VERSION,
+            "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
+            "execution_mode_schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
+            "execution_mode": selected_mode,
+            "execution_mode_source": selected_mode_source,
+            "execution_mode_profile": _agent_execution_mode_profile(selected_mode),
+            "query": query,
+            "read_only": True,
+            "selection_mode": "ranked_keyword_cards",
+            "cards_available": len(WORKFLOW_CARDS),
+            "matches": matches,
+            "caveats": _workflow_selection_caveats(matches, tokens, selected_mode, selected_mode_source),
+        }
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 class TaskRouterService:
@@ -13552,54 +13898,68 @@ def task_router(
         "sandbox_mode": sandbox_mode,
         "sandbox_action": sandbox_action,
     }
-    categories = _require_tool_security_gate("task_router", audit_args)
-    sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
-    try:
-        result = _TASK_ROUTER_SERVICE.route(
-            mode=mode,
-            prompt=prompt,
-            task=task,
-            prefix=prefix,
-            suffix=suffix,
-            language=language,
-            texts=texts,
-            query=query,
-            candidates=candidates,
-            execution_mode=execution_mode,
-            backend=backend,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            stop=stop,
-            normalize=normalize,
-            top_k=top_k,
-            output_profile=output_profile,
-            offset=offset,
-            limit=limit,
-            compress=compress,
-            store_result=store_result,
-            memory_session=memory_session,
-            check_profile=check_profile,
-            check_target=check_target,
-            check_timeout_seconds=check_timeout_seconds,
-            run_checks=run_checks,
-            packages=packages,
-            pip_upgrade=pip_upgrade,
-            sandbox_mode=sandbox_mode,
-            sandbox_id=sandbox_id,
-            sandbox_action=sandbox_action,
-            prompts=prompts,
-            max_parallel=max_parallel,
-            auto_parallel_when_possible=auto_parallel_when_possible,
-        )
-    except Exception as exc:
+    categories = _tool_categories("task_router", audit_args)
+    span_attrs = _otel_tool_attributes("task_router", audit_args, categories)
+    span_attrs.update(
+        {
+            "mcp.workflow.mode": str(mode or "task"),
+            "mcp.execution_mode.requested": execution_mode,
+            "mcp.input.prompt.length": len(str(prompt or query or "")),
+        }
+    )
+    with _otel_span("mcp.tool.task_router", span_attrs) as span:
+        categories = _require_tool_security_gate("task_router", audit_args)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+        try:
+            result = _TASK_ROUTER_SERVICE.route(
+                mode=mode,
+                prompt=prompt,
+                task=task,
+                prefix=prefix,
+                suffix=suffix,
+                language=language,
+                texts=texts,
+                query=query,
+                candidates=candidates,
+                execution_mode=execution_mode,
+                backend=backend,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                stop=stop,
+                normalize=normalize,
+                top_k=top_k,
+                output_profile=output_profile,
+                offset=offset,
+                limit=limit,
+                compress=compress,
+                store_result=store_result,
+                memory_session=memory_session,
+                check_profile=check_profile,
+                check_target=check_target,
+                check_timeout_seconds=check_timeout_seconds,
+                run_checks=run_checks,
+                packages=packages,
+                pip_upgrade=pip_upgrade,
+                sandbox_mode=sandbox_mode,
+                sandbox_id=sandbox_id,
+                sandbox_action=sandbox_action,
+                prompts=prompts,
+                max_parallel=max_parallel,
+                auto_parallel_when_possible=auto_parallel_when_possible,
+            )
+        except Exception as exc:
+            if sensitive:
+                _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
+            raise
+        _otel_set_result_attributes(span, result)
+        if isinstance(result, dict) and isinstance(result.get("execution_mode"), str):
+            span.set_attribute("mcp.execution_mode", result["execution_mode"])
         if sensitive:
-            _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
-        raise
-    if sensitive:
-        _append_audit_event("task_router", categories, True, audit_args)
-    return result
+            _append_audit_event("task_router", categories, True, audit_args)
+        return result
 
 
 @mcp.tool()
@@ -15266,54 +15626,88 @@ def workflow_task(
     retry_of: str = "",
 ) -> dict[str, Any]:
     """Start or inspect a supported persisted async workflow task."""
-    _require_git_repo()
-    if action not in {"start", "status"}:
-        raise ValueError("action must be one of: start, status")
-    if action == "status":
-        if not task_id:
-            raise ValueError("task_id is required for status")
-        return _workflow_task_status_payload(task_id)
-    if workflow == "vscode_task_run":
-        _require_mutations()
-        if not label.strip():
-            raise ValueError("label is required for vscode_task_run")
-        if timeout_seconds < 1:
-            raise ValueError("timeout_seconds must be >= 1")
-        args = {
-            "label": label.strip(),
-            "tasks_path": tasks_path,
-            "control_profile": control_profile,
-            "timeout_seconds": timeout_seconds,
-            "max_output_chars": max_output_chars,
-        }
-    elif workflow == "governance_report":
-        args = {
-            "start_time": start_time,
-            "end_time": end_time,
-            "base_ref": base_ref,
-            "head_ref": head_ref,
-            "export": export,
-        }
-    else:
-        raise ValueError(
-            "workflow must be one of: "
-            + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
-        )
-    return _start_workflow_task(
-        workflow,
-        args,
-        retry_of=retry_of,
-        task_id=task_id,
-        max_retries=max_retries if workflow == "vscode_task_run" else 0,
-        restart=restart,
+    action = str(action or "start").strip().lower() or "start"
+    workflow = str(workflow or "vscode_task_run").strip()
+    trace_task_id = task_id.strip()
+    attrs = _otel_tool_attributes(
+        "workflow_task",
+        {"action": action, "workflow": workflow, "task_id": trace_task_id},
+        _workflow_task_categories(workflow),
     )
+    attrs.update(
+        {
+            "mcp.workflow.name": workflow,
+            "mcp.workflow.action": action,
+            "mcp.workflow.task_id.present": bool(trace_task_id),
+        }
+    )
+    with _otel_span("mcp.tool.workflow_task", attrs, correlation_id=trace_task_id) as span:
+        _require_git_repo()
+        if action not in {"start", "status"}:
+            raise ValueError("action must be one of: start, status")
+        if action == "status":
+            if not task_id:
+                raise ValueError("task_id is required for status")
+            result = _workflow_task_status_payload(task_id)
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.workflow.task_id", task_id)
+            return result
+        if workflow == "vscode_task_run":
+            _require_mutations()
+            if not label.strip():
+                raise ValueError("label is required for vscode_task_run")
+            if timeout_seconds < 1:
+                raise ValueError("timeout_seconds must be >= 1")
+            args = {
+                "label": label.strip(),
+                "tasks_path": tasks_path,
+                "control_profile": control_profile,
+                "timeout_seconds": timeout_seconds,
+                "max_output_chars": max_output_chars,
+            }
+        elif workflow == "governance_report":
+            args = {
+                "start_time": start_time,
+                "end_time": end_time,
+                "base_ref": base_ref,
+                "head_ref": head_ref,
+                "export": export,
+            }
+        else:
+            raise ValueError(
+                "workflow must be one of: "
+                + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+            )
+        id_args = dict(args)
+        if retry_of:
+            id_args["retry_of"] = retry_of
+        resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
+        span.set_attribute("mcp.workflow.task_id", resolved_task_id)
+        if not trace_task_id:
+            span.set_attribute("mcp.workflow.task_id.generated", True)
+        result = _start_workflow_task(
+            workflow,
+            args,
+            retry_of=retry_of,
+            task_id=task_id,
+            max_retries=max_retries if workflow == "vscode_task_run" else 0,
+            restart=restart,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 @mcp.tool()
 def task_status(task_id: str) -> dict[str, Any]:
     """Return persisted redacted status for an asynchronous workflow task."""
-    _require_git_repo()
-    return _workflow_task_status_payload(task_id)
+    attrs = _otel_tool_attributes("task_status", {"task_id": task_id}, _tool_categories("task_status"))
+    attrs.update({"mcp.workflow.action": "status", "mcp.workflow.task_id.present": bool(task_id)})
+    with _otel_span("mcp.tool.task_status", attrs, correlation_id=task_id) as span:
+        _require_git_repo()
+        result = _workflow_task_status_payload(task_id)
+        span.set_attribute("mcp.workflow.task_id", task_id)
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 
