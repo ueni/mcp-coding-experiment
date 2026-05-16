@@ -81,6 +81,82 @@ class ServerToolsTest(ServerToolsTestBase):
         )
         self.assertEqual(impact["matches"][0]["id"], "test-impact")
 
+    def test_task_router_workflow_select_online_execution_mode_contract(self):
+        out = self.server.task_router(
+            mode="workflow_select",
+            execution_mode="online",
+            prompt="Use cloud-assisted mode for compact context, token savings, audit traces, and local autocomplete",
+            top_k=1,
+        )
+
+        self.assertEqual(out["execution_mode"], "online")
+        self.assertEqual(out["execution_mode_source"], "explicit")
+        profile = out["execution_mode_profile"]
+        self.assertEqual(profile["profile_name"], "online-cloud-assisted")
+        self.assertTrue(any("Cloud model owns primary reasoning" in item for item in profile["model_responsibilities"]))
+        self.assertTrue(any("compact repository context" in item for item in profile["mcp_responsibilities"]))
+        self.assertTrue(any("autocomplete" in item.lower() for item in profile["mcp_responsibilities"]))
+        self.assertEqual(out["matches"][0]["id"], "cloud-assisted-agent-mode")
+        self.assertIn("online", out["matches"][0]["supported_execution_modes"])
+        self.assertIn("selected_mode_routing", out["matches"][0])
+
+    def test_task_router_workflow_select_offline_execution_mode_contract(self):
+        out = self.server.task_router(
+            mode="workflow_select",
+            execution_mode="offline",
+            prompt="Run onboard-only local-small model JSON contract bounded loop for a controlled patch",
+            top_k=1,
+        )
+
+        self.assertEqual(out["execution_mode"], "offline")
+        self.assertEqual(out["matches"][0]["id"], "offline-bounded-agent-loop")
+        profile = out["execution_mode_profile"]
+        self.assertEqual(profile["profile_name"], "offline-onboard-only")
+        self.assertEqual(
+            profile["agent_loop"],
+            [
+                "inspect",
+                "workflow_selection",
+                "context_retrieval",
+                "patch_proposal",
+                "controlled_apply",
+                "checks",
+                "summary",
+            ],
+        )
+        contract = profile["small_model_json_contract"]
+        self.assertEqual(contract["schema"], "offline_small_model_decision.v1")
+        self.assertIn("confidence", contract["required_fields"])
+        self.assertIn("ask_clarification", contract["allowed_next_actions"])
+        self.assertIn("escalate_online", contract["allowed_next_actions"])
+        self.assertLessEqual(profile["iteration_limits"]["max_tool_iterations"], 6)
+        self.assertLess(profile["confidence_policy"]["clarify_below"], profile["confidence_policy"]["accept_min"])
+
+    def test_task_router_workflow_select_infers_offline_mode_from_prompt(self):
+        out = self.server.task_router(
+            mode="workflow_select",
+            prompt="No cloud: choose the onboard-only workflow for local patching",
+            top_k=1,
+        )
+
+        self.assertEqual(out["execution_mode"], "offline")
+        self.assertEqual(out["execution_mode_source"], "prompt")
+        self.assertEqual(out["matches"][0]["id"], "offline-bounded-agent-loop")
+        self.assertTrue(any("inferred" in caveat.lower() for caveat in out["caveats"]))
+
+    def test_offline_small_model_decision_policy_bounds_low_confidence_and_iterations(self):
+        clarify = self.server._offline_small_model_decision_policy(0.2, decision_retries=0)
+        self.assertEqual(clarify["next_action"], "ask_clarification")
+        self.assertEqual(clarify["reason"], "confidence_below_clarify_below")
+
+        escalated_confidence = self.server._offline_small_model_decision_policy(0.2, decision_retries=2)
+        self.assertEqual(escalated_confidence["next_action"], "escalate_online")
+        self.assertEqual(escalated_confidence["reason"], "low_confidence_after_retries")
+
+        escalated_iterations = self.server._offline_small_model_decision_policy(0.9, tool_iterations=6)
+        self.assertEqual(escalated_iterations["next_action"], "escalate_online")
+        self.assertEqual(escalated_iterations["reason"], "hard_iteration_limit_reached")
+
     def test_workflow_task_persists_succeeded_status_and_resource_link(self):
         original_audit_log = self.server.MCP_AUDIT_LOG_FILE
         self.server.MCP_AUDIT_LOG_FILE = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"

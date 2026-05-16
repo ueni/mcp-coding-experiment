@@ -26,6 +26,7 @@
     "MCP_APPLY_REPO_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
     "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
+    "MCP_AGENT_EXECUTION_MODE": "online",
     "ALLOW_MUTATIONS": "true",
     "OLLAMA_VULKAN": "0",
     "OLLAMA_HOST": "0.0.0.0:2345",

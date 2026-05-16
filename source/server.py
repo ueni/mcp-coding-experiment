@@ -305,6 +305,163 @@ CODING_AGENT_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yam
 CODING_MICRO_MODEL_CONFIG_FILE = ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
 CODING_AGENT_ROUTE = "coding_agent"
 CODING_MICRO_ROUTE = "coding_micro"
+AGENT_EXECUTION_MODE_SCHEMA_VERSION = "agent_execution_mode.v1"
+AGENT_EXECUTION_MODE_DEFAULT = "online"
+AGENT_EXECUTION_MODES = ("online", "offline")
+AGENT_EXECUTION_MODE_ENV = os.getenv("MCP_AGENT_EXECUTION_MODE", AGENT_EXECUTION_MODE_DEFAULT).strip()
+AGENT_EXECUTION_PROFILE_ENV = os.getenv("MCP_AGENT_PROFILE", "").strip()
+AGENT_EXECUTION_MODE_ALIASES = {
+    "online": "online",
+    "cloud": "online",
+    "cloud-assisted": "online",
+    "cloud_assisted": "online",
+    "online-cloud-assisted": "online",
+    "offline": "offline",
+    "onboard": "offline",
+    "onboard-only": "offline",
+    "onboard_only": "offline",
+    "local-only": "offline",
+    "local_only": "offline",
+    "offline-onboard-only": "offline",
+}
+AGENT_EXECUTION_MODE_PROMPT_TERMS = {
+    "online": (
+        "online",
+        "cloud",
+        "cloud-assisted",
+        "cloud assisted",
+        "remote model",
+        "hosted model",
+    ),
+    "offline": (
+        "offline",
+        "onboard",
+        "onboard-only",
+        "onboard only",
+        "local-only",
+        "local only",
+        "no cloud",
+        "air-gapped",
+        "airgapped",
+    ),
+}
+OFFLINE_AGENT_LOOP_STEPS = [
+    "inspect",
+    "workflow_selection",
+    "context_retrieval",
+    "patch_proposal",
+    "controlled_apply",
+    "checks",
+    "summary",
+]
+OFFLINE_SMALL_MODEL_JSON_CONTRACT = {
+    "schema": "offline_small_model_decision.v1",
+    "required_fields": ["intent", "confidence", "next_action", "rationale_summary"],
+    "allowed_next_actions": [
+        "select_workflow",
+        "retrieve_context",
+        "propose_patch",
+        "run_check",
+        "ask_clarification",
+        "escalate_online",
+        "stop",
+    ],
+    "confidence_field": "confidence",
+    "confidence_range": [0.0, 1.0],
+    "free_text_limit_chars": 600,
+}
+OFFLINE_AGENT_LOOP_LIMITS = {
+    "max_tool_iterations": 6,
+    "max_model_decision_retries": 2,
+    "max_patch_apply_attempts": 2,
+    "max_check_retries": 1,
+}
+OFFLINE_CONFIDENCE_POLICY = {
+    "accept_min": 0.72,
+    "retry_min": 0.55,
+    "clarify_below": 0.55,
+    "escalate_when": [
+        "confidence stays below retry_min after retries",
+        "required context cannot be retrieved locally",
+        "task asks for high-uncertainty architecture or security judgment",
+        "hard iteration limits are reached",
+    ],
+}
+AGENT_EXECUTION_MODE_PROFILES = {
+    "online": {
+        "schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
+        "mode": "online",
+        "profile_name": "online-cloud-assisted",
+        "model_responsibilities": [
+            "Cloud model owns primary reasoning, planning, and high-uncertainty coding decisions.",
+            "Small local models are limited to routing, compression, autocomplete, simple classification, and token reduction.",
+        ],
+        "mcp_responsibilities": [
+            "Provide compact repository context, indexed/search summaries, deterministic prechecks, and reusable workflow-card knowledge.",
+            "Record audit traces for sensitive tool calls, plans, mutations, test runs, policy gates, memory use, and rationale summaries where practical.",
+            "Expose project/repository memory and token-saving summaries without forcing raw file dumps into the cloud context.",
+            "Keep local/offline autocomplete available even when the primary reasoning model is cloud-backed.",
+        ],
+        "data_flow_boundaries": [
+            "Send compact, task-relevant repository context to the cloud model instead of whole raw trees by default.",
+            "Keep bearer tokens, private keys, local absolute host paths, and generated secret-bearing artifacts out of prompts and audit output.",
+        ],
+        "audit_memory_behavior": [
+            "Use MCP audit/memory/reporting tools as the local trace of cloud-assisted work.",
+            "Prefer deterministic summaries and provenance handles over unbounded transcript capture.",
+        ],
+        "fallback_escalation": [
+            "If cloud access fails, rerun `workflow_select` with `execution_mode='offline'` and follow the bounded onboard loop.",
+            "If local prechecks fail, fix or clarify before spending additional cloud context.",
+        ],
+        "configuration_defaults": {
+            "MCP_AGENT_EXECUTION_MODE": "online",
+            "MCP_AGENT_PROFILE": "online-cloud-assisted",
+            "LOCAL_EMBED_BACKEND": "hash",
+            "CODING_DEFAULT_MODEL": DEFAULT_CODING_MODEL,
+            "CODING_MICRO_MODEL": DEFAULT_CODING_MICRO_MODEL,
+        },
+    },
+    "offline": {
+        "schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
+        "mode": "offline",
+        "profile_name": "offline-onboard-only",
+        "model_responsibilities": [
+            "All model-dependent behavior must use onboard/local models; no cloud model is required.",
+            "Small local coding/intent models make only bounded decisions, patch suggestions, summaries, autocomplete, and tool/result classifications.",
+        ],
+        "mcp_responsibilities": [
+            "Move agent behavior into deterministic orchestration: inspect -> workflow selection -> context retrieval -> patch proposal -> controlled apply -> checks -> summary.",
+            "Use workflow cards, repository indexes, tests, static checks, grep/ripgrep, AST parsers, and policy gates to compensate for weaker local reasoning.",
+            "Enforce structured JSON contracts, confidence thresholds, retries/fallbacks, clarification/escalation paths, and hard iteration limits.",
+        ],
+        "data_flow_boundaries": [
+            "Do not require outbound model calls or runtime model pulls for the offline profile.",
+            "Keep generated state and audit artifacts local to `.codebase-tooling-mcp/` unless the user explicitly exports them.",
+        ],
+        "audit_memory_behavior": [
+            "Record deterministic step summaries, confidence decisions, check results, and local-memory use.",
+            "Treat low-confidence local-model output as advisory until confirmed by deterministic checks or user clarification.",
+        ],
+        "agent_loop": OFFLINE_AGENT_LOOP_STEPS,
+        "small_model_json_contract": OFFLINE_SMALL_MODEL_JSON_CONTRACT,
+        "confidence_policy": OFFLINE_CONFIDENCE_POLICY,
+        "iteration_limits": OFFLINE_AGENT_LOOP_LIMITS,
+        "fallback_escalation": [
+            "Retry deterministic analysis before retrying model calls.",
+            "Ask for clarification when required fields are missing or confidence is below clarify_below.",
+            "Mark the task as requiring online/large-model mode when local-small mode remains insufficient.",
+        ],
+        "configuration_defaults": {
+            "MCP_AGENT_EXECUTION_MODE": "offline",
+            "MCP_AGENT_PROFILE": "offline-onboard-only",
+            "OLLAMA_ALLOW_PULL": "false",
+            "CONTINUE_OLLAMA_MODELS": DEFAULT_CONTINUE_OLLAMA_MODELS,
+            "CODING_DEFAULT_MODEL": DEFAULT_CODING_MODEL,
+            "CODING_MICRO_MODEL": DEFAULT_CODING_MICRO_MODEL,
+        },
+    },
+}
 MODEL_STRIP_TOKENS = [
     "<|im_start|>",
     "<|im_end|>",
@@ -575,8 +732,48 @@ WORKFLOW_CARD_FIELDS = (
     "do_not_use_when",
     "recommended_entrypoint",
     "routing_terms",
+    "supported_execution_modes",
+    "mode_routing",
 )
 WORKFLOW_CARDS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "cloud-assisted-agent-mode",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Online/cloud-assisted agent mode",
+        "intent": "Use MCP as the compact repository, audit, memory, and deterministic-tool layer while a cloud model owns primary reasoning.",
+        "triggers": ["online mode", "cloud-assisted", "cloud model", "token savings", "audit assisted coding"],
+        "prerequisites": ["Cloud reasoning model is available to the client", "HTTP auth and secret redaction are configured", "MCP repository context should be compacted before sharing"],
+        "risk": "medium",
+        "mutation_mode": "MCP remains governed by normal read/write gates; cloud reasoning does not bypass local mutation/audit controls",
+        "outputs": ["compact repository context", "workflow-card recommendation", "audit/memory trace", "deterministic precheck plan", "local autocomplete continuity"],
+        "do_not_use_when": ["Cloud calls are disabled, unavailable, or disallowed", "The task must remain entirely onboard/local"],
+        "recommended_entrypoint": "task_router(mode='workflow_select', execution_mode='online') before the selected specialist workflow",
+        "routing_terms": ["online mode", "cloud-assisted", "cloud assisted", "cloud model", "hosted model", "token savings", "compact context", "audit trace"],
+        "supported_execution_modes": ["online"],
+        "mode_routing": {
+            "online": "Primary path: cloud model reasons; MCP supplies compact context, audit/memory, checks, compression, and local autocomplete.",
+            "offline": "Do not route here for onboard-only work; select the offline bounded agent loop instead.",
+        },
+    },
+    {
+        "id": "offline-bounded-agent-loop",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Offline/onboard-only bounded agent loop",
+        "intent": "Approximate agent behavior without cloud models by combining small local JSON decisions with deterministic MCP orchestration.",
+        "triggers": ["offline mode", "onboard-only", "local-only", "no cloud", "bounded agent loop"],
+        "prerequisites": ["Local model endpoint and required model tags are installed", "Runtime model pulls are disabled or explicitly allowed by policy", "Task can fit bounded local reasoning plus deterministic checks"],
+        "risk": "medium",
+        "mutation_mode": "Read-only through workflow selection; patch application still requires explicit mutation mode and controlled apply/check steps",
+        "outputs": ["structured local decision packet", "bounded inspect/select/retrieve/patch/check/summary loop", "confidence/fallback decision", "escalation or clarification request"],
+        "do_not_use_when": ["The task requires high-uncertainty architecture, security, or product judgment that local-small mode cannot validate", "A cloud model is explicitly required by policy or user request"],
+        "recommended_entrypoint": "task_router(mode='workflow_select', execution_mode='offline') then follow the offline agent_loop contract",
+        "routing_terms": ["offline mode", "offline", "onboard-only", "onboard only", "local-only", "local only", "no cloud", "small model", "json contract", "bounded loop", "hard iteration"],
+        "supported_execution_modes": ["offline"],
+        "mode_routing": {
+            "online": "Use only as an offline fallback plan when cloud access is unavailable or privacy policy requires onboard execution.",
+            "offline": "Primary path: inspect -> workflow selection -> context retrieval -> patch proposal -> controlled apply -> checks -> summary, with structured JSON decisions and hard limits.",
+        },
+    },
     {
         "id": "release-readiness",
         "schema": WORKFLOW_CARD_SCHEMA_VERSION,
@@ -10644,8 +10841,18 @@ def local_model_status() -> dict[str, Any]:
     }
     native_api_base = _ollama_native_base_url()
     openai_compat_base = _ollama_openai_base_url()
+    selected_execution_mode, selected_execution_mode_source = _resolve_agent_execution_mode("auto", "")
+    selected_execution_profile = _agent_execution_mode_profile(selected_execution_mode)
     status: dict[str, Any] = {
         "schema": "local_model_status.v1",
+        "execution_mode": {
+            "schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
+            "mode": selected_execution_mode,
+            "source": selected_execution_mode_source,
+            "profile_name": selected_execution_profile["profile_name"],
+            "configured_mode": AGENT_EXECUTION_MODE_ENV or AGENT_EXECUTION_MODE_DEFAULT,
+            "configured_profile": AGENT_EXECUTION_PROFILE_ENV,
+        },
         "models_dir": str(LOCAL_MODELS_DIR),
         "models_dir_exists": _resolve_repo_path(".").exists() if str(LOCAL_MODELS_DIR).startswith(str(REPO_PATH)) else LOCAL_MODELS_DIR.exists(),
         "embed": {
@@ -12678,8 +12885,89 @@ def _infer_batch_from_prompt(prompt: str) -> list[str]:
 
 
 
-def _workflow_card_public(card: dict[str, Any]) -> dict[str, Any]:
-    return {field: card[field] for field in WORKFLOW_CARD_FIELDS if field in card}
+def _agent_execution_mode_profile(mode: str) -> dict[str, Any]:
+    """Return a defensive copy of the mode contract exposed to workflow cards."""
+    profile = AGENT_EXECUTION_MODE_PROFILES[mode]
+    return json.loads(json.dumps(profile))
+
+
+def _infer_agent_execution_mode_from_prompt(prompt: str) -> str | None:
+    text = f" {str(prompt or '').lower()} "
+    for mode in ("offline", "online"):
+        for term in AGENT_EXECUTION_MODE_PROMPT_TERMS[mode]:
+            if f" {term} " in text or term in text:
+                return mode
+    return None
+
+
+def _resolve_agent_execution_mode(execution_mode: str = "auto", prompt: str = "") -> tuple[str, str]:
+    """Resolve online/offline agent execution mode from explicit arg, prompt, or env default."""
+    raw = str(execution_mode or "auto").strip().lower().replace(" ", "-")
+    if raw and raw != "auto":
+        if raw not in AGENT_EXECUTION_MODE_ALIASES:
+            allowed = ", ".join(["auto", *sorted(AGENT_EXECUTION_MODE_ALIASES)])
+            raise ValueError(f"execution_mode must be one of: {allowed}")
+        return AGENT_EXECUTION_MODE_ALIASES[raw], "explicit"
+
+    inferred = _infer_agent_execution_mode_from_prompt(prompt)
+    if inferred:
+        return inferred, "prompt"
+
+    env_raw = (AGENT_EXECUTION_PROFILE_ENV or AGENT_EXECUTION_MODE_ENV or AGENT_EXECUTION_MODE_DEFAULT).lower().replace(" ", "-")
+    return AGENT_EXECUTION_MODE_ALIASES.get(env_raw, AGENT_EXECUTION_MODE_DEFAULT), "default"
+
+
+def _offline_small_model_decision_policy(
+    confidence: float,
+    decision_retries: int = 0,
+    tool_iterations: int = 0,
+) -> dict[str, Any]:
+    """Map a bounded offline JSON decision to retry, clarification, or escalation."""
+    confidence_value = max(0.0, min(1.0, float(confidence)))
+    limits = OFFLINE_AGENT_LOOP_LIMITS
+    policy = OFFLINE_CONFIDENCE_POLICY
+    if tool_iterations >= int(limits["max_tool_iterations"]):
+        next_action = "escalate_online"
+        reason = "hard_iteration_limit_reached"
+    elif confidence_value < float(policy["clarify_below"]):
+        if decision_retries >= int(limits["max_model_decision_retries"]):
+            next_action = "escalate_online"
+            reason = "low_confidence_after_retries"
+        else:
+            next_action = "ask_clarification"
+            reason = "confidence_below_clarify_below"
+    elif confidence_value < float(policy["accept_min"]):
+        next_action = "retry_deterministic_analysis"
+        reason = "confidence_below_accept_min"
+    else:
+        next_action = "continue"
+        reason = "confidence_accepted"
+    return {
+        "schema": "offline_decision_policy.v1",
+        "confidence": round(confidence_value, 3),
+        "next_action": next_action,
+        "reason": reason,
+        "limits": limits,
+        "confidence_policy": policy,
+    }
+
+
+def _workflow_card_public(card: dict[str, Any], execution_mode: str | None = None) -> dict[str, Any]:
+    public = {field: card[field] for field in WORKFLOW_CARD_FIELDS if field in card}
+    supported = list(card.get("supported_execution_modes", AGENT_EXECUTION_MODES))
+    mode_routing = dict(card.get("mode_routing", {}))
+    for mode in AGENT_EXECUTION_MODES:
+        if mode not in mode_routing:
+            mode_routing[mode] = (
+                "Cloud model handles primary reasoning while MCP supplies compact context and gates."
+                if mode == "online"
+                else "Onboard/local models stay bounded by workflow cards, structured decisions, checks, and hard limits."
+            )
+    public["supported_execution_modes"] = supported
+    public["mode_routing"] = mode_routing
+    if execution_mode in mode_routing:
+        public["selected_mode_routing"] = mode_routing[execution_mode]
+    return public
 
 
 def _workflow_selection_tokens(text: str) -> set[str]:
@@ -12690,14 +12978,24 @@ def _workflow_selection_tokens(text: str) -> set[str]:
     }
 
 
-def _workflow_card_score(card: dict[str, Any], query: str, tokens: set[str]) -> dict[str, Any]:
+def _workflow_card_score(
+    card: dict[str, Any],
+    query: str,
+    tokens: set[str],
+    execution_mode: str,
+    execution_mode_source: str,
+) -> dict[str, Any]:
     haystack_parts: list[str] = []
     for key in ("id", "title", "intent", "risk", "mutation_mode", "recommended_entrypoint"):
         haystack_parts.append(str(card.get(key, "") or ""))
-    for key in ("triggers", "prerequisites", "outputs", "do_not_use_when", "routing_terms"):
+    for key in ("triggers", "prerequisites", "outputs", "do_not_use_when", "routing_terms", "supported_execution_modes"):
         value = card.get(key, [])
         if isinstance(value, list):
             haystack_parts.extend(str(item) for item in value)
+    mode_routing = card.get("mode_routing", {})
+    if isinstance(mode_routing, dict):
+        for key, value in mode_routing.items():
+            haystack_parts.extend((str(key), str(value)))
     haystack = " ".join(haystack_parts).lower()
 
     score = 0.0
@@ -12715,6 +13013,25 @@ def _workflow_card_score(card: dict[str, Any], query: str, tokens: set[str]) -> 
     for token in tokens:
         if token in haystack:
             score += 0.35
+
+    mode_was_requested = execution_mode_source in {"explicit", "prompt"}
+    supported_modes = list(card.get("supported_execution_modes", AGENT_EXECUTION_MODES))
+    if mode_was_requested:
+        if execution_mode in supported_modes:
+            if len(supported_modes) < len(AGENT_EXECUTION_MODES):
+                score += 2.0
+            else:
+                score += 0.25
+            reasons.append(f"execution-mode:{execution_mode}")
+        else:
+            score -= 2.0
+            reasons.append(f"execution-mode-mismatch:{execution_mode}")
+    if mode_was_requested and execution_mode == "online" and card.get("id") == "cloud-assisted-agent-mode":
+        score += 2.5
+        reasons.append("cloud-assisted responsibilities requested")
+    if mode_was_requested and execution_mode == "offline" and card.get("id") == "offline-bounded-agent-loop":
+        score += 2.5
+        reasons.append("offline bounded-loop requested")
 
     risk = str(card.get("risk", "") or "").lower()
     high_risk_terms = {
@@ -12737,10 +13054,21 @@ def _workflow_card_score(card: dict[str, Any], query: str, tokens: set[str]) -> 
     return {"score": score, "reasons": reasons[:6]}
 
 
-def _workflow_selection_caveats(matches: list[dict[str, Any]], tokens: set[str]) -> list[str]:
+def _workflow_selection_caveats(
+    matches: list[dict[str, Any]],
+    tokens: set[str],
+    execution_mode: str,
+    execution_mode_source: str,
+) -> list[str]:
     caveats: list[str] = ["Read-only selector: it recommends existing workflows/prompts/tools but does not execute them."]
     high_risk = tokens.intersection({"delete", "remove", "rewrite", "refactor", "migration", "release", "ship", "publish", "deploy", "security", "secret", "token", "auth", "credential"})
     match_ids = {str(match.get("id")) for match in matches}
+    if execution_mode_source == "prompt":
+        caveats.append(f"Execution mode inferred from prompt as `{execution_mode}`; pass execution_mode explicitly to override.")
+    if execution_mode == "online":
+        caveats.append("Online/cloud-assisted mode: use MCP for compact context, audit/memory, deterministic prechecks, compression, and local autocomplete while the cloud model reasons.")
+    else:
+        caveats.append("Offline/onboard-only mode: keep local-model decisions structured, confidence-scored, retry-limited, and ready to clarify or escalate when confidence is low.")
     if high_risk:
         caveats.append("High-risk wording detected: clarify scope, confirm mutation mode, and preserve a rollback path before edits.")
     if tokens.intersection({"delete", "remove", "rewrite", "refactor", "migration"}) and "snapshot-before-refactor" in match_ids:
@@ -12754,25 +13082,26 @@ def _workflow_selection_caveats(matches: list[dict[str, Any]], tokens: set[str])
     return caveats
 
 
-def workflow_select(prompt: str, top_k: int = 3) -> dict[str, Any]:
+def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -> dict[str, Any]:
     """Read-only workflow-card selector for natural-language MCP workflow choice."""
     query = str(prompt or "").strip()
     if not query:
         raise ValueError("prompt must not be empty")
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
+    selected_mode, selected_mode_source = _resolve_agent_execution_mode(execution_mode, query)
     tokens = _workflow_selection_tokens(query)
     scored: list[dict[str, Any]] = []
     max_score = 1.0
     for card in WORKFLOW_CARDS:
-        details = _workflow_card_score(card, query, tokens)
+        details = _workflow_card_score(card, query, tokens, selected_mode, selected_mode_source)
         max_score = max(max_score, float(details["score"]))
         scored.append({"card": card, **details})
     scored.sort(key=lambda row: (float(row["score"]), str(row["card"].get("id", ""))), reverse=True)
 
     matches: list[dict[str, Any]] = []
     for row in scored[: min(top_k, len(scored))]:
-        card = _workflow_card_public(row["card"])
+        card = _workflow_card_public(row["card"], execution_mode=selected_mode)
         score = float(row["score"])
         confidence = round(min(0.99, score / max(max_score, 6.0)), 2)
         if score <= 0:
@@ -12788,12 +13117,16 @@ def workflow_select(prompt: str, top_k: int = 3) -> dict[str, Any]:
     return {
         "schema": WORKFLOW_SELECT_SCHEMA_VERSION,
         "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "execution_mode_schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
+        "execution_mode": selected_mode,
+        "execution_mode_source": selected_mode_source,
+        "execution_mode_profile": _agent_execution_mode_profile(selected_mode),
         "query": query,
         "read_only": True,
         "selection_mode": "ranked_keyword_cards",
         "cards_available": len(WORKFLOW_CARDS),
         "matches": matches,
-        "caveats": _workflow_selection_caveats(matches, tokens),
+        "caveats": _workflow_selection_caveats(matches, tokens, selected_mode, selected_mode_source),
     }
 
 
@@ -12811,6 +13144,7 @@ class TaskRouterService:
         texts: list[str] | None = None,
         query: str = "",
         candidates: list[dict[str, Any]] | None = None,
+        execution_mode: str = "auto",
         backend: str = "auto",
         model: str = "",
         max_tokens: int = 256,
@@ -12857,7 +13191,11 @@ class TaskRouterService:
                 "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, workflow_select"
             )
         if mode == "workflow_select":
-            return workflow_select(prompt=prompt or query, top_k=3 if top_k is None else top_k)
+            return workflow_select(
+                prompt=prompt or query,
+                top_k=3 if top_k is None else top_k,
+                execution_mode=execution_mode,
+            )
         if mode == "status":
             return local_model_status()
         if mode == "task":
@@ -13087,6 +13425,10 @@ def task_router(
         str,
         Field(description="Query text for reranking and other mode-specific router operations."),
     ] = "",
+    execution_mode: Annotated[
+        str,
+        Field(description="Agent execution profile for workflow selection: `auto`, `online`/`cloud-assisted`, or `offline`/`onboard-only`. Used by `mode='workflow_select'` to expose mode-aware workflow-card routing without creating a second selector."),
+    ] = "auto",
     candidates: Annotated[
         list[dict[str, Any]] | None,
         Field(description="Candidate objects to rerank when `mode='rerank'`."),
@@ -13196,12 +13538,13 @@ def task_router(
         Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
     ] = True,
 ) -> dict[str, Any]:
-    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` for read-only workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select."""
+    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` plus `execution_mode` for read-only, mode-aware workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select."""
     audit_args = {
         "mode": mode,
         "task": task,
         "backend": backend,
         "model": model,
+        "execution_mode": execution_mode,
         "check_profile": check_profile,
         "check_target": check_target,
         "run_checks": run_checks,
@@ -13222,6 +13565,7 @@ def task_router(
             texts=texts,
             query=query,
             candidates=candidates,
+            execution_mode=execution_mode,
             backend=backend,
             model=model,
             max_tokens=max_tokens,

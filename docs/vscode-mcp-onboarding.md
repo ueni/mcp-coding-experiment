@@ -51,6 +51,15 @@ python3 scripts/vscode_mcp_healthcheck.py
 
 The script prints remediation text for common failures: container not started, missing forwarded ports, missing token, wrong mutation mode, or Ollama not listening.
 
+## Execution-mode choice in VS Code/devcontainers
+
+The devcontainer supports both agent execution profiles on the same MCP endpoint:
+
+- `online-cloud-assisted` / `MCP_AGENT_EXECUTION_MODE=online`: use this when VS Code, Copilot, or another cloud-backed client owns primary reasoning. MCP still provides compact repository context, audit/memory traces, deterministic prechecks, token-saving summaries/compression, and local/offline autocomplete through the bundled Ollama service.
+- `offline-onboard-only` / `MCP_AGENT_EXECUTION_MODE=offline`: use this when cloud models are unavailable, disabled, or disallowed. Local models stay bounded by structured JSON decisions while MCP runs the scripted loop: inspect -> workflow selection -> context retrieval -> patch proposal -> controlled apply -> checks -> summary.
+
+Cloud mode optimizes quality/speed/audit/token savings. Offline mode optimizes privacy/availability and must respect confidence thresholds, clarification/escalation behavior, and hard iteration limits from [Agent execution modes](./execution-modes.md).
+
 ## Devcontainer CI smoke test
 
 `./scripts/devcontainer_smoke_test.py` is the CI/local smoke test for the VS Code devcontainer path. It validates:
