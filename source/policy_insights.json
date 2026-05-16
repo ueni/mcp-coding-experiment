@@ -1,0 +1,59 @@
+{
+  "schema": "mcp_policy_insights.v1",
+  "version": "2026-05-16.1",
+  "owner": "maintainers",
+  "runtime_learning": false,
+  "promotion": "Promote an audit failure, gate ambiguity, or verifier finding by adding a reviewed insight with a stable id, tool_router, trigger, expected_decision, rationale, source, and remediation. Re-run the policy insight replay tests before merge. Agents must not add runtime-learned or self-authored policy mutations.",
+  "insights": [
+    {
+      "id": "mutation.workspace-write.requires-allow-mutations",
+      "tool_router": "workspace_transaction",
+      "trigger": {
+        "kind": "tool_security_gate",
+        "summary": "workspace_transaction write mode while ALLOW_MUTATIONS is false",
+        "tool": "workspace_transaction",
+        "arguments": {"mode": "write", "path": "src/example.py"},
+        "allow_mutations": false,
+        "http_authorized": true
+      },
+      "expected_decision": "deny",
+      "rationale": "Mutation-capable tools must not run when repository mutation mode is disabled.",
+      "source": "AGENTS.md mutation guardrails and TOOL_SECURITY_METADATA.workspace_transaction.mode_categories",
+      "remediation": "Use a read-only planning/snapshot path first or explicitly enable ALLOW_MUTATIONS for an authorized session."
+    },
+    {
+      "id": "release.readiness.remains-read-only",
+      "tool_router": "release_readiness",
+      "trigger": {
+        "kind": "tool_security_gate",
+        "summary": "release readiness gate with mutations disabled",
+        "tool": "release_readiness",
+        "arguments": {"base_ref": "HEAD", "head_ref": "HEAD"},
+        "allow_mutations": false,
+        "http_authorized": true
+      },
+      "expected_decision": "allow",
+      "rationale": "Release-readiness reporting must remain inspectable without requiring mutation permission.",
+      "source": "release_readiness public read-only annotation and docs/release-notes-policy.md",
+      "remediation": "Keep release recommendations read-only; route fixes through explicit mutation-gated tools."
+    },
+    {
+      "id": "secret.audit-arguments-redact-sensitive-values",
+      "tool_router": "command_runner",
+      "trigger": {
+        "kind": "audit_redaction",
+        "summary": "sensitive audit argument values are redacted before reporting",
+        "sample": {
+          "command": "print environment summary",
+          "api_key": "insight-fixture-sensitive-value",
+          "Authorization": "Bearer insight-fixture-token"
+        },
+        "forbidden_fragments": ["insight-fixture-sensitive-value", "insight-fixture-token"]
+      },
+      "expected_decision": "redact",
+      "rationale": "Policy and governance reports must expose decision classes without leaking tokens or sensitive outputs.",
+      "source": "SENSITIVE_AUDIT_KEY_RE/SENSITIVE_AUDIT_VALUE_RE audit redaction contract",
+      "remediation": "Redact sensitive keys and token-like values before persisting or returning audit/report data."
+    }
+  ]
+}

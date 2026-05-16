@@ -1,11 +1,14 @@
 schema: v1
 router:
-  model: qwen3.6-35b-a3b:iq1
-  file: .continue/models/coding-qwen3.6-35b-a3b.yaml
+  model: qwen2.5-coder:1.5b
+  file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
 routes:
   coding:
-    model: qwen3.6-35b-a3b:iq1
-    file: .continue/models/coding-qwen3.6-35b-a3b.yaml
+    model: qwen2.5-coder:1.5b
+    file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
+  coding_agent:
+    model: qwen2.5-coder:1.5b
+    file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
   coding_micro:
     model: qwen2.5-coder:1.5b
     file: .continue/models/coding-qwen2.5-coder-1.5b.yaml

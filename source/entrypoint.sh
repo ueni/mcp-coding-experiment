@@ -8,10 +8,11 @@ set -euo pipefail
 
 umask 027
 
-DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL="hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M"
-DEFAULT_OLLAMA_TEXT_ALIAS_MODEL="qwen3.6-35b-a3b:iq1"
-DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="512"
-DEFAULT_CONTINUE_OLLAMA_MODELS="${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL},qwen2.5-coder:1.5b"
+DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL=""
+DEFAULT_OLLAMA_TEXT_ALIAS_MODEL=""
+DEFAULT_CODING_AGENT_MODEL="qwen2.5-coder:1.5b"
+DEFAULT_OLLAMA_TEXT_ALIAS_NUM_CTX="8192"
+DEFAULT_CONTINUE_OLLAMA_MODELS="qwen2.5-coder:1.5b"
 
 is_truthy() {
   case "${1:-}" in
@@ -30,6 +31,86 @@ sanitize_positive_int() {
   fi
   echo "Invalid ${var_name}='${raw}'; using default ${fallback}" >&2
   echo "${fallback}"
+}
+
+read_mcp_http_bearer_token_from_env_file() {
+  local env_file="${1:-}"
+  local line=""
+  local token=""
+  if [[ -z "${env_file}" || ! -r "${env_file}" ]]; then
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "${line}" in
+      MCP_HTTP_BEARER_TOKEN=*)
+        token="${line#MCP_HTTP_BEARER_TOKEN=}"
+        token="${token%"${token##*[![:space:]]}"}"
+        token="${token%\"}"
+        token="${token#\"}"
+        token="${token%\'}"
+        token="${token#\'}"
+        if [[ -n "${token}" ]]; then
+          printf '%s\n' "${token}"
+          return 0
+        fi
+        ;;
+    esac
+  done < "${env_file}"
+  return 1
+}
+
+secure_continue_env_file_for_devcontainer_user() {
+  local continue_dir="${1:-/repo/.continue}"
+  local env_file="${2:-${continue_dir}/.env}"
+  if [[ "$(id -u)" -eq 0 ]] && id app >/dev/null 2>&1; then
+    chown app:app "${continue_dir}" "${env_file}" || true
+  fi
+  chmod 700 "${continue_dir}" || true
+  chmod 600 "${env_file}" || true
+}
+
+ensure_mcp_http_bearer_token() {
+  local transport="${MCP_TRANSPORT:-stdio}"
+  local auth_mode="${MCP_HTTP_AUTH_MODE:-token}"
+  local token=""
+  local env_file=""
+  case "${transport}" in
+    http|streamable-http|streamable_http) ;;
+    *) return ;;
+  esac
+  case "${auth_mode}" in
+    token|bearer|oauth-resource) ;;
+    *) return ;;
+  esac
+  if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
+    return
+  fi
+
+  for env_file in /repo/.continue/.env /repo/.env "${HOME:-/home/app}/.continue/.env"; do
+    if token="$(read_mcp_http_bearer_token_from_env_file "${env_file}")"; then
+      if [[ "${env_file}" == "/repo/.continue/.env" ]]; then
+        secure_continue_env_file_for_devcontainer_user /repo/.continue "${env_file}"
+      fi
+      export MCP_HTTP_BEARER_TOKEN="${token}"
+      echo "MCP_HTTP_BEARER_TOKEN loaded from local secret file ${env_file}" >&2
+      return
+    fi
+  done
+
+  if [[ -d /repo && -w /repo ]] && command -v openssl >/dev/null 2>&1; then
+    token="$(openssl rand -hex 32)"
+    mkdir -p /repo/.continue
+    env_file="/repo/.continue/.env"
+    if [[ -f "${env_file}" ]]; then
+      printf '\nMCP_HTTP_BEARER_TOKEN=%s\n' "${token}" >> "${env_file}"
+    else
+      printf 'MCP_HTTP_BEARER_TOKEN=%s\n' "${token}" > "${env_file}"
+    fi
+    secure_continue_env_file_for_devcontainer_user /repo/.continue "${env_file}"
+    export MCP_HTTP_BEARER_TOKEN="${token}"
+    echo "MCP_HTTP_BEARER_TOKEN generated into local secret file ${env_file}" >&2
+  fi
 }
 
 _ollama_probe_url() {
@@ -164,10 +245,18 @@ ensure_ollama_text_alias_from_preloaded_model() {
     alias_manifest_path="$(ollama_manifest_path_for_model_ref "${alias}")"
     if [[ -f "${alias_manifest_path}" ]] && alias_blob_path="$(ollama_model_blob_path_from_manifest "${alias_manifest_path}")"; then
       if [[ "${alias_blob_path}" == "${blob_path}" ]]; then
-        return 0
+        if [[ ! "${num_ctx}" =~ ^[0-9]+$ ]] || [[ "${num_ctx}" -le 0 ]] \
+          || ollama show "${alias}" --modelfile 2>/dev/null \
+            | grep -Eq "^[[:space:]]*PARAMETER[[:space:]]+num_ctx[[:space:]]+${num_ctx}([[:space:]]|$)"; then
+          return 0
+        fi
+        echo "Ollama alias '${alias}' exists with stale num_ctx; recreating it with num_ctx=${num_ctx}." >&2
+      else
+        echo "Ollama alias '${alias}' exists but does not point at '${source_model}'; recreating it." >&2
       fi
+    else
+      echo "Ollama alias '${alias}' exists but its manifest cannot be inspected; recreating it." >&2
     fi
-    echo "Ollama alias '${alias}' exists but does not point at '${source_model}'; recreating it." >&2
   fi
 
   modelfile="$(mktemp)"
@@ -444,6 +533,36 @@ maybe_fix_gpu_device_groups() {
   done
 }
 
+copy_continue_default_if_missing_or_stale() {
+  local default_path="$1"
+  local target_path="$2"
+  local target_name
+  target_name=$(basename "${target_path}")
+
+  if [[ ! -f "${target_path}" ]]; then
+    cp "${default_path}" "${target_path}"
+    return
+  fi
+
+  case "${target_name}" in
+    codebase-tooling-mcp.yaml)
+      if grep -q 'secret-token' "${target_path}"; then
+        echo "Continue MCP server profile has stale auth header; refreshing ${target_path}." >&2
+        cp "${default_path}" "${target_path}"
+      fi
+      ;;
+  esac
+}
+
+remove_retired_continue_model_default() {
+  local target_path="$1"
+  local model_name="$2"
+  if [[ -f "${target_path}" ]] && grep -q "model: ${model_name}" "${target_path}"; then
+    echo "Removing retired Continue model profile ${target_path}." >&2
+    rm -f "${target_path}"
+  fi
+}
+
 apply_repo_defaults() {
   local defaults_root="/opt/codebase-tooling/defaults"
   if [[ "${MCP_APPLY_REPO_DEFAULTS:-false}" != "true" ]]; then
@@ -454,17 +573,27 @@ apply_repo_defaults() {
   fi
 
   mkdir -p /repo/.continue/mcpServers
-  if [[ ! -f /repo/.continue/mcpServers/codebase-tooling-mcp.yaml ]]; then
-    cp "${defaults_root}/continue/codebase-tooling-mcp.yaml" /repo/.continue/mcpServers/codebase-tooling-mcp.yaml
-  fi
+  copy_continue_default_if_missing_or_stale \
+    "${defaults_root}/continue/codebase-tooling-mcp.yaml" \
+    /repo/.continue/mcpServers/codebase-tooling-mcp.yaml
   mkdir -p /repo/.continue/models
+  remove_retired_continue_model_default \
+    /repo/.continue/models/coding-agent-llama3.1-8b.yaml \
+    "llama3.1:8b"
+  remove_retired_continue_model_default \
+    /repo/.continue/models/coding-qwen3.6-35b-a3b.yaml \
+    "qwen3.6-35b-a3b:iq1"
   while IFS= read -r model_path; do
     model_name=$(basename "${model_path}")
-    if [[ ! -f "/repo/.continue/models/${model_name}" ]]; then
-      cp "${model_path}" "/repo/.continue/models/${model_name}"
-    fi
+    copy_continue_default_if_missing_or_stale \
+      "${model_path}" \
+      "/repo/.continue/models/${model_name}"
   done < <(find "${defaults_root}/continue/models" -maxdepth 1 -type f -name '*.yaml' | sort)
   if [[ ! -f /repo/.continue/model-routing.yaml ]]; then
+    cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
+  elif grep -q 'model: llama3.1:8b' /repo/.continue/model-routing.yaml \
+    || grep -q 'model: qwen3.6-35b-a3b:iq1' /repo/.continue/model-routing.yaml; then
+    echo "Continue model routing references retired bundled model profiles; refreshing /repo/.continue/model-routing.yaml." >&2
     cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
   fi
 
@@ -528,10 +657,9 @@ fi
 export HOME="${HOME:-/home/app}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-${HOME}/.ollama/models}"
 seed_ollama_models_from_image_preload
-if [[ -z "${OLLAMA_VULKAN:-}" ]] && [[ -d /dev/dri ]]; then
-  export OLLAMA_VULKAN=1
-fi
-CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen3.6-35b-a3b:iq1}"
+export OLLAMA_VULKAN="${OLLAMA_VULKAN:-0}"
+CODING_DEFAULT_MODEL="${CODING_DEFAULT_MODEL:-qwen2.5-coder:1.5b}"
+CODING_AGENT_MODEL="${CODING_AGENT_MODEL:-${DEFAULT_CODING_AGENT_MODEL}}"
 CODING_MICRO_MODEL="${CODING_MICRO_MODEL:-qwen2.5-coder:1.5b}"
 OLLAMA_TEXT_ALIAS_SOURCE_MODEL="${OLLAMA_TEXT_ALIAS_SOURCE_MODEL:-${DEFAULT_OLLAMA_TEXT_ALIAS_SOURCE_MODEL}}"
 OLLAMA_TEXT_ALIAS_MODEL="${OLLAMA_TEXT_ALIAS_MODEL:-${DEFAULT_OLLAMA_TEXT_ALIAS_MODEL}}"
@@ -544,6 +672,7 @@ OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL="${OLLAMA_BLOCK_UNTIL_DEFAULT_MODEL:-true}"
 OLLAMA_ALLOW_PULL="${OLLAMA_ALLOW_PULL:-false}"
 OLLAMA_STARTUP_TIMEOUT="$(sanitize_positive_int "${OLLAMA_STARTUP_TIMEOUT}" 30 "OLLAMA_STARTUP_TIMEOUT")"
 
+ensure_mcp_http_bearer_token
 apply_repo_defaults
 
 if is_truthy "${OLLAMA_ENABLED}"; then

@@ -791,7 +791,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -804,17 +804,17 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "task_router.task.v1")
         self.assertEqual(out["classification"]["route"], "security")
-        self.assertEqual(out["routing"]["selected_model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(out["routing"]["selected_model"], "qwen2.5-coder:1.5b")
         self.assertTrue(out["routing"]["routing_loaded"])
         self.assertIn('"r":"SEC"', out["encoding"]["encoded_prompt"])
         self.assertEqual(linf.call_args.kwargs["task"], "security")
-        self.assertEqual(linf.call_args.kwargs["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
 
     def test_task_router_task_includes_retrieval_context(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "review findings",
         }
@@ -860,7 +860,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -878,7 +878,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.compact.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "review findings",
         }
@@ -892,10 +892,10 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "task_router.task.compact.v1")
         self.assertEqual(out["route"], "review")
-        self.assertEqual(out["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(out["model"], "qwen2.5-coder:1.5b")
         self.assertTrue(out["ok"])
         self.assertEqual(linf.call_args.kwargs["task"], "review")
-        self.assertEqual(linf.call_args.kwargs["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
 
     def test_task_router_task_auto_selects_micro_coding_model_for_short_prompt(self):
         infer_payload = {
@@ -952,7 +952,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -978,7 +978,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
             "result_id": "infer-123",
@@ -998,7 +998,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(len(session_entries), 1)
         value = session_entries[0]["value"]
         self.assertEqual(value["route"], "security")
-        self.assertEqual(value["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(value["model"], "qwen2.5-coder:1.5b")
         self.assertEqual(value["backend"], "fallback")
         self.assertTrue(value["ok"])
         self.assertEqual(value["result_id"], "infer-123")
@@ -1017,7 +1017,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "",
         }
@@ -1070,7 +1070,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -1843,6 +1843,76 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertNotIn("secret-value", encoded_observation)
         self.assertTrue(observation["rules"]["deterministic"])
 
+    def test_policy_insight_bank_schema_seed_coverage_and_replay(self):
+        bank = self.server._load_policy_insight_bank()
+        self.assertEqual(bank["schema"], "mcp_policy_insights.v1")
+        self.assertRegex(bank["version"], r"^\d{4}-\d{2}-\d{2}\.\d+$")
+        self.assertEqual(bank["owner"], "maintainers")
+        self.assertFalse(bank["runtime_learning"])
+
+        required = {
+            "id",
+            "tool_router",
+            "trigger",
+            "expected_decision",
+            "rationale",
+            "source",
+            "remediation",
+        }
+        ids = {item["id"] for item in bank["insights"]}
+        self.assertIn("mutation.workspace-write.requires-allow-mutations", ids)
+        self.assertIn("release.readiness.remains-read-only", ids)
+        self.assertIn("secret.audit-arguments-redact-sensitive-values", ids)
+        for insight in bank["insights"]:
+            self.assertTrue(required.issubset(insight), insight)
+            self.assertIsInstance(insight["trigger"], dict)
+
+        replay = self.server._policy_insight_replay_report()
+        self.assertEqual(replay["schema"], "mcp_policy_insight_replay.v1")
+        self.assertTrue(replay["ok"])
+        self.assertEqual(replay["insight_count"], len(bank["insights"]))
+        self.assertTrue(all(item["matched"] for item in replay["results"]))
+        decisions = {item["id"]: item["actual_decision"] for item in replay["results"]}
+        self.assertEqual(decisions["mutation.workspace-write.requires-allow-mutations"], "deny")
+        self.assertEqual(decisions["release.readiness.remains-read-only"], "allow")
+        self.assertEqual(decisions["secret.audit-arguments-redact-sensitive-values"], "redact")
+
+    def test_policy_insight_replay_detects_decision_drift(self):
+        bank = self.server.json.loads(
+            self.server.json.dumps(self.server._load_policy_insight_bank())
+        )
+        bank["insights"][0]["expected_decision"] = "allow"
+        with patch.object(self.server, "_load_policy_insight_bank", return_value=bank):
+            replay = self.server._policy_insight_replay_report()
+        self.assertFalse(replay["ok"])
+        drifted = replay["results"][0]
+        self.assertEqual(drifted["expected_decision"], "allow")
+        self.assertEqual(drifted["actual_decision"], "deny")
+        self.assertFalse(drifted["matched"])
+
+    def test_policy_insights_public_summary_is_read_only_and_redacted(self):
+        out = self.server.policy_insights()
+        self.assertEqual(out["schema"], "mcp_policy_insights_summary.v1")
+        self.assertEqual(out["bank_schema"], "mcp_policy_insights.v1")
+        self.assertTrue(out["safety"]["read_only"])
+        self.assertFalse(out["safety"]["raw_triggers_exposed"])
+        self.assertFalse(out["safety"]["contains_secrets"])
+        self.assertGreaterEqual(out["insight_count"], 3)
+        encoded = self.server.json.dumps(out, sort_keys=True)
+        self.assertNotIn("insight-fixture-sensitive-value", encoded)
+        self.assertNotIn("insight-fixture-token", encoded)
+        self.assertNotIn("allow_mutations", encoded)
+        for row in out["insights"]:
+            self.assertNotIn("arguments", row["trigger"])
+            self.assertNotIn("sample", row["trigger"])
+        self.assertTrue(all("summary" in item["trigger"] for item in out["insights"]))
+
+        selected = self.server.policy_insights("release.readiness.remains-read-only")
+        self.assertEqual(selected["insight_count"], 1)
+        self.assertEqual(selected["insights"][0]["expected_decision"], "allow")
+        with self.assertRaises(ValueError):
+            self.server.policy_insights("missing-insight")
+
     def test_workflow_diagnostics_classifies_failures_and_redacts(self):
         audit_path = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
         audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2245,7 +2315,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(
             self.server,
             "local_infer",
-            return_value={"schema": "local_infer.v1", "model": "qwen3.6-35b-a3b:iq1", "ok": True},
+            return_value={"schema": "local_infer.v1", "model": "qwen2.5-coder:1.5b", "ok": True},
         ), patch.object(
             self.server,
             "_coding_checks",
@@ -2526,6 +2596,10 @@ class ServerToolsTest(ServerToolsTestBase):
             self.assertNotIn("audit_report", names)
             for tool_name in self.server.SCHEMA_BACKED_TOOL_NAMES:
                 self.assertIn(tool_name, names)
+            for item in tools:
+                output_schema = item.model_dump().get("outputSchema")
+                if output_schema is not None:
+                    self.assertEqual(output_schema.get("type"), "object", item.model_dump().get("name"))
 
         asyncio.run(run_checks())
 

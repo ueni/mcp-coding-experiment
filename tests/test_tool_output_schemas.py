@@ -139,7 +139,17 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         for tool_name in SCHEMA_BACKED_TOOL_NAMES:
             with self.subTest(tool_name=tool_name):
                 self.assertIn(tool_name, by_name)
-                self.assertEqual(by_name[tool_name].outputSchema, TOOL_OUTPUT_SCHEMAS[tool_name])
+                advertised = by_name[tool_name].outputSchema
+                checked_in = TOOL_OUTPUT_SCHEMAS[tool_name]
+                self.assertEqual(advertised.get("type"), "object")
+                if checked_in.get("type") == "object":
+                    self.assertEqual(advertised, checked_in)
+                else:
+                    self.assertEqual(
+                        advertised.get("x-codebase-tooling-mcp-legacy-output-schema"),
+                        checked_in,
+                    )
+                    self.assertEqual(advertised.get("properties", {}).get("result"), checked_in)
 
     def test_shared_error_envelope_validates_for_each_schema_backed_tool(self):
         for tool_name in SCHEMA_BACKED_TOOL_NAMES:

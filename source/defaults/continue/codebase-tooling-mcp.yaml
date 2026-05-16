@@ -6,4 +6,6 @@ mcpServers:
     type: streamable-http
     url: http://localhost:8000/mcp
     requestOptions:
+      headers:
+        Authorization: "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}"
       timeout: 300000
