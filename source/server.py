@@ -182,6 +182,7 @@ COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
+    "workflow_skill_search",
     "test_impact_map",
     "tool_annotations",
     "tool_output_contracts",
@@ -214,6 +215,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
             "coding_sandbox": ["write", "shell/process"],
         },
     },
+    "workflow_skill_search": {"categories": ["read-only"]},
     "tool_annotations": {"categories": ["read-only"]},
     "tool_output_contracts": {"categories": ["read-only"]},
     "workflow_task": {
@@ -11838,6 +11840,185 @@ def _build_task_retrieval_context(
     }
 
 
+WORKFLOW_CARD_SCHEMA_VERSION = "workflow_card.v1"
+WORKFLOW_SKILL_SEARCH_SCHEMA = "workflow_skill_search.v1"
+
+WORKFLOW_SKILL_CARDS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "release-readiness",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Release readiness gate",
+        "intent": "Decide whether a branch or repository state is ready for release.",
+        "entrypoints": [
+            "release_readiness(summary_mode='quick')",
+            "quality_router(mode='release_readiness')",
+            "required_tool_chain(required_tools=['release_readiness'])",
+        ],
+        "prerequisites": ["base/head refs or a clean current workspace", "release scope and required gates"],
+        "risk_level": "high",
+        "mutation_mode": "read-only",
+        "outputs": ["release gate checks", "blocking failures", "optional dashboard payload"],
+        "do_not_use_when": ["the user is asking for implementation edits before defining release scope"],
+        "keywords": [
+            "release", "readiness", "ship", "shipping", "deploy", "deployment", "gate", "go/no-go", "go no go", "cut", "version",
+        ],
+        "caveats": ["High-risk release decisions should run clarification_gate when scope or rollback is underspecified."],
+    },
+    {
+        "id": "devcontainer-health",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Devcontainer and VS Code MCP health",
+        "intent": "Diagnose VS Code devcontainer, MCP endpoint, auth, port, and Ollama readiness.",
+        "entrypoints": ["devcontainer_health_check prompt", "vscode_router", "healthz", "docs/vscode-mcp-onboarding.md"],
+        "prerequisites": ["workspace opened in VS Code/devcontainer or a described client failure"],
+        "risk_level": "medium",
+        "mutation_mode": "read-only-first; shell/process only for explicit diagnostics",
+        "outputs": ["health findings", "auth/port/Ollama checks", "safe recovery steps"],
+        "do_not_use_when": ["the task is a generic code quality check unrelated to the MCP client/container path"],
+        "keywords": ["devcontainer", "vs code", "vscode", "container", "mcp endpoint", "port", "8000", "2345", "ollama", "healthz", "auth", "bearer"],
+        "caveats": ["Prefer read-only health checks before running shell/process diagnostics."],
+    },
+    {
+        "id": "snapshot-before-refactor",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Snapshot before refactor",
+        "intent": "Create or plan a rollback point before broad edits, refactors, migrations, or generated changes.",
+        "entrypoints": ["snapshot_before_refactor prompt", "workspace_transaction(mode='snapshot')", "state_snapshot"],
+        "prerequisites": ["target files or refactor scope", "current git status reviewed"],
+        "risk_level": "high",
+        "mutation_mode": "read-only snapshot, then explicit mutation only after approval/mutation mode",
+        "outputs": ["snapshot id", "rollback instructions", "refactor checklist"],
+        "do_not_use_when": ["the request is purely read-only analysis with no planned mutation"],
+        "keywords": ["snapshot", "rollback", "restore", "refactor", "rewrite", "migration", "mass edit", "large change", "risky edit", "before changing"],
+        "caveats": ["For high-risk mutation, clarify scope and rollback plan before edits."],
+    },
+    {
+        "id": "security-triage",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Security triage",
+        "intent": "Review security-sensitive changes, suspected vulnerabilities, policy bypasses, or secret exposure risks.",
+        "entrypoints": ["security_triage prompt", "task_router(task='security')", "policy_simulator", "change_impact_gate"],
+        "prerequisites": ["suspected risk, changed files, or vulnerability description"],
+        "risk_level": "high",
+        "mutation_mode": "read-only triage; mutation requires explicit follow-up approval",
+        "outputs": ["risk summary", "affected files", "safe remediation next steps", "policy findings"],
+        "do_not_use_when": ["the user asks for release certification rather than security investigation"],
+        "keywords": ["security", "vulnerability", "cve", "secret", "token", "credential", "auth", "policy", "bypass", "sandbox", "exploit", "injection"],
+        "caveats": ["Do not print secrets; redact evidence and use clarification_gate if impact or authorization is unclear."],
+    },
+    {
+        "id": "test-impact",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Test impact selection",
+        "intent": "Choose focused tests for changed files and identify coverage gaps before validation.",
+        "entrypoints": ["test_impact_map", "impact_tests", "change_impact_gate", "quality_router(mode='change_impact')"],
+        "prerequisites": ["changed files or base/head refs", "fresh or refreshable test impact map"],
+        "risk_level": "medium",
+        "mutation_mode": "read-only by default; refresh=true writes generated artifact and needs mutation mode",
+        "outputs": ["selected tests", "coverage gaps", "unmapped changed files", "confidence"],
+        "do_not_use_when": ["a full release gate is required; combine with release_readiness instead"],
+        "keywords": ["test", "tests", "impact", "coverage", "changed files", "what should i run", "focused", "validation", "unmapped"],
+        "caveats": ["Unmapped changed files are coverage gaps and need manual review."],
+    },
+    {
+        "id": "governance-report",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Governance report export",
+        "intent": "Produce audit/release governance evidence from local policy, readiness, tool-chain, snapshot, and diagnostic signals.",
+        "entrypoints": ["governance_report", "workflow_task(workflow='governance_report')", "artifact_provenance"],
+        "prerequisites": ["audit log/report scope", "base/head refs when comparing changes"],
+        "risk_level": "medium",
+        "mutation_mode": "read-only analysis; export writes report artifacts when requested",
+        "outputs": ["JSON report", "Markdown report", "resource links", "provenance sidecars"],
+        "do_not_use_when": ["the user only needs a quick test list or local code edit"],
+        "keywords": ["governance", "audit", "compliance", "evidence", "report", "provenance", "artifact", "export", "policy", "readiness summary"],
+        "caveats": ["Exports are local artifacts; verify provenance before treating them as release evidence."],
+    },
+    {
+        "id": "workflow-diagnostics",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Workflow diagnostics",
+        "intent": "Explain failed MCP workflow attempts, critical steps, failure categories, and safe recovery actions.",
+        "entrypoints": ["workflow_diagnostics", "governance_report(include_diagnostics=True)"],
+        "prerequisites": ["failed audit events or a redacted trajectory snippet"],
+        "risk_level": "medium",
+        "mutation_mode": "read-only",
+        "outputs": ["failure categories", "critical steps", "safe recovery actions", "redacted trajectory summary"],
+        "do_not_use_when": ["there is no workflow failure or diagnostic question"],
+        "keywords": ["diagnose", "diagnostic", "workflow failed", "failure", "failed", "trajectory", "recovery", "why did", "debug workflow", "critical step"],
+        "caveats": ["Provide only redacted trajectory snippets; do not include secrets or private tokens."],
+    },
+)
+
+_WORKFLOW_HIGH_RISK_TERMS = {
+    "deploy", "deployment", "release", "ship", "production", "prod", "refactor", "rewrite", "migration", "delete", "remove", "destructive", "security", "secret", "credential",
+}
+
+
+def _workflow_skill_public_card(card: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: card[key]
+        for key in (
+            "id", "schema", "title", "intent", "entrypoints", "prerequisites", "risk_level", "mutation_mode", "outputs", "do_not_use_when", "caveats"
+        )
+    }
+
+
+def _workflow_skill_search(prompt: str, top_k: int = 3) -> dict[str, Any]:
+    query = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
+    if not query:
+        raise ValueError("prompt must not be empty")
+    top_k = max(1, min(int(top_k or 3), len(WORKFLOW_SKILL_CARDS)))
+    tokens = set(re.findall(r"[a-z0-9][a-z0-9_-]+", query))
+    high_risk_terms = sorted(term for term in _WORKFLOW_HIGH_RISK_TERMS if term in query or term in tokens)
+    scored: list[dict[str, Any]] = []
+    for card in WORKFLOW_SKILL_CARDS:
+        keyword_hits: list[str] = []
+        score = 0.0
+        for keyword in card.get("keywords", []):
+            key = str(keyword).lower()
+            if " " in key:
+                if key in query:
+                    keyword_hits.append(str(keyword))
+                    score += 3.0
+            elif key in tokens or key in query:
+                keyword_hits.append(str(keyword))
+                score += 2.0 if key in tokens else 1.0
+        title_tokens = set(re.findall(r"[a-z0-9][a-z0-9_-]+", str(card.get("title", "")).lower()))
+        intent_tokens = set(re.findall(r"[a-z0-9][a-z0-9_-]+", str(card.get("intent", "")).lower()))
+        score += 0.4 * len(tokens.intersection(title_tokens))
+        score += 0.2 * len(tokens.intersection(intent_tokens))
+        if card.get("risk_level") == "high" and high_risk_terms:
+            score += 0.6
+        if score <= 0:
+            continue
+        confidence = min(0.95, round(0.25 + score / 12.0, 2))
+        public = _workflow_skill_public_card(card)
+        public.update({"score": round(score, 2), "confidence": confidence, "matched_terms": keyword_hits[:8]})
+        scored.append(public)
+    scored.sort(key=lambda item: (-float(item["score"]), str(item["id"])))
+    matches = scored[:top_k]
+    caveats: list[str] = []
+    if high_risk_terms:
+        caveats.append(
+            "High-risk wording detected; prefer clarification_gate and a snapshot/rollback plan before mutation, and release_readiness before deploy/release decisions."
+        )
+    if not matches:
+        caveats.append("No strong workflow match; start with task_router(mode='task') or ask for clarification.")
+    elif float(matches[0].get("confidence", 0.0)) < 0.5:
+        caveats.append("Top match has low confidence; ask a concise clarification before choosing a workflow.")
+    return {
+        "schema": WORKFLOW_SKILL_SEARCH_SCHEMA,
+        "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "query": prompt,
+        "top_k": top_k,
+        "matches": matches,
+        "high_risk_terms": high_risk_terms,
+        "caveats": caveats,
+        "read_only": True,
+    }
+
+
 def _task_infer(
     prompt: str,
     task: str = 'general',
@@ -11870,6 +12051,7 @@ def _task_infer(
         prompt=prompt,
         route=str(classification['route']),
     )
+    workflow_skills = _workflow_skill_search(prompt=prompt, top_k=3)
     encoded = _encode_task_prompt_packet(
         prompt=prompt,
         route=str(classification['route']),
@@ -11912,6 +12094,7 @@ def _task_infer(
             'forced': True,
         },
         'retrieval': retrieval_info,
+        'workflow_skills': workflow_skills,
         'infer': infer,
     }
     if profile == 'compact':
@@ -11927,6 +12110,8 @@ def _task_infer(
             'memory_chars': memory_info['context_chars'],
             'retrieval_count': retrieval_info['item_count'],
             'retrieval_chars': retrieval_info['context_chars'],
+            'workflow_skill_matches': [match['id'] for match in workflow_skills['matches']],
+            'workflow_skill_caveats': workflow_skills['caveats'],
             'ok': task_ok,
             'output': infer.get('output', ''),
         }
@@ -12484,6 +12669,22 @@ class TaskRouterService:
 
 
 _TASK_ROUTER_SERVICE = TaskRouterService()
+
+
+@mcp.tool()
+def workflow_skill_search(
+    prompt: Annotated[
+        str,
+        Field(description="Natural-language task description to match against concise workflow cards."),
+    ],
+    top_k: Annotated[
+        int,
+        Field(description="Maximum number of ranked workflow cards to return; clamped to the available card count."),
+    ] = 3,
+) -> dict[str, Any]:
+    """Read-only workflow-card retrieval helper for choosing MCP prompts, routers, and safety gates."""
+    _require_tool_security_gate("workflow_skill_search", {"top_k": top_k})
+    return _workflow_skill_search(prompt=prompt, top_k=top_k)
 
 
 @mcp.tool()

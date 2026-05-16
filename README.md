@@ -128,6 +128,8 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 
 The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails.
 
+When an agent or user is unsure which workflow to choose, call read-only `workflow_skill_search(prompt=...)` first. It returns ranked `workflow_card.v1` matches with intent, prerequisites, risk, mutation mode, outputs, do-not-use guidance, confidence, and caveats. The same matches are included in `task_router(mode="task", prompt=...)` results for prompt selection context. See [Workflow skill cards](./docs/workflow-skill-cards.md).
+
 ### Static test impact map workflow
 
 Use `test_impact_map` when you need a repeatable, TDAD-style view of which Python tests should cover a source change. In normal read mode it loads the repository-local artifact at `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json`, checks that it is still fresh, and returns `selected_tests`, `test_details`, `confidence`, `impacted_sources`, `coverage_gaps`, and `unmapped_changed_files` for explicit `changed_files`.
