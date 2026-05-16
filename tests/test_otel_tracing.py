@@ -73,6 +73,38 @@ class OTelTracingTest(ServerToolsTestBase):
         self.assertNotIn("/tmp/should-not-leak", encoded)
         self.assertNotIn(str(self.repo_path), encoded)
 
+    def test_otel_unsupported_exporter_is_offline_safe_noop(self):
+        self.server.MCP_OTEL_TRACING_ENABLED = True
+        self.server.MCP_OTEL_EXPORTER = "otlp"
+
+        self.server.task_router(
+            mode="workflow_select",
+            prompt="Pick a release workflow before handoff",
+        )
+
+        self.assertFalse((self.repo_path / self.trace_file).exists())
+
+    def test_otel_governance_and_artifact_spans_use_repo_relative_refs(self):
+        self._enable_tracing()
+
+        report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        provenance = self.server.artifact_provenance(include_reports=True, include_snapshots=False)
+
+        self.assertEqual(report["schema"], "governance_report.v1")
+        self.assertGreaterEqual(provenance["artifact_count"], 2)
+
+        spans = self._spans()
+        governance_span = next(span for span in spans if span["name"] == "mcp.tool.governance_report")
+        provenance_span = next(span for span in spans if span["name"] == "mcp.tool.artifact_provenance")
+        self.assertEqual(governance_span["attributes"]["gen_ai.tool.name"], "governance_report")
+        self.assertEqual(provenance_span["attributes"]["gen_ai.tool.name"], "artifact_provenance")
+        refs = governance_span["attributes"].get("mcp.artifact.refs", [])
+        self.assertTrue(any(ref.startswith(".codebase-tooling-mcp/reports/") for ref in refs))
+
+        encoded = json.dumps(spans, sort_keys=True)
+        self.assertNotIn(str(self.repo_path), encoded)
+        self.assertNotIn("Authorization: Bearer", encoded)
+
     def test_otel_policy_denial_span_is_redacted_and_correlates_audit_event(self):
         self._enable_tracing()
         self.server.ALLOW_MUTATIONS = False
