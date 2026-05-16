@@ -128,7 +128,7 @@ Public tools:
 - `tool_output_contracts`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `interaction_invariant_audit`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -228,6 +228,7 @@ Restore:
 - Security findings.
 - Risk score thresholds.
 - Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
+- Multi-turn invariant checks from `interaction_invariant_audit` before mutation or readiness summaries, without storing conversation snippets by default.
 - Required artifact/report presence, including `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json` when the impact-map workflow is used.
 - Unmapped changed files and coverage gaps that require manual review or new tests.
 

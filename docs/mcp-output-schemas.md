@@ -24,6 +24,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `governance_report`
 - `artifact_provenance`
 - `workflow_diagnostics`
+- `interaction_invariant_audit`
 - `test_impact_map` (public workflow, currently documented contract rather than schema-backed core contract)
 
 The checked-in contracts live in [`source/tool_output_schemas.py`](../source/tool_output_schemas.py). The public helper tool `tool_output_contracts` returns either all contracts or one contract by `tool_name`.
@@ -142,10 +143,11 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `provenance`, opt-in `compressed_observation`, `_meta` |
 | `artifact_provenance` | `schema`, `provenance_schema`, `artifact_count`, `ok`, `checks` | none |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |
+| `interaction_invariant_audit` | `schema`, `read_only`, `advisory_only`, `ok_to_continue`, `confidence`, `extracted_invariants`, `suspected_smells`, `safe_next_actions`, `linked_gates` | `security`, `redactions_applied`, `input_summary` |
 | `test_impact_map` | `schema`, `artifact_path`, `artifact_status`, `changed_files`, `selected_tests`, `unmapped_changed_files`, `confidence` | `test_details`, `impacted_sources`, `coverage_gaps`, `generated_at` |
 
 ## IDE/client smoke fixture
 
 [`docs/fixtures/mcp-structured-grep-response.json`](./fixtures/mcp-structured-grep-response.json) demonstrates an IDE-style client consuming a structured `grep` quick response while still displaying the fallback text content.
 
-For uncertainty-aware workflow gating, see [Clarification Gate](./clarification-gate.md). `clarification_gate` returns both structured MCP output and an elicitation adapter/fallback checklist for clients that need missing non-sensitive fields before mutation, release, or security workflows.
+For uncertainty-aware workflow gating, see [Clarification Gate](./clarification-gate.md). `clarification_gate` returns both structured MCP output and an elicitation adapter/fallback checklist for clients that need missing non-sensitive fields before mutation, release, or security workflows. For multi-turn task-constraint drift before mutation/readiness summaries, see [Interaction invariant audit](./interaction-invariant-audit.md).
