@@ -6,7 +6,7 @@
 set -eu
 
 IMAGE_REF="ueniueni/codebase-tooling-mcp:latest"
-ENABLE_VULKAN_GPU=auto
+ENABLE_VULKAN_GPU=false
 
 log() {
   printf '%s\n' "$*" >&2
@@ -77,14 +77,6 @@ fi
 cd "$REPO_ROOT"
 
 REPO_NAME=$(basename "$REPO_ROOT")
-
-if [ "$ENABLE_VULKAN_GPU" = auto ]; then
-  if [ -e /dev/dri ]; then
-    ENABLE_VULKAN_GPU=true
-  else
-    ENABLE_VULKAN_GPU=false
-  fi
-fi
 
 DEVCONTAINER_RUNARGS_BLOCK='  "runArgs": [
     "-p",
