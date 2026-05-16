@@ -323,6 +323,10 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
 
     def test_dockerfile_installs_app_requirements_into_coding_venv(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "--mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked",
+            dockerfile,
+        )
         self.assertIn('python -m venv /opt/codebase-tooling/coding-venv', dockerfile)
         self.assertIn('/opt/codebase-tooling/coding-venv/bin/pip install \\', dockerfile)
         self.assertIn('--root-user-action=ignore \\', dockerfile)
@@ -421,14 +425,23 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
     def test_dockerfile_caches_vscode_vsix_downloads(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn(
-            "--mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked",
+            "--mount=type=cache,id=codebase-tooling-vscode-vsix,target=/var/cache/buildkit/vscode-vsix,sharing=locked",
             dockerfile,
         )
         self.assertIn(
             'vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"',
             dockerfile,
         )
-        self.assertIn('if [ ! -f "${vsix_path}" ] && ! curl -fsSL', dockerfile)
+        self.assertIn('tmp_vsix="${vsix_path}.tmp"', dockerfile)
+        self.assertIn("curl --fail --location --retry 5", dockerfile)
+        self.assertIn('mv "${tmp_vsix}" "${vsix_path}"', dockerfile)
+        self.assertLess(
+            dockerfile.index("codebase-tooling-vscode-vsix"),
+            dockerfile.index("COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/"),
+        )
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("codebase-tooling-vscode-vsix", readme)
+        self.assertIn("cache namespace does not depend on the exact Dockerfile instruction text", readme)
 
     def test_dockerfile_writes_app_sudoers_rule_with_single_shell_command(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")

@@ -184,13 +184,20 @@ Inline devcontainer example (non-compose):
 }
 ```
 
-The Dockerfile uses BuildKit cache mounts for `apt`, `pip`, and Ollama build
-artifacts, so repeated devcontainer rebuilds can reuse downloaded package
-metadata, wheels, the Ollama binary archive, and preloaded model blobs. The `apt`
-mounts use stable explicit IDs (`codebase-tooling-apt-cache` for
-`/var/cache/apt` and `codebase-tooling-apt-lists` for `/var/lib/apt/lists`) and
-the build removes Debian slim's `/etc/apt/apt.conf.d/docker-clean` hook before
-installing packages so downloaded `.deb` archives can remain in the cache mount.
+The Dockerfile uses BuildKit cache mounts for `apt`, `pip`, VSIX downloads, and
+Ollama build artifacts, so repeated devcontainer rebuilds can reuse downloaded
+package metadata, wheels, VSIX archives, the Ollama binary archive, and
+preloaded model blobs. Download cache mounts use stable explicit IDs, including
+`codebase-tooling-apt-cache` for `/var/cache/apt`,
+`codebase-tooling-apt-lists` for `/var/lib/apt/lists`,
+`codebase-tooling-pip` for `/var/cache/buildkit/pip`, and
+`codebase-tooling-vscode-vsix` for `/var/cache/buildkit/vscode-vsix`, so the
+cache namespace does not depend on the exact Dockerfile instruction text.
+Marketplace VS Code extensions are preloaded before repository defaults are
+copied, so edits under `source/defaults/` do not invalidate the network download
+layer. The build removes Debian slim's `/etc/apt/apt.conf.d/docker-clean` hook
+before installing packages so downloaded `.deb` archives can remain in the cache
+mount.
 Keep BuildKit enabled and use the same persistent builder/cache store when
 building this image or those cache mounts will be ignored or lost between builds.
 With `docker buildx` on ephemeral builders, persist the cache explicitly with

@@ -105,12 +105,12 @@ RUN --mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,shari
 WORKDIR /app
 
 COPY requirements.txt requirements-embedding.txt ./
-RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
     pip install --root-user-action=ignore -r requirements.txt \
     && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
          pip install --root-user-action=ignore -r requirements-embedding.txt; \
        fi
-RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
        --root-user-action=ignore \
@@ -236,9 +236,7 @@ RUN groupadd --gid "${APP_GID}" app \
     && ln -sfn /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
     && chown -R app:app /app /models /repo /home/app /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models
 
-COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
-
-RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-vscode-vsix,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
     set -eux; \
     mkdir -p /opt/codebase-tooling/defaults/extensions /var/cache/buildkit/vscode-vsix; \
     if [ -z "$(echo "${VSCODE_PRELOAD_EXTENSIONS}" | xargs)" ]; then \
@@ -248,15 +246,32 @@ RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
         publisher="${extension_id%%.*}"; \
         extension_name="${extension_id#*.}"; \
         vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"; \
-        if [ ! -f "${vsix_path}" ] && ! curl -fsSL "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${vsix_path}"; then \
-          if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
-          echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
+        if [ -f "${vsix_path}" ] && ! python -c "import sys, zipfile; assert zipfile.is_zipfile(sys.argv[1]), 'cached file is not a zip archive'" "${vsix_path}"; then \
+          echo "Discarding corrupt cached VS Code extension ${extension_id}." >&2; \
           rm -f "${vsix_path}"; \
-          continue; \
+        fi; \
+        if [ ! -f "${vsix_path}" ]; then \
+          tmp_vsix="${vsix_path}.tmp"; \
+          rm -f "${tmp_vsix}"; \
+          if ! curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${tmp_vsix}"; then \
+            if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+            echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
+            rm -f "${tmp_vsix}"; \
+            continue; \
+          fi; \
+          if ! python -c "import sys, zipfile; assert zipfile.is_zipfile(sys.argv[1]), 'downloaded file is not a zip archive'" "${tmp_vsix}"; then \
+            if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+            echo "Skipping VS Code extension ${extension_id}: marketplace payload was not a valid VSIX archive." >&2; \
+            rm -f "${tmp_vsix}"; \
+            continue; \
+          fi; \
+          mv "${tmp_vsix}" "${vsix_path}"; \
+        else \
+          echo "Using cached VS Code extension ${extension_id}."; \
         fi; \
         if ! python -c "import json, shutil, sys, tempfile, zipfile; from pathlib import Path; vsix_path = Path(sys.argv[1]); extensions_root = Path(sys.argv[2]); tmp_dir = tempfile.mkdtemp(); tmp_path = Path(tmp_dir); assert zipfile.is_zipfile(vsix_path), 'downloaded file is not a zip archive'; zipfile.ZipFile(vsix_path).extractall(tmp_path); extension_dir = tmp_path / 'extension'; package = json.loads((extension_dir / 'package.json').read_text()); install_dir = extensions_root / (package['publisher'] + '.' + package['name'] + '-' + package['version']); shutil.rmtree(install_dir, ignore_errors=True); shutil.copytree(extension_dir, install_dir); shutil.rmtree(tmp_dir)" "${vsix_path}" /opt/codebase-tooling/defaults/extensions; then \
           if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
-          echo "Skipping VS Code extension ${extension_id}: marketplace payload was not a valid VSIX archive." >&2; \
+          echo "Skipping VS Code extension ${extension_id}: cached VSIX archive could not be installed." >&2; \
           rm -f "${vsix_path}"; \
           continue; \
         fi; \
@@ -267,6 +282,8 @@ RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
       ln -sfn /opt/codebase-tooling/defaults/extensions "${server_root}/extensions"; \
     done; \
     chown -R app:app /opt/codebase-tooling/defaults/extensions /home/app/.vscode-server /home/app/.vscode-server-insiders /home/app/.openvscode-server
+
+COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
 
 # Keep high-churn app files in the last layers to speed iterative rebuilds.
 COPY --chown=app:app server.py ./
