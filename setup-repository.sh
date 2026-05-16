@@ -6,7 +6,7 @@
 set -eu
 
 IMAGE_REF="ueniueni/codebase-tooling-mcp:latest"
-ENABLE_VULKAN_GPU=auto
+ENABLE_VULKAN_GPU=false
 
 log() {
   printf '%s\n' "$*" >&2
@@ -78,15 +78,11 @@ cd "$REPO_ROOT"
 
 REPO_NAME=$(basename "$REPO_ROOT")
 
-if [ "$ENABLE_VULKAN_GPU" = auto ]; then
-  if [ -e /dev/dri ]; then
-    ENABLE_VULKAN_GPU=true
-  else
-    ENABLE_VULKAN_GPU=false
-  fi
-fi
-
 DEVCONTAINER_RUNARGS_BLOCK='  "runArgs": [
+    "-p",
+    "127.0.0.1:8000:8000",
+    "-p",
+    "127.0.0.1:2345:2345",
     "--security-opt=seccomp=unconfined",
     "--security-opt=apparmor=unconfined"'
 DEVCONTAINER_GPU_ENV_BLOCK=""
@@ -101,6 +97,9 @@ if [ "$ENABLE_VULKAN_GPU" = true ]; then
   if [ ! -e /dev/dri ]; then
     log "Warning: Vulkan GPU passthrough was forced on, but /dev/dri is not present on this host."
   fi
+fi
+if [ -z "$DEVCONTAINER_GPU_ENV_BLOCK" ]; then
+  DEVCONTAINER_GPU_ENV_BLOCK='    "OLLAMA_VULKAN": "0",'
 fi
 DEVCONTAINER_RUNARGS_BLOCK="${DEVCONTAINER_RUNARGS_BLOCK}
   ],"
@@ -140,6 +139,10 @@ ${DEVCONTAINER_RUNARGS_BLOCK}
 ${DEVCONTAINER_GPU_ENV_BLOCK}
     "OLLAMA_HOST": "0.0.0.0:2345",
     "OLLAMA_FALLBACK_HOST": "0.0.0.0:2345",
+    "OLLAMA_CONTEXT_LENGTH": "8192",
+    "OLLAMA_TEXT_ALIAS_NUM_CTX": "8192",
+    "CODING_DEFAULT_MODEL": "qwen2.5-coder:1.5b",
+    "CODING_AGENT_MODEL": "qwen2.5-coder:1.5b",
     "LOCAL_INFER_ENDPOINT": "http://127.0.0.1:2345/api/generate"
   },
   "forwardPorts": [

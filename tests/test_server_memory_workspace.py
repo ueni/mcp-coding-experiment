@@ -372,7 +372,7 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }

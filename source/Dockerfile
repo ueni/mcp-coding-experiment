@@ -11,7 +11,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG APP_UID=1000
 ARG APP_GID=1000
 ARG OLLAMA_VERSION=0.18.2
-ARG OLLAMA_PRELOAD_MODELS=""
+ARG OLLAMA_PRELOAD_MODELS="qwen2.5-coder:1.5b"
 ARG OLLAMA_PULL_TIMEOUT_SECONDS=7200
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
@@ -55,22 +55,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_INFER_MODEL= \
     LOCAL_INFER_ENDPOINT=http://127.0.0.1:11434/api/generate \
     CODING_VENV_PYTHON=/opt/codebase-tooling/coding-venv/bin/python \
-    CODING_DEFAULT_MODEL=qwen3.6-35b-a3b:iq1 \
+    CODING_DEFAULT_MODEL=qwen2.5-coder:1.5b \
+    CODING_AGENT_MODEL=qwen2.5-coder:1.5b \
     CODING_MICRO_MODEL=qwen2.5-coder:1.5b \
     CODING_MICRO_MAX_PROMPT_CHARS=600 \
-    OLLAMA_CONTEXT_LENGTH=512 \
-    OLLAMA_TEXT_ALIAS_SOURCE_MODEL=hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ1_M \
-    OLLAMA_TEXT_ALIAS_MODEL=qwen3.6-35b-a3b:iq1 \
-    CONTINUE_OLLAMA_MODELS=qwen3.6-35b-a3b:iq1,qwen2.5-coder:1.5b \
+    OLLAMA_CONTEXT_LENGTH=8192 \
+    OLLAMA_TEXT_ALIAS_SOURCE_MODEL= \
+    OLLAMA_TEXT_ALIAS_MODEL= \
+    CONTINUE_OLLAMA_MODELS=qwen2.5-coder:1.5b \
     OLLAMA_ALLOW_PULL=false \
     OLLAMA_PRELOAD_MODELS=${OLLAMA_PRELOAD_MODELS} \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOST_CA_CERT_FILE= \
     MCP_APPLY_REPO_DEFAULTS=false
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=codebase-tooling-apt-lists,target=/var/lib/apt/lists,sharing=locked \
     set -eux; \
+    rm -f /etc/apt/apt.conf.d/docker-clean; \
     apt-get update; \
     packages=( \
         antiword \
@@ -103,12 +105,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /app
 
 COPY requirements.txt requirements-embedding.txt ./
-RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
     pip install --root-user-action=ignore -r requirements.txt \
     && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
          pip install --root-user-action=ignore -r requirements-embedding.txt; \
        fi
-RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
     && /opt/codebase-tooling/coding-venv/bin/pip install \
        --root-user-action=ignore \
@@ -128,7 +130,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/pip,sharing=locked \
          ln -sf "/opt/codebase-tooling/coding-venv/bin/${tool}" "/usr/local/bin/${tool}"; \
        done
 
-RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-ollama-binary,target=/var/cache/buildkit/ollama,sharing=locked \
     set -eux; \
     curl_retry() { \
       curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --http1.1 "$@"; \
@@ -180,7 +182,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama,sharing=locked \
       tgz) tar -xzf "${ollama_archive}" -C /usr/local ;; \
     esac
 
-RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models,sharing=locked \
     set -eux; \
     mkdir -p /tmp/ollama-models; \
     if [ -z "$(echo "${OLLAMA_PRELOAD_MODELS}" | xargs)" ]; then \
@@ -201,6 +203,10 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
     for model in "${preload_models[@]}"; do \
       model="$(echo "$model" | xargs)"; \
       if [ -n "$model" ]; then \
+        if ollama show "$model" >/dev/null 2>&1; then \
+          echo "Ollama model ${model} is already present in the BuildKit cache; skipping pull."; \
+          continue; \
+        fi; \
         pull_log="/tmp/ollama-pull-$(echo "$model" | tr -c 'A-Za-z0-9_.-' '_').log"; \
         echo "Pulling Ollama model ${model}"; \
         timeout "${OLLAMA_PULL_TIMEOUT_SECONDS}" ollama pull "$model" >"${pull_log}" 2>&1 || { \
@@ -211,6 +217,7 @@ RUN --mount=type=cache,target=/var/cache/buildkit/ollama-models,sharing=locked \
           wait "$pid" || true; \
           exit "$status"; \
         }; \
+        ollama show "$model" >/dev/null 2>&1; \
       fi; \
     done; \
     rm -rf /tmp/ollama-models/*; \
@@ -229,9 +236,7 @@ RUN groupadd --gid "${APP_GID}" app \
     && ln -sfn /opt/codebase-tooling/preloaded-ollama-models /home/app/.ollama/models \
     && chown -R app:app /app /models /repo /home/app /opt/codebase-tooling/defaults /opt/codebase-tooling/preloaded-ollama-models
 
-COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
-
-RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
+RUN --mount=type=cache,id=codebase-tooling-vscode-vsix,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
     set -eux; \
     mkdir -p /opt/codebase-tooling/defaults/extensions /var/cache/buildkit/vscode-vsix; \
     if [ -z "$(echo "${VSCODE_PRELOAD_EXTENSIONS}" | xargs)" ]; then \
@@ -241,15 +246,32 @@ RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
         publisher="${extension_id%%.*}"; \
         extension_name="${extension_id#*.}"; \
         vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"; \
-        if [ ! -f "${vsix_path}" ] && ! curl -fsSL "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${vsix_path}"; then \
-          if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
-          echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
+        if [ -f "${vsix_path}" ] && ! python -c "import sys, zipfile; assert zipfile.is_zipfile(sys.argv[1]), 'cached file is not a zip archive'" "${vsix_path}"; then \
+          echo "Discarding corrupt cached VS Code extension ${extension_id}." >&2; \
           rm -f "${vsix_path}"; \
-          continue; \
+        fi; \
+        if [ ! -f "${vsix_path}" ]; then \
+          tmp_vsix="${vsix_path}.tmp"; \
+          rm -f "${tmp_vsix}"; \
+          if ! curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${tmp_vsix}"; then \
+            if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+            echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
+            rm -f "${tmp_vsix}"; \
+            continue; \
+          fi; \
+          if ! python -c "import sys, zipfile; assert zipfile.is_zipfile(sys.argv[1]), 'downloaded file is not a zip archive'" "${tmp_vsix}"; then \
+            if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+            echo "Skipping VS Code extension ${extension_id}: marketplace payload was not a valid VSIX archive." >&2; \
+            rm -f "${tmp_vsix}"; \
+            continue; \
+          fi; \
+          mv "${tmp_vsix}" "${vsix_path}"; \
+        else \
+          echo "Using cached VS Code extension ${extension_id}."; \
         fi; \
         if ! python -c "import json, shutil, sys, tempfile, zipfile; from pathlib import Path; vsix_path = Path(sys.argv[1]); extensions_root = Path(sys.argv[2]); tmp_dir = tempfile.mkdtemp(); tmp_path = Path(tmp_dir); assert zipfile.is_zipfile(vsix_path), 'downloaded file is not a zip archive'; zipfile.ZipFile(vsix_path).extractall(tmp_path); extension_dir = tmp_path / 'extension'; package = json.loads((extension_dir / 'package.json').read_text()); install_dir = extensions_root / (package['publisher'] + '.' + package['name'] + '-' + package['version']); shutil.rmtree(install_dir, ignore_errors=True); shutil.copytree(extension_dir, install_dir); shutil.rmtree(tmp_dir)" "${vsix_path}" /opt/codebase-tooling/defaults/extensions; then \
           if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
-          echo "Skipping VS Code extension ${extension_id}: marketplace payload was not a valid VSIX archive." >&2; \
+          echo "Skipping VS Code extension ${extension_id}: cached VSIX archive could not be installed." >&2; \
           rm -f "${vsix_path}"; \
           continue; \
         fi; \
@@ -260,6 +282,8 @@ RUN --mount=type=cache,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
       ln -sfn /opt/codebase-tooling/defaults/extensions "${server_root}/extensions"; \
     done; \
     chown -R app:app /opt/codebase-tooling/defaults/extensions /home/app/.vscode-server /home/app/.vscode-server-insiders /home/app/.openvscode-server
+
+COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
 
 # Keep high-churn app files in the last layers to speed iterative rebuilds.
 COPY --chown=app:app server.py ./

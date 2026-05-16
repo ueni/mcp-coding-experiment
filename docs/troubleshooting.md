@@ -80,7 +80,21 @@ Symptom:
 
 Checks:
 
-- For HTTP mode, set `MCP_HTTP_BEARER_TOKEN` and send `Authorization: Bearer <token>`.
+- For HTTP mode, set `MCP_HTTP_BEARER_TOKEN` before starting the server and send
+  `Authorization: Bearer <token>` from the client.
+- For Continue IDE MCP, keep the server token out of tracked YAML and make the
+  same value resolvable as `${{ secrets.MCP_HTTP_BEARER_TOKEN }}`. Use Continue
+  Settings > Secrets for personal IDE use, or a local secret source such as
+  `.env`, `.continue/.env`, or `~/.continue/.env` with
+  `MCP_HTTP_BEARER_TOKEN=<token>`.
+- If Continue reports `unresolved secrets: MCP_HTTP_BEARER_TOKEN`, the IDE could
+  not resolve the client-side secret. If `/mcp` also reports
+  `MCP_HTTP_BEARER_TOKEN is not configured`, restart or rebuild the server after
+  exporting the same token into its environment.
+- In devcontainers, an empty `${localEnv:MCP_HTTP_BEARER_TOKEN}` usually means
+  VS Code was launched without that environment variable. Rebuild/reopen the
+  container after setting it, or let the entrypoint generate `.continue/.env` on
+  the next startup and use that local file as the Continue secret source.
 - If `MCP_HTTP_AUTH_MODE=oauth-resource`, also set `MCP_HTTP_AUTHORIZATION_SERVERS` to a JSON list or comma-separated list of issuer URLs, for example `MCP_HTTP_AUTHORIZATION_SERVERS='["https://auth.example.test"]'`. Without it, protected MCP endpoints fail closed with 403 and `/healthz` reports `auth.configuration_error`.
 - OAuth-capable MCP clients should read `/.well-known/oauth-protected-resource`; 401 responses include a `WWW-Authenticate` `resource_metadata` parameter pointing at that document.
 - If unauthenticated HTTP is intentional for a throwaway local test, set `MCP_HTTP_AUTH_MODE=insecure-local` and bind `HOST=127.0.0.1`; do not forward that port from VS Code, a devcontainer, SSH, or a tunnel.
@@ -119,6 +133,51 @@ Checks:
 - Confirm the container environment includes `MCP_APPLY_REPO_DEFAULTS=true`.
 - Rebuild or reopen the devcontainer so the image entrypoint runs again.
 
+## Continue suggests adding `/v1` to `apiBase`
+
+Symptom:
+
+```text
+This may mean that you forgot to add '/v1' to the end of your 'apiBase' in config.json.
+```
+
+Checks:
+
+- Treat this as a generic Continue connection hint for this repository's
+  checked-in `provider: ollama` model configs. Keep
+  `apiBase: http://127.0.0.1:2345` without `/v1`.
+- Confirm Continue is loading the repository `.continue` YAML config, not a
+  stale legacy `config.json` or OpenAI-compatible model entry.
+- From the same side where Continue is running, confirm the native Ollama API
+  responds:
+
+  ```bash
+  curl http://127.0.0.1:2345/api/tags
+  ```
+
+- If `/api/tags` works but Continue still cannot chat, check that the configured
+  model is installed and that the native `/api/chat` path is healthy. A `404` on
+  `http://127.0.0.1:2345/v1/` is expected for this native Ollama route.
+
+## Devcontainer build fails while pulling an Ollama model
+
+Symptom:
+
+```text
+timeout 7200 ollama pull qwen2.5-coder:1.5b
+ERROR: failed to build: failed to receive status: rpc error: code = Unavailable desc = ... error reading from server: EOF
+```
+
+Fix:
+
+- The checked-in devcontainer preloads `qwen2.5-coder:1.5b` by default. Run the
+  build on a stable network with a persistent BuildKit cache so retries can
+  reuse completed blobs.
+- If you need to validate startup without a baked model, override the build arg
+  to an empty value and keep runtime downloads opt-in with
+  `OLLAMA_ALLOW_PULL=false`.
+- After a no-model validation container starts, install the model manually with
+  `ollama pull qwen2.5-coder:1.5b` only when you want local inference available.
 
 ## VS Code Server attach fails with exit code 137
 
@@ -170,12 +229,15 @@ Diagnosis hints:
 
 Remediation options:
 
-- Rebuild/reopen after increasing Docker/VM memory. For the Qwen3.6 IQ1_M
-  devcontainer path, use a 32GB T14-class host or equivalent Docker memory
-  allocation when collecting final attach evidence.
+- Rebuild/reopen after increasing Docker/VM memory. The default local model is
+  the compact `qwen2.5-coder:1.5b` profile with an `8192` context to keep
+  laptop-class startup and Agent/MCP diagnostics predictable. Increase the
+  context to 16384/32768 only after confirming enough memory, or configure a
+  verified tool-capable Agent model locally when Agent tool calling requires it.
 - Close other memory-heavy workloads before rebuild/reopen.
 - Keep `OLLAMA_ALLOW_PULL=false` unless runtime downloads are intentionally
-  enabled; preloaded models avoid extra memory/network pressure during attach.
+  enabled; build-time or published-image preloads avoid extra memory/network
+  pressure during attach when you have intentionally created such an image.
 - Temporarily set `OLLAMA_ENABLED=false` to distinguish VS Code Server attach
   memory pressure from Ollama startup/model checks, then restore Ollama for the
   final verification path.
@@ -187,21 +249,24 @@ docker inspect --format 'running={{.State.Running}} exit_code={{.State.ExitCode}
 docker exec <devcontainer-name-or-id> pgrep -af 'python /app/server.py|server.py'
 ```
 
-## Ollama stays on CPU in the devcontainer
+## Vulkan crashes the Ollama runner in the devcontainer
 
 Symptom:
 
 ```text
-ollama ps
-NAME                ID              SIZE      PROCESSOR
-qwen3.6-35b-a3b:iq1 ...             22 GB     100% CPU
+model runner has unexpectedly stopped
+radv/amdgpu: The CS has been cancelled because the context is lost.
+terminate called after throwing an instance of 'vk::DeviceLostError'
+what():  vk::Queue::submit: ErrorDeviceLost
 ```
 
-Checks:
+Fix:
 
-- Confirm the built image uses Ollama `0.12.11` or newer; older releases do not ship Vulkan support for Intel/AMD iGPU paths.
-- Confirm `.devcontainer/devcontainer.json` includes `--device=/dev/dri`.
-- On AMD hosts, also expose `/dev/kfd` when it exists.
-- Confirm `.devcontainer/devcontainer.json` sets `OLLAMA_VULKAN=1`.
-- Inspect `/tmp/ollama.log`; if it still says `no compatible GPUs were discovered`, run `vulkaninfo --summary` inside the container and verify a real Intel or AMD GPU is visible instead of only llvmpipe.
-- Rebuild or reopen the devcontainer after changing the config so Ollama restarts with the new environment.
+- Keep the default `.devcontainer/devcontainer.json` setting `OLLAMA_VULKAN=0`
+  and rebuild/reopen the devcontainer so Ollama restarts on the CPU backend.
+- Remove any local `--device=/dev/dri` / `--device=/dev/kfd` additions unless
+  you are explicitly validating Vulkan acceleration.
+- If you opt into Vulkan with `setup-repository.sh --enable-vulkan-gpu`, inspect
+  `/tmp/ollama.log` after a real `/api/chat` Agent/tool request. A
+  `vk::DeviceLostError` means the GPU path is not stable for this host/driver
+  combination; return to `OLLAMA_VULKAN=0`.

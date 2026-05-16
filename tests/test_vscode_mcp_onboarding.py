@@ -36,6 +36,15 @@ def _load_healthcheck_module():
     return module
 
 
+def _load_smoke_module():
+    spec = importlib.util.spec_from_file_location("devcontainer_smoke_test", SMOKE_SCRIPT)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
 
 def test_vscode_discovers_curated_mcp_workflow_prompts():
     server = _load_server_module()
@@ -127,6 +136,18 @@ def test_vscode_healthcheck_task_points_at_checked_in_script():
     assert HEALTHCHECK_SCRIPT.exists()
 
 
+def test_docker_run_task_passes_http_bearer_token_without_literal_secret():
+    tasks = json.loads((REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
+    task = next(task for task in tasks["tasks"] if task["label"] == "Docker: Run Container")
+
+    args = task["args"]
+    token_index = args.index("MCP_HTTP_BEARER_TOKEN")
+    assert args[token_index - 1] == "-e"
+    assert "MCP_HTTP_BEARER_TOKEN=" not in args
+    assert "127.0.0.1:8000:8000" in args
+    assert "127.0.0.1:2345:2345" in args
+
+
 def test_vscode_devcontainer_smoke_task_points_at_checked_in_script():
     tasks = json.loads((REPO_ROOT / ".vscode" / "tasks.json").read_text(encoding="utf-8"))
     task = next(task for task in tasks["tasks"] if task["label"] == "Devcontainer: CI Smoke Test")
@@ -135,6 +156,7 @@ def test_vscode_devcontainer_smoke_task_points_at_checked_in_script():
     assert task["command"] == "python3"
     assert "${workspaceFolder}/scripts/devcontainer_smoke_test.py" in task["args"]
     assert task["options"]["env"]["OLLAMA_ALLOW_PULL"] == "false"
+    assert task["options"]["env"]["MCP_SMOKE_HOST_PORT_MODE"] == "ephemeral"
     assert SMOKE_SCRIPT.exists()
 
 
@@ -144,9 +166,46 @@ def test_devcontainer_smoke_script_uses_safe_model_prompt_defaults():
     assert "OLLAMA_ALLOW_PULL" in script
     assert "MCP_SMOKE_REQUIRE_MODEL_PROMPT" in script
     assert "MODEL_PROMPT_SKIP: no local Ollama models" in script
+    assert "preferred_model = os.getenv('CODING_AGENT_MODEL', '').strip()" in script
+    assert "preferred_model if preferred_model in models else models[0]" in script
+    assert "base + '/api/chat'" in script
+    assert "'tools': [{" in script
+    assert "'stream': True" in script
+    assert "'repo_status'" in script
+    assert "'repo_status' not in tool_names" in script
+    assert "MODEL_AGENT_OK" in script
     assert "num_predict" in script
     assert "OLLAMA_ALLOW_PULL" in script
     assert "false" in script
+
+
+def test_devcontainer_smoke_uses_ephemeral_host_ports_by_default():
+    smoke = _load_smoke_module()
+
+    args = smoke._smoke_run_args(
+        [
+            "-p",
+            "127.0.0.1:8000:8000",
+            "-p",
+            "127.0.0.1:2345:2345",
+            "--security-opt=seccomp=unconfined",
+        ],
+        "ephemeral",
+    )
+
+    assert "127.0.0.1:8000:8000" not in args
+    assert "127.0.0.1:2345:2345" not in args
+    assert "127.0.0.1::8000" in args
+    assert "127.0.0.1::2345" in args
+    assert "--security-opt=seccomp=unconfined" in args
+
+
+def test_devcontainer_smoke_can_preserve_fixed_host_ports_for_local_debugging():
+    smoke = _load_smoke_module()
+
+    args = smoke._smoke_run_args(["-p", "127.0.0.1:8000:8000"], "fixed")
+
+    assert args == ["-p", "127.0.0.1:8000:8000"]
 
 
 def test_healthcheck_requires_unauthenticated_mcp_auth_rejection():
@@ -221,6 +280,41 @@ def test_healthcheck_authorization_state_fails_when_token_request_has_auth_error
 
     assert auth_check.ok is False
     assert "with $MCP_HTTP_BEARER_TOKEN=403" in auth_check.detail
+    assert "Continue Settings > Secrets" in auth_check.remediation
+    assert "${{ secrets.MCP_HTTP_BEARER_TOKEN }}" in auth_check.remediation
+
+
+def test_healthcheck_authorization_state_reports_continue_secret_sources_when_token_missing(monkeypatch):
+    healthcheck = _load_healthcheck_module()
+    monkeypatch.setattr(healthcheck, "TOKEN", "")
+    monkeypatch.setattr(healthcheck, "TOKEN_ENV", "MCP_HTTP_BEARER_TOKEN")
+    monkeypatch.setattr(healthcheck, "_port_open", lambda _host, _port: True)
+
+    def fake_request_json(url):
+        if url.endswith("/healthz"):
+            return (
+                200,
+                {
+                    "ok": True,
+                    "transport": "http",
+                    "allow_mutations": True,
+                    "server": {"http_mode": True},
+                    "ollama": {"running": True, "configured_port": 2345, "configured_port_listening": True},
+                },
+                "",
+            )
+        return 200, {}, ""
+
+    monkeypatch.setattr(healthcheck, "_request_json", fake_request_json)
+    monkeypatch.setattr(healthcheck, "_request_status", lambda *_args, **_kwargs: (403, "MCP_HTTP_BEARER_TOKEN is not configured"))
+
+    auth_check = next(check for check in healthcheck.run_checks() if check.name == "HTTP authorization state")
+
+    assert auth_check.ok is False
+    assert "no $MCP_HTTP_BEARER_TOKEN set" in auth_check.detail
+    assert "Continue Settings > Secrets" in auth_check.remediation
+    assert "workspace .continue/.env" in auth_check.remediation
+    assert "${{ secrets.MCP_HTTP_BEARER_TOKEN }}" in auth_check.remediation
 
 
 def test_healthcheck_authorization_state_passes_only_for_rejection_then_endpoint_reached(monkeypatch):
@@ -259,6 +353,10 @@ def test_devcontainer_passes_http_bearer_token_from_local_env():
 
     assert config["containerEnv"]["MCP_HTTP_BEARER_TOKEN"] == "${localEnv:MCP_HTTP_BEARER_TOKEN}"
     assert config["containerEnv"]["MCP_TRANSPORT"] == "http"
+    assert config["containerEnv"]["OLLAMA_VULKAN"] == "0"
+    assert "127.0.0.1:8000:8000" in config["runArgs"]
+    assert "127.0.0.1:2345:2345" in config["runArgs"]
+    assert "--device=/dev/dri" not in config["runArgs"]
 
 
 def test_setup_script_generates_token_aware_devcontainer():
@@ -276,6 +374,10 @@ def test_setup_script_generates_token_aware_devcontainer():
         config = json.loads((repo_root / ".devcontainer" / "devcontainer.json").read_text(encoding="utf-8"))
 
     assert config["containerEnv"]["MCP_HTTP_BEARER_TOKEN"] == "${localEnv:MCP_HTTP_BEARER_TOKEN}"
+    assert config["containerEnv"]["OLLAMA_VULKAN"] == "0"
+    assert "127.0.0.1:8000:8000" in config["runArgs"]
+    assert "127.0.0.1:2345:2345" in config["runArgs"]
+    assert "--device=/dev/dri" not in config["runArgs"]
     assert "MCP_HTTP_BEARER_TOKEN" in result.stderr
 
 
@@ -313,5 +415,6 @@ def test_troubleshooting_documents_devcontainer_exit137_collection_and_remediati
     assert "memory.peak" in troubleshooting
     assert "memory.events" in troubleshooting
     assert "Process list sorted by RSS" in troubleshooting
-    assert "32GB T14-class" in troubleshooting
+    assert "compact `qwen2.5-coder:1.5b` profile" in troubleshooting
+    assert "16384/32768" in troubleshooting
     assert "python /app/server.py" in troubleshooting
