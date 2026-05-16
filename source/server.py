@@ -178,6 +178,7 @@ WORKFLOW_TASK_EXPIRY_HOURS = max(1, int(os.getenv("MCP_WORKFLOW_TASK_EXPIRY_HOUR
 TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.json")
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
+POLICY_INSIGHTS_FILE = Path("source/policy_insights.json")
 # Keep the external MCP contract focused: task_router remains the normal entrypoint,
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
@@ -188,6 +189,7 @@ PUBLIC_MCP_TOOL_NAMES = {
     "workflow_task",
     "task_status",
     "roots_diagnostics",
+    "policy_insights",
     *SCHEMA_BACKED_TOOL_NAMES,
 }
 OUTPUT_SCHEMA_BY_TOOL = TOOL_OUTPUT_SCHEMAS
@@ -216,6 +218,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "tool_annotations": {"categories": ["read-only"]},
     "tool_output_contracts": {"categories": ["read-only"]},
+    "policy_insights": {"categories": ["read-only", "governance"]},
     "workflow_task": {
         "categories": ["write", "shell/process"],
         "mode_categories": {
@@ -6304,6 +6307,153 @@ def _build_log_proposals(stdout: str, stderr: str) -> list[dict[str, str]]:
         )
     return proposals
 
+
+
+def _policy_insights_path() -> Path:
+    """Return the source-controlled maintainer policy insight bank path."""
+    return Path(__file__).resolve().parents[1] / POLICY_INSIGHTS_FILE
+
+
+def _load_policy_insight_bank() -> dict[str, Any]:
+    path = _policy_insights_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"policy insight bank is missing: {POLICY_INSIGHTS_FILE}") from exc
+    if payload.get("schema") != "mcp_policy_insights.v1":
+        raise ValueError("policy insight bank schema must be mcp_policy_insights.v1")
+    insights = payload.get("insights")
+    if not isinstance(insights, list) or not insights:
+        raise ValueError("policy insight bank must contain at least one insight")
+    required = {
+        "id",
+        "tool_router",
+        "trigger",
+        "expected_decision",
+        "rationale",
+        "source",
+        "remediation",
+    }
+    seen: set[str] = set()
+    for index, insight in enumerate(insights):
+        if not isinstance(insight, dict):
+            raise ValueError(f"policy insight {index} must be an object")
+        missing = sorted(required.difference(insight))
+        if missing:
+            raise ValueError(f"policy insight {index} missing required fields: {missing}")
+        insight_id = str(insight["id"])
+        if insight_id in seen:
+            raise ValueError(f"duplicate policy insight id: {insight_id}")
+        seen.add(insight_id)
+        if not isinstance(insight.get("trigger"), dict):
+            raise ValueError(f"policy insight {insight_id} trigger must be an object")
+    return payload
+
+
+def _policy_insight_public_row(insight: dict[str, Any]) -> dict[str, Any]:
+    trigger = insight.get("trigger", {}) if isinstance(insight.get("trigger"), dict) else {}
+    return {
+        "id": str(insight.get("id", "")),
+        "tool_router": str(insight.get("tool_router", "")),
+        "trigger": {
+            "kind": str(trigger.get("kind", "")),
+            "summary": str(trigger.get("summary", "")),
+        },
+        "expected_decision": str(insight.get("expected_decision", "")),
+        "rationale": str(insight.get("rationale", "")),
+        "source": str(insight.get("source", "")),
+        "remediation": str(insight.get("remediation", "")),
+    }
+
+
+def _policy_insight_replay_decision(insight: dict[str, Any]) -> dict[str, Any]:
+    """Replay one maintainer-authored insight through local policy primitives."""
+    trigger = insight.get("trigger", {}) if isinstance(insight.get("trigger"), dict) else {}
+    kind = str(trigger.get("kind", ""))
+    if kind == "tool_security_gate":
+        global ALLOW_MUTATIONS
+        original_allow_mutations = ALLOW_MUTATIONS
+        token = None
+        try:
+            if "allow_mutations" in trigger:
+                ALLOW_MUTATIONS = bool(trigger.get("allow_mutations"))
+            if "http_authorized" in trigger:
+                token = _HTTP_REQUEST_AUTHORIZED.set(bool(trigger.get("http_authorized")))
+            _require_tool_security_gate(
+                str(trigger.get("tool", insight.get("tool_router", ""))),
+                trigger.get("arguments") if isinstance(trigger.get("arguments"), dict) else {},
+            )
+        except PermissionError as exc:
+            return {"decision": "deny", "reason": _redact_audit_reason(str(exc))}
+        finally:
+            if token is not None:
+                _HTTP_REQUEST_AUTHORIZED.reset(token)
+            ALLOW_MUTATIONS = original_allow_mutations
+        return {"decision": "allow", "reason": "policy gate allowed request"}
+    if kind == "audit_redaction":
+        sample = trigger.get("sample", {})
+        redacted = _redact_audit_value(sample)
+        encoded = json.dumps(redacted, sort_keys=True)
+        forbidden = [str(item) for item in trigger.get("forbidden_fragments", []) if str(item)]
+        leaked = [item for item in forbidden if item in encoded]
+        decision = "redact" if "<redacted>" in encoded and not leaked else "leak"
+        return {"decision": decision, "reason": "audit redaction replay", "leaked_fragments": leaked}
+    raise ValueError(f"unsupported policy insight trigger kind: {kind}")
+
+
+def _policy_insight_replay_report() -> dict[str, Any]:
+    bank = _load_policy_insight_bank()
+    results: list[dict[str, Any]] = []
+    ok = True
+    for insight in bank["insights"]:
+        actual = _policy_insight_replay_decision(insight)
+        expected = str(insight.get("expected_decision", ""))
+        matched = actual["decision"] == expected
+        ok = ok and matched
+        results.append(
+            {
+                "id": str(insight.get("id", "")),
+                "tool_router": str(insight.get("tool_router", "")),
+                "expected_decision": expected,
+                "actual_decision": actual["decision"],
+                "matched": matched,
+                "reason": actual.get("reason", ""),
+            }
+        )
+    return {
+        "schema": "mcp_policy_insight_replay.v1",
+        "ok": ok,
+        "insight_count": len(results),
+        "results": results,
+    }
+
+
+@mcp.tool()
+def policy_insights(insight_id: str = "") -> dict[str, Any]:
+    """Read-only summary of maintainer-owned policy/tool-gate regression insights."""
+    bank = _load_policy_insight_bank()
+    rows = [_policy_insight_public_row(item) for item in bank["insights"]]
+    selected = insight_id.strip()
+    if selected:
+        rows = [row for row in rows if row["id"] == selected]
+        if not rows:
+            raise ValueError(f"unknown policy insight id: {selected}")
+    return {
+        "schema": "mcp_policy_insights_summary.v1",
+        "bank_schema": bank["schema"],
+        "bank_version": str(bank.get("version", "")),
+        "maintainer_controlled": True,
+        "runtime_learning": False,
+        "source_path": str(POLICY_INSIGHTS_FILE),
+        "insight_count": len(rows),
+        "insights": rows,
+        "safety": {
+            "read_only": True,
+            "raw_triggers_exposed": False,
+            "contains_secrets": False,
+        },
+        "promotion": str(bank.get("promotion", "")),
+    }
 
 @mcp.tool()
 def tool_annotations(tool_name: str = "") -> dict[str, Any]:

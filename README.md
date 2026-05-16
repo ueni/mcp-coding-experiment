@@ -460,6 +460,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `task_router`
 - `tool_annotations`
 - `tool_output_contracts`
+- `policy_insights` for read-only maintainer policy/tool-gate regression summaries
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
 - Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `interaction_invariant_audit`
 
@@ -470,6 +471,8 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 `roots_diagnostics()` is a read-only advisory setup diagnostic that feature-detects MCP client roots support and compares available `file://` roots with `REPO_PATH`. It returns redacted relationship metadata (`exact_match`, overlaps, multiple roots, no overlap, unsupported, unavailable, or error) without exposing absolute client paths outside the repository and without changing `_resolve_repo_path` enforcement. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
 
 `tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
+
+`policy_insights()` reports the versioned maintainer-owned policy insight bank from `source/policy_insights.json` without exposing raw trigger arguments or secret-like fixture values. The bank captures deterministic tool/router gate regressions for mutation denial, release/readiness read-only behavior, and sensitive-output redaction; see [Policy insight regression bank](./docs/policy-insights.md).
 
 ## Labs and Reports
 
@@ -486,3 +489,4 @@ See [MCP Fun Labs](./docs/labs.md) for command examples and expected outputs.
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Release Notes and Documentation Policy](./docs/release-notes-policy.md)
 - [MCP Output Schemas](./docs/mcp-output-schemas.md)
+- [Policy insight regression bank](./docs/policy-insights.md)
