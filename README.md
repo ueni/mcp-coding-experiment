@@ -460,6 +460,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 ### Public MCP v1 Surface
 
 - `task_router`
+- `workflow_skill_search`
 - `tool_annotations`
 - `tool_output_contracts`
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper

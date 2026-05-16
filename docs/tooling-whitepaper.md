@@ -124,6 +124,7 @@ The platform now exposes a compact LLM-first MCP v1 surface. Capabilities remain
 Public tools:
 
 - `task_router`
+- `workflow_skill_search`
 - `tool_annotations`
 - `tool_output_contracts`
 - `workflow_task`
