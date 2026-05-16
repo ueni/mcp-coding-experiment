@@ -126,6 +126,7 @@ Public tools:
 - `task_router`
 - `tool_annotations`
 - `tool_output_contracts`
+- `policy_insights`
 - `workflow_task`
 - `task_status`
 - Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`
@@ -137,6 +138,8 @@ Public tools:
 `task_router` is the only public high-level router in the MCP v1 surface. Its documented modes are covered by `tool_annotations` because each mode can have distinct safety semantics: status/embed/rerank are read-only, inference/autocomplete modes are open-world network operations, and coding modes may involve writes, shell/process execution, package/network access, or sandbox lifecycle actions.
 
 `workspace_transaction` is a public schema-backed core tool with mode-specific annotation coverage because it exposes transaction lifecycle and direct file mutations, including destructive delete/restore/rollback modes.
+
+`policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
 
 The following router families are internal orchestration helpers, not public MCP v1 tools. They remain implemented in the server for reuse, direct Python tests, and future composition, but MCP clients do not see them in `list_tools()` and their modes are not part of the v1 annotation coverage contract unless they are exposed through a public tool:
 
