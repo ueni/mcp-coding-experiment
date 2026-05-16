@@ -38,6 +38,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "governance_report",
                 "artifact_provenance",
                 "workflow_diagnostics",
+                "interaction_invariant_audit",
             ),
         )
         contracts = all_tool_output_contracts()
@@ -104,6 +105,10 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
+            "interaction_invariant_audit": self.server.interaction_invariant_audit(
+                task_summary="Read-only audit before mutation; run tests before readiness.",
+                recent_notes=["No mutation happened yet."],
+            ),
         }
 
         for tool_name, payload in outputs.items():

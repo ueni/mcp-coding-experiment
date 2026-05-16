@@ -257,6 +257,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "governance_report": {"categories": ["read-only"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
+    "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
@@ -14139,6 +14140,244 @@ def clarification_gate(
         risk_level=risk_level,
         rollback_plan=rollback_plan,
         user_response_action=user_response_action,
+    )
+
+
+INTERACTION_INVARIANT_SMELL_GUIDANCE: dict[str, str] = {
+    "intent_drift": "Pause and restate the user goal; use clarification_gate when the current plan no longer matches the original intent.",
+    "ignored_historical_instruction": "Stop before mutation and reconcile the ignored constraint; create state_snapshot before any approved follow-up mutation.",
+    "missing_validation": "Run or explicitly waive the required validation before summarizing readiness; use change_impact_gate or release_readiness for release-sensitive work.",
+    "contradicted_prior_response": "Ask a clarifying question before continuing because the trajectory contradicts an earlier plan or promise.",
+}
+
+
+def _interaction_audit_normalize_notes(
+    recent_notes: list[str] | list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(recent_notes or []):
+        if isinstance(item, dict):
+            text = str(item.get("text") or item.get("note") or item.get("content") or item)
+            role = str(item.get("role") or item.get("source") or "note")
+        else:
+            text = str(item)
+            role = "note"
+        normalized.append(
+            {
+                "index": index,
+                "role": role[:40],
+                "text": _redact_audit_string(text.strip())[:500],
+                "_raw_text": text.strip()[:1000],
+            }
+        )
+    return normalized[:25]
+
+
+def _interaction_audit_extract_invariants(task_summary: str, notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    combined = "\n".join([task_summary] + [str(note.get("_raw_text", note.get("text", ""))) for note in notes]).lower()
+    rules: list[tuple[str, str, str, tuple[str, ...]]] = [
+        ("mutation_mode", "No mutation without explicit approval", "blocking", ("no mutation", "read-only", "do not mutate", "do not edit", "do not change", "without mutation")),
+        ("secret_safety", "Do not request, print, store, or commit secrets", "blocking", ("no secret", "do not expose secret", "do not print token", "credential", "api key", "private key", "authorization header")),
+        ("validation", "Required validation or tests must be run or explicitly waived", "required", ("run tests", "pytest", "validation required", "must validate", "required tests", "typecheck", "lint")),
+        ("rollback", "Mutation work needs a snapshot or rollback plan", "required", ("rollback", "snapshot", "state_snapshot", "restore plan")),
+        ("scope", "Stay inside the stated task/file/repository scope", "required", ("out of scope", "only", "scope", "target file", "do not touch")),
+        ("release_gate", "Readiness summaries must respect release blockers", "required", ("release blocker", "release readiness", "do not release", "not ready")),
+        ("client_compatibility", "Preserve target client compatibility", "required", ("vscode", "copilot", "mcp client", "compatibility", "client")),
+    ]
+    invariants: list[dict[str, Any]] = []
+    for invariant_id, description, severity, keywords in rules:
+        matches = [kw for kw in keywords if kw in combined]
+        if matches:
+            invariants.append(
+                {
+                    "id": invariant_id,
+                    "description": description,
+                    "severity": severity,
+                    "source": "task_summary_or_recent_notes",
+                    "evidence_terms": matches[:4],
+                }
+            )
+    if not invariants:
+        invariants.append(
+            {
+                "id": "task_intent",
+                "description": "Preserve the stated task intent across follow-up turns",
+                "severity": "advisory",
+                "source": "task_summary",
+                "evidence_terms": [],
+            }
+        )
+    return invariants
+
+
+def _interaction_audit_find_smells(
+    task_summary: str,
+    notes: list[dict[str, Any]],
+    invariants: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    task_lower = task_summary.lower()
+    note_text = "\n".join(str(note.get("_raw_text", note.get("text", ""))) for note in notes)
+    blob = f"{task_summary}\n{note_text}".lower()
+    invariant_ids = {item.get("id") for item in invariants}
+    smells: list[dict[str, Any]] = []
+
+    def add(category: str, confidence: float, reason: str, evidence: list[str]) -> None:
+        smells.append(
+            {
+                "category": category,
+                "confidence": round(max(0.0, min(1.0, confidence)), 2),
+                "reason": reason,
+                "evidence": [_redact_audit_string(item)[:240] for item in evidence[:4]],
+                "safe_next_action": INTERACTION_INVARIANT_SMELL_GUIDANCE[category],
+            }
+        )
+
+    mutation_terms = ("apply patch", "edited", "write", "delete", "move", "commit", "committed", "push", "deploy", "changed file", "mutated")
+    if "mutation_mode" in invariant_ids and any(term in blob for term in mutation_terms):
+        add(
+            "ignored_historical_instruction",
+            0.86,
+            "Trajectory mentions mutation while a read-only/no-mutation constraint is present.",
+            [note["text"] for note in notes if any(term in str(note.get("_raw_text", note.get("text", ""))).lower() for term in mutation_terms)],
+        )
+    secret_terms = ("token=", "password=", "authorization:", "api_key", "api key", "private key", "secret=")
+    if "secret_safety" in invariant_ids and any(term in blob for term in secret_terms):
+        add(
+            "ignored_historical_instruction",
+            0.9,
+            "Trajectory appears to handle or expose a secret despite a no-secret constraint.",
+            [note["text"] for note in notes if any(term in str(note.get("_raw_text", note.get("text", ""))).lower() for term in secret_terms)],
+        )
+    if "validation" in invariant_ids and any(term in blob for term in ("skipped tests", "did not run tests", "not run tests", "untested", "no validation", "without validation")):
+        add(
+            "missing_validation",
+            0.88,
+            "Required validation is mentioned but the trajectory says it was skipped or not run.",
+            [note["text"] for note in notes if any(term in str(note.get("_raw_text", note.get("text", ""))).lower() for term in ("skipped", "not run", "untested", "no validation"))],
+        )
+    drift_terms = ("instead", "unrelated", "changed scope", "different task", "also deploy", "rewrite everything", "new feature")
+    if any(term in blob for term in drift_terms) and any(term in task_lower for term in ("audit", "read-only", "review", "summarize", "diagnose")):
+        add(
+            "intent_drift",
+            0.72,
+            "Trajectory suggests a broader or different action than the stated read-only/audit intent.",
+            [note["text"] for note in notes if any(term in str(note.get("_raw_text", note.get("text", ""))).lower() for term in drift_terms)],
+        )
+    contradiction_patterns = (
+        ("will not", "then i"),
+        ("plan: no", "now"),
+        ("promised", "but"),
+        ("prior plan", "instead"),
+        ("said no", "but"),
+    )
+    if any(a in blob and b in blob for a, b in contradiction_patterns) or "contradict" in blob:
+        add(
+            "contradicted_prior_response",
+            0.76,
+            "Recent notes indicate a prior plan or promise was contradicted.",
+            [note["text"] for note in notes if any(term in str(note.get("_raw_text", note.get("text", ""))).lower() for term in ("will not", "prior plan", "instead", "contradict", "but"))],
+        )
+    return smells
+
+
+def _interaction_audit_confidence(smells: list[dict[str, Any]], invariants: list[dict[str, Any]]) -> float:
+    if smells:
+        return round(max(float(item.get("confidence", 0.0)) for item in smells), 2)
+    if invariants and invariants[0].get("id") != "task_intent":
+        return 0.64
+    return 0.42
+
+
+def _build_interaction_invariant_audit(
+    *,
+    task_summary: str,
+    recent_notes: list[str] | list[dict[str, Any]] | None = None,
+    planned_next_step: str = "",
+    log_audit: bool = False,
+) -> dict[str, Any]:
+    summary = task_summary.strip()[:1000]
+    notes = _interaction_audit_normalize_notes(recent_notes)
+    if planned_next_step.strip():
+        notes.append(
+            {
+                "index": len(notes),
+                "role": "planned_next_step",
+                "text": _redact_audit_string(planned_next_step.strip())[:500],
+                "_raw_text": planned_next_step.strip()[:1000],
+            }
+        )
+    invariants = _interaction_audit_extract_invariants(summary, notes)
+    smells = _interaction_audit_find_smells(summary, notes, invariants)
+    confidence = _interaction_audit_confidence(smells, invariants)
+    needs_clarification = bool(smells) or confidence < 0.55
+    recommendations = [item["safe_next_action"] for item in smells]
+    if needs_clarification and not any("clarification_gate" in item for item in recommendations):
+        recommendations.append("Use clarification_gate before mutation or readiness summaries when constraints are ambiguous.")
+    if any(item.get("id") == "mutation_mode" for item in invariants):
+        recommendations.append("Use state_snapshot before any explicitly approved mutation follow-up.")
+    if any(item.get("category") == "missing_validation" for item in smells):
+        recommendations.append("Use change_impact_gate and release_readiness to verify validation/readiness evidence.")
+    if not recommendations:
+        recommendations.append("Proceed with the planned read-only workflow while preserving the extracted invariants.")
+
+    payload: dict[str, Any] = {
+        "schema": "interaction_invariant_audit.v1",
+        "read_only": True,
+        "advisory_only": True,
+        "ok_to_continue": not needs_clarification,
+        "confidence": confidence,
+        "extracted_invariants": invariants,
+        "suspected_smells": smells,
+        "safe_next_actions": list(dict.fromkeys(recommendations)),
+        "linked_gates": {
+            "clarification_gate": "Ask focused non-sensitive questions when intent or constraints are ambiguous.",
+            "state_snapshot": "Create a rollback point before approved mutation work.",
+            "change_impact_gate": "Check impacted files/tests before risky changes.",
+            "release_readiness": "Summarize release blockers only after required evidence is present.",
+            "workflow_diagnostics": "Diagnose concrete failed tool trajectories and audit events after a workflow failure.",
+        },
+        "redactions_applied": ["sensitive_keys_or_values"],
+        "security": {
+            "stores_conversation_logs_by_default": False,
+            "records_secrets": False,
+            "caller_snippets_redacted": True,
+            "audit_logging_default": False,
+        },
+        "input_summary": {
+            "task_summary_present": bool(summary),
+            "recent_note_count": len(notes),
+            "planned_next_step_present": bool(planned_next_step.strip()),
+        },
+    }
+    if log_audit:
+        _append_audit_event(
+            "interaction_invariant_audit",
+            ["read-only", "governance"],
+            payload["ok_to_continue"],
+            {
+                "smell_categories": [item["category"] for item in smells],
+                "invariant_ids": [item["id"] for item in invariants],
+                "confidence": confidence,
+                "input_summary": payload["input_summary"],
+            },
+            "ready" if payload["ok_to_continue"] else "needs_clarification",
+        )
+    return payload
+
+
+@mcp.tool()
+def interaction_invariant_audit(
+    task_summary: str,
+    recent_notes: list[str] | list[dict[str, Any]] | None = None,
+    planned_next_step: str = "",
+    log_audit: bool = False,
+) -> dict[str, Any]:
+    """Extract multi-turn task invariants and flag interaction-smell risks before mutation/readiness summaries."""
+    return _build_interaction_invariant_audit(
+        task_summary=task_summary,
+        recent_notes=recent_notes,
+        planned_next_step=planned_next_step,
+        log_audit=log_audit,
     )
 
 
