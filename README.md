@@ -127,7 +127,7 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 - `devcontainer_health_check` - VS Code/devcontainer MCP endpoint, auth, port, and Ollama diagnostics.
 - `snapshot_before_refactor` - pre-refactor snapshot and rollback planning before mutation work.
 
-The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails.
+The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails. When unsure which workflow to use, call `task_router(mode="workflow_select", prompt="...")` first; it returns read-only, ranked workflow cards with confidence and caveats. See [Workflow selection cards](./docs/workflow-selection.md).
 
 ### Static test impact map workflow
 
@@ -508,7 +508,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
 - Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `interaction_invariant_audit`
 
-`task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
+`task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `mode="workflow_select"` as a read-only preflight when an agent is unsure which workflow/prompt/tool to choose. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
 `workflow_task()` starts the prototype async wrapper for long-running workflows. Initial supported workflows are `governance_report` and `vscode_task_run`; status is persisted under `.codebase-tooling-mcp/tasks/`, can be read with `task_status()`, and returns repository-relative artifact resource links. VS Code task logs are kept in redacted result artifacts referenced by the compact task status. See [Workflow task prototype](./docs/workflow-tasks.md).
 

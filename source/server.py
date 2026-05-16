@@ -214,6 +214,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
             "coding_check": ["shell/process"],
             "coding_pip": ["write", "shell/process", "network"],
             "coding_sandbox": ["write", "shell/process"],
+            "workflow_select": ["read-only"],
         },
     },
     "tool_annotations": {"categories": ["read-only"]},
@@ -559,6 +560,123 @@ TASK_ROUTE_SYSTEM_PROMPTS = {
     "vision": "Interpret compact JSON input. q is a vision task, m is compact task memory when present, and k is retrieved repository context when present. Focus on visible evidence only.",
     "research": "Interpret compact JSON input. q is a research task, m is compact task memory when present, and k is retrieved repository context when present. Return a concise factual synthesis.",
 }
+WORKFLOW_CARD_SCHEMA_VERSION = "workflow_card.v1"
+WORKFLOW_SELECT_SCHEMA_VERSION = "workflow_selection.v1"
+WORKFLOW_CARD_FIELDS = (
+    "id",
+    "schema",
+    "title",
+    "intent",
+    "triggers",
+    "prerequisites",
+    "risk",
+    "mutation_mode",
+    "outputs",
+    "do_not_use_when",
+    "recommended_entrypoint",
+    "routing_terms",
+)
+WORKFLOW_CARDS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "release-readiness",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Release readiness gate",
+        "intent": "Summarize whether the repository is ready to release by combining health, tests, release-note, and known-risk signals.",
+        "triggers": ["release", "ship", "publish", "version", "tag", "ready to merge"],
+        "prerequisites": ["Clean or intentionally scoped git diff", "Known target branch/version", "Relevant tests or quality gates identified"],
+        "risk": "high",
+        "mutation_mode": "read-only; mutations require a separate explicit fix workflow",
+        "outputs": ["release gate summary", "blocking findings", "recommended checks", "rollback notes"],
+        "do_not_use_when": ["The user only asks for a single failing test explanation", "Release target or acceptance criteria are unknown; clarify first"],
+        "recommended_entrypoint": "quality_router(mode='release_readiness') or release readiness prompt via task_router(mode='task')",
+        "routing_terms": ["release", "readiness", "ship", "publish", "tag", "version", "changelog", "gate", "merge"],
+    },
+    {
+        "id": "devcontainer-health",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Devcontainer health check",
+        "intent": "Diagnose VS Code/devcontainer MCP connectivity, ports, health endpoints, bearer-token setup, and Ollama/service readiness.",
+        "triggers": ["devcontainer", "VS Code MCP", "healthz", "port 8000", "container won't start"],
+        "prerequisites": ["Devcontainer or local container context", "Expected endpoint or forwarded port"],
+        "risk": "medium",
+        "mutation_mode": "read-only diagnostics by default; shell/container fixes require explicit mutation approval",
+        "outputs": ["health status", "failed probe list", "safe next actions", "docs/vscode-mcp-onboarding.md references"],
+        "do_not_use_when": ["The request is about production deployment health outside the devcontainer", "No container/MCP runtime context is involved"],
+        "recommended_entrypoint": "vscode_router / workspace task 'MCP: Workspace Health Check' or task_router(mode='status')",
+        "routing_terms": ["devcontainer", "vscode", "mcp", "health", "healthz", "port", "ollama", "container"],
+    },
+    {
+        "id": "snapshot-before-refactor",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Snapshot before refactor",
+        "intent": "Create or require a rollback point before broad, risky, or ambiguous edits/refactors.",
+        "triggers": ["refactor", "rename", "large change", "rewrite", "delete", "migration"],
+        "prerequisites": ["Clarified target files/scope", "Rollback plan", "Mutation mode explicitly enabled before edits"],
+        "risk": "high",
+        "mutation_mode": "snapshot is read-only metadata plus git state capture; later edits require ALLOW_MUTATIONS=true and explicit intent",
+        "outputs": ["snapshot id", "restore instruction", "scope caveats", "clarification questions when scope is unclear"],
+        "do_not_use_when": ["The task is purely read-only review", "The change is a trivial single-line edit with normal git rollback sufficient and documented"],
+        "recommended_entrypoint": "workspace_transaction(mode='snapshot') before mutation workflow",
+        "routing_terms": ["snapshot", "rollback", "refactor", "rewrite", "rename", "delete", "migration", "risky", "large"],
+    },
+    {
+        "id": "security-triage",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Security triage",
+        "intent": "Triage suspicious code, dependencies, auth, secret, or sandbox exposure without weakening gates.",
+        "triggers": ["security", "secret", "token", "auth", "vulnerability", "sandbox", "CVE"],
+        "prerequisites": ["Suspicious file/diff/dependency or threat question", "Do not print secrets; redact evidence"],
+        "risk": "high",
+        "mutation_mode": "read-only analysis first; fixes require explicit mutation workflow and may need snapshot/clarification",
+        "outputs": ["risk findings", "affected paths", "exploitability notes", "safe remediation options"],
+        "do_not_use_when": ["The request asks to reveal, copy, or bypass secrets", "No security/privacy dimension is present"],
+        "recommended_entrypoint": "security triage prompt via task_router(mode='task', task='security') plus change_impact_gate/policy_simulator as needed",
+        "routing_terms": ["security", "secret", "token", "auth", "credential", "vulnerability", "sandbox", "cve", "injection"],
+    },
+    {
+        "id": "test-impact",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Test impact selection",
+        "intent": "Map changed files or requested scope to the smallest meaningful verification gate.",
+        "triggers": ["what tests", "impact", "changed files", "verify", "coverage", "CI"],
+        "prerequisites": ["Changed files, diff, or target path", "Known test framework or generated impact map when available"],
+        "risk": "medium",
+        "mutation_mode": "read-only selection; running tests may execute project code but should not edit repository files",
+        "outputs": ["ranked test commands", "coverage caveats", "unmapped changes", "fallback gate"],
+        "do_not_use_when": ["The user asks for release sign-off; use release readiness instead", "No target/diff exists and the user only wants general advice"],
+        "recommended_entrypoint": "quality_router(mode='change_impact') or change_impact_gate",
+        "routing_terms": ["test", "tests", "impact", "verify", "coverage", "changed", "ci", "pytest", "gate"],
+    },
+    {
+        "id": "governance-report",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Governance report",
+        "intent": "Produce read-only audit/reporting evidence for policy, tool gates, snapshots, security events, and workflow diagnostics.",
+        "triggers": ["governance", "audit", "policy report", "compliance", "evidence"],
+        "prerequisites": ["Reporting window or scope", "Generated state may be absent in fresh repositories"],
+        "risk": "low",
+        "mutation_mode": "read-only report generation; async status files may be generated only through explicit workflow_task use",
+        "outputs": ["governance report", "policy/tool-gate summary", "snapshot/security/workflow evidence", "provenance"],
+        "do_not_use_when": ["The task asks to change policy settings", "The user needs a single operational diagnostic rather than an audit bundle"],
+        "recommended_entrypoint": "governance_report or workflow_task(workflow='governance_report')",
+        "routing_terms": ["governance", "audit", "policy", "compliance", "evidence", "report", "provenance"],
+    },
+    {
+        "id": "workflow-diagnostics",
+        "schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "title": "Workflow diagnostics",
+        "intent": "Diagnose a failed or confusing MCP workflow by finding the critical failing step and safe next actions.",
+        "triggers": ["workflow failed", "diagnose", "critical step", "why did it fail", "audit events"],
+        "prerequisites": ["Workflow/audit trajectory or recent failure context", "Redaction before sharing logs"],
+        "risk": "medium",
+        "mutation_mode": "read-only diagnostics",
+        "outputs": ["critical step candidate", "failure category", "evidence", "safe next actions", "redactions applied"],
+        "do_not_use_when": ["The user asks to rerun/fix the workflow immediately without diagnosis", "No failure or trajectory context exists"],
+        "recommended_entrypoint": "workflow_diagnostics",
+        "routing_terms": ["workflow", "diagnostic", "diagnose", "failed", "failure", "critical", "audit", "trajectory", "stuck"],
+    },
+)
+
 TASK_RETRIEVAL_STOPWORDS = {
     "a",
     "about",
@@ -12559,6 +12677,126 @@ def _infer_batch_from_prompt(prompt: str) -> list[str]:
     return []
 
 
+
+def _workflow_card_public(card: dict[str, Any]) -> dict[str, Any]:
+    return {field: card[field] for field in WORKFLOW_CARD_FIELDS if field in card}
+
+
+def _workflow_selection_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", text.lower())
+        if token not in TASK_RETRIEVAL_STOPWORDS and not token.isdigit()
+    }
+
+
+def _workflow_card_score(card: dict[str, Any], query: str, tokens: set[str]) -> dict[str, Any]:
+    haystack_parts: list[str] = []
+    for key in ("id", "title", "intent", "risk", "mutation_mode", "recommended_entrypoint"):
+        haystack_parts.append(str(card.get(key, "") or ""))
+    for key in ("triggers", "prerequisites", "outputs", "do_not_use_when", "routing_terms"):
+        value = card.get(key, [])
+        if isinstance(value, list):
+            haystack_parts.extend(str(item) for item in value)
+    haystack = " ".join(haystack_parts).lower()
+
+    score = 0.0
+    reasons: list[str] = []
+    for term in card.get("routing_terms", []):
+        term_text = str(term).lower()
+        term_tokens = _workflow_selection_tokens(term_text)
+        if term_text and term_text in query.lower():
+            score += 4.0
+            reasons.append(f"phrase:{term_text}")
+        elif term_tokens and term_tokens.intersection(tokens):
+            overlap = len(term_tokens.intersection(tokens))
+            score += 1.5 * overlap
+            reasons.append(f"term:{','.join(sorted(term_tokens.intersection(tokens)))}")
+    for token in tokens:
+        if token in haystack:
+            score += 0.35
+
+    risk = str(card.get("risk", "") or "").lower()
+    high_risk_terms = {
+        "delete", "remove", "rewrite", "refactor", "migration", "release", "ship",
+        "publish", "deploy", "security", "secret", "token", "auth", "credential",
+    }
+    if risk == "high" and tokens.intersection(high_risk_terms):
+        score += 1.25
+        reasons.append("high-risk term")
+    if card.get("id") == "snapshot-before-refactor" and tokens.intersection({"delete", "remove", "rewrite", "refactor", "migration"}):
+        score += 3.0
+        reasons.append("rollback recommended before risky mutation")
+    if card.get("id") == "release-readiness" and tokens.intersection({"release", "ship", "publish", "deploy", "merge"}):
+        score += 2.5
+        reasons.append("release gate requested")
+    if card.get("id") == "security-triage" and tokens.intersection({"security", "secret", "token", "auth", "credential", "vulnerability"}):
+        score += 2.5
+        reasons.append("security/privacy gate requested")
+
+    return {"score": score, "reasons": reasons[:6]}
+
+
+def _workflow_selection_caveats(matches: list[dict[str, Any]], tokens: set[str]) -> list[str]:
+    caveats: list[str] = ["Read-only selector: it recommends existing workflows/prompts/tools but does not execute them."]
+    high_risk = tokens.intersection({"delete", "remove", "rewrite", "refactor", "migration", "release", "ship", "publish", "deploy", "security", "secret", "token", "auth", "credential"})
+    match_ids = {str(match.get("id")) for match in matches}
+    if high_risk:
+        caveats.append("High-risk wording detected: clarify scope, confirm mutation mode, and preserve a rollback path before edits.")
+    if tokens.intersection({"delete", "remove", "rewrite", "refactor", "migration"}) and "snapshot-before-refactor" in match_ids:
+        caveats.append("Use snapshot-before-refactor before broad or destructive mutations.")
+    if tokens.intersection({"release", "ship", "publish", "deploy", "merge"}) and "release-readiness" in match_ids:
+        caveats.append("Run release readiness before handoff/merge/deploy decisions.")
+    if tokens.intersection({"security", "secret", "token", "auth", "credential"}) and "security-triage" in match_ids:
+        caveats.append("Keep security triage read-only until remediation scope and secret redaction are explicit.")
+    if not matches or float(matches[0].get("confidence", 0.0) or 0.0) < 0.35:
+        caveats.append("Low confidence: ask a clarification question before choosing a workflow.")
+    return caveats
+
+
+def workflow_select(prompt: str, top_k: int = 3) -> dict[str, Any]:
+    """Read-only workflow-card selector for natural-language MCP workflow choice."""
+    query = str(prompt or "").strip()
+    if not query:
+        raise ValueError("prompt must not be empty")
+    if top_k < 1:
+        raise ValueError("top_k must be >= 1")
+    tokens = _workflow_selection_tokens(query)
+    scored: list[dict[str, Any]] = []
+    max_score = 1.0
+    for card in WORKFLOW_CARDS:
+        details = _workflow_card_score(card, query, tokens)
+        max_score = max(max_score, float(details["score"]))
+        scored.append({"card": card, **details})
+    scored.sort(key=lambda row: (float(row["score"]), str(row["card"].get("id", ""))), reverse=True)
+
+    matches: list[dict[str, Any]] = []
+    for row in scored[: min(top_k, len(scored))]:
+        card = _workflow_card_public(row["card"])
+        score = float(row["score"])
+        confidence = round(min(0.99, score / max(max_score, 6.0)), 2)
+        if score <= 0:
+            confidence = 0.05
+        matches.append(
+            {
+                **card,
+                "score": round(score, 2),
+                "confidence": confidence,
+                "match_reasons": row["reasons"],
+            }
+        )
+    return {
+        "schema": WORKFLOW_SELECT_SCHEMA_VERSION,
+        "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "query": query,
+        "read_only": True,
+        "selection_mode": "ranked_keyword_cards",
+        "cards_available": len(WORKFLOW_CARDS),
+        "matches": matches,
+        "caveats": _workflow_selection_caveats(matches, tokens),
+    }
+
+
 class TaskRouterService:
     """Application service for the single public task router and explicit model utilities."""
 
@@ -12580,7 +12818,7 @@ class TaskRouterService:
         system: str = "",
         stop: list[str] | None = None,
         normalize: bool = True,
-        top_k: int = 20,
+        top_k: int | None = None,
         output_profile: str | None = None,
         offset: int = 0,
         limit: int | None = None,
@@ -12613,10 +12851,13 @@ class TaskRouterService:
             "coding_check",
             "coding_pip",
             "coding_sandbox",
+            "workflow_select",
         }:
             raise ValueError(
-                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox"
+                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, workflow_select"
             )
+        if mode == "workflow_select":
+            return workflow_select(prompt=prompt or query, top_k=3 if top_k is None else top_k)
         if mode == "status":
             return local_model_status()
         if mode == "task":
@@ -12801,7 +13042,7 @@ class TaskRouterService:
         return local_rerank(
             query=query,
             candidates=candidates or [],
-            top_k=top_k,
+            top_k=20 if top_k is None else top_k,
             backend=backend,
             output_profile=output_profile,
         )
@@ -12815,7 +13056,7 @@ def task_router(
     mode: Annotated[
         str,
         Field(
-            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
+            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use `workflow_select` first when you are unsure which existing MCP workflow/prompt/tool to use. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
         ),
     ] = "task",
     prompt: Annotated[
@@ -12879,9 +13120,9 @@ def task_router(
         Field(description="Whether embeddings should be L2-normalized in `mode='embed'`."),
     ] = True,
     top_k: Annotated[
-        int,
-        Field(description="Maximum rerank results to return in `mode='rerank'`."),
-    ] = 20,
+        int | None,
+        Field(description="Maximum results to return in ranked modes. Defaults to 3 for `mode='workflow_select'` and 20 for `mode='rerank'`."),
+    ] = None,
     output_profile: Annotated[
         str | None,
         Field(description="Output verbosity/profile. Common values are `compact`, `normal`, and `verbose`."),
@@ -12955,7 +13196,7 @@ def task_router(
         Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
     ] = True,
 ) -> dict[str, Any]:
-    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox."""
+    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` for read-only workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select."""
     audit_args = {
         "mode": mode,
         "task": task,

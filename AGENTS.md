@@ -23,7 +23,10 @@ manual.
 ## Default MCP entrypoint and important routers
 
 - Start high-level requests with public tool `task_router(mode="task", prompt=...)`.
-  It classifies the request and dispatches to the right specialist flow.
+  It classifies the request and dispatches to the right specialist flow. If unsure
+  which existing workflow/prompt/tool fits a task, first call the read-only
+  selector `task_router(mode="workflow_select", prompt=...)`; see
+  [`docs/workflow-selection.md`](./docs/workflow-selection.md).
 - Use `quality_router` for test/quality workflows, including `self_test`,
   `self_check`, `change_impact`, `release_readiness`, flaky-test, required-tool,
   spec-to-test, and smart-fix modes.

@@ -25,6 +25,62 @@ class ServerToolsTest(ServerToolsTestBase):
             time.sleep(0.02)
         self.fail(f"workflow task did not reach terminal state: {task_id}")
 
+
+    def test_task_router_workflow_select_release_and_snapshot_gates(self):
+        out = self.server.task_router(
+            mode="workflow_select",
+            prompt="We need to release this branch after a risky refactor; what gates should run?",
+            top_k=3,
+        )
+
+        self.assertEqual(out["schema"], "workflow_selection.v1")
+        self.assertTrue(out["read_only"])
+        ids = [match["id"] for match in out["matches"]]
+        self.assertIn("release-readiness", ids)
+        self.assertIn("snapshot-before-refactor", ids)
+        self.assertTrue(any("release" in caveat.lower() for caveat in out["caveats"]))
+        self.assertTrue(any("snapshot" in caveat.lower() or "rollback" in caveat.lower() for caveat in out["caveats"]))
+        for match in out["matches"]:
+            self.assertEqual(match["schema"], "workflow_card.v1")
+            for field in ("intent", "prerequisites", "risk", "mutation_mode", "outputs", "do_not_use_when"):
+                self.assertIn(field, match)
+
+    def test_task_router_workflow_select_security_triage_is_read_only(self):
+        out = self.server.task_router(
+            mode="workflow_select",
+            prompt="Audit these auth changes for leaked tokens and security vulnerabilities",
+            top_k=2,
+        )
+
+        self.assertEqual(out["matches"][0]["id"], "security-triage")
+        self.assertGreaterEqual(out["matches"][0]["confidence"], 0.5)
+        self.assertIn("read-only", out["matches"][0]["mutation_mode"].lower())
+        self.assertTrue(any("security" in caveat.lower() for caveat in out["caveats"]))
+
+    def test_task_router_workflow_select_defaults_to_three_matches(self):
+        out = self.server.task_router(
+            mode="workflow_select",
+            prompt="Pick the right workflow for release, refactor, security, tests, devcontainer, governance, and diagnostics",
+        )
+
+        self.assertEqual(out["schema"], "workflow_selection.v1")
+        self.assertEqual(len(out["matches"]), 3)
+
+    def test_task_router_workflow_select_devcontainer_and_test_impact(self):
+        health = self.server.task_router(
+            mode="workflow_select",
+            prompt="VS Code devcontainer MCP healthz fails on port 8000",
+            top_k=1,
+        )
+        self.assertEqual(health["matches"][0]["id"], "devcontainer-health")
+
+        impact = self.server.task_router(
+            mode="workflow_select",
+            prompt="Which pytest commands cover changed Python files?",
+            top_k=1,
+        )
+        self.assertEqual(impact["matches"][0]["id"], "test-impact")
+
     def test_workflow_task_persists_succeeded_status_and_resource_link(self):
         original_audit_log = self.server.MCP_AUDIT_LOG_FILE
         self.server.MCP_AUDIT_LOG_FILE = self.repo_path / ".codebase-tooling-mcp" / "audit" / "security_events.jsonl"
