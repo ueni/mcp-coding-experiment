@@ -179,6 +179,7 @@ def _validate_vscode_tasks(tasks: dict[str, Any]) -> None:
     for key in {
         "TEST_IMAGE",
         "MCP_SMOKE_REQUIRE_MODEL_PROMPT",
+        "MCP_SMOKE_HOST_PORT_MODE",
         "OLLAMA_ALLOW_PULL",
         "MCP_SMOKE_SERVER_STARTUP_TIMEOUT_SECONDS",
         "MCP_SMOKE_MODEL_TIMEOUT_SECONDS",
@@ -228,34 +229,106 @@ if not model:
     if not models:
         print('MODEL_PROMPT_SKIP: no local Ollama models are installed in this image/container; build with preload_ollama_models or set OLLAMA_ALLOW_PULL=true only for an explicit local run')
         raise SystemExit(1 if require else 0)
-    model = models[0]
+    preferred_model = os.getenv('CODING_AGENT_MODEL', '').strip()
+    model = preferred_model if preferred_model in models else models[0]
 payload = {
     'model': model,
-    'prompt': 'Reply with exactly: devcontainer-smoke-ok',
-    'stream': False,
-    'options': {'num_predict': 16, 'temperature': 0},
+    'messages': [{'role': 'user', 'content': 'Call the repo_status tool now with summary set to status. Do not answer in normal text.'}],
+    'tools': [{
+        'type': 'function',
+        'function': {
+            'name': 'repo_status',
+            'description': 'Return a short repository status summary.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'summary': {'type': 'string', 'description': 'Short status request.'},
+                },
+                'required': ['summary'],
+            },
+        },
+    }],
+    'stream': True,
+    'options': {'num_predict': 64, 'temperature': 0},
 }
 request = urllib.request.Request(
-    base + '/api/generate',
+    base + '/api/chat',
     data=json.dumps(payload).encode('utf-8'),
     headers={'Content-Type': 'application/json'},
 )
 try:
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        result = json.loads(response.read().decode('utf-8'))
+        raw_body = response.read().decode('utf-8')
+        events = (
+            [json.loads(line) for line in raw_body.splitlines() if line.strip()]
+            if '\n' in raw_body
+            else ([json.loads(raw_body)] if raw_body.strip() else [])
+        )
 except urllib.error.HTTPError as exc:
     detail = exc.read().decode('utf-8', errors='replace')[:500]
-    print(f'MODEL_PROMPT_SKIP: Ollama generate failed for {model!r}: HTTP {exc.code}: {detail}')
+    print(f'MODEL_AGENT_SKIP: Ollama native /api/chat tool-call failed for {model!r}: HTTP {exc.code}: {detail}')
     raise SystemExit(1 if require else 0)
 except Exception as exc:
-    print(f'MODEL_PROMPT_SKIP: Ollama generate failed for {model!r}: {exc}')
+    print(f'MODEL_AGENT_SKIP: Ollama native /api/chat tool-call failed for {model!r}: {exc}')
     raise SystemExit(1 if require else 0)
-text = str(result.get('response', '')).strip()
-if not text:
-    print(f'MODEL_PROMPT_FAIL: Ollama generate returned an empty response for {model!r}')
+if not events:
+    print(f'MODEL_AGENT_FAIL: Ollama native /api/chat returned no events for {model!r}')
     raise SystemExit(1)
-print(f'MODEL_PROMPT_OK: model={model!r} response_chars={len(text)}')
+content = ''.join(
+    str(event.get('message', {}).get('content', ''))
+    for event in events
+    if isinstance(event, dict) and isinstance(event.get('message'), dict)
+).strip()
+tool_calls = []
+for event in events:
+    message = event.get('message') if isinstance(event, dict) else None
+    event_tool_calls = message.get('tool_calls') if isinstance(message, dict) else None
+    if isinstance(event_tool_calls, list):
+        tool_calls.extend(event_tool_calls)
+tool_names = [
+    call.get('function', {}).get('name')
+    for call in tool_calls
+    if isinstance(call, dict) and isinstance(call.get('function'), dict)
+]
+if 'repo_status' not in tool_names:
+    print(f'MODEL_AGENT_FAIL: Ollama native /api/chat did not return repo_status tool call for {model!r}; content_chars={len(content)} tool_calls={tool_names!r}')
+    raise SystemExit(1)
+print(f'MODEL_AGENT_OK: model={model!r} content_chars={len(content)} tool_calls={tool_names!r}')
 """
+
+
+def _smoke_run_args(raw_run_args: list[Any], host_port_mode: str) -> list[str]:
+    """Return docker run args for smoke runs without requiring fixed host ports."""
+    run_args: list[str] = []
+    iterator = iter(raw_run_args)
+    for run_arg in iterator:
+        if run_arg in {"-p", "--publish"}:
+            try:
+                publish = next(iterator)
+            except StopIteration as exc:
+                raise SmokeFailure(
+                    "devcontainer runArgs contains a publish flag without a value"
+                ) from exc
+            if not isinstance(publish, str):
+                raise SmokeFailure("devcontainer runArgs publish value must be a string")
+            if host_port_mode == "none":
+                continue
+            if host_port_mode == "ephemeral" and publish in {
+                "127.0.0.1:8000:8000",
+                "127.0.0.1:2345:2345",
+            }:
+                host_ip, _host_port, container_port = publish.split(":", 2)
+                publish = f"{host_ip}::{container_port}"
+            run_args.extend([str(run_arg), publish])
+            continue
+        if run_arg == "--device=/dev/dri" and not Path("/dev/dri").exists():
+            print(
+                "SMOKE_NOTICE: /dev/dri is unavailable on this runner; "
+                "skipping devcontainer GPU device passthrough"
+            )
+            continue
+        run_args.append(str(run_arg))
+    return run_args
 
 
 def _container_logs(name: str) -> None:
@@ -283,11 +356,10 @@ def _start_container(args: argparse.Namespace, config: dict[str, Any]) -> str:
     ]
     for key, value in sorted(env.items()):
         command.extend(["--env", f"{key}={value}"])
-    for run_arg in config.get("runArgs", []):
-        if run_arg == "--device=/dev/dri" and not Path("/dev/dri").exists():
-            print("SMOKE_NOTICE: /dev/dri is unavailable on this runner; skipping devcontainer GPU device passthrough")
-            continue
-        command.append(run_arg)
+    raw_run_args = config.get("runArgs", [])
+    if not isinstance(raw_run_args, list):
+        raise SmokeFailure(".devcontainer/devcontainer.json runArgs must be a list")
+    command.extend(_smoke_run_args(raw_run_args, args.host_port_mode))
     command.append(args.image)
 
     _run(command)
@@ -348,6 +420,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--healthcheck-timeout-seconds", type=float, default=float(os.getenv("MCP_HEALTHCHECK_TIMEOUT_SECONDS", "3")))
     parser.add_argument("--ollama-startup-timeout-seconds", type=int, default=int(os.getenv("OLLAMA_STARTUP_TIMEOUT", "30")))
     parser.add_argument("--model-timeout-seconds", type=float, default=float(os.getenv("MCP_SMOKE_MODEL_TIMEOUT_SECONDS", "30")))
+    parser.add_argument(
+        "--host-port-mode",
+        choices=("ephemeral", "fixed", "none"),
+        default=os.getenv("MCP_SMOKE_HOST_PORT_MODE", "ephemeral"),
+        help=(
+            "how to handle devcontainer publish runArgs during smoke runs; "
+            "ephemeral keeps container ports exposed on random localhost host ports to avoid CI collisions"
+        ),
+    )
     return parser.parse_args(argv)
 
 

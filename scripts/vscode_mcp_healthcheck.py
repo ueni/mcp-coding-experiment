@@ -192,8 +192,10 @@ def run_checks() -> list[Check]:
         if auth_status in {405, 406} and token_reached_endpoint:
             auth_detail += " (endpoint reached; method/content negotiation failed after auth)"
         auth_remediation = (
-            f"Export {TOKEN_ENV} before rebuilding/opening the devcontainer and use the same env var in VS Code MCP config. "
-            "Token mode must reject missing/incorrect tokens but accept the configured bearer token."
+            f"Export {TOKEN_ENV} before rebuilding/opening the devcontainer, and make the same value resolvable "
+            f"to Continue as ${{{{ secrets.{TOKEN_ENV} }}}} through Continue Settings > Secrets, "
+            f"workspace .env, workspace .continue/.env, or ~/.continue/.env. Token mode must reject "
+            "missing/incorrect tokens but accept the configured bearer token."
         )
     else:
         auth_ok = False
@@ -202,8 +204,10 @@ def run_checks() -> list[Check]:
             f" ({'expected auth rejection' if unauth_ok else 'unexpected response'})"
         )
         auth_remediation = (
-            f"Generate a local token with `export {TOKEN_ENV}=\"$(openssl rand -hex 32)\"`, "
-            "then rebuild/reopen the devcontainer so the server and VS Code use the same value."
+            f"Generate a local token with `export {TOKEN_ENV}=\"$(openssl rand -hex 32)\"`, then "
+            f"rebuild/reopen the devcontainer so the server sees it. Add the same value to Continue as "
+            f"${{{{ secrets.{TOKEN_ENV} }}}} through Continue Settings > Secrets, workspace .env, "
+            "workspace .continue/.env, or ~/.continue/.env."
         )
     checks.append(Check("HTTP authorization state", auth_ok, auth_detail, auth_remediation if not auth_ok else ""))
 

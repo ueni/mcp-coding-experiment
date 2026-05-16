@@ -735,7 +735,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -748,17 +748,17 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "task_router.task.v1")
         self.assertEqual(out["classification"]["route"], "security")
-        self.assertEqual(out["routing"]["selected_model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(out["routing"]["selected_model"], "qwen2.5-coder:1.5b")
         self.assertTrue(out["routing"]["routing_loaded"])
         self.assertIn('"r":"SEC"', out["encoding"]["encoded_prompt"])
         self.assertEqual(linf.call_args.kwargs["task"], "security")
-        self.assertEqual(linf.call_args.kwargs["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
 
     def test_task_router_task_includes_retrieval_context(self):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "review findings",
         }
@@ -804,7 +804,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -822,7 +822,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.compact.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "review findings",
         }
@@ -836,10 +836,10 @@ class ServerToolsTest(ServerToolsTestBase):
             )
         self.assertEqual(out["schema"], "task_router.task.compact.v1")
         self.assertEqual(out["route"], "review")
-        self.assertEqual(out["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(out["model"], "qwen2.5-coder:1.5b")
         self.assertTrue(out["ok"])
         self.assertEqual(linf.call_args.kwargs["task"], "review")
-        self.assertEqual(linf.call_args.kwargs["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(linf.call_args.kwargs["model"], "qwen2.5-coder:1.5b")
 
     def test_task_router_task_auto_selects_micro_coding_model_for_short_prompt(self):
         infer_payload = {
@@ -896,7 +896,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -922,7 +922,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
             "result_id": "infer-123",
@@ -942,7 +942,7 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(len(session_entries), 1)
         value = session_entries[0]["value"]
         self.assertEqual(value["route"], "security")
-        self.assertEqual(value["model"], "qwen3.6-35b-a3b:iq1")
+        self.assertEqual(value["model"], "qwen2.5-coder:1.5b")
         self.assertEqual(value["backend"], "fallback")
         self.assertTrue(value["ok"])
         self.assertEqual(value["result_id"], "infer-123")
@@ -961,7 +961,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "",
         }
@@ -1014,7 +1014,7 @@ class ServerToolsTest(ServerToolsTestBase):
         infer_payload = {
             "schema": "local_infer.v1",
             "backend": "fallback",
-            "model": "qwen3.6-35b-a3b:iq1",
+            "model": "qwen2.5-coder:1.5b",
             "ok": True,
             "output": "security findings",
         }
@@ -2259,7 +2259,7 @@ class ServerToolsTest(ServerToolsTestBase):
         with patch.object(
             self.server,
             "local_infer",
-            return_value={"schema": "local_infer.v1", "model": "qwen3.6-35b-a3b:iq1", "ok": True},
+            return_value={"schema": "local_infer.v1", "model": "qwen2.5-coder:1.5b", "ok": True},
         ), patch.object(
             self.server,
             "_coding_checks",
@@ -2540,6 +2540,10 @@ class ServerToolsTest(ServerToolsTestBase):
             self.assertNotIn("audit_report", names)
             for tool_name in self.server.SCHEMA_BACKED_TOOL_NAMES:
                 self.assertIn(tool_name, names)
+            for item in tools:
+                output_schema = item.model_dump().get("outputSchema")
+                if output_schema is not None:
+                    self.assertEqual(output_schema.get("type"), "object", item.model_dump().get("name"))
 
         asyncio.run(run_checks())
 

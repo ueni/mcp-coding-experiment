@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from scripts.monitor_runtime_resources import (
+    _docker_publish_arg,
     bytes_to_mib,
     collect_runtime_samples,
     docker_run_args,
@@ -53,9 +54,15 @@ def test_docker_run_args_disable_runtime_pulls_and_ollama() -> None:
 
     assert args[:2] == ["docker", "run"]
     assert "codebase-tooling-mcp:test" == args[-1]
+    assert "127.0.0.1:18000:8000" in args
     assert "OLLAMA_ENABLED=false" in args
     assert "OLLAMA_ALLOW_PULL=false" in args
     assert "EXTRA=value" in args
+
+
+def test_docker_publish_arg_uses_random_host_port_by_default() -> None:
+    assert _docker_publish_arg(0) == "127.0.0.1::8000"
+    assert _docker_publish_arg(18000) == "127.0.0.1:18000:8000"
 
 
 def test_query_vram_usage_reports_unavailable_without_nvidia_smi(monkeypatch: pytest.MonkeyPatch) -> None:
