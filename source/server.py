@@ -12494,7 +12494,7 @@ class TaskRouterService:
         system: str = "",
         stop: list[str] | None = None,
         normalize: bool = True,
-        top_k: int = 20,
+        top_k: int | None = None,
         output_profile: str | None = None,
         offset: int = 0,
         limit: int | None = None,
@@ -12533,7 +12533,7 @@ class TaskRouterService:
                 "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, workflow_select"
             )
         if mode == "workflow_select":
-            return workflow_select(prompt=prompt or query, top_k=top_k)
+            return workflow_select(prompt=prompt or query, top_k=3 if top_k is None else top_k)
         if mode == "status":
             return local_model_status()
         if mode == "task":
@@ -12718,7 +12718,7 @@ class TaskRouterService:
         return local_rerank(
             query=query,
             candidates=candidates or [],
-            top_k=top_k,
+            top_k=20 if top_k is None else top_k,
             backend=backend,
             output_profile=output_profile,
         )
@@ -12796,9 +12796,9 @@ def task_router(
         Field(description="Whether embeddings should be L2-normalized in `mode='embed'`."),
     ] = True,
     top_k: Annotated[
-        int,
-        Field(description="Maximum rerank results to return in `mode='rerank'`."),
-    ] = 20,
+        int | None,
+        Field(description="Maximum results to return in ranked modes. Defaults to 3 for `mode='workflow_select'` and 20 for `mode='rerank'`."),
+    ] = None,
     output_profile: Annotated[
         str | None,
         Field(description="Output verbosity/profile. Common values are `compact`, `normal`, and `verbose`."),

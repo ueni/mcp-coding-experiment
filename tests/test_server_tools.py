@@ -57,6 +57,15 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("read-only", out["matches"][0]["mutation_mode"].lower())
         self.assertTrue(any("security" in caveat.lower() for caveat in out["caveats"]))
 
+    def test_task_router_workflow_select_defaults_to_three_matches(self):
+        out = self.server.task_router(
+            mode="workflow_select",
+            prompt="Pick the right workflow for release, refactor, security, tests, devcontainer, governance, and diagnostics",
+        )
+
+        self.assertEqual(out["schema"], "workflow_selection.v1")
+        self.assertEqual(len(out["matches"]), 3)
+
     def test_task_router_workflow_select_devcontainer_and_test_impact(self):
         health = self.server.task_router(
             mode="workflow_select",
