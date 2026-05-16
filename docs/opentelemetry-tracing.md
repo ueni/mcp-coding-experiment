@@ -34,6 +34,8 @@ This first slice records local spans for:
 - `mcp.tool.task_router` public router execution.
 - `mcp.workflow.select` for `task_router(mode="workflow_select")`.
 - `mcp.tool.workflow_task` and `mcp.tool.task_status` async task entrypoints.
+- `mcp.tool.governance_report` and `mcp.tool.artifact_provenance` report/provenance
+  entrypoints, including compact repository-relative artifact refs when exported.
 - `mcp.workflow_task.lifecycle` for task start/running/completed/failed/expired
   lifecycle events.
 - `mcp.policy_gate` for mutation/auth policy denials.
@@ -59,7 +61,8 @@ Span attributes intentionally stay low-cardinality and redacted:
 
 Span records also include `trace_id`, `span_id`, `parent_span_id`,
 `correlation_id`, start/end timestamps, duration, status, and
-`resource.service.name`.
+`resource.service.name`. Async workflow spans use the task id as the correlation
+id; direct tool calls get a generated local correlation id when no task id exists.
 
 ## Redaction and content-capture boundaries
 
