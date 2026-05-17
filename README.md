@@ -383,7 +383,9 @@ python source/server.py
 curl -H "Authorization: Bearer $MCP_HTTP_BEARER_TOKEN" http://localhost:8000/mcp
 ```
 
-The default `token`/`bearer` modes are simple local bearer-token protection. Their `/.well-known/oauth-protected-resource` response is public and intentionally returns an empty `authorization_servers` list; those modes do not claim full OAuth authorization-server discovery.
+The default `token`/`bearer` modes are simple local bearer-token protection. Their `/.well-known/oauth-protected-resource` response is public and intentionally returns an empty `authorization_servers` list; those modes do not claim full OAuth authorization-server discovery. Protected-resource metadata and the public MCP server manifest advertise the local scope vocabulary: `mcp:read` for discovery/read-only tools, and `mcp:mutate` for HTTP tools or modes whose categories intersect mutation or sensitive categories (`write`, `git mutation`, `shell/process`, `network`, or `secret-sensitive`). Unauthorized protected MCP responses include a least-privilege `WWW-Authenticate` challenge with `scope="mcp:read"` by default.
+
+For early deployments that need a narrower local token, set `MCP_HTTP_BEARER_TOKEN_SCOPES` to a comma- or space-separated subset such as `mcp:read`. When unset, the single configured `MCP_HTTP_BEARER_TOKEN` keeps the historical behavior and grants both `mcp:read` and `mcp:mutate`. A read-only-scoped HTTP request can call read-only tools, but mutation/sensitive tools return `insufficient_scope` with a challenge naming the required scope; bearer token values are never written to audit events.
 
 For MCP/OAuth clients that need RFC 9728 protected resource metadata, use `oauth-resource` mode and configure at least one authorization server issuer URL:
 
@@ -396,7 +398,7 @@ python source/server.py
 curl -sS http://localhost:8000/.well-known/oauth-protected-resource
 ```
 
-In `oauth-resource` mode, missing `MCP_HTTP_AUTHORIZATION_SERVERS` fails closed for protected MCP endpoints and is reported under `/healthz` `auth.configuration_error`. Unauthorized MCP requests include a `WWW-Authenticate: Bearer ... resource_metadata="..."` challenge so clients can discover the protected-resource metadata document.
+In `oauth-resource` mode, missing `MCP_HTTP_AUTHORIZATION_SERVERS` fails closed for protected MCP endpoints and is reported under `/healthz` `auth.configuration_error`. Unauthorized MCP requests include a `WWW-Authenticate: Bearer ... resource_metadata="..." scope="mcp:read"` challenge so clients can discover the protected-resource metadata document and request the least privilege needed for initial read/discovery access.
 
 For throwaway local-only experiments, unauthenticated HTTP is still available only by explicit opt-in:
 
@@ -450,6 +452,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 | `ALLOW_MUTATIONS` | `false` (recommended default) | No | `true`, `false` | Enables/disables write and git-mutating operations. |
 | `MCP_HTTP_AUTH_MODE` | `token` | No | `token`, `bearer`, `oauth-resource`, `insecure-local`, `disabled`, `off`, `none` | HTTP auth mode. Token/bearer modes require `Authorization: Bearer ...` and are local/simple bearer modes; `oauth-resource` also publishes RFC 9728 protected-resource metadata. Insecure modes are explicit local-only escapes. Stdio is unaffected. |
 | `MCP_HTTP_BEARER_TOKEN` | empty | Required for HTTP token modes | Secret string | Bearer token accepted by HTTP MCP/SSE requests. Missing token in token mode returns 403. |
+| `MCP_HTTP_BEARER_TOKEN_SCOPES` | empty | No | Comma- or space-separated subset of `mcp:read`, `mcp:mutate` | Static scopes granted to the configured local bearer token. Empty preserves existing single-token behavior by granting both scopes; set `mcp:read` for read-only HTTP access. |
 | `MCP_HTTP_AUTHORIZATION_SERVERS` | empty | Required for `oauth-resource` mode | JSON string list or comma-separated issuer URLs | Authorization server issuer URLs returned as `authorization_servers` by `/.well-known/oauth-protected-resource`. Missing values in `oauth-resource` mode fail closed and appear in `/healthz` diagnostics. |
 | `MCP_HTTP_RESOURCE` | `http://localhost:$PORT/mcp` | No | Absolute resource URI | Resource identifier advertised by the protected-resource metadata document. |
 | `MCP_HTTP_PROTECTED_RESOURCE_METADATA_URL` | derived from `MCP_HTTP_RESOURCE` | No | Absolute URL | URL placed in 401 `WWW-Authenticate` challenges as `resource_metadata`. |

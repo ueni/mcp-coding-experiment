@@ -142,6 +142,7 @@ ALLOW_ORIGINS = [
 ]
 MCP_HTTP_AUTH_MODE = os.getenv("MCP_HTTP_AUTH_MODE", "token").strip().lower()
 MCP_HTTP_BEARER_TOKEN = os.getenv("MCP_HTTP_BEARER_TOKEN", "").strip()
+MCP_HTTP_BEARER_TOKEN_SCOPES_RAW = os.getenv("MCP_HTTP_BEARER_TOKEN_SCOPES", "").strip()
 MCP_HTTP_AUTHORIZATION_SERVERS_RAW = os.getenv("MCP_HTTP_AUTHORIZATION_SERVERS", "").strip()
 MCP_HTTP_ALLOWED_ORIGINS_RAW = os.getenv("MCP_HTTP_ALLOWED_ORIGINS", "").strip()
 MCP_HTTP_DEFAULT_PROTOCOL_VERSIONS = (
@@ -223,6 +224,9 @@ PUBLIC_MCP_TOOL_NAMES = {
     *SCHEMA_BACKED_TOOL_NAMES,
 }
 OUTPUT_SCHEMA_BY_TOOL = TOOL_OUTPUT_SCHEMAS
+MCP_SCOPE_READ = "mcp:read"
+MCP_SCOPE_MUTATE = "mcp:mutate"
+MCP_SUPPORTED_SCOPES = (MCP_SCOPE_READ, MCP_SCOPE_MUTATE)
 
 
 class _AnyToolOutput(RootModel[Any]):
@@ -300,6 +304,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
 }
 SENSITIVE_TOOL_CATEGORIES = {"write", "git mutation", "shell/process", "network", "secret-sensitive"}
 MUTATION_TOOL_CATEGORIES = {"write", "git mutation"}
+MCP_SCOPE_MUTATE_CATEGORIES = MUTATION_TOOL_CATEGORIES | SENSITIVE_TOOL_CATEGORIES
 SENSITIVE_AUDIT_KEY_RE = re.compile(
     r"token|secret|password|credential|authorization|api[_-]?key", re.IGNORECASE
 )
@@ -320,6 +325,9 @@ ABSOLUTE_PATH_VALUE_RE = re.compile(
 )
 _HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
     "http_request_authorized", default=None
+)
+_HTTP_REQUEST_GRANTED_SCOPES: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "http_request_granted_scopes", default=None
 )
 _OTEL_CURRENT_SPAN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "mcp_otel_current_span_id", default=""
@@ -1077,6 +1085,75 @@ def _bearer_token_from_headers(headers: list[tuple[bytes, bytes]]) -> str:
     return ""
 
 
+def _supported_mcp_scopes() -> list[str]:
+    return list(MCP_SUPPORTED_SCOPES)
+
+
+def _parse_scope_values(raw_scopes: str) -> list[str]:
+    return [scope.strip() for scope in re.split(r"[\s,]+", raw_scopes.strip()) if scope.strip()]
+
+
+def _http_bearer_token_scope_config_error(raw_scopes: str | None = None) -> str:
+    value = MCP_HTTP_BEARER_TOKEN_SCOPES_RAW if raw_scopes is None else raw_scopes.strip()
+    if not value:
+        return ""
+    scopes = _parse_scope_values(value)
+    unknown = sorted({scope for scope in scopes if scope not in MCP_SUPPORTED_SCOPES})
+    if unknown:
+        return (
+            "MCP_HTTP_BEARER_TOKEN_SCOPES only supports "
+            f"{', '.join(MCP_SUPPORTED_SCOPES)}; unsupported scope(s): {', '.join(unknown)}"
+        )
+    if not scopes:
+        return "MCP_HTTP_BEARER_TOKEN_SCOPES must include at least one supported scope"
+    return ""
+
+
+def _local_bearer_token_granted_scopes(raw_scopes: str | None = None) -> frozenset[str]:
+    value = MCP_HTTP_BEARER_TOKEN_SCOPES_RAW if raw_scopes is None else raw_scopes.strip()
+    if not value:
+        return frozenset(MCP_SUPPORTED_SCOPES)
+    if _http_bearer_token_scope_config_error(value):
+        return frozenset()
+    return frozenset(scope for scope in _parse_scope_values(value) if scope in MCP_SUPPORTED_SCOPES)
+
+
+def _www_authenticate_quote(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', r'\"')
+
+
+def _http_bearer_challenge(
+    *,
+    required_scope: str = MCP_SCOPE_READ,
+    error: str = "",
+) -> str:
+    parts = ['Bearer realm="mcp"']
+    if error:
+        parts.append(f'error="{_www_authenticate_quote(error)}"')
+    parts.append(
+        'resource_metadata="%s"'
+        % _www_authenticate_quote(_http_protected_resource_metadata_url())
+    )
+    parts.append(f'scope="{_www_authenticate_quote(required_scope)}"')
+    return ", ".join(parts)
+
+
+class HTTPInsufficientScopeError(PermissionError):
+    def __init__(self, tool_name: str, required_scope: str, granted_scopes: frozenset[str]):
+        self.tool_name = tool_name
+        self.required_scope = required_scope
+        self.granted_scopes = granted_scopes
+        self.challenge = _http_bearer_challenge(
+            required_scope=required_scope,
+            error="insufficient_scope",
+        )
+        granted = " ".join(sorted(granted_scopes)) or "none"
+        super().__init__(
+            f"insufficient_scope: {tool_name} requires scope {required_scope}; "
+            f"granted scopes: {granted}; WWW-Authenticate: {self.challenge}"
+        )
+
+
 def _http_path_is_protected_mcp(path: str) -> bool:
     return path == "/sse" or path == "/mcp" or path.startswith("/mcp/")
 
@@ -1264,7 +1341,7 @@ def _http_auth_discovery_payload() -> dict[str, Any]:
         "resource": _http_resource_identifier(),
         "authorization_servers": authorization_servers,
         "bearer_methods_supported": ["header"],
-        "scopes_supported": ["mcp:read", "mcp:mutate"],
+        "scopes_supported": _supported_mcp_scopes(),
         "mcp_auth_mode": MCP_HTTP_AUTH_MODE,
         "oauth_protected_resource_metadata": _http_protected_resource_metadata_url(),
     }
@@ -1291,6 +1368,7 @@ def _mcp_server_manifest_payload() -> dict[str, Any]:
         {
             "name": entry["tool"],
             "categories": entry.get("categories", []),
+            "required_scope": entry.get("required_scope", MCP_SCOPE_READ),
             "mutation_capable": bool(entry.get("mutation_capable", False)),
             "annotations": entry.get("annotations", {}),
             **({"modes": entry["modes"]} if "modes" in entry else {}),
@@ -1317,7 +1395,7 @@ def _mcp_server_manifest_payload() -> dict[str, Any]:
                     "mode": MCP_HTTP_AUTH_MODE,
                     "schemes": ["bearer"] if _http_auth_required() else [],
                     "header": "Authorization",
-                    "scopes_supported": ["mcp:read", "mcp:mutate"],
+                    "scopes_supported": _supported_mcp_scopes(),
                     "oauth_protected_resource_metadata": "/.well-known/oauth-protected-resource",
                 },
             },
@@ -1393,6 +1471,9 @@ def _http_authenticate_scope(scope: dict[str, Any]) -> tuple[bool, int, str]:
     config_error = _http_oauth_resource_config_error()
     if config_error:
         return False, 403, config_error
+    scope_config_error = _http_bearer_token_scope_config_error()
+    if scope_config_error:
+        return False, 403, scope_config_error
     if not MCP_HTTP_BEARER_TOKEN:
         return False, 403, "HTTP auth is enabled but MCP_HTTP_BEARER_TOKEN is not configured"
     token = _bearer_token_from_headers(scope.get("headers", []))
@@ -1441,6 +1522,8 @@ def _redact_audit_reason(value: str) -> str:
     ``<redacted>`` because it contains words like "bearer token".
     """
     lower_value = value.lower()
+    if "insufficient_scope" in lower_value:
+        return "insufficient_scope"
     if "http session not authorized" in lower_value:
         return "HTTP session not authorized"
     if "missing bearer token" in lower_value:
@@ -1482,6 +1565,9 @@ def _append_audit_event(
     success: bool,
     arguments: dict[str, Any] | None = None,
     reason: str = "",
+    *,
+    required_scope: str | None = None,
+    granted_scopes: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> None:
     event = {
         "timestamp": _now_iso(),
@@ -1491,6 +1577,10 @@ def _append_audit_event(
         "reason": _redact_audit_reason(reason),
         "arguments": _redact_audit_value(arguments or {}),
     }
+    if required_scope:
+        event["required_scope"] = str(required_scope)
+    if granted_scopes is not None:
+        event["granted_scopes"] = sorted(str(scope) for scope in granted_scopes)
     correlation_id = _OTEL_CORRELATION_ID.get()
     if correlation_id:
         event["correlation_id"] = _redact_audit_string(correlation_id)
@@ -1753,17 +1843,26 @@ def _otel_record_policy_gate(
     decision: str,
     reason: str,
     arguments: dict[str, Any] | None = None,
+    *,
+    required_scope: str | None = None,
+    granted_scopes: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> None:
     attrs = _otel_tool_attributes(tool_name, arguments, categories)
+    required_scope = required_scope or _required_scope_for_categories(categories)
     attrs.update(
         {
             "mcp.schema": "mcp.policy_gate.v1",
             "mcp.policy.decision": decision,
             "mcp.policy.reason": _redact_audit_reason(reason),
             "mcp.security.mutation_required": bool(MUTATION_TOOL_CATEGORIES.intersection(categories)),
+            "mcp.security.required_scope": required_scope,
             "mcp.http.authorized": _http_request_authorized_for_tools(),
         }
     )
+    if granted_scopes is not None:
+        attrs["mcp.security.granted_scopes"] = sorted(str(scope) for scope in granted_scopes)
+    elif _inside_http_request():
+        attrs["mcp.security.granted_scopes"] = sorted(_http_request_granted_scopes_for_tools())
     with _otel_span("mcp.policy_gate", attrs) as span:
         if decision != "allow":
             span.set_status("ERROR", reason)
@@ -3018,6 +3117,7 @@ def _tool_annotation_entry(tool_name: str, *, mode: str = "") -> dict[str, Any]:
         "tool": tool_name,
         "mode": mode,
         "categories": categories,
+        "required_scope": _required_scope_for_categories(categories),
         "mutation_capable": bool(MUTATION_TOOL_CATEGORIES.intersection(categories)),
         "annotations": annotation,
     }
@@ -3055,6 +3155,10 @@ def _tool_categories(tool_name: str, arguments: dict[str, Any] | None = None) ->
     return categories
 
 
+def _required_scope_for_categories(categories: list[str] | set[str] | tuple[str, ...]) -> str:
+    return MCP_SCOPE_MUTATE if MCP_SCOPE_MUTATE_CATEGORIES.intersection(categories) else MCP_SCOPE_READ
+
+
 def _inside_http_request() -> bool:
     return _HTTP_REQUEST_AUTHORIZED.get() is not None
 
@@ -3064,20 +3168,87 @@ def _http_request_authorized_for_tools() -> bool:
     return True if authorized is None else bool(authorized)
 
 
+def _http_request_granted_scopes_for_tools() -> frozenset[str]:
+    authorized = _HTTP_REQUEST_AUTHORIZED.get()
+    if authorized is None:
+        return frozenset(MCP_SUPPORTED_SCOPES)
+    if not authorized:
+        return frozenset()
+    scopes = _HTTP_REQUEST_GRANTED_SCOPES.get()
+    if scopes is None:
+        return frozenset(MCP_SUPPORTED_SCOPES)
+    return scopes
+
+
 def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
     categories = _tool_categories(tool_name, arguments)
+    required_scope = _required_scope_for_categories(categories)
+    granted_scopes = _http_request_granted_scopes_for_tools() if _inside_http_request() else None
     sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
     mutating = bool(MUTATION_TOOL_CATEGORIES.intersection(categories))
+    if _inside_http_request() and sensitive and not _http_request_authorized_for_tools():
+        _append_audit_event(
+            tool_name,
+            categories,
+            False,
+            arguments,
+            "HTTP session not authorized",
+            required_scope=required_scope,
+            granted_scopes=granted_scopes,
+        )
+        _otel_record_policy_gate(
+            tool_name,
+            categories,
+            "deny",
+            "HTTP session not authorized",
+            arguments,
+            required_scope=required_scope,
+            granted_scopes=granted_scopes,
+        )
+        raise PermissionError(f"{tool_name} requires an authorized HTTP session")
+    if _inside_http_request() and required_scope not in (granted_scopes or frozenset()):
+        granted = granted_scopes or frozenset()
+        _append_audit_event(
+            tool_name,
+            categories,
+            False,
+            arguments,
+            "insufficient_scope",
+            required_scope=required_scope,
+            granted_scopes=granted,
+        )
+        _otel_record_policy_gate(
+            tool_name,
+            categories,
+            "deny",
+            "insufficient_scope",
+            arguments,
+            required_scope=required_scope,
+            granted_scopes=granted,
+        )
+        raise HTTPInsufficientScopeError(tool_name, required_scope, granted)
     if mutating and not ALLOW_MUTATIONS:
-        _append_audit_event(tool_name, categories, False, arguments, "mutations disabled")
-        _otel_record_policy_gate(tool_name, categories, "deny", "mutations disabled", arguments)
+        _append_audit_event(
+            tool_name,
+            categories,
+            False,
+            arguments,
+            "mutations disabled",
+            required_scope=required_scope,
+            granted_scopes=granted_scopes,
+        )
+        _otel_record_policy_gate(
+            tool_name,
+            categories,
+            "deny",
+            "mutations disabled",
+            arguments,
+            required_scope=required_scope,
+            granted_scopes=granted_scopes,
+        )
         raise PermissionError(
             f"{tool_name} requires mutation permission; set ALLOW_MUTATIONS=true and use an authorized HTTP session."
         )
-    if _inside_http_request() and sensitive and not _http_request_authorized_for_tools():
-        _append_audit_event(tool_name, categories, False, arguments, "HTTP session not authorized")
-        _otel_record_policy_gate(tool_name, categories, "deny", "HTTP session not authorized", arguments)
-        raise PermissionError(f"{tool_name} requires an authorized HTTP session")
     return categories
 
 
@@ -3116,7 +3287,17 @@ def _run_with_tool_security_audit(
             result = action()
         except Exception as exc:
             if sensitive:
-                _append_audit_event(tool_name, categories, False, arguments, type(exc).__name__)
+                _append_audit_event(
+                    tool_name,
+                    categories,
+                    False,
+                    arguments,
+                    type(exc).__name__,
+                    required_scope=_required_scope_for_categories(categories),
+                    granted_scopes=(
+                        _http_request_granted_scopes_for_tools() if _inside_http_request() else None
+                    ),
+                )
             raise
         _otel_set_result_attributes(span, result)
         if sensitive:
@@ -3128,6 +3309,10 @@ def _run_with_tool_security_audit(
                 success,
                 arguments,
                 "" if success else _tool_result_failure_reason(result),
+                required_scope=_required_scope_for_categories(categories),
+                granted_scopes=(
+                    _http_request_granted_scopes_for_tools() if _inside_http_request() else None
+                ),
             )
         return result
 
@@ -3195,14 +3380,17 @@ class MCPHTTPAuthMiddleware:
             return
         authorized, status_code, reason = _http_authenticate_scope(scope)
         if not authorized:
-            _append_audit_event("http_request", ["network"], False, {"path": path}, reason)
+            _append_audit_event(
+                "http_request",
+                ["network"],
+                False,
+                {"path": path},
+                reason,
+                required_scope=MCP_SCOPE_READ,
+                granted_scopes=frozenset(),
+            )
             headers = (
-                {
-                    "WWW-Authenticate": (
-                        'Bearer realm="mcp", resource_metadata="%s"'
-                        % _http_protected_resource_metadata_url()
-                    )
-                }
+                {"WWW-Authenticate": _http_bearer_challenge(required_scope=MCP_SCOPE_READ)}
                 if status_code == 401
                 else None
             )
@@ -3213,20 +3401,47 @@ class MCPHTTPAuthMiddleware:
             )
             await response(scope, receive, send)
             return
+        granted_scopes = (
+            _local_bearer_token_granted_scopes()
+            if _http_auth_required()
+            else frozenset(MCP_SUPPORTED_SCOPES)
+        )
         token = _HTTP_REQUEST_AUTHORIZED.set(True)
+        scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
         try:
             if path == "/sse":
                 await self.app(scope, receive, send)
             else:
                 await asyncio.wait_for(self.app(scope, receive, send), timeout=MCP_HTTP_REQUEST_TIMEOUT_SECONDS)
+        except HTTPInsufficientScopeError as exc:
+            response = JSONResponse(
+                {
+                    "error": "insufficient_scope",
+                    "detail": "HTTP bearer token lacks the required MCP scope",
+                    "required_scope": exc.required_scope,
+                    "granted_scopes": sorted(exc.granted_scopes),
+                },
+                status_code=403,
+                headers={"WWW-Authenticate": exc.challenge},
+            )
+            await response(scope, receive, send)
         except asyncio.TimeoutError:
-            _append_audit_event("http_request", ["network"], False, {"path": path}, "request timeout")
+            _append_audit_event(
+                "http_request",
+                ["network"],
+                False,
+                {"path": path},
+                "request timeout",
+                required_scope=MCP_SCOPE_READ,
+                granted_scopes=granted_scopes,
+            )
             response = JSONResponse(
                 {"error": "timeout", "detail": "MCP HTTP request exceeded configured timeout"},
                 status_code=504,
             )
             await response(scope, receive, send)
         finally:
+            _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
 
 
@@ -21127,6 +21342,8 @@ async def healthz(_request):
     server_state = runtime.get("server", {})
     ollama_state = runtime.get("ollama", {})
     oauth_resource_config_error = _http_oauth_resource_config_error()
+    scope_config_error = _http_bearer_token_scope_config_error()
+    auth_configuration_error = oauth_resource_config_error or scope_config_error
     return JSONResponse(
         {
             "ok": True,
@@ -21145,7 +21362,10 @@ async def healthz(_request):
                 "mode": MCP_HTTP_AUTH_MODE,
                 "oauth_resource_configured": MCP_HTTP_AUTH_MODE == "oauth-resource"
                 and not bool(oauth_resource_config_error),
-                "configuration_error": oauth_resource_config_error,
+                "configuration_error": auth_configuration_error,
+                "scope_configuration_error": scope_config_error,
+                "scopes_supported": _supported_mcp_scopes(),
+                "local_bearer_token_scopes": sorted(_local_bearer_token_granted_scopes()),
                 "oauth_protected_resource_metadata": "/.well-known/oauth-protected-resource",
             },
             "ollama": {

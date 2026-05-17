@@ -96,9 +96,10 @@ Checks:
   container after setting it, or let the entrypoint generate `.continue/.env` on
   the next startup and use that local file as the Continue secret source.
 - If `MCP_HTTP_AUTH_MODE=oauth-resource`, also set `MCP_HTTP_AUTHORIZATION_SERVERS` to a JSON list or comma-separated list of issuer URLs, for example `MCP_HTTP_AUTHORIZATION_SERVERS='["https://auth.example.test"]'`. Without it, protected MCP endpoints fail closed with 403 and `/healthz` reports `auth.configuration_error`.
-- OAuth-capable MCP clients should read `/.well-known/oauth-protected-resource`; 401 responses include a `WWW-Authenticate` `resource_metadata` parameter pointing at that document.
+- OAuth-capable MCP clients should read `/.well-known/oauth-protected-resource`; 401 responses include a `WWW-Authenticate` `resource_metadata` parameter pointing at that document plus `scope="mcp:read"` for least-privilege discovery/read access.
+- If `MCP_HTTP_BEARER_TOKEN_SCOPES` is set, confirm it contains only `mcp:read` and/or `mcp:mutate`. Empty preserves the old single-token behavior and grants both scopes; `mcp:read` alone can run read-only tools but mutation/sensitive categories (`write`, `git mutation`, `shell/process`, `network`, `secret-sensitive`) require `mcp:mutate` and otherwise fail with `insufficient_scope`.
 - If unauthenticated HTTP is intentional for a throwaway local test, set `MCP_HTTP_AUTH_MODE=insecure-local` and bind `HOST=127.0.0.1`; do not forward that port from VS Code, a devcontainer, SSH, or a tunnel.
-- Confirm `ALLOW_MUTATIONS=true` when mutation tools are required. Mutating tool categories require both this flag and an authorized HTTP session.
+- Confirm `ALLOW_MUTATIONS=true` when mutation tools are required. Mutating tool categories require both this flag and an authorized HTTP session with `mcp:mutate`.
 - Keep `ALLOW_MUTATIONS=false` for read-only sessions.
 - Confirm paths are inside the mounted repository root.
 - Check `.codebase-tooling-mcp/audit/security_events.jsonl` (or `MCP_AUDIT_LOG_FILE`) for denied auth attempts and sensitive tool call audit events.
