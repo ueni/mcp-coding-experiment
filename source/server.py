@@ -2388,6 +2388,54 @@ def _dependency_security_normalize_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name.strip().lower())
 
 
+DEPENDENCY_SECURITY_URL_VALUE_RE = re.compile(
+    r"\b(?:[A-Za-z][A-Za-z0-9+.-]*\+)?(?:https?|ssh|git|file)://[^\s'\"<>]+",
+    re.IGNORECASE,
+)
+DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE = re.compile(
+    r"(?<!\S)[^\s/@:]+:[^\s/@]+@[^\s]+"
+)
+
+
+def _dependency_security_safe_requirement_input(requirement_text: str) -> str:
+    """Return a diagnostic requirement snippet without URLs, credentials, or host paths."""
+    text = requirement_text.strip()
+    if not text:
+        return ""
+
+    if text.startswith("-"):
+        option_name = text.split(maxsplit=1)[0].split("=", 1)[0]
+        if len(text) > len(option_name):
+            return f"{option_name} <redacted:option_value>"
+        return option_name
+
+    redacted = DEPENDENCY_SECURITY_URL_VALUE_RE.sub("<redacted:url>", text)
+    redacted = DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.sub("<redacted:credential>", redacted)
+    redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:credential>", redacted)
+    redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute_path>", redacted)
+    return _trim_text(redacted, max_chars=200)
+
+
+def _dependency_security_safe_input_path(path_value: str) -> str:
+    if not path_value.strip():
+        return ""
+    if (
+        DEPENDENCY_SECURITY_URL_VALUE_RE.search(path_value)
+        or DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.search(path_value)
+        or SENSITIVE_AUDIT_VALUE_RE.search(path_value)
+    ):
+        return _dependency_security_safe_requirement_input(path_value)
+    if ABSOLUTE_PATH_VALUE_RE.search(path_value):
+        try:
+            return _dependency_security_rel_path(_resolve_repo_path(path_value))
+        except ValueError:
+            return _dependency_security_safe_requirement_input(path_value)
+    try:
+        return _dependency_security_rel_path(_resolve_repo_path(path_value))
+    except ValueError:
+        return _dependency_security_safe_requirement_input(path_value)
+
+
 def _dependency_security_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -2525,7 +2573,7 @@ def _dependency_security_parse_requirement_string(
         return None, {
             "source": source,
             "line": line,
-            "input": _trim_text(text, max_chars=200),
+            "input": _dependency_security_safe_requirement_input(text),
             "reason": "unsupported_requirement_syntax",
         }
     name = match.group(1)
@@ -2591,7 +2639,7 @@ def _dependency_security_parse_requirements_file(
                 {
                     "source": rel,
                     "line": index,
-                    "input": _trim_text(line, max_chars=200),
+                    "input": _dependency_security_safe_requirement_input(line),
                     "reason": "non_pypi_or_option_requirement",
                 }
             )
@@ -18262,6 +18310,9 @@ def _dependency_security_report_impl(
         warnings.append("some dependency inputs were skipped or unresolved")
 
     generated_at = _now_iso()
+    safe_path = _dependency_security_safe_input_path(path)
+    safe_advisory_fixture_path = _dependency_security_safe_input_path(advisory_fixture_path)
+    safe_pip_audit_json_path = _dependency_security_safe_input_path(pip_audit_json_path)
     summary = {
         "component_count": len(components),
         "resolved_component_count": sum(1 for row in components if row.get("status") == "resolved"),
@@ -18291,11 +18342,11 @@ def _dependency_security_report_impl(
         "ok": not bool(gate.get("would_block", False)),
         "summary": summary,
         "inputs": {
-            "path": path,
+            "path": safe_path,
             "requirements_paths": input_paths,
             "include_installed": include_installed,
-            "advisory_fixture_path": advisory_fixture_path,
-            "pip_audit_json_path": pip_audit_json_path,
+            "advisory_fixture_path": safe_advisory_fixture_path,
+            "pip_audit_json_path": safe_pip_audit_json_path,
         },
         "advisory": advisory,
         "gate": gate,
@@ -18310,16 +18361,18 @@ def _dependency_security_report_impl(
             "network_used": False,
             "repo_boundary_enforced": True,
             "host_absolute_paths_exposed": False,
+            "raw_unsupported_requirement_inputs_persisted": False,
+            "unsupported_requirement_input_redaction": "urls_credentials_and_host_paths",
         },
         "exports": {},
         "resource_links": [],
         "_meta": _artifact_meta([]),
     }
     provenance_inputs = {
-        "path": path,
+        "path": safe_path,
         "requirements_paths": input_paths,
-        "advisory_fixture_path": advisory_fixture_path,
-        "pip_audit_json_path": pip_audit_json_path,
+        "advisory_fixture_path": safe_advisory_fixture_path,
+        "pip_audit_json_path": safe_pip_audit_json_path,
         "allow_network": allow_network,
         "advisory_max_age_hours": advisory_max_age_hours,
         "include_installed": include_installed,

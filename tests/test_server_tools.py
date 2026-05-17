@@ -1926,6 +1926,65 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["advisory"]["status"], "fresh")
         self.assertEqual(out["exports"], {})
 
+    def test_dependency_security_report_redacts_skipped_requirement_inputs_in_exports(self):
+        self.write_repo_text(
+            "requirements.txt",
+            "\n".join(
+                [
+                    "--index-url https://user:pa55word@private.example/simple",
+                    "--extra-index-url=https://token@example.org/simple",
+                    "-e git+https://oauth2:ghp_secret1234567890@github.example/private/repo.git#egg=private_pkg",
+                    "direct-pkg @ https://user:secret@files.example.com/direct-pkg-1.0.0.whl",
+                    "local-pkg @ file:///home/alice/private/wheels/local_pkg-1.0.0.whl",
+                    "/home/alice/private/raw/path/pkg.whl",
+                    "bad req @@@ /home/alice/other",
+                    "safe-pkg==1.2.3",
+                ]
+            )
+            + "\n",
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            export=True,
+            include_sbom=True,
+        )
+
+        skipped_inputs = [row.get("input", "") for row in out["skipped"]]
+        self.assertIn("--index-url <redacted:option_value>", skipped_inputs)
+        self.assertIn("--extra-index-url <redacted:option_value>", skipped_inputs)
+        self.assertTrue(any(item == "<redacted:url>" for item in skipped_inputs))
+        self.assertTrue(any(item == "direct-pkg @ <redacted:url>" for item in skipped_inputs))
+        self.assertTrue(any("<redacted:absolute_path>" in item for item in skipped_inputs))
+        self.assertFalse(out["security"]["raw_unsupported_requirement_inputs_persisted"])
+
+        payloads = [json.dumps(out, sort_keys=True)]
+        payloads.extend(
+            (self.repo_path / rel_path).read_text(encoding="utf-8")
+            for rel_path in out["exports"].values()
+        )
+        payloads.extend(
+            (self.repo_path / rel_path).read_text(encoding="utf-8")
+            for rel_path in out["provenance"]["sidecars"].values()
+        )
+        exported_and_returned = "\n".join(payloads)
+
+        for leaked_fragment in (
+            "https://",
+            "file://",
+            "private.example",
+            "github.example",
+            "files.example.com",
+            "pa55word",
+            "oauth2",
+            "ghp_secret1234567890",
+            "/home/alice/private",
+            "/home/alice/other",
+        ):
+            self.assertNotIn(leaked_fragment, exported_and_returned)
+        self.assertIn("<redacted:url>", exported_and_returned)
+        self.assertIn("<redacted:absolute_path>", exported_and_returned)
+
     def test_dependency_security_report_stale_offline_fixture(self):
         self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
         self._write_dependency_advisory_fixture(

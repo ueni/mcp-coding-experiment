@@ -38,6 +38,6 @@ With `export=true`, the workflow writes:
 - `.codebase-tooling-mcp/reports/dependency-security-report-*.sbom.cdx.json` when `include_sbom=true`
 - adjacent `mcp_artifact_provenance.v1` sidecars for both artifacts
 
-Artifacts are linked through `artifact_resource_link.v1` and use repository-relative `repo://file/...` URIs. The SBOM is CycloneDX-compatible JSON generated from declared or caller-provided dependency metadata.
+Artifacts are linked through `artifact_resource_link.v1` and use repository-relative `repo://file/...` URIs. The SBOM is CycloneDX-compatible JSON generated from declared or caller-provided dependency metadata. Unsupported, option, VCS, URL, and direct-reference requirement lines are reported with safe diagnostics only; credentials, URLs, and host absolute paths are redacted before return or export.
 
 `release_readiness` includes a compact non-blocking `dependency_security` check, and `governance_report` summarizes the latest exported dependency security report when present.
