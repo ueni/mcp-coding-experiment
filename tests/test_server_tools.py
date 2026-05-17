@@ -1844,6 +1844,125 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertGreaterEqual(execute["applied_count"], 1)
         self.assertIn("return x + 2", (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"))
 
+    def _write_dependency_advisory_fixture(self, rel_path, generated_at, advisories):
+        return self.write_repo_text(
+            rel_path,
+            json.dumps(
+                {
+                    "schema": "dependency_advisory_fixture.v1",
+                    "generated_at": generated_at,
+                    "advisories": advisories,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+    def test_dependency_security_report_vulnerable_fixture_exports_artifacts(self):
+        self.write_repo_text("requirements.txt", "vulnerable-pkg==1.0.0\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-test-vuln",
+                    "package": "vulnerable-pkg",
+                    "affected_versions": "<2.0.0",
+                    "severity": "high",
+                    "fixed_versions": ["2.0.0"],
+                    "summary": "fixture vulnerability",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/advisories.json",
+            export=True,
+            include_sbom=True,
+            advisory_max_age_hours=24,
+        )
+
+        self.assertEqual(out["schema"], "dependency_security_report.v1")
+        self.assertEqual(out["status"], "vulnerable")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["summary"]["component_count"], 1)
+        self.assertEqual(out["summary"]["vulnerability_count"], 1)
+        self.assertEqual(out["vulnerabilities"][0]["id"], "GHSA-test-vuln")
+        self.assertIn("json", out["exports"])
+        self.assertIn("sbom", out["exports"])
+        self.assertEqual(len(out["resource_links"]), 2)
+        self.assertFalse(out["security"]["mutates_dependency_files"])
+
+        verify = self.server.artifact_provenance(artifact_path=out["exports"]["json"])
+        self.assertTrue(verify["ok"], verify)
+        governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        self.assertTrue(governance["dependency_security"]["present"])
+        self.assertEqual(governance["dependency_security"]["status"], "vulnerable")
+
+    def test_dependency_security_report_clean_fixture(self):
+        self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/clean-advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-other",
+                    "package": "other-pkg",
+                    "affected_versions": "<9",
+                    "severity": "low",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/clean-advisories.json",
+            export=False,
+        )
+
+        self.assertEqual(out["status"], "clean")
+        self.assertEqual(out["summary"]["vulnerability_count"], 0)
+        self.assertEqual(out["advisory"]["status"], "fresh")
+        self.assertEqual(out["exports"], {})
+
+    def test_dependency_security_report_stale_offline_fixture(self):
+        self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/stale-advisories.json",
+            "2000-01-01T00:00:00+00:00",
+            [],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/stale-advisories.json",
+            advisory_max_age_hours=1,
+            export=False,
+        )
+
+        self.assertEqual(out["status"], "stale-cache")
+        self.assertEqual(out["advisory"]["status"], "stale-cache")
+        self.assertTrue(any("older" in warning for warning in out["warnings"]))
+
+    def test_release_readiness_includes_dependency_security_summary(self):
+        out = self.server.release_readiness(
+            base_ref="HEAD",
+            head_ref="HEAD",
+            run_tests=False,
+            run_docs_check=False,
+            run_security_check=False,
+            run_license_check=False,
+            run_risk_check=False,
+            run_impact_check=False,
+            summary_mode="quick",
+        )
+
+        self.assertIn("dependency_security", out["checks"])
+        dep = out["checks"]["dependency_security"]
+        self.assertIn(dep["status"], {"clean", "vulnerable", "skipped", "stale-cache", "network-disabled", "scanner-unavailable"})
+        self.assertIn("vulnerability_count", dep)
+
     def test_release_readiness_quick(self):
         out = self.server.release_readiness(
             base_ref="HEAD",

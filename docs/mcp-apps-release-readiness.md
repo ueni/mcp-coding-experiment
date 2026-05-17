@@ -22,7 +22,7 @@ With the flag enabled, the tool result still includes the normal `schema`, `base
 ui://codebase-tooling-mcp/release-readiness-dashboard
 ```
 
-The dashboard is display-only. It renders real `release_readiness` result data: go/no-go status, blocking failures, selected impacted tests, docs/security/license/risk status, governance report status, and a rollback/snapshot reference when one is present. It may show copyable next-step tool-chain text, but it exposes no executable UI actions.
+The dashboard is display-only. It renders real `release_readiness` result data: go/no-go status, blocking failures, selected impacted tests, docs/security/dependency-security/license/risk status, governance report status, and a rollback/snapshot reference when one is present. It may show copyable next-step tool-chain text, but it exposes no executable UI actions.
 
 ## Try in VS Code
 
