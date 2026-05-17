@@ -162,7 +162,7 @@ Call `test_impact_map(refresh=true)` to rebuild and write the artifact. Refresh 
 
 For dependency supply-chain review, `dependency_security_report` builds a read-only dependency inventory, matches repository-local or caller-provided advisory data, distinguishes clean/vulnerable/skipped/stale/network-disabled/scanner-unavailable states, and exports JSON plus an optional CycloneDX-compatible SBOM with local provenance sidecars under `.codebase-tooling-mcp/reports/`. It never edits dependency files or performs live network lookup unless a future caller explicitly enables that path; the current offline-safe slice consumes advisory fixtures or externally generated `pip-audit` JSON. See [Dependency security report](./docs/dependency-security.md).
 
-For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot/dependency-security evidence, and exports JSON plus Markdown plus local provenance sidecars under `.codebase-tooling-mcp/reports/`. It also writes a redacted deterministic `workflow_lineage.v1` manifest for the governance-report workflow; `workflow_lineage(mode="verify")` checks the manifest read-only and reports `matched`, `input_changed`, `artifact_changed`, and `non_deterministic_node` conditions without persisting prompts, transcript snippets, secrets, file contents, or host absolute paths. `artifact_provenance` verifies report sidecars and snapshot-index sidecars read-only, reports existing unsigned sidecars as `unsigned` / `local-only`, and can validate deterministic offline `local-dsse-fixture` attestations without network calls; GitHub Artifact Attestations and Sigstore/cosign are future unsupported backends behind the same schema. `workflow_task` can start the governance report asynchronously and persist a redacted MCP Tasks-style status handle under `.codebase-tooling-mcp/tasks/`; poll it with `task_status`. `workflow_diagnostics` turns failed audit events and optional caller-supplied trajectory snippets into a redacted critical-step/failure-category report with safe recovery actions. `interaction_invariant_audit` checks extracted task constraints and interaction-smell risks before mutation or readiness summaries without persisting conversation snippets by default. `grep` and `governance_report` can also opt into deterministic `compressed_observation` summaries without replacing raw results or artifacts. See [Governance report workflow](./docs/governance-report.md), [Workflow lineage manifests](./docs/workflow-lineage.md), [Async workflow tasks](./docs/workflow-tasks.md), [Workflow diagnostics](./docs/workflow-diagnostics.md), [Interaction invariant audit](./docs/interaction-invariant-audit.md), and [Adaptive observation compression](./docs/observation-compression.md).
+For enterprise audit/release review, `governance_report` reads redacted events from `MCP_AUDIT_LOG_FILE`, summarizes local policy/readiness/tool-chain/snapshot/dependency-security evidence, and exports JSON plus Markdown plus local provenance sidecars under `.codebase-tooling-mcp/reports/`. It also writes a redacted deterministic `workflow_lineage.v1` manifest for the governance-report workflow; `workflow_lineage(mode="verify")` checks the manifest read-only and reports `matched`, `input_changed`, `artifact_changed`, and `non_deterministic_node` conditions without persisting prompts, transcript snippets, secrets, file contents, or host absolute paths. `artifact_provenance` verifies report sidecars and snapshot-index sidecars read-only, reports existing unsigned sidecars as `unsigned` / `local-only`, validates deterministic offline `local-dsse-fixture` attestations without network calls, and can opt into `github-artifact-attestations` verification when the sidecar/config provides a local bundle, trusted root, expected repository/workflow/ref-or-commit policy, and predicate type. GitHub attestation verification is offline by default; online `gh attestation verify` is unavailable unless explicitly enabled and reports `network_access=true` only when it actually uses network access. Other future backends such as Sigstore/cosign remain `unsupported`. `workflow_task` can start the governance report asynchronously and persist a redacted MCP Tasks-style status handle under `.codebase-tooling-mcp/tasks/`; poll it with `task_status`. `workflow_diagnostics` turns failed audit events and optional caller-supplied trajectory snippets into a redacted critical-step/failure-category report with safe recovery actions. `interaction_invariant_audit` checks extracted task constraints and interaction-smell risks before mutation or readiness summaries without persisting conversation snippets by default. `grep` and `governance_report` can also opt into deterministic `compressed_observation` summaries without replacing raw results or artifacts. See [Governance report workflow](./docs/governance-report.md), [Workflow lineage manifests](./docs/workflow-lineage.md), [Async workflow tasks](./docs/workflow-tasks.md), [Workflow diagnostics](./docs/workflow-diagnostics.md), [Interaction invariant audit](./docs/interaction-invariant-audit.md), and [Adaptive observation compression](./docs/observation-compression.md).
 
 For opt-in observability, `MCP_OTEL_TRACING_ENABLED=true` with `MCP_OTEL_EXPORTER=jsonl` writes redacted local span records for public tool execution, workflow selection, async task lifecycle events, and policy-gate denials under `.codebase-tooling-mcp/traces/`. Tracing is disabled by default, uses the audit redaction path before recording attributes, and does not capture raw prompts, file contents, command output, bearer tokens, or host absolute paths. See [Opt-in OpenTelemetry tracing](./docs/opentelemetry-tracing.md).
 
@@ -237,6 +237,25 @@ offline hash embedding path. Build with `--build-arg INSTALL_SENTENCE_TRANSFORME
 and set `LOCAL_EMBED_BACKEND=sentence-transformers` plus `LOCAL_EMBED_MODEL` only
 when that optional backend is required; for local non-Docker installs, add
 `source/requirements-embedding.txt` to the normal requirements install.
+
+### Hash-pinned dependency locks
+
+The default Docker build still installs from the normal requirements files. For
+reproducible MCP runtime builds, opt into the checked-in hash locks:
+
+```bash
+docker build \
+  --build-arg MCP_USE_LOCKED_DEPS=true \
+  -t codebase-tooling-mcp \
+  ./source
+```
+
+Locked builds validate `source/dependency-locks.json` and install with
+`pip install --require-hashes --only-binary=:all:`, failing closed when a
+requirements input, lock file, wheel hash, or binary wheel is stale or missing.
+Maintainers refresh/check locks with `scripts/dependency_lock.py`; see
+[Hash-pinned dependency locks](./docs/dependency-locks.md)
+for refresh, CI, offline wheelhouse, and optional embedding guidance.
 
 ## Docker image size and RAM monitoring
 

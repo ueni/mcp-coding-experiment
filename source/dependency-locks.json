@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-05-17T16:03:05+00:00",
+  "generated_by": "scripts/dependency_lock.py",
+  "install": {
+    "coding_tools_section": "coding-tools",
+    "default_section": "runtime",
+    "locked_build_arg": "MCP_USE_LOCKED_DEPS=true",
+    "optional_embedding_section": "embedding",
+    "pip_mode": "--require-hashes --only-binary=:all:"
+  },
+  "schema": "codebase_tooling_mcp.dependency_locks.v1",
+  "sections": {
+    "coding-tools": {
+      "content_digest": "sha256:149ff4127ab1cd6abc8c8f649b5834dd54e9efe0407c417aab7b2b5a1a2e6b5a",
+      "description": "Pinned developer tools installed into the coding virtualenv.",
+      "hash_count": 17,
+      "input": "source/requirements-coding-tools.txt",
+      "input_digest": "sha256:419e4a21d349a22d2aeb88c4c027ef607a251fdff80c29c02c59e9c3d7bd6946",
+      "lock": "source/requirements-coding-tools.lock",
+      "lock_digest": "sha256:1b2b984c36afce38a8c72ac981724836c55eb73a58c9c82a0c6ab3664e9160b0",
+      "optional": false,
+      "package_count": 17
+    },
+    "embedding": {
+      "content_digest": "sha256:d5d4bd9a9a4ef2bc33416a1f46d28ded6e16eeef0da55a464c210a34ea4dfa05",
+      "description": "Optional sentence-transformers embedding backend dependencies.",
+      "hash_count": 50,
+      "input": "source/requirements-embedding.txt",
+      "input_digest": "sha256:4c6dffb5603be75466f83c3f36e436ac644fd49266a1ac7adeab7928148ecd4f",
+      "lock": "source/requirements-embedding.lock",
+      "lock_digest": "sha256:550992853fd63b4a5f3c4c9060bb6d6591db7afeb7d1da1936a45615a1eb1137",
+      "optional": true,
+      "package_count": 50
+    },
+    "runtime": {
+      "content_digest": "sha256:13cc81e8c28feb5e994f4590859422fa1f85e3d18a82c290da82421003f25fed",
+      "description": "Default MCP runtime dependencies installed in the image.",
+      "hash_count": 66,
+      "input": "source/requirements.txt",
+      "input_digest": "sha256:26ff0371d4f5f4078a92f79997343252d64d89af6feac3ac2a0a09fd88790d85",
+      "lock": "source/requirements.lock",
+      "lock_digest": "sha256:148b68004be498720d0c726f4a3b58728e39478f56755bc38d3221fae096872f",
+      "optional": false,
+      "package_count": 66
+    }
+  },
+  "target": {
+    "implementation": "cpython",
+    "machine": "x86_64",
+    "pip_version": "26.0.1",
+    "platform": "Linux-7.0.0-15-generic-x86_64-with-glibc2.41",
+    "python_executable": "/usr/local/bin/python",
+    "python_version": "3.13.13"
+  }
+}

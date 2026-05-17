@@ -183,9 +183,11 @@ PROVENANCE_SCHEMA = "mcp_artifact_provenance.v1"
 PROVENANCE_SUFFIX = ".provenance.json"
 ATTESTATION_SCHEMA = "mcp_artifact_attestation.v1"
 ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE = "local-dsse-fixture"
+ATTESTATION_BACKEND_GITHUB_ARTIFACT_ATTESTATIONS = "github-artifact-attestations"
 ATTESTATION_PAYLOAD_TYPE = "application/vnd.codebase-tooling-mcp.artifact-attestation.v1+json"
 ATTESTATION_FIXTURE_KEY_ID = "local-dsse-fixture-v1"
 ATTESTATION_FIXTURE_SIGNER_IDENTITY = "local-fixture://codebase-tooling-mcp/offline-dsse-fixture"
+ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS = 30
 # Fixture-only verifier material. This is intentionally public/non-secret and is
 # not a production signing key; it exists only to make offline DSSE verification
 # deterministic in tests and local demos without network or transparency-log IO.
@@ -225,6 +227,9 @@ TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.js
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 POLICY_INSIGHTS_FILE = Path("source/policy_insights.json")
+DEPENDENCY_LOCK_MANIFEST_SCHEMA = "codebase_tooling_mcp.dependency_locks.v1"
+DEPENDENCY_LOCK_STATUS_SCHEMA = "dependency_locks.runtime.v1"
+DEPENDENCY_LOCK_MANIFEST_FILE = "dependency-locks.json"
 # Keep the external MCP contract focused: task_router remains the normal entrypoint,
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
@@ -4062,6 +4067,16 @@ def _attach_local_dsse_fixture_attestation(
     return provenance
 
 
+def _safe_attestation_ref(value: Any) -> str:
+    text = _redact_audit_string(str(value or "").strip())
+    if not text:
+        return ""
+    redacted = _otel_redact_paths(text)
+    if len(redacted) > 240:
+        return redacted[:240] + "...[truncated]"
+    return redacted
+
+
 def _attestation_result(
     *,
     status: str,
@@ -4072,27 +4087,37 @@ def _attestation_result(
     bundle_ref: str = "",
     envelope_ref: str = "",
     messages: list[str] | None = None,
+    network_access: bool = False,
+    offline: bool = True,
+    verifier: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result_messages = messages or []
-    return {
+    result: dict[str, Any] = {
         "schema": ATTESTATION_SCHEMA,
         "status": status,
         "backend": backend,
         "signed": signed,
         "local_only": backend in {"local-only", ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE},
-        "network_access": False,
+        "network_access": bool(network_access),
         "subject_digest": _coerce_sha256_digest(subject_digest or {}),
-        "signer_identity": signer_identity,
-        "bundle_ref": bundle_ref,
-        "envelope_ref": envelope_ref,
+        "signer_identity": _redact_audit_string(signer_identity),
+        "bundle_ref": _safe_attestation_ref(bundle_ref),
+        "envelope_ref": _safe_attestation_ref(envelope_ref),
         "verification": {
             "status": status,
             "backend": backend,
-            "offline": True,
+            "offline": bool(offline),
+            "network_access": bool(network_access),
             "messages": result_messages,
         },
         "findings": result_messages,
     }
+    if verifier:
+        result["verifier"] = _redact_audit_value(verifier)
+    if policy:
+        result["policy"] = _redact_audit_value(policy)
+    return result
 
 
 def _verify_local_dsse_fixture_attestation(
@@ -4198,6 +4223,654 @@ def _verify_local_dsse_fixture_attestation(
     )
 
 
+def _truthy_attestation_config(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return False
+
+
+def _github_config_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _github_attestation_config_containers(signing: dict[str, Any]) -> list[dict[str, Any]]:
+    verification = _github_config_dict(signing.get("verification"))
+    containers = [signing, verification]
+    for parent in (signing, verification):
+        for key in ("policy", "expected", "github", "artifact_attestation"):
+            child = parent.get(key)
+            if isinstance(child, dict):
+                containers.append(child)
+    return containers
+
+
+def _github_first_value(containers: list[dict[str, Any]], *keys: str) -> Any:
+    for container in containers:
+        for key in keys:
+            if key in container and container[key] is not None:
+                return container[key]
+    return None
+
+
+def _github_first_text(containers: list[dict[str, Any]], *keys: str) -> str:
+    value = _github_first_value(containers, *keys)
+    if isinstance(value, (str, int, float, bool)):
+        return str(value).strip()
+    return ""
+
+
+def _split_github_repository(value: Any) -> tuple[str, str]:
+    text = str(value or "").strip().removesuffix(".git")
+    if not text:
+        return "", ""
+    text = text.replace("git@github.com:", "https://github.com/")
+    if "github.com/" in text:
+        text = text.split("github.com/", 1)[1]
+    text = text.strip("/")
+    if text.startswith("repos/"):
+        text = text.removeprefix("repos/")
+    parts = [part for part in text.split("/") if part]
+    if len(parts) >= 2:
+        return parts[0], parts[1].removesuffix(".git")
+    return "", ""
+
+
+def _parse_github_workflow_ref(value: Any) -> dict[str, str]:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    text = text.replace("https://github.com/", "")
+    match = re.search(
+        r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/(?P<path>\.github/workflows/[^@\s]+)@(?P<ref>[^\s]+)",
+        text,
+    )
+    if not match:
+        return {}
+    return {
+        "owner": match.group("owner"),
+        "repo": match.group("repo"),
+        "path": match.group("path"),
+        "ref": match.group("ref"),
+    }
+
+
+def _github_attestation_expected_policy(signing: dict[str, Any]) -> dict[str, Any]:
+    containers = _github_attestation_config_containers(signing)
+    verification = _github_config_dict(signing.get("verification"))
+    repository_config = _github_config_dict(
+        _github_first_value(containers, "repository", "expected_repository")
+    )
+    workflow_config = _github_config_dict(_github_first_value(containers, "workflow", "expected_workflow"))
+
+    repo_slug = _github_first_text(containers, "expected_repository", "repository_slug", "repo_slug")
+    owner, repo_name = _split_github_repository(repo_slug)
+    if not owner:
+        owner = _github_first_text(containers + [repository_config], "expected_owner", "owner", "repository_owner")
+    if not repo_name:
+        repo_name = _github_first_text(
+            containers + [repository_config],
+            "expected_repo",
+            "expected_repository_name",
+            "repository_name",
+            "repo",
+        )
+    if not repo_name and repo_slug:
+        _owner, _repo = _split_github_repository(repo_slug)
+        owner = owner or _owner
+        repo_name = _repo
+
+    workflow = _github_first_text(
+        containers + [workflow_config],
+        "expected_workflow",
+        "expected_workflow_path",
+        "workflow_path",
+        "workflow_name",
+        "name",
+    )
+    workflow_ref = _github_first_text(containers + [workflow_config], "workflow_ref", "job_workflow_ref")
+    parsed_workflow_ref = _parse_github_workflow_ref(workflow_ref)
+    if not workflow and parsed_workflow_ref:
+        workflow = parsed_workflow_ref.get("path", "")
+    if not owner and parsed_workflow_ref:
+        owner = parsed_workflow_ref.get("owner", "")
+    if not repo_name and parsed_workflow_ref:
+        repo_name = parsed_workflow_ref.get("repo", "")
+
+    mode = _github_first_text(containers, "mode", "verification_mode", "attestation_mode").lower() or "offline"
+    online_requested = mode in {"online", "github-online", "network"}
+    allow_online = _truthy_attestation_config(
+        _github_first_value(containers, "allow_online", "online_enabled", "network_enabled")
+    ) or _truthy_attestation_config(os.getenv("MCP_ARTIFACT_ATTESTATION_GITHUB_ALLOW_ONLINE", ""))
+    enabled = _truthy_attestation_config(
+        _github_first_value(containers, "enabled", "opt_in", "github_artifact_attestations_enabled")
+    ) or _truthy_attestation_config(os.getenv("MCP_ARTIFACT_ATTESTATION_GITHUB_ENABLED", ""))
+
+    timeout_value = _github_first_text(containers, "timeout_seconds", "timeout")
+    try:
+        timeout_seconds = min(max(1, int(float(timeout_value))), 120) if timeout_value else ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS
+    except ValueError:
+        timeout_seconds = ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS
+
+    bundle_ref = str(signing.get("bundle_ref") or _github_first_text(containers, "bundle_ref", "bundle_path") or "")
+    trusted_root_ref = _github_first_text(
+        containers,
+        "trusted_root_ref",
+        "custom_trusted_root",
+        "custom_trusted_root_ref",
+        "trusted_root_path",
+    )
+    return {
+        "enabled": enabled,
+        "mode": "online" if online_requested else "offline",
+        "allow_online": allow_online,
+        "expected_owner": owner,
+        "expected_repo": repo_name,
+        "expected_repository": f"{owner}/{repo_name}" if owner and repo_name else repo_slug,
+        "expected_workflow": workflow,
+        "expected_ref": _github_first_text(containers + [workflow_config], "expected_ref", "ref", "git_ref"),
+        "expected_commit": _github_first_text(containers, "expected_commit", "commit", "commit_sha", "sha"),
+        "predicate_type": _github_first_text(containers, "predicate_type", "expected_predicate_type"),
+        "bundle_ref": bundle_ref,
+        "trusted_root_ref": trusted_root_ref,
+        "timeout_seconds": timeout_seconds,
+        "verification": verification,
+    }
+
+
+def _github_attestation_policy_summary(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "expected_repository": policy.get("expected_repository", ""),
+            "expected_workflow": policy.get("expected_workflow", ""),
+            "expected_ref": policy.get("expected_ref", ""),
+            "expected_commit": policy.get("expected_commit", ""),
+            "predicate_type": policy.get("predicate_type", ""),
+            "mode": policy.get("mode", "offline"),
+        }.items()
+        if value
+    }
+
+
+def _resolve_github_attestation_file_ref(ref: str) -> tuple[Path | None, str, str]:
+    display_ref = _safe_attestation_ref(ref)
+    text = str(ref or "").strip()
+    if not text:
+        return None, display_ref, "missing"
+    if text.startswith("repo://file/"):
+        text = urllib.parse.unquote(text.removeprefix("repo://file/")).lstrip("/")
+    elif text.startswith("file://"):
+        text = urllib.parse.urlparse(text).path
+    elif text.startswith("file:"):
+        text = text.removeprefix("file:")
+    if re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
+        return None, display_ref, "remote"
+    try:
+        path = _resolve_repo_path(text)
+    except ValueError:
+        return None, display_ref, "unsafe"
+    try:
+        display_ref = str(path.relative_to(REPO_PATH))
+    except ValueError:
+        display_ref = _safe_attestation_ref(text)
+    if not path.is_file():
+        return path, display_ref, "missing"
+    return path, display_ref, "ok"
+
+
+def _github_cli_token_available() -> bool:
+    if os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN"):
+        return True
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _github_sha256_from_value(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("sha256", "SHA256", "value", "digest"):
+            digest = _github_sha256_from_value(value.get(key))
+            if digest:
+                return digest
+        algorithm = str(value.get("algorithm", "")).lower()
+        if algorithm == "sha256":
+            return _github_sha256_from_value(value.get("value"))
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("sha256:"):
+            text = text.removeprefix("sha256:")
+        if re.fullmatch(r"[0-9a-fA-F]{64}", text):
+            return text.lower()
+    return ""
+
+
+def _iter_json_dicts(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 8:
+        return []
+    if isinstance(value, dict):
+        rows = [value]
+        for item in value.values():
+            rows.extend(_iter_json_dicts(item, depth=depth + 1))
+        return rows[:500]
+    if isinstance(value, list):
+        rows: list[dict[str, Any]] = []
+        for item in value[:100]:
+            rows.extend(_iter_json_dicts(item, depth=depth + 1))
+        return rows[:500]
+    return []
+
+
+def _append_unique(values: list[str], value: Any, *, lower: bool = False) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    text = text.lower() if lower else text
+    if text not in values:
+        values.append(text)
+
+
+def _github_attestation_extract_info(parsed: Any) -> dict[str, list[str]]:
+    info: dict[str, list[str]] = {
+        "subject_digests": [],
+        "predicate_types": [],
+        "repositories": [],
+        "workflow_paths": [],
+        "workflow_names": [],
+        "workflow_refs": [],
+        "refs": [],
+        "commits": [],
+        "signer_identities": [],
+    }
+    for row in _iter_json_dicts(parsed):
+        subject = row.get("subject")
+        subject_rows = subject if isinstance(subject, list) else [subject]
+        for subject_row in subject_rows:
+            if isinstance(subject_row, dict):
+                digest = _github_sha256_from_value(subject_row.get("digest")) or _github_sha256_from_value(subject_row)
+                _append_unique(info["subject_digests"], digest, lower=True)
+
+        for key, value in row.items():
+            key_lower = str(key).lower()
+            if key_lower in {"predicatetype", "predicate_type"}:
+                _append_unique(info["predicate_types"], value)
+            if key_lower in {
+                "repository",
+                "repositoryuri",
+                "repo",
+                "source_repository",
+                "source_repository_uri",
+                "sourcerepository",
+                "sourcerepositoryuri",
+                "github_repository",
+            }:
+                if isinstance(value, dict):
+                    owner = str(value.get("owner") or value.get("repository_owner") or "").strip()
+                    repo = str(value.get("name") or value.get("repo") or value.get("repository") or "").strip()
+                    if owner and repo:
+                        _append_unique(info["repositories"], f"{owner}/{repo}", lower=True)
+                else:
+                    owner, repo = _split_github_repository(value)
+                    if owner and repo:
+                        _append_unique(info["repositories"], f"{owner}/{repo}", lower=True)
+            if isinstance(value, str):
+                parsed_ref = _parse_github_workflow_ref(value)
+                if parsed_ref:
+                    _append_unique(info["repositories"], f"{parsed_ref['owner']}/{parsed_ref['repo']}", lower=True)
+                    _append_unique(info["workflow_refs"], value)
+                    _append_unique(info["workflow_paths"], parsed_ref["path"])
+                    _append_unique(info["refs"], parsed_ref["ref"])
+                if key_lower in {"workflow_path", "workflowpath", "workflow_file", "workflowfile", "path"} and ".github/workflows/" in value:
+                    _append_unique(info["workflow_paths"], value.split("@", 1)[0])
+                if key_lower in {"workflow_name", "workflowname", "workflow", "name"}:
+                    _append_unique(info["workflow_names"], value)
+                if key_lower in {"ref", "git_ref", "gitref", "source_ref", "sourceref", "github_ref", "githubref"} and value.startswith("refs/"):
+                    _append_unique(info["refs"], value)
+                if key_lower in {
+                    "sha",
+                    "commit",
+                    "commit_sha",
+                    "commitsha",
+                    "source_sha",
+                    "sourcesha",
+                    "git_commit",
+                    "gitcommit",
+                    "source_commit",
+                    "sourcecommit",
+                }:
+                    digest = value.strip().lower()
+                    if re.fullmatch(r"[0-9a-f]{40}", digest):
+                        _append_unique(info["commits"], digest)
+                if "identity" in key_lower and ("github.com" in value or ".github/workflows/" in value):
+                    _append_unique(info["signer_identities"], value)
+
+    return info
+
+
+def _workflow_policy_candidates(value: str) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    parsed = _parse_github_workflow_ref(text)
+    if parsed:
+        text = parsed["path"]
+    text = text.split("@", 1)[0]
+    if "github.com/" in text:
+        marker = "/.github/workflows/"
+        if marker in text:
+            text = ".github/workflows/" + text.split(marker, 1)[1]
+    values = {text.lower()}
+    if "/" in text:
+        values.add(Path(text).name.lower())
+    return values
+
+
+def _github_signer_workflow_arg(policy: dict[str, Any]) -> str:
+    workflow = str(policy.get("expected_workflow", "")).strip()
+    if not workflow:
+        return ""
+    parsed = _parse_github_workflow_ref(workflow)
+    owner = parsed.get("owner", "") or str(policy.get("expected_owner", "")).strip()
+    repo = parsed.get("repo", "") or str(policy.get("expected_repo", "")).strip()
+    path = parsed.get("path", "") or workflow.split("@", 1)[0]
+    if "github.com/" in path:
+        marker = "/.github/workflows/"
+        if marker in path:
+            path = ".github/workflows/" + path.split(marker, 1)[1]
+    if not (owner and repo and path.startswith(".github/workflows/")):
+        return ""
+    return f"{owner}/{repo}/{path}"
+
+
+def _github_policy_validation_messages(
+    info: dict[str, list[str]],
+    policy: dict[str, Any],
+    actual_digest: str,
+) -> tuple[str, list[str]]:
+    unavailable: list[str] = []
+    invalid: list[str] = []
+
+    expected_owner = str(policy.get("expected_owner", "")).strip()
+    expected_repo = str(policy.get("expected_repo", "")).strip()
+    expected_workflow = str(policy.get("expected_workflow", "")).strip()
+    expected_ref = str(policy.get("expected_ref", "")).strip()
+    expected_commit = str(policy.get("expected_commit", "")).strip().lower()
+    predicate_type = str(policy.get("predicate_type", "")).strip()
+
+    if not expected_owner:
+        unavailable.append("attestation_policy_expected_owner_missing")
+    if not expected_repo:
+        unavailable.append("attestation_policy_expected_repo_missing")
+    if not expected_workflow:
+        unavailable.append("attestation_policy_expected_workflow_missing")
+    if not predicate_type:
+        unavailable.append("attestation_policy_predicate_type_missing")
+    if not expected_ref and not expected_commit:
+        unavailable.append("attestation_policy_expected_ref_or_commit_missing")
+
+    if unavailable:
+        return "unavailable", unavailable
+
+    if not info["subject_digests"]:
+        unavailable.append("attestation_subject_digest_unavailable")
+    elif actual_digest.lower() not in info["subject_digests"]:
+        invalid.append("attestation_subject_digest_mismatch")
+
+    expected_repository = f"{expected_owner}/{expected_repo}".lower()
+    if not info["repositories"]:
+        unavailable.append("attestation_repository_unavailable")
+    elif expected_repository not in info["repositories"]:
+        invalid.append("attestation_repository_mismatch")
+
+    actual_workflows = set()
+    for value in info["workflow_paths"] + info["workflow_names"] + info["workflow_refs"]:
+        actual_workflows.update(_workflow_policy_candidates(value))
+    expected_workflows = _workflow_policy_candidates(expected_workflow)
+    if not actual_workflows:
+        unavailable.append("attestation_workflow_unavailable")
+    elif not expected_workflows.intersection(actual_workflows):
+        invalid.append("attestation_workflow_mismatch")
+
+    if predicate_type:
+        if not info["predicate_types"]:
+            unavailable.append("attestation_predicate_type_unavailable")
+        elif predicate_type not in info["predicate_types"]:
+            invalid.append("attestation_predicate_type_mismatch")
+
+    if expected_ref:
+        if not info["refs"]:
+            unavailable.append("attestation_ref_unavailable")
+        elif expected_ref not in info["refs"]:
+            invalid.append("attestation_ref_mismatch")
+    if expected_commit:
+        if not info["commits"]:
+            unavailable.append("attestation_commit_unavailable")
+        elif expected_commit not in info["commits"]:
+            invalid.append("attestation_commit_mismatch")
+
+    if invalid:
+        return "invalid", invalid + unavailable
+    if unavailable:
+        return "unavailable", unavailable
+    return "verified", []
+
+
+def _github_policy_prerequisite_messages(policy: dict[str, Any]) -> list[str]:
+    messages: list[str] = []
+    if not str(policy.get("expected_owner", "")).strip():
+        messages.append("attestation_policy_expected_owner_missing")
+    if not str(policy.get("expected_repo", "")).strip():
+        messages.append("attestation_policy_expected_repo_missing")
+    if not str(policy.get("expected_workflow", "")).strip():
+        messages.append("attestation_policy_expected_workflow_missing")
+    if not str(policy.get("predicate_type", "")).strip():
+        messages.append("attestation_policy_predicate_type_missing")
+    expected_ref = str(policy.get("expected_ref", "")).strip()
+    expected_commit = str(policy.get("expected_commit", "")).strip()
+    if not expected_ref and not expected_commit:
+        messages.append("attestation_policy_expected_ref_or_commit_missing")
+    return messages
+
+
+def _github_cli_failure_is_unavailable(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    network_access: bool,
+) -> bool:
+    stderr = str(completed.stderr or "")
+    stdout = str(completed.stdout or "")
+    output = f"{stderr}\n{stdout}".lower()
+    tooling_or_config_markers = (
+        "only 'gh auth token' is implemented",
+        "unknown command",
+        "unknown flag",
+        "not a gh command",
+        "usage:",
+        "permission denied",
+        "no such file",
+    )
+    if any(marker in output for marker in tooling_or_config_markers):
+        return True
+    network_or_auth_markers = (
+        "authentication",
+        "authorization",
+        "unauthorized",
+        "forbidden",
+        "token",
+        "rate limit",
+        "network",
+        "connection",
+        "could not resolve",
+        "no such host",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "service unavailable",
+        "transparency data unavailable",
+    )
+    return network_access and any(marker in output for marker in network_or_auth_markers)
+
+
+def _verify_github_artifact_attestation(
+    provenance: dict[str, Any],
+    artifact_rel: str,
+    actual_digest: str,
+) -> dict[str, Any]:
+    signing = provenance.get("signing", {}) if isinstance(provenance.get("signing"), dict) else {}
+    subject_digest = signing.get("subject_digest", {})
+    signer_identity = str(signing.get("signer_identity", ""))
+    bundle_ref = str(signing.get("bundle_ref", ""))
+    envelope_ref = str(signing.get("envelope_ref", ""))
+    policy = _github_attestation_expected_policy(signing)
+    policy_summary = _github_attestation_policy_summary(policy)
+    verifier: dict[str, Any] = {
+        "tool": "gh attestation verify",
+        "mode": policy.get("mode", "offline"),
+        "network_access": False,
+        "timeout_seconds": policy.get("timeout_seconds", ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS),
+    }
+
+    def result(status: str, messages: list[str], *, network_access: bool = False, offline: bool = True) -> dict[str, Any]:
+        verifier["network_access"] = bool(network_access)
+        return _attestation_result(
+            status=status,
+            backend=ATTESTATION_BACKEND_GITHUB_ARTIFACT_ATTESTATIONS,
+            signed=True,
+            subject_digest=subject_digest,
+            signer_identity=signer_identity,
+            bundle_ref=bundle_ref,
+            envelope_ref=envelope_ref,
+            messages=messages,
+            network_access=network_access,
+            offline=offline,
+            verifier=verifier,
+            policy=policy_summary,
+        )
+
+    if not policy["enabled"]:
+        return result("unavailable", ["attestation_backend_disabled"])
+
+    preflight_messages: list[str] = []
+    if not _sha256_digest_matches(subject_digest, actual_digest):
+        preflight_messages.append("attestation_signing_subject_digest_mismatch")
+
+    policy_prerequisites = _github_policy_prerequisite_messages(policy)
+    if policy_prerequisites:
+        return result("unavailable", preflight_messages + policy_prerequisites)
+
+    artifact_path = _resolve_repo_path(artifact_rel)
+    cmd = ["gh", "attestation", "verify", str(artifact_path)]
+    expected_owner = str(policy.get("expected_owner", "")).strip()
+    expected_repo = str(policy.get("expected_repo", "")).strip()
+    predicate_type = str(policy.get("predicate_type", "")).strip()
+    if expected_owner and expected_repo:
+        cmd.extend(["--repo", f"{expected_owner}/{expected_repo}"])
+    elif expected_owner:
+        cmd.extend(["--owner", expected_owner])
+    signer_workflow = _github_signer_workflow_arg(policy)
+    if signer_workflow:
+        cmd.extend(["--signer-workflow", signer_workflow])
+    expected_ref = str(policy.get("expected_ref", "")).strip()
+    expected_commit = str(policy.get("expected_commit", "")).strip()
+    if expected_ref:
+        cmd.extend(["--source-ref", expected_ref])
+    if expected_commit:
+        cmd.extend(["--source-digest", expected_commit])
+    if predicate_type:
+        cmd.extend(["--predicate-type", predicate_type])
+
+    network_access = policy["mode"] == "online"
+    if network_access:
+        if not policy["allow_online"]:
+            return result(
+                "unavailable",
+                preflight_messages + ["attestation_online_verification_disabled"],
+                network_access=False,
+                offline=False,
+            )
+        if not _github_cli_token_available():
+            return result(
+                "unavailable",
+                preflight_messages + ["attestation_online_token_unavailable"],
+                network_access=False,
+                offline=False,
+            )
+    else:
+        bundle_path, bundle_display, bundle_status = _resolve_github_attestation_file_ref(str(policy.get("bundle_ref", "")))
+        root_path, root_display, root_status = _resolve_github_attestation_file_ref(str(policy.get("trusted_root_ref", "")))
+        verifier["bundle_ref"] = bundle_display
+        verifier["trusted_root_ref"] = root_display
+        if bundle_status != "ok":
+            return result("unavailable", preflight_messages + [f"attestation_bundle_{bundle_status}"])
+        if root_status != "ok":
+            return result("unavailable", preflight_messages + [f"attestation_trusted_root_{root_status}"])
+        assert bundle_path is not None and root_path is not None
+        cmd.extend(["--bundle", str(bundle_path), "--custom-trusted-root", str(root_path)])
+
+    if shutil.which("gh") is None:
+        return result(
+            "unavailable",
+            preflight_messages + ["attestation_verifier_dependency_missing"],
+            network_access=False,
+            offline=not network_access,
+        )
+
+    cmd.extend(["--format", "json"])
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=int(policy.get("timeout_seconds") or ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS),
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return result("unavailable", preflight_messages + ["attestation_verifier_unavailable"], network_access=network_access, offline=not network_access)
+    if completed.returncode != 0:
+        status = (
+            "unavailable"
+            if _github_cli_failure_is_unavailable(
+                completed,
+                network_access=network_access,
+            )
+            else "invalid"
+        )
+        if preflight_messages:
+            status = "invalid"
+        message = (
+            "attestation_verification_unavailable"
+            if status == "unavailable"
+            else "attestation_verification_failed"
+        )
+        return result(
+            status,
+            preflight_messages + [message],
+            network_access=network_access,
+            offline=not network_access,
+        )
+    try:
+        parsed = json.loads(completed.stdout or "null")
+    except json.JSONDecodeError:
+        return result("unavailable", preflight_messages + ["attestation_verification_output_unreadable"], network_access=network_access, offline=not network_access)
+
+    info = _github_attestation_extract_info(parsed)
+    status, messages = _github_policy_validation_messages(info, policy, actual_digest)
+    if preflight_messages and status == "verified":
+        status = "invalid"
+    return result(status, preflight_messages + messages, network_access=network_access, offline=not network_access)
+
+
 def _verify_artifact_attestation(
     provenance: dict[str, Any],
     artifact_rel: str,
@@ -4218,6 +4891,8 @@ def _verify_artifact_attestation(
     signer_identity = str(signing.get("signer_identity", ""))
     bundle_ref = str(signing.get("bundle_ref", ""))
     envelope_ref = str(signing.get("envelope_ref", ""))
+    if backend == ATTESTATION_BACKEND_GITHUB_ARTIFACT_ATTESTATIONS:
+        return _verify_github_artifact_attestation(provenance, artifact_rel, actual_digest)
     if backend != ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE:
         return _attestation_result(
             status="unsupported",
@@ -9051,6 +9726,107 @@ def _probe_http(url: str, timeout: float = 2.0) -> dict[str, Any]:
     return result
 
 
+def _sha256_file_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _dependency_lock_manifest_candidates() -> list[Path]:
+    module_dir = Path(__file__).resolve().parent
+    return [
+        module_dir / DEPENDENCY_LOCK_MANIFEST_FILE,
+        module_dir / "source" / DEPENDENCY_LOCK_MANIFEST_FILE,
+        module_dir.parent / "source" / DEPENDENCY_LOCK_MANIFEST_FILE,
+    ]
+
+
+def _resolve_dependency_lock_artifact(manifest_path: Path, recorded_path: str) -> Path:
+    recorded = Path(recorded_path)
+    candidates = [
+        manifest_path.parent / recorded.name,
+        manifest_path.parent / recorded,
+        Path.cwd() / recorded,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
+def _dependency_lock_status() -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "schema": DEPENDENCY_LOCK_STATUS_SCHEMA,
+        "mode": os.getenv("MCP_LOCKED_DEPS_MODE", "unknown").strip() or "unknown",
+        "ok": False,
+        "manifest": None,
+        "manifest_digest": "",
+        "generated_at": "",
+        "sections": {},
+    }
+    manifest_path = next(
+        (path for path in _dependency_lock_manifest_candidates() if path.is_file()),
+        None,
+    )
+    if manifest_path is None:
+        status["error"] = "dependency lock manifest is not present"
+        return status
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema") != DEPENDENCY_LOCK_MANIFEST_SCHEMA:
+            raise ValueError("unexpected dependency lock manifest schema")
+        sections = manifest.get("sections")
+        if not isinstance(sections, dict):
+            raise ValueError("dependency lock manifest sections must be an object")
+        status.update(
+            {
+                "manifest": manifest_path.name,
+                "manifest_digest": _sha256_file_digest(manifest_path),
+                "generated_at": str(manifest.get("generated_at", "")),
+            }
+        )
+        section_status: dict[str, Any] = {}
+        ok = True
+        for name, section in sorted(sections.items()):
+            errors: list[str] = []
+            if not isinstance(section, dict):
+                section_status[str(name)] = {"ok": False, "errors": ["invalid section"]}
+                ok = False
+                continue
+            input_path = _resolve_dependency_lock_artifact(
+                manifest_path,
+                str(section.get("input", "")),
+            )
+            lock_path = _resolve_dependency_lock_artifact(
+                manifest_path,
+                str(section.get("lock", "")),
+            )
+            input_digest = _sha256_file_digest(input_path) if input_path.is_file() else "missing"
+            lock_digest = _sha256_file_digest(lock_path) if lock_path.is_file() else "missing"
+            if input_digest != section.get("input_digest"):
+                errors.append("input_digest_mismatch")
+            if lock_digest != section.get("lock_digest"):
+                errors.append("lock_digest_mismatch")
+            section_ok = not errors
+            ok = ok and section_ok
+            section_status[str(name)] = {
+                "ok": section_ok,
+                "input": str(section.get("input", "")),
+                "lock": str(section.get("lock", "")),
+                "input_digest": input_digest,
+                "lock_digest": lock_digest,
+                "content_digest": str(section.get("content_digest", "")),
+                "package_count": int(section.get("package_count", 0) or 0),
+                "hash_count": int(section.get("hash_count", 0) or 0),
+                "optional": bool(section.get("optional", False)),
+                "errors": errors,
+            }
+        status["sections"] = section_status
+        status["ok"] = ok
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
 def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
     listening_ports = _list_listening_ports()
     http_mode = MCP_TRANSPORT in {"http", "streamable-http", "streamable_http"}
@@ -9093,6 +9869,7 @@ def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
             "tags_probe": ollama_probe,
         },
         "docker": _docker_cli_status(),
+        "dependency_locks": _dependency_lock_status(),
     }
 
 
@@ -16798,6 +17575,7 @@ def self_test(
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
 
+    dependency_locks = _dependency_lock_status()
     out_cap = _token_budget_apply_max(None)
     target_raw = target.strip()
     force_repo_target = target_raw.startswith("repo:")
@@ -16880,6 +17658,7 @@ def self_test(
             "command": cmd,
             "stdout": "",
             "stderr": str(exc),
+            "dependency_locks": dependency_locks,
         }
     except subprocess.TimeoutExpired as exc:
         stdout = exc.output if isinstance(exc.output, str) else getattr(exc, "stdout", "") or ""
@@ -16903,6 +17682,7 @@ def self_test(
             "command": cmd,
             "stdout": _trim_text(stdout, max_chars=out_cap),
             "stderr": _trim_text(stderr, max_chars=out_cap),
+            "dependency_locks": dependency_locks,
         }
 
     if proc.returncode != 0:
@@ -16919,12 +17699,13 @@ def self_test(
         "target": target,
         "resolved_target": resolved_target,
         "execution_root": execution_root,
-        "ok": proc.returncode == 0,
+        "ok": proc.returncode == 0 and bool(dependency_locks.get("ok", False)),
         "timeout": False,
         "exit_code": proc.returncode,
         "command": cmd,
         "stdout": _trim_text(proc.stdout, max_chars=out_cap),
         "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+        "dependency_locks": dependency_locks,
     }
 
 

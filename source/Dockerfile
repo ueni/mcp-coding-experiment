@@ -16,6 +16,7 @@ ARG OLLAMA_PULL_TIMEOUT_SECONDS=7200
 ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vscode-pylance ms-azuretools.vscode-docker openai.chatgpt mhutchie.git-graph"
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
 ARG INSTALL_SENTENCE_TRANSFORMERS=false
+ARG MCP_USE_LOCKED_DEPS=false
 ARG RUNTIME_IMAGE_VERSION_COMPATIBILITY=0
 ARG RUNTIME_IMAGE_VERSION_FEATURE=0
 ARG RUNTIME_IMAGE_VERSION_BUGFIX=0
@@ -67,7 +68,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OLLAMA_PRELOAD_MODELS=${OLLAMA_PRELOAD_MODELS} \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOST_CA_CERT_FILE= \
-    MCP_APPLY_REPO_DEFAULTS=false
+    MCP_APPLY_REPO_DEFAULTS=false \
+    MCP_LOCKED_DEPS_MODE=${MCP_USE_LOCKED_DEPS}
 
 RUN --mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=codebase-tooling-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -104,28 +106,55 @@ RUN --mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,shari
 
 WORKDIR /app
 
-COPY requirements.txt requirements-embedding.txt ./
+COPY requirements.txt requirements-embedding.txt requirements-coding-tools.txt requirements.lock requirements-embedding.lock requirements-coding-tools.lock dependency-locks.json ./
+RUN if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
+      python -c 'exec("""\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\n\nmanifest = json.loads(Path(\"dependency-locks.json\").read_text(encoding=\"utf-8\"))\nif manifest.get(\"schema\") != \"codebase_tooling_mcp.dependency_locks.v1\":\n    raise SystemExit(\"dependency-locks.json has an unexpected schema\")\nnames = [\"runtime\", \"coding-tools\"]\nif os.environ.get(\"INSTALL_SENTENCE_TRANSFORMERS\") == \"true\":\n    names.append(\"embedding\")\nfor name in names:\n    section = manifest[\"sections\"][name]\n    input_path = Path(section[\"input\"]).name\n    lock_path = Path(section[\"lock\"]).name\n    for path, expected, label in (\n        (input_path, section[\"input_digest\"], \"input\"),\n        (lock_path, section[\"lock_digest\"], \"lock\"),\n    ):\n        actual = \"sha256:\" + hashlib.sha256(Path(path).read_bytes()).hexdigest()\n        if actual != expected:\n            raise SystemExit(\n                f\"stale dependency lock section={name} {label}={path}: \"\n                f\"expected {expected}, got {actual}; run scripts/dependency_lock.py refresh\"\n            )\n""")'; \
+    fi
 RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
-    pip install --root-user-action=ignore -r requirements.txt \
+    if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
+      pip install --root-user-action=ignore --require-hashes --only-binary=:all: -r requirements.lock; \
+    else \
+      pip install --root-user-action=ignore -r requirements.txt; \
+    fi \
     && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
-         pip install --root-user-action=ignore -r requirements-embedding.txt; \
+         if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
+           pip install --root-user-action=ignore --require-hashes --only-binary=:all: -r requirements-embedding.lock; \
+         else \
+           pip install --root-user-action=ignore -r requirements-embedding.txt; \
+         fi; \
        fi
 RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
     python -m venv /opt/codebase-tooling/coding-venv \
-    && /opt/codebase-tooling/coding-venv/bin/pip install \
-       --root-user-action=ignore \
-       -r requirements.txt \
-    && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
-         /opt/codebase-tooling/coding-venv/bin/pip install --root-user-action=ignore -r requirements-embedding.txt; \
+    && if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
+         /opt/codebase-tooling/coding-venv/bin/pip install \
+           --root-user-action=ignore \
+           --require-hashes \
+           --only-binary=:all: \
+           -r requirements.lock; \
+       else \
+         /opt/codebase-tooling/coding-venv/bin/pip install \
+           --root-user-action=ignore \
+           -r requirements.txt \
+           ; \
        fi \
-    && /opt/codebase-tooling/coding-venv/bin/pip install \
-       --root-user-action=ignore \
-       black==26.3.0 \
-       isort==8.0.1 \
-       mypy==1.18.2 \
-       pyupgrade==3.21.2 \
-       pytest==8.4.2 \
-       ruff==0.15.5 \
+    && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
+         if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
+           /opt/codebase-tooling/coding-venv/bin/pip install --root-user-action=ignore --require-hashes --only-binary=:all: -r requirements-embedding.lock; \
+         else \
+           /opt/codebase-tooling/coding-venv/bin/pip install --root-user-action=ignore -r requirements-embedding.txt; \
+         fi; \
+       fi \
+    && if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
+         /opt/codebase-tooling/coding-venv/bin/pip install \
+           --root-user-action=ignore \
+           --require-hashes \
+           --only-binary=:all: \
+           -r requirements-coding-tools.lock; \
+       else \
+         /opt/codebase-tooling/coding-venv/bin/pip install \
+           --root-user-action=ignore \
+           -r requirements-coding-tools.txt; \
+       fi \
     && for tool in black isort mypy pyupgrade pytest ruff; do \
          ln -sf "/opt/codebase-tooling/coding-venv/bin/${tool}" "/usr/local/bin/${tool}"; \
        done
