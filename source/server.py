@@ -18,6 +18,7 @@ import threading
 import uuid
 import hashlib
 import hmac
+import ipaddress
 import time
 import math
 import ssl
@@ -142,6 +143,17 @@ ALLOW_ORIGINS = [
 MCP_HTTP_AUTH_MODE = os.getenv("MCP_HTTP_AUTH_MODE", "token").strip().lower()
 MCP_HTTP_BEARER_TOKEN = os.getenv("MCP_HTTP_BEARER_TOKEN", "").strip()
 MCP_HTTP_AUTHORIZATION_SERVERS_RAW = os.getenv("MCP_HTTP_AUTHORIZATION_SERVERS", "").strip()
+MCP_HTTP_ALLOWED_ORIGINS_RAW = os.getenv("MCP_HTTP_ALLOWED_ORIGINS", "").strip()
+MCP_HTTP_DEFAULT_PROTOCOL_VERSIONS = (
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+)
+MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW = os.getenv(
+    "MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS",
+    ",".join(MCP_HTTP_DEFAULT_PROTOCOL_VERSIONS),
+).strip()
 MCP_HTTP_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_REQUESTS", "120")))
 MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60")))
 MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TIMEOUT_SECONDS", "120")))
@@ -988,6 +1000,15 @@ def _client_is_loopback(scope: dict[str, Any]) -> bool:
     return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
 
 
+def _http_header_values(scope: dict[str, Any], header_name: str) -> list[str]:
+    expected = header_name.lower().encode("latin-1")
+    values: list[str] = []
+    for key, value in scope.get("headers", []):
+        if key.lower() == expected:
+            values.append(value.decode("latin-1", errors="replace").strip())
+    return values
+
+
 def _bearer_token_from_headers(headers: list[tuple[bytes, bytes]]) -> str:
     for key, value in headers:
         if key.lower() != b"authorization":
@@ -997,6 +1018,137 @@ def _bearer_token_from_headers(headers: list[tuple[bytes, bytes]]) -> str:
         if scheme.lower() == "bearer" and token:
             return token.strip()
     return ""
+
+
+def _http_path_is_protected_mcp(path: str) -> bool:
+    return path == "/sse" or path == "/mcp" or path.startswith("/mcp/")
+
+
+def _parse_origin(origin: str) -> urllib.parse.SplitResult | None:
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+        # Touch hostname/port so urllib validates malformed bracketed IPv6 and ports.
+        _ = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        return None
+    return parsed
+
+
+def _origin_host_is_loopback(host: str) -> bool:
+    candidate = host.strip().lower()
+    if candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def _default_http_origin_allowed(origin: str) -> bool:
+    parsed = _parse_origin(origin)
+    if parsed is None:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    return bool(parsed.hostname and _origin_host_is_loopback(parsed.hostname))
+
+
+def _normalize_origin_for_compare(origin: str) -> str | None:
+    parsed = _parse_origin(origin)
+    if parsed is None:
+        return None
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme or not host:
+        return None
+    port = parsed.port
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{scheme}://{host_part}{':' + str(port) if port is not None else ''}"
+
+
+def _configured_http_origin_allowed(origin: str, raw_allowed_origins: str) -> bool:
+    normalized_origin = _normalize_origin_for_compare(origin)
+    if normalized_origin is None:
+        return False
+    origin_parts = urllib.parse.urlsplit(normalized_origin)
+    origin_host = (origin_parts.hostname or "").lower()
+    for item in raw_allowed_origins.split(","):
+        allowed = item.strip().rstrip("/")
+        if not allowed:
+            continue
+        if allowed == "*":
+            return True
+        if allowed.endswith(":*"):
+            allowed_base = allowed[:-2]
+            normalized_allowed_base = _normalize_origin_for_compare(allowed_base)
+            if normalized_allowed_base is None:
+                continue
+            allowed_parts = urllib.parse.urlsplit(normalized_allowed_base)
+            if (
+                origin_parts.scheme.lower() == allowed_parts.scheme.lower()
+                and origin_host == (allowed_parts.hostname or "").lower()
+            ):
+                return True
+            continue
+        normalized_allowed = _normalize_origin_for_compare(allowed)
+        if normalized_allowed is not None and normalized_origin == normalized_allowed:
+            return True
+    return False
+
+
+def _http_origin_policy(scope: dict[str, Any]) -> tuple[bool, int, str]:
+    origins = _http_header_values(scope, "origin")
+    if not origins:
+        return True, 200, "origin absent"
+    if len(origins) != 1 or not origins[0]:
+        return False, 403, "invalid Origin header"
+    origin = origins[0]
+    if MCP_HTTP_ALLOWED_ORIGINS_RAW:
+        if _configured_http_origin_allowed(origin, MCP_HTTP_ALLOWED_ORIGINS_RAW):
+            return True, 200, "origin allowed"
+    elif _default_http_origin_allowed(origin):
+        return True, 200, "origin allowed"
+    return False, 403, "invalid Origin header"
+
+
+def _mcp_protocol_versions_supported() -> tuple[str, ...]:
+    versions = tuple(
+        dict.fromkeys(
+            version.strip()
+            for version in MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW.split(",")
+            if version.strip()
+        )
+    )
+    return versions or MCP_HTTP_DEFAULT_PROTOCOL_VERSIONS
+
+
+def _mcp_protocol_version_is_well_formed(version: str) -> bool:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", version):
+        return False
+    try:
+        datetime.strptime(version, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+def _http_protocol_version_policy(scope: dict[str, Any]) -> tuple[bool, int, str]:
+    values = _http_header_values(scope, "mcp-protocol-version")
+    if not values:
+        return True, 200, "protocol version absent"
+    if len(values) != 1:
+        return False, 400, "malformed MCP-Protocol-Version header"
+    version = values[0].strip()
+    if not version or "," in version or not _mcp_protocol_version_is_well_formed(version):
+        return False, 400, "malformed MCP-Protocol-Version header"
+    if version not in _mcp_protocol_versions_supported():
+        return False, 400, "unsupported MCP-Protocol-Version header"
+    return True, 200, "protocol version accepted"
 
 
 def _http_resource_identifier() -> str:
@@ -2944,6 +3096,37 @@ class MCPHTTPAuthMiddleware:
             response = JSONResponse(_mcp_server_manifest_payload())
             await response(scope, receive, send)
             return
+        if _http_path_is_protected_mcp(path):
+            origin_allowed, origin_status, origin_reason = _http_origin_policy(scope)
+            if not origin_allowed:
+                _append_audit_event(
+                    "http_request",
+                    ["network"],
+                    False,
+                    {"path": path, "origin": "<redacted>"},
+                    origin_reason,
+                )
+                response = JSONResponse(
+                    {"error": "forbidden", "detail": origin_reason},
+                    status_code=origin_status,
+                )
+                await response(scope, receive, send)
+                return
+            protocol_allowed, protocol_status, protocol_reason = _http_protocol_version_policy(scope)
+            if not protocol_allowed:
+                _append_audit_event(
+                    "http_request",
+                    ["network"],
+                    False,
+                    {"path": path, "mcp_protocol_version": "<redacted>"},
+                    protocol_reason,
+                )
+                response = JSONResponse(
+                    {"error": "bad_request", "detail": protocol_reason},
+                    status_code=protocol_status,
+                )
+                await response(scope, receive, send)
+                return
         allowed, retry_after = _http_rate_limit_allow(scope)
         if not allowed:
             response = JSONResponse(

@@ -1,5 +1,7 @@
 const vscode = require("vscode");
 
+const DEFAULT_MCP_PROTOCOL_VERSION = "2024-11-05";
+
 function cfg() {
   return vscode.workspace.getConfiguration("mcpInlineAutocomplete");
 }
@@ -13,7 +15,7 @@ function makeRequestBody(id, method, params) {
   });
 }
 
-async function postJson(endpoint, payload, timeoutMs, sessionId, bearerToken) {
+async function postJson(endpoint, payload, timeoutMs, sessionId, bearerToken, protocolVersion) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -26,6 +28,9 @@ async function postJson(endpoint, payload, timeoutMs, sessionId, bearerToken) {
     }
     if (sessionId) {
       headers["mcp-session-id"] = sessionId;
+    }
+    if (protocolVersion) {
+      headers["MCP-Protocol-Version"] = protocolVersion;
     }
     const resp = await fetch(endpoint, {
       method: "POST",
@@ -106,6 +111,7 @@ class McpHttpClient {
     this.timeoutMs = timeoutMs;
     this.bearerToken = bearerToken;
     this.sessionId = "";
+    this.protocolVersion = DEFAULT_MCP_PROTOCOL_VERSION;
     this.nextId = 1;
     this.initialized = false;
   }
@@ -113,7 +119,15 @@ class McpHttpClient {
   async call(method, params) {
     const id = this.nextId++;
     const payload = makeRequestBody(id, method, params);
-    const raw = await postJson(this.endpoint, payload, this.timeoutMs, this.sessionId, this.bearerToken);
+    const protocolVersion = this.initialized ? this.protocolVersion : "";
+    const raw = await postJson(
+      this.endpoint,
+      payload,
+      this.timeoutMs,
+      this.sessionId,
+      this.bearerToken,
+      protocolVersion
+    );
     if (raw.nextSessionId) {
       this.sessionId = raw.nextSessionId;
     }
@@ -134,18 +148,28 @@ class McpHttpClient {
     if (this.initialized) {
       return;
     }
-    await this.call("initialize", {
-      protocolVersion: "2024-11-05",
+    const initResult = await this.call("initialize", {
+      protocolVersion: DEFAULT_MCP_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: "mcp-inline-autocomplete", version: "0.0.1" },
     });
+    if (initResult && typeof initResult.protocolVersion === "string" && initResult.protocolVersion.trim()) {
+      this.protocolVersion = initResult.protocolVersion.trim();
+    }
     const payload = JSON.stringify({
       jsonrpc: "2.0",
       method: "notifications/initialized",
       params: {},
     });
     try {
-      const raw = await postJson(this.endpoint, payload, this.timeoutMs, this.sessionId, this.bearerToken);
+      const raw = await postJson(
+        this.endpoint,
+        payload,
+        this.timeoutMs,
+        this.sessionId,
+        this.bearerToken,
+        this.protocolVersion
+      );
       if (raw.nextSessionId) {
         this.sessionId = raw.nextSessionId;
       }

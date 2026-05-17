@@ -16,6 +16,8 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self._orig_auth_mode = self.server.MCP_HTTP_AUTH_MODE
         self._orig_token = self.server.MCP_HTTP_BEARER_TOKEN
         self._orig_authorization_servers = self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW
+        self._orig_allowed_origins = self.server.MCP_HTTP_ALLOWED_ORIGINS_RAW
+        self._orig_supported_protocol_versions = self.server.MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW
         self._orig_rate_requests = self.server.MCP_HTTP_RATE_LIMIT_REQUESTS
         self._orig_rate_window = self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS
         self._orig_request_timeout = self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS
@@ -28,6 +30,8 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.server.MCP_HTTP_AUTH_MODE = self._orig_auth_mode
         self.server.MCP_HTTP_BEARER_TOKEN = self._orig_token
         self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = self._orig_authorization_servers
+        self.server.MCP_HTTP_ALLOWED_ORIGINS_RAW = self._orig_allowed_origins
+        self.server.MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW = self._orig_supported_protocol_versions
         self.server.MCP_HTTP_RATE_LIMIT_REQUESTS = self._orig_rate_requests
         self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = self._orig_rate_window
         self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS = self._orig_request_timeout
@@ -36,16 +40,33 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.audit_tmp.cleanup()
         super().tearDown()
 
-    def _scope(self, token: str = "", client: str = "127.0.0.1", path: str = "/mcp", method: str = "POST"):
+    def _scope(
+        self,
+        token: str = "",
+        client: str = "127.0.0.1",
+        path: str = "/mcp",
+        method: str = "POST",
+        origin: str | None = None,
+        protocol_version: str | None = None,
+        session_id: str = "",
+    ):
         headers = []
         if token:
             headers.append((b"authorization", f"Bearer {token}".encode("ascii")))
+        if origin is not None:
+            headers.append((b"origin", origin.encode("latin-1")))
+        if protocol_version is not None:
+            headers.append((b"mcp-protocol-version", protocol_version.encode("latin-1")))
+        if session_id:
+            headers.append((b"mcp-session-id", session_id.encode("latin-1")))
         return {"type": "http", "path": path, "method": method, "headers": headers, "client": (client, 12345)}
 
-    def _middleware_json_response(self, scope):
+    def _middleware_json_response(self, scope, downstream_calls: list[dict] | None = None):
         messages = []
 
         async def app(_scope, _receive, send):
+            if downstream_calls is not None:
+                downstream_calls.append(_scope)
             response = self.server.JSONResponse({"downstream": True})
             await response(_scope, _receive, send)
 
@@ -77,6 +98,146 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertEqual(self.server._http_authenticate_scope(self._scope()), (False, 401, "missing bearer token"))
         self.assertEqual(self.server._http_authenticate_scope(self._scope("wrong"))[1], 403)
         self.assertEqual(self.server._http_authenticate_scope(self._scope("secret-token")), (True, 200, "authorized"))
+
+    def test_protected_mcp_allows_missing_and_default_loopback_origins(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+
+        cases = [
+            ("/mcp", None),
+            ("/mcp", "http://localhost:8000"),
+            ("/mcp", "http://127.0.0.1:8000"),
+            ("/mcp", "http://127.42.0.1:9000"),
+            ("/mcp", "http://[::1]:8000"),
+            ("/sse", "http://localhost:8000"),
+        ]
+        for path, origin in cases:
+            with self.subTest(path=path, origin=origin):
+                downstream_calls = []
+                start, payload = self._middleware_json_response(
+                    self._scope("secret-token", path=path, origin=origin), downstream_calls
+                )
+                self.assertEqual(start["status"], 200)
+                self.assertEqual(payload, {"downstream": True})
+                self.assertEqual(len(downstream_calls), 1)
+
+        self.assertFalse(self.server.MCP_AUDIT_LOG_FILE.exists())
+
+    def test_invalid_origin_is_rejected_and_audited_without_raw_origin(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        bad_origin = "https://evil.example.test"
+
+        for path in ["/mcp", "/sse"]:
+            with self.subTest(path=path):
+                downstream_calls = []
+                start, payload = self._middleware_json_response(
+                    self._scope("secret-token", path=path, origin=bad_origin), downstream_calls
+                )
+
+                self.assertEqual(start["status"], 403)
+                self.assertEqual(payload["error"], "forbidden")
+                self.assertIn("Origin", payload["detail"])
+                self.assertEqual(downstream_calls, [])
+
+        audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertNotIn(bad_origin, audit_text)
+        events = [json.loads(line) for line in audit_text.splitlines()]
+        self.assertEqual([event["arguments"]["path"] for event in events], ["/mcp", "/sse"])
+        for event in events:
+            self.assertEqual(event["tool_name"], "http_request")
+            self.assertFalse(event["success"])
+            self.assertEqual(event["arguments"]["origin"], "<redacted>")
+            self.assertIn("Origin", event["reason"])
+
+    def test_configured_origin_allowlist_supports_exact_and_port_wildcard(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        self.server.MCP_HTTP_ALLOWED_ORIGINS_RAW = "https://mcp.example.test,http://localhost:*"
+
+        for origin in ["https://mcp.example.test", "http://localhost:5173"]:
+            with self.subTest(origin=origin):
+                downstream_calls = []
+                start, payload = self._middleware_json_response(
+                    self._scope("secret-token", origin=origin), downstream_calls
+                )
+                self.assertEqual(start["status"], 200)
+                self.assertEqual(payload, {"downstream": True})
+                self.assertEqual(len(downstream_calls), 1)
+
+    def test_protocol_version_accepts_absent_and_supported_values(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+
+        for protocol_version in [None, "2024-11-05", "2025-11-25"]:
+            with self.subTest(protocol_version=protocol_version):
+                downstream_calls = []
+                start, payload = self._middleware_json_response(
+                    self._scope(
+                        "secret-token",
+                        origin="http://localhost:8000",
+                        protocol_version=protocol_version,
+                    ),
+                    downstream_calls,
+                )
+                self.assertEqual(start["status"], 200)
+                self.assertEqual(payload, {"downstream": True})
+                self.assertEqual(len(downstream_calls), 1)
+
+    def test_protocol_version_rejects_malformed_and_unsupported_before_downstream(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+
+        cases = [
+            ("not-a-date", "malformed MCP-Protocol-Version header"),
+            ("2099-01-01", "unsupported MCP-Protocol-Version header"),
+        ]
+        for protocol_version, expected_detail in cases:
+            with self.subTest(protocol_version=protocol_version):
+                downstream_calls = []
+                start, payload = self._middleware_json_response(
+                    self._scope("secret-token", protocol_version=protocol_version), downstream_calls
+                )
+                self.assertEqual(start["status"], 400)
+                self.assertEqual(payload, {"error": "bad_request", "detail": expected_detail})
+                self.assertEqual(downstream_calls, [])
+
+        events = self._audit_events()
+        self.assertEqual([event["reason"] for event in events], [detail for _, detail in cases])
+        for event in events:
+            self.assertEqual(event["arguments"], {"path": "/mcp", "mcp_protocol_version": "<redacted>"})
+
+    def test_mcp_session_id_without_bearer_token_does_not_authorize(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        downstream_calls = []
+
+        start, payload = self._middleware_json_response(
+            self._scope(session_id="not-a-credential"), downstream_calls
+        )
+
+        self.assertEqual(start["status"], 401)
+        self.assertEqual(payload["error"], "unauthorized")
+        self.assertIn("bearer token", payload["detail"])
+        self.assertEqual(downstream_calls, [])
+        headers = dict(start["headers"])
+        self.assertIn(b"www-authenticate", headers)
+        event = self._audit_events()[0]
+        self.assertEqual(event["arguments"], {"path": "/mcp"})
+        self.assertEqual(event["reason"], "missing bearer token")
+
+    def test_mcp_session_id_with_invalid_bearer_token_is_still_forbidden(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+
+        start, payload = self._middleware_json_response(
+            self._scope("wrong", session_id="not-a-credential")
+        )
+
+        self.assertEqual(start["status"], 403)
+        self.assertEqual(payload["error"], "forbidden")
+        event = self._audit_events()[0]
+        self.assertEqual(event["reason"], "invalid bearer token")
 
     def test_insecure_local_mode_is_explicit_and_loopback_only(self):
         self.server.MCP_HTTP_AUTH_MODE = "insecure-local"
