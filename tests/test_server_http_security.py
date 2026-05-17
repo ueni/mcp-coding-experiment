@@ -15,6 +15,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         super().setUp()
         self._orig_auth_mode = self.server.MCP_HTTP_AUTH_MODE
         self._orig_token = self.server.MCP_HTTP_BEARER_TOKEN
+        self._orig_token_scopes = self.server.MCP_HTTP_BEARER_TOKEN_SCOPES_RAW
         self._orig_authorization_servers = self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW
         self._orig_allowed_origins = self.server.MCP_HTTP_ALLOWED_ORIGINS_RAW
         self._orig_supported_protocol_versions = self.server.MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW
@@ -29,6 +30,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
     def tearDown(self):
         self.server.MCP_HTTP_AUTH_MODE = self._orig_auth_mode
         self.server.MCP_HTTP_BEARER_TOKEN = self._orig_token
+        self.server.MCP_HTTP_BEARER_TOKEN_SCOPES_RAW = self._orig_token_scopes
         self.server.MCP_HTTP_AUTHORIZATION_SERVERS_RAW = self._orig_authorization_servers
         self.server.MCP_HTTP_ALLOWED_ORIGINS_RAW = self._orig_allowed_origins
         self.server.MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW = self._orig_supported_protocol_versions
@@ -98,6 +100,35 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertEqual(self.server._http_authenticate_scope(self._scope()), (False, 401, "missing bearer token"))
         self.assertEqual(self.server._http_authenticate_scope(self._scope("wrong"))[1], 403)
         self.assertEqual(self.server._http_authenticate_scope(self._scope("secret-token")), (True, 200, "authorized"))
+
+    def test_local_bearer_scope_config_defaults_to_current_full_access(self):
+        self.server.MCP_HTTP_BEARER_TOKEN_SCOPES_RAW = ""
+
+        self.assertEqual(
+            self.server._local_bearer_token_granted_scopes(),
+            frozenset({self.server.MCP_SCOPE_READ, self.server.MCP_SCOPE_MUTATE}),
+        )
+
+    def test_local_bearer_scope_config_can_grant_read_only(self):
+        self.server.MCP_HTTP_BEARER_TOKEN_SCOPES_RAW = "mcp:read"
+
+        self.assertEqual(
+            self.server._local_bearer_token_granted_scopes(),
+            frozenset({self.server.MCP_SCOPE_READ}),
+        )
+        self.assertEqual(self.server._http_bearer_token_scope_config_error(), "")
+
+    def test_local_bearer_scope_config_rejects_unknown_scopes(self):
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        self.server.MCP_HTTP_BEARER_TOKEN_SCOPES_RAW = "mcp:read admin"
+
+        allowed, status, reason = self.server._http_authenticate_scope(self._scope("secret-token"))
+
+        self.assertFalse(allowed)
+        self.assertEqual(status, 403)
+        self.assertIn("MCP_HTTP_BEARER_TOKEN_SCOPES", reason)
+        self.assertIn("admin", reason)
 
     def test_protected_mcp_allows_missing_and_default_loopback_origins(self):
         self.server.MCP_HTTP_AUTH_MODE = "token"
@@ -222,6 +253,8 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertEqual(downstream_calls, [])
         headers = dict(start["headers"])
         self.assertIn(b"www-authenticate", headers)
+        challenge = headers[b"www-authenticate"].decode("latin-1")
+        self.assertIn('scope="mcp:read"', challenge)
         event = self._audit_events()[0]
         self.assertEqual(event["arguments"], {"path": "/mcp"})
         self.assertEqual(event["reason"], "missing bearer token")
@@ -278,6 +311,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         transports = {entry["endpoint"]: entry for entry in payload["transports"]}
         self.assertTrue(transports["/mcp"]["auth_required"])
         self.assertEqual(transports["/mcp"]["auth"]["schemes"], ["bearer"])
+        self.assertEqual(transports["/mcp"]["auth"]["scopes_supported"], ["mcp:read", "mcp:mutate"])
         self.assertIn("/.well-known/oauth-protected-resource", transports["/mcp"]["auth"]["oauth_protected_resource_metadata"])
 
         tool_names = {tool["name"] for tool in payload["capabilities"]["tools"]}
@@ -292,8 +326,12 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertIn("release_readiness", output_contracts["schema_backed_tools"])
         task_router = next(tool for tool in payload["capabilities"]["tools"] if tool["name"] == "task_router")
         self.assertIn("categories", task_router)
+        self.assertIn("required_scope", task_router)
+        self.assertEqual(task_router["required_scope"], "mcp:read")
         self.assertIn("annotations", task_router)
         self.assertIn("modes", task_router)
+        task_mode = next(mode for mode in task_router["modes"] if mode["mode"] == "task")
+        self.assertEqual(task_mode["required_scope"], "mcp:mutate")
 
         payload_text = json.dumps(payload, sort_keys=True)
         self.assertNotIn("super-secret-token", payload_text)
@@ -320,6 +358,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertEqual(payload["resource"], "http://localhost:8000/mcp")
         self.assertEqual(payload["authorization_servers"], [])
         self.assertEqual(payload["bearer_methods_supported"], ["header"])
+        self.assertEqual(payload["scopes_supported"], ["mcp:read", "mcp:mutate"])
         self.assertEqual(payload["mcp_auth_mode"], "token")
         self.assertIn("local-bearer", payload["oauth_2_1_status"])
         payload_text = json.dumps(payload, sort_keys=True)
@@ -385,6 +424,7 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.assertIn('Bearer realm="mcp"', challenge)
         self.assertIn("resource_metadata=", challenge)
         self.assertIn("/.well-known/oauth-protected-resource", challenge)
+        self.assertIn('scope="mcp:read"', challenge)
         self.assertEqual(payload["error"], "unauthorized")
 
     def test_mcp_endpoint_auth_is_unchanged_when_manifest_is_public(self):
@@ -438,6 +478,99 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
 
         self.assertEqual(categories, ["read-only"])
         self.assertFalse(self.server.MCP_AUDIT_LOG_FILE.exists())
+
+    def test_read_scoped_http_request_can_run_read_only_tools(self):
+        auth_token = self.server._HTTP_REQUEST_AUTHORIZED.set(True)
+        scope_token = self.server._HTTP_REQUEST_GRANTED_SCOPES.set(
+            frozenset({self.server.MCP_SCOPE_READ})
+        )
+        try:
+            categories = self.server._require_tool_security_gate("task_router", {"mode": "status"})
+        finally:
+            self.server._HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
+            self.server._HTTP_REQUEST_AUTHORIZED.reset(auth_token)
+
+        self.assertEqual(categories, ["read-only"])
+        self.assertFalse(self.server.MCP_AUDIT_LOG_FILE.exists())
+
+    def test_read_scoped_http_mutating_tool_is_denied_before_mutation_flag(self):
+        self.server.ALLOW_MUTATIONS = False
+        auth_token = self.server._HTTP_REQUEST_AUTHORIZED.set(True)
+        scope_token = self.server._HTTP_REQUEST_GRANTED_SCOPES.set(
+            frozenset({self.server.MCP_SCOPE_READ})
+        )
+        try:
+            with self.assertRaises(self.server.HTTPInsufficientScopeError) as raised:
+                self.server._require_tool_security_gate("workspace_transaction", {"mode": "write"})
+        finally:
+            self.server._HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
+            self.server._HTTP_REQUEST_AUTHORIZED.reset(auth_token)
+
+        self.assertEqual(raised.exception.required_scope, self.server.MCP_SCOPE_MUTATE)
+        event = self._audit_events()[0]
+        self.assertEqual(event["reason"], "insufficient_scope")
+        self.assertEqual(event["required_scope"], "mcp:mutate")
+        self.assertEqual(event["granted_scopes"], ["mcp:read"])
+
+    def test_read_scoped_http_sensitive_tool_is_denied_with_scope_evidence(self):
+        self.server.ALLOW_MUTATIONS = True
+        token_value = "secret-token-never-logged"
+        self.server.MCP_HTTP_BEARER_TOKEN = token_value
+        auth_token = self.server._HTTP_REQUEST_AUTHORIZED.set(True)
+        scope_token = self.server._HTTP_REQUEST_GRANTED_SCOPES.set(
+            frozenset({self.server.MCP_SCOPE_READ})
+        )
+        try:
+            with self.assertRaises(self.server.HTTPInsufficientScopeError) as raised:
+                self.server.command_runner(command=["cat", "README.md"])
+        finally:
+            self.server._HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
+            self.server._HTTP_REQUEST_AUTHORIZED.reset(auth_token)
+
+        self.assertEqual(raised.exception.required_scope, self.server.MCP_SCOPE_MUTATE)
+        self.assertIn('scope="mcp:mutate"', raised.exception.challenge)
+        event = self._audit_events()[0]
+        self.assertEqual(event["tool_name"], "command_runner")
+        self.assertFalse(event["success"])
+        self.assertEqual(event["reason"], "insufficient_scope")
+        self.assertEqual(event["required_scope"], "mcp:mutate")
+        self.assertEqual(event["granted_scopes"], ["mcp:read"])
+        audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertNotIn(token_value, audit_text)
+
+    def test_middleware_insufficient_scope_returns_403_challenge(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_HTTP_AUTH_MODE = "token"
+        self.server.MCP_HTTP_BEARER_TOKEN = "secret-token"
+        self.server.MCP_HTTP_BEARER_TOKEN_SCOPES_RAW = "mcp:read"
+        messages = []
+
+        async def app(_scope, _receive, _send):
+            self.server._require_tool_security_gate("command_runner", {"command": ["cat", "README.md"]})
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        asyncio.run(self.server.MCPHTTPAuthMiddleware(app)(self._scope("secret-token"), receive, send))
+
+        start = next(message for message in messages if message["type"] == "http.response.start")
+        body = b"".join(
+            message.get("body", b"")
+            for message in messages
+            if message["type"] == "http.response.body"
+        )
+        payload = json.loads(body.decode("utf-8"))
+        headers = dict(start["headers"])
+        challenge = headers[b"www-authenticate"].decode("latin-1")
+        self.assertEqual(start["status"], 403)
+        self.assertEqual(payload["error"], "insufficient_scope")
+        self.assertEqual(payload["required_scope"], "mcp:mutate")
+        self.assertEqual(payload["granted_scopes"], ["mcp:read"])
+        self.assertIn('error="insufficient_scope"', challenge)
+        self.assertIn('scope="mcp:mutate"', challenge)
 
     def test_unauthorized_http_sensitive_tool_is_denied_and_audited(self):
         self.server.ALLOW_MUTATIONS = True
