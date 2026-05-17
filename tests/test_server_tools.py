@@ -2418,18 +2418,26 @@ class ServerToolsTest(ServerToolsTestBase):
             ]
         }
 
-    def _fake_github_attestation_runner(self, output, seen_commands=None):
+    def _fake_github_attestation_runner(
+        self,
+        output,
+        seen_commands=None,
+        *,
+        returncode=0,
+        stderr="",
+    ):
         real_run = subprocess.run
 
         def fake_run(cmd, *args, **kwargs):
             if isinstance(cmd, (list, tuple)) and list(cmd[:3]) == ["gh", "attestation", "verify"]:
                 if seen_commands is not None:
                     seen_commands.append(list(cmd))
+                stdout = json.dumps(output) if output is not None else ""
                 return subprocess.CompletedProcess(
                     cmd,
-                    0,
-                    stdout=json.dumps(output),
-                    stderr="",
+                    returncode,
+                    stdout=stdout,
+                    stderr=stderr,
                 )
             return real_run(cmd, *args, **kwargs)
 
@@ -2558,6 +2566,39 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(verify["checks"][0]["attestation"]["status"], "invalid")
         self.assertIn("attestation_commit_mismatch", verify["checks"][0]["findings"])
         self.assertFalse(verify["checks"][0]["attestation"]["network_access"])
+
+    def test_artifact_provenance_marks_github_cli_verification_failures_invalid(self):
+        cases = [
+            ("wrong_digest", {"subject_digest": {"algorithm": "sha256", "value": "0" * 64}}, {}),
+            ("wrong_repo", {}, {"expected_repo": "other-repo"}),
+            ("wrong_workflow", {}, {"expected_workflow": ".github/workflows/other.yml"}),
+            ("wrong_ref", {}, {"expected_ref": "refs/tags/v1.0.0"}),
+            ("wrong_commit", {}, {"expected_ref": "", "expected_commit": "f" * 40}),
+            ("wrong_predicate", {}, {"predicate_type": "https://example.invalid/predicate/v1"}),
+        ]
+        for case, signing_overrides, verification_overrides in cases:
+            with self.subTest(case=case):
+                json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+                    signing_overrides=signing_overrides,
+                    verification_overrides=verification_overrides,
+                )
+
+                with patch.object(self.server.shutil, "which", return_value="/usr/bin/gh"), patch.object(
+                    self.server.subprocess,
+                    "run",
+                    side_effect=self._fake_github_attestation_runner(
+                        None,
+                        returncode=1,
+                        stderr="gh attestation verify: policy verification failed",
+                    ),
+                ):
+                    verify = self.server.artifact_provenance(artifact_path=json_artifact)
+
+                self.assertFalse(verify["ok"])
+                check = verify["checks"][0]
+                self.assertEqual(check["attestation"]["status"], "invalid")
+                self.assertIn("attestation_verification_failed", check["findings"])
+                self.assertFalse(check["attestation"]["network_access"])
 
     def test_artifact_provenance_github_attestation_prerequisites_fail_closed(self):
         missing_cases = [

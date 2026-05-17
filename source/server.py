@@ -3695,6 +3695,62 @@ def _github_policy_validation_messages(
     return "verified", []
 
 
+def _github_policy_prerequisite_messages(policy: dict[str, Any]) -> list[str]:
+    messages: list[str] = []
+    if not str(policy.get("expected_owner", "")).strip():
+        messages.append("attestation_policy_expected_owner_missing")
+    if not str(policy.get("expected_repo", "")).strip():
+        messages.append("attestation_policy_expected_repo_missing")
+    if not str(policy.get("expected_workflow", "")).strip():
+        messages.append("attestation_policy_expected_workflow_missing")
+    if not str(policy.get("predicate_type", "")).strip():
+        messages.append("attestation_policy_predicate_type_missing")
+    expected_ref = str(policy.get("expected_ref", "")).strip()
+    expected_commit = str(policy.get("expected_commit", "")).strip()
+    if not expected_ref and not expected_commit:
+        messages.append("attestation_policy_expected_ref_or_commit_missing")
+    return messages
+
+
+def _github_cli_failure_is_unavailable(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    network_access: bool,
+) -> bool:
+    stderr = str(completed.stderr or "")
+    stdout = str(completed.stdout or "")
+    output = f"{stderr}\n{stdout}".lower()
+    tooling_or_config_markers = (
+        "only 'gh auth token' is implemented",
+        "unknown command",
+        "unknown flag",
+        "not a gh command",
+        "usage:",
+        "permission denied",
+        "no such file",
+    )
+    if any(marker in output for marker in tooling_or_config_markers):
+        return True
+    network_or_auth_markers = (
+        "authentication",
+        "authorization",
+        "unauthorized",
+        "forbidden",
+        "token",
+        "rate limit",
+        "network",
+        "connection",
+        "could not resolve",
+        "no such host",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "service unavailable",
+        "transparency data unavailable",
+    )
+    return network_access and any(marker in output for marker in network_or_auth_markers)
+
+
 def _verify_github_artifact_attestation(
     provenance: dict[str, Any],
     artifact_rel: str,
@@ -3737,6 +3793,10 @@ def _verify_github_artifact_attestation(
     preflight_messages: list[str] = []
     if not _sha256_digest_matches(subject_digest, actual_digest):
         preflight_messages.append("attestation_signing_subject_digest_mismatch")
+
+    policy_prerequisites = _github_policy_prerequisite_messages(policy)
+    if policy_prerequisites:
+        return result("unavailable", preflight_messages + policy_prerequisites)
 
     artifact_path = _resolve_repo_path(artifact_rel)
     cmd = ["gh", "attestation", "verify", str(artifact_path)]
@@ -3807,7 +3867,27 @@ def _verify_github_artifact_attestation(
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
         return result("unavailable", preflight_messages + ["attestation_verifier_unavailable"], network_access=network_access, offline=not network_access)
     if completed.returncode != 0:
-        return result("unavailable", preflight_messages + ["attestation_verification_unavailable"], network_access=network_access, offline=not network_access)
+        status = (
+            "unavailable"
+            if _github_cli_failure_is_unavailable(
+                completed,
+                network_access=network_access,
+            )
+            else "invalid"
+        )
+        if preflight_messages:
+            status = "invalid"
+        message = (
+            "attestation_verification_unavailable"
+            if status == "unavailable"
+            else "attestation_verification_failed"
+        )
+        return result(
+            status,
+            preflight_messages + [message],
+            network_access=network_access,
+            offline=not network_access,
+        )
     try:
         parsed = json.loads(completed.stdout or "null")
     except json.JSONDecodeError:
