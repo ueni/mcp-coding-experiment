@@ -176,6 +176,27 @@ MCP_OTEL_SERVICE_NAME = (
     os.getenv("MCP_OTEL_SERVICE_NAME", "codebase-tooling-mcp").strip()
     or "codebase-tooling-mcp"
 )
+MCP_SAMPLING_ENABLED = os.getenv("MCP_SAMPLING_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+MCP_SAMPLING_ALLOWED_USE_CASES_RAW = os.getenv(
+    "MCP_SAMPLING_ALLOWED_USE_CASES",
+    "summary,classification,workflow_selection",
+).strip()
+MCP_SAMPLING_MAX_PATHS = max(1, int(os.getenv("MCP_SAMPLING_MAX_PATHS", "5")))
+MCP_SAMPLING_MAX_BYTES = max(512, int(os.getenv("MCP_SAMPLING_MAX_BYTES", "12000")))
+MCP_SAMPLING_MAX_CONTEXT_TOKENS = max(
+    128,
+    int(os.getenv("MCP_SAMPLING_MAX_CONTEXT_TOKENS", "2000")),
+)
+MCP_SAMPLING_MAX_OUTPUT_TOKENS = max(
+    64,
+    int(os.getenv("MCP_SAMPLING_MAX_OUTPUT_TOKENS", "512")),
+)
+MCP_SAMPLING_MODEL_HINTS_RAW = os.getenv("MCP_SAMPLING_MODEL_HINTS", "").strip()
 RELEASE_READINESS_DASHBOARD_RESOURCE_URI = "ui://codebase-tooling-mcp/release-readiness-dashboard"
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
@@ -285,6 +306,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "task_status": {"categories": ["read-only"]},
     "repo_info": {"categories": ["read-only"]},
     "roots_diagnostics": {"categories": ["read-only"]},
+    "model_assisted_summary": {"categories": ["read-only", "network"]},
     "runtime_state": {"categories": ["read-only"]},
     "git_status": {"categories": ["read-only"]},
     "grep": {"categories": ["read-only"]},
@@ -10317,6 +10339,533 @@ def repo_info() -> dict[str, Any]:
     return info
 
 
+_SAMPLING_SECRET_PATH_RE = re.compile(
+    r"(^|/)(?:\.env(?:\.|$)|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.|$)|"
+    r"[^/]*\.(?:pem|key|p12|pfx)$|(?:secrets?|credentials?)(?:\.|/|$))",
+    re.IGNORECASE,
+)
+_SAMPLING_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
+_SAMPLING_HARD_DENIED_USE_CASES = (
+    "mutation",
+    "write",
+    "patch",
+    "apply",
+    "delete",
+    "release_approval",
+    "release_readiness_decision",
+    "security_conclusion",
+    "secret_extraction",
+    "credential_handling",
+)
+
+
+def _sampling_allowed_use_cases() -> set[str]:
+    values = {
+        item.strip().lower().replace("-", "_")
+        for item in str(MCP_SAMPLING_ALLOWED_USE_CASES_RAW or "").split(",")
+        if item.strip()
+    }
+    return values or {"summary", "classification", "workflow_selection"}
+
+
+def _sampling_model_hints() -> list[str]:
+    return [
+        item.strip()
+        for item in str(MCP_SAMPLING_MODEL_HINTS_RAW or "").split(",")
+        if item.strip()
+    ][:5]
+
+
+def _sampling_estimated_tokens(text: str) -> int:
+    return max(1, math.ceil(len(text) / 4)) if text else 0
+
+
+def _sampling_digest_text(text: str) -> dict[str, str]:
+    return _sha256_digest(text.encode("utf-8", errors="replace"))
+
+
+def _sampling_redact_text(text: str) -> tuple[str, list[str]]:
+    redactions: list[str] = []
+
+    def _record(code: str) -> str:
+        if code not in redactions:
+            redactions.append(code)
+        return f"<redacted:{code}>"
+
+    redacted = _SAMPLING_PRIVATE_KEY_BLOCK_RE.sub(
+        lambda _match: _record("private_key_block"), text
+    )
+    redacted = SENSITIVE_AUDIT_VALUE_RE.sub(
+        lambda _match: _record("secret_value"), redacted
+    )
+    redacted = ABSOLUTE_PATH_VALUE_RE.sub(
+        lambda _match: _record("absolute_path"), redacted
+    )
+    return redacted, redactions
+
+
+def _sampling_default_paths(max_paths: int) -> list[str]:
+    candidates = ["README.md", "AGENTS.md", "pyproject.toml", "docs/index.md"]
+    paths: list[str] = []
+    for rel in candidates:
+        try:
+            if _resolve_repo_path(rel).is_file():
+                paths.append(rel)
+        except Exception:
+            continue
+        if len(paths) >= max_paths:
+            break
+    return paths
+
+
+def _sampling_effective_budget(
+    *,
+    max_paths: int | None,
+    max_bytes: int | None,
+    max_context_tokens: int | None,
+    max_tokens: int | None,
+) -> dict[str, Any]:
+    requested = {
+        "max_paths": max_paths,
+        "max_bytes": max_bytes,
+        "max_context_tokens": max_context_tokens,
+        "max_output_tokens": max_tokens,
+    }
+    effective = {
+        "max_paths": min(
+            MCP_SAMPLING_MAX_PATHS,
+            max(1, int(max_paths)) if max_paths is not None else MCP_SAMPLING_MAX_PATHS,
+        ),
+        "max_bytes": min(
+            MCP_SAMPLING_MAX_BYTES,
+            max(1, int(max_bytes)) if max_bytes is not None else MCP_SAMPLING_MAX_BYTES,
+        ),
+        "max_context_tokens": min(
+            MCP_SAMPLING_MAX_CONTEXT_TOKENS,
+            max(1, int(max_context_tokens))
+            if max_context_tokens is not None
+            else MCP_SAMPLING_MAX_CONTEXT_TOKENS,
+        ),
+        "max_output_tokens": min(
+            MCP_SAMPLING_MAX_OUTPUT_TOKENS,
+            max(1, int(max_tokens)) if max_tokens is not None else MCP_SAMPLING_MAX_OUTPUT_TOKENS,
+        ),
+    }
+    return {"requested": requested, "effective": effective}
+
+
+def _sampling_policy_payload(budget: dict[str, Any], execution_mode: str) -> dict[str, Any]:
+    return {
+        "schema": "mcp_sampling_policy.v1",
+        "enabled": bool(MCP_SAMPLING_ENABLED),
+        "allowed_use_cases": sorted(_sampling_allowed_use_cases()),
+        "hard_denied_use_cases": list(_SAMPLING_HARD_DENIED_USE_CASES),
+        "budgets": budget,
+        "model_preferences": {
+            "hints": _sampling_model_hints(),
+            "cost_priority": 0.2,
+            "speed_priority": 0.4,
+            "intelligence_priority": 0.4,
+            "max_output_tokens": budget["effective"]["max_output_tokens"],
+        },
+        "human_review_required": True,
+        "client_mediated": True,
+        "no_silent_model_calls": True,
+        "output_authority": "advisory_only",
+        "execution_mode": execution_mode,
+        "online_offline_behavior": {
+            "online": "Client-mediated sampling may use the client's configured model only after client/user review.",
+            "offline": "Client-mediated sampling is still explicit; clients must keep any model call onboard/local if offline privacy is required.",
+        },
+        "redaction": "repository-relative context only; secret-looking values, private keys, and host absolute paths are redacted before prompt construction",
+    }
+
+
+def _sampling_base_result(
+    *,
+    status: str,
+    reason: str,
+    purpose: str,
+    execution_mode: str,
+    execution_mode_source: str,
+    policy: dict[str, Any],
+    capability: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
+    request: dict[str, Any] | None = None,
+    sampling: dict[str, Any] | None = None,
+    audit: dict[str, Any] | None = None,
+    guidance: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": "model_assisted_summary.v1",
+        "ok": status in {"approved", "prepared"},
+        "status": status,
+        "reason": reason,
+        "read_only": True,
+        "advisory_only": True,
+        "purpose": purpose,
+        "execution_mode": execution_mode,
+        "execution_mode_source": execution_mode_source,
+        "policy": policy,
+        "capability": capability
+        or {
+            "client_session_active": False,
+            "sampling_declared": False,
+            "create_message_api": False,
+            "status": "unavailable",
+            "reason": "not_probed",
+        },
+        "context": context
+        or {
+            "repo_boundary_enforced": True,
+            "sources": [],
+            "omitted": [],
+            "redactions_applied": [],
+            "estimated_tokens": 0,
+            "included_bytes": 0,
+            "prompt_contains_raw_repository_content": False,
+        },
+        "request": request
+        or {
+            "would_call_client": False,
+            "dry_run": False,
+            "human_review_expected": True,
+            "include_context": "none",
+            "metadata": {},
+        },
+        "sampling": sampling
+        or {
+            "model": "",
+            "stop_reason": "",
+            "summary": "",
+            "output_digest": {},
+        },
+        "audit": audit
+        or {
+            "records_raw_prompt": False,
+            "records_raw_response": False,
+            "records_repository_content": False,
+            "approval_status": "not_observed",
+            "prompt_digest": {},
+            "output_digest": {},
+        },
+        "guidance": guidance
+        or [
+            "Generated text is advisory only; cite raw tool results/artifacts before release, security, or destructive decisions.",
+            "No repository content is sampled unless MCP_SAMPLING_ENABLED is true and the client declares sampling capability.",
+        ],
+    }
+
+
+def _sampling_context_from_paths(
+    paths: list[str] | None,
+    *,
+    budget: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    effective = budget["effective"]
+    max_paths = int(effective["max_paths"])
+    max_bytes = int(effective["max_bytes"])
+    max_context_tokens = int(effective["max_context_tokens"])
+    raw_paths = [str(item).strip() for item in (paths or []) if str(item).strip()]
+    if not raw_paths:
+        raw_paths = _sampling_default_paths(max_paths)
+    if len(raw_paths) > max_paths:
+        return "", {
+            "repo_boundary_enforced": True,
+            "sources": [],
+            "omitted": [
+                {
+                    "reason": "path_budget_exceeded",
+                    "requested_paths": len(raw_paths),
+                    "max_paths": max_paths,
+                }
+            ],
+            "redactions_applied": [],
+            "estimated_tokens": 0,
+            "included_bytes": 0,
+            "prompt_contains_raw_repository_content": False,
+            "budget_violation": "path_budget_exceeded",
+        }
+
+    sources: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
+    redactions: list[str] = []
+    chunks: list[str] = []
+    included_bytes = 0
+    remaining_chars = max_context_tokens * 4
+
+    for index, raw in enumerate(raw_paths):
+        rel_for_policy = raw.replace("\\", "/").lstrip("/")
+        if _SAMPLING_SECRET_PATH_RE.search(rel_for_policy):
+            omitted.append({"path": rel_for_policy, "reason": "secret_bearing_path_denied"})
+            continue
+        try:
+            path = _resolve_repo_path(raw)
+        except ValueError:
+            omitted.append({"path": rel_for_policy, "reason": "path_escapes_repository"})
+            continue
+        if not path.is_file():
+            omitted.append({"path": rel_for_policy, "reason": "not_a_regular_file"})
+            continue
+        rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
+        if _SAMPLING_SECRET_PATH_RE.search(rel):
+            omitted.append({"path": rel, "reason": "secret_bearing_path_denied"})
+            continue
+        if included_bytes >= max_bytes or remaining_chars <= 0:
+            omitted.append({"path": rel, "reason": "byte_or_token_budget_exhausted"})
+            continue
+        try:
+            size = path.stat().st_size
+            read_limit = min(size, max_bytes - included_bytes)
+            with path.open("rb") as handle:
+                data = handle.read(read_limit)
+        except OSError:
+            omitted.append({"path": rel, "reason": "read_failed"})
+            continue
+        text = data.decode("utf-8", errors="replace")
+        redacted, redaction_codes = _sampling_redact_text(text)
+        for code in redaction_codes:
+            if code not in redactions:
+                redactions.append(code)
+        token_truncated = False
+        if len(redacted) > remaining_chars:
+            redacted = redacted[: max(0, remaining_chars)]
+            token_truncated = True
+            if "token_budget_truncated" not in redactions:
+                redactions.append("token_budget_truncated")
+        chunk_digest = _sampling_digest_text(redacted)
+        chunks.append(
+            f"FILE: {rel}\n"
+            f"REDACTED_SHA256: {chunk_digest['value']}\n"
+            "---\n"
+            f"{redacted}\n"
+            "---"
+        )
+        included_bytes += len(data)
+        remaining_chars -= len(redacted)
+        truncated = bool(size > read_limit or token_truncated)
+        sources.append(
+            {
+                "path": rel,
+                "size_bytes": int(size),
+                "included_bytes": len(data),
+                "estimated_tokens": _sampling_estimated_tokens(redacted),
+                "truncated": truncated,
+                "redacted_digest": chunk_digest,
+            }
+        )
+        if size > read_limit:
+            omitted.append({"path": rel, "reason": "byte_budget_truncated"})
+        if token_truncated:
+            omitted.append({"path": rel, "reason": "token_budget_truncated"})
+        if remaining_chars <= 0:
+            remaining_paths = [p for p in raw_paths[index + 1 :]]
+            for later in remaining_paths:
+                omitted.append(
+                    {
+                        "path": later.replace("\\", "/").lstrip("/"),
+                        "reason": "token_budget_exhausted",
+                    }
+                )
+            break
+
+    context_text = "\n\n".join(chunks)
+    return context_text, {
+        "repo_boundary_enforced": True,
+        "sources": sources,
+        "omitted": omitted,
+        "redactions_applied": redactions,
+        "estimated_tokens": _sampling_estimated_tokens(context_text),
+        "included_bytes": included_bytes,
+        "max_bytes": max_bytes,
+        "max_context_tokens": max_context_tokens,
+        "prompt_contains_raw_repository_content": False,
+        "prompt_contains_redacted_repository_content": bool(sources),
+        "budget_violation": "" if sources else "no_context_available",
+    }
+
+
+def _sampling_prompt(
+    *,
+    purpose: str,
+    question: str,
+    context_text: str,
+    execution_mode: str,
+) -> tuple[str, list[str]]:
+    safe_question, question_redactions = _sampling_redact_text(question.strip())
+    if not safe_question:
+        safe_question = "Summarize the bounded repository context for an engineering handoff."
+    purpose_instruction = {
+        "summary": "Return a concise repository-context summary with uncertainty notes.",
+        "classification": "Return only a concise classification and supporting non-sensitive rationale.",
+        "workflow_selection": "Classify the likely workflow family; do not approve release, security, or mutation decisions.",
+    }.get(purpose, "Return a concise bounded summary.")
+    prompt = (
+        "You are assisting codebase-tooling-mcp through MCP Sampling.\n"
+        "The client/user remains in control of model access and approval.\n"
+        "Use only the redacted repository-relative context below.\n"
+        "Do not request credentials, infer secrets, or rely on host absolute paths.\n"
+        "Do not recommend destructive changes, release approval, or security conclusions as final.\n"
+        "Generated text is advisory only; raw tool results/artifacts must support high-risk decisions.\n\n"
+        f"Purpose: {purpose}\n"
+        f"Execution mode: {execution_mode}\n"
+        f"Allowed output: {purpose_instruction}\n"
+        f"Question: {safe_question}\n\n"
+        "Repository context (redacted, compressed, bounded):\n"
+        f"{context_text}"
+    )
+    return prompt, question_redactions
+
+
+def _sampling_make_messages(prompt: str) -> list[Any]:
+    try:
+        from mcp.types import SamplingMessage, TextContent
+
+        return [
+            SamplingMessage(
+                role="user",
+                content=TextContent(type="text", text=prompt),
+            )
+        ]
+    except Exception:
+        return [{"role": "user", "content": {"type": "text", "text": prompt}}]
+
+
+def _sampling_model_preferences() -> Any:
+    hints = _sampling_model_hints()
+    try:
+        from mcp.types import ModelHint, ModelPreferences
+
+        return ModelPreferences(
+            hints=[ModelHint(name=item) for item in hints] or None,
+            costPriority=0.2,
+            speedPriority=0.4,
+            intelligencePriority=0.4,
+        )
+    except Exception:
+        return {
+            "hints": [{"name": item} for item in hints],
+            "costPriority": 0.2,
+            "speedPriority": 0.4,
+            "intelligencePriority": 0.4,
+        }
+
+
+def _sampling_value(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _sampling_extract_response_text(response: Any) -> str:
+    content = _sampling_value(response, "content", None)
+    if isinstance(content, list):
+        return "\n".join(_sampling_extract_response_text({"content": item}) for item in content)
+    if isinstance(content, dict):
+        if content.get("type") == "text" or "text" in content:
+            return str(content.get("text", ""))
+        return _trim_text(json.dumps(_redact_audit_value(content), sort_keys=True), max_chars=2000)
+    text = getattr(content, "text", None)
+    if text is not None:
+        return str(text)
+    if isinstance(response, str):
+        return response
+    return ""
+
+
+def _sampling_response_meta(response: Any) -> dict[str, Any]:
+    meta = _sampling_value(response, "meta", None)
+    if meta is None:
+        meta = _sampling_value(response, "_meta", None)
+    return meta if isinstance(meta, dict) else {}
+
+
+def _sampling_denial_error(exc: Exception) -> bool:
+    text = f"{exc.__class__.__name__} {exc}".lower()
+    return any(term in text for term in ("denied", "deny", "declined", "cancelled", "canceled"))
+
+
+def _sampling_audit_payload(result: dict[str, Any]) -> dict[str, Any]:
+    request = result.get("request", {}) if isinstance(result.get("request"), dict) else {}
+    context = result.get("context", {}) if isinstance(result.get("context"), dict) else {}
+    audit = result.get("audit", {}) if isinstance(result.get("audit"), dict) else {}
+    return {
+        "purpose": result.get("purpose", ""),
+        "status": result.get("status", ""),
+        "reason": result.get("reason", ""),
+        "execution_mode": result.get("execution_mode", ""),
+        "approval_status": audit.get("approval_status", "not_observed"),
+        "prompt_digest": audit.get("prompt_digest", {}),
+        "output_digest": audit.get("output_digest", {}),
+        "context_sources": [
+            {
+                "path": row.get("path", ""),
+                "redacted_digest": row.get("redacted_digest", {}),
+                "included_bytes": row.get("included_bytes", 0),
+                "truncated": row.get("truncated", False),
+            }
+            for row in context.get("sources", [])[:10]
+            if isinstance(row, dict)
+        ],
+        "redactions_applied": list(context.get("redactions_applied", []))[:10],
+        "metadata": request.get("metadata", {}),
+        "records_raw_prompt": False,
+        "records_raw_response": False,
+        "records_repository_content": False,
+    }
+
+
+async def _client_sampling_capability(session: Any | None) -> dict[str, Any]:
+    if session is None:
+        return {
+            "client_session_active": False,
+            "sampling_declared": False,
+            "create_message_api": False,
+            "status": "unavailable",
+            "reason": "no_active_mcp_request_session",
+        }
+    has_create_message = hasattr(session, "create_message")
+    checker = getattr(session, "check_client_capability", None)
+    sampling_declared = False
+    reason = "client_sampling_capability_not_advertised"
+    if checker is not None:
+        try:
+            from mcp.types import ClientCapabilities, SamplingCapability
+
+            sampling_declared = bool(
+                await _maybe_await(checker(ClientCapabilities(sampling=SamplingCapability())))
+            )
+        except Exception:
+            sampling_declared = False
+            reason = "client_sampling_capability_probe_failed"
+    else:
+        capabilities = getattr(session, "client_capabilities", None)
+        if isinstance(capabilities, dict):
+            sampling_declared = bool(capabilities.get("sampling"))
+        else:
+            sampling_declared = bool(
+                getattr(capabilities, "sampling", None)
+                if capabilities is not None
+                else False
+            )
+        if not sampling_declared:
+            reason = "session_has_no_sampling_capability_probe"
+    if sampling_declared and not has_create_message:
+        reason = "session_has_no_create_message_api"
+    elif sampling_declared:
+        reason = "sampling_capability_declared"
+    return {
+        "client_session_active": True,
+        "sampling_declared": bool(sampling_declared),
+        "create_message_api": bool(has_create_message),
+        "status": "available" if sampling_declared and has_create_message else "unsupported",
+        "reason": reason,
+    }
+
+
 @mcp.tool()
 async def roots_diagnostics(timeout_seconds: float = 1.0) -> dict[str, Any]:
     """Read-only MCP roots diagnostic comparing client roots with REPO_PATH."""
@@ -10362,6 +10911,323 @@ async def roots_diagnostics(timeout_seconds: float = 1.0) -> dict[str, Any]:
             payload["roots"]["invalid_count"] = 1
             return payload
     return _summarize_roots_result(roots)
+
+
+@mcp.tool()
+async def model_assisted_summary(
+    purpose: Annotated[
+        str,
+        Field(
+            description="Allowed MCP sampling purpose: summary, classification, or workflow_selection. Mutations, release approval, and security conclusions are denied."
+        ),
+    ] = "summary",
+    paths: Annotated[
+        list[str] | None,
+        Field(
+            description="Repository-relative files to summarize/classify. Defaults to small repository overview docs. Secret-bearing paths and paths outside REPO_PATH are denied/omitted."
+        ),
+    ] = None,
+    question: Annotated[
+        str,
+        Field(
+            description="Optional bounded question. Secret-looking values and host absolute paths are redacted before any client-mediated sampling request."
+        ),
+    ] = "",
+    execution_mode: Annotated[
+        str,
+        Field(
+            description="Agent execution profile (`auto`, `online`, or `offline`). Offline mode is explicit metadata; clients must keep sampling local/onboard if privacy requires it."
+        ),
+    ] = "auto",
+    max_paths: Annotated[int | None, Field(description="Optional per-call path cap, clamped by MCP_SAMPLING_MAX_PATHS.")] = None,
+    max_bytes: Annotated[int | None, Field(description="Optional per-call byte cap, clamped by MCP_SAMPLING_MAX_BYTES.")] = None,
+    max_context_tokens: Annotated[
+        int | None,
+        Field(description="Optional estimated context-token cap, clamped by MCP_SAMPLING_MAX_CONTEXT_TOKENS."),
+    ] = None,
+    max_tokens: Annotated[
+        int | None,
+        Field(description="Optional generated-token cap, clamped by MCP_SAMPLING_MAX_OUTPUT_TOKENS."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        Field(description="Prepare policy/context/digests without sending a sampling/createMessage request."),
+    ] = False,
+    timeout_seconds: Annotated[
+        float,
+        Field(description="Client-mediated sampling timeout in seconds; capped at 30 seconds."),
+    ] = 20.0,
+) -> dict[str, Any]:
+    """Disabled-by-default MCP sampling safety adapter for bounded advisory repo summaries/classifications."""
+    purpose_norm = str(purpose or "summary").strip().lower().replace("-", "_")
+    try:
+        resolved_mode, mode_source = _resolve_agent_execution_mode(
+            execution_mode,
+            f"sampling {purpose_norm} {question}",
+        )
+    except ValueError:
+        resolved_mode, mode_source = "online", "fallback_after_invalid_request"
+    budget = _sampling_effective_budget(
+        max_paths=max_paths,
+        max_bytes=max_bytes,
+        max_context_tokens=max_context_tokens,
+        max_tokens=max_tokens,
+    )
+    policy = _sampling_policy_payload(budget, resolved_mode)
+    audit_args = {
+        "purpose": purpose_norm,
+        "execution_mode": resolved_mode,
+        "execution_mode_source": mode_source,
+        "dry_run": dry_run,
+        "path_count": len(paths or []),
+        "question_length": len(question or ""),
+        "budgets": budget["effective"],
+    }
+    categories = _tool_categories("model_assisted_summary", audit_args)
+    with _otel_span(
+        "mcp.tool.model_assisted_summary",
+        _otel_tool_attributes("model_assisted_summary", audit_args, categories),
+    ) as span:
+        categories = _require_tool_security_gate("model_assisted_summary", audit_args)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+        result: dict[str, Any]
+        try:
+            session = _active_mcp_session()
+            capability = await _client_sampling_capability(session)
+            if purpose_norm in _SAMPLING_HARD_DENIED_USE_CASES:
+                result = _sampling_base_result(
+                    status="denied",
+                    reason="hard_denied_use_case",
+                    purpose=purpose_norm,
+                    execution_mode=resolved_mode,
+                    execution_mode_source=mode_source,
+                    policy=policy,
+                    capability=capability,
+                )
+            elif purpose_norm not in _sampling_allowed_use_cases():
+                result = _sampling_base_result(
+                    status="denied",
+                    reason="purpose_not_allowed",
+                    purpose=purpose_norm,
+                    execution_mode=resolved_mode,
+                    execution_mode_source=mode_source,
+                    policy=policy,
+                    capability=capability,
+                )
+            elif not MCP_SAMPLING_ENABLED:
+                result = _sampling_base_result(
+                    status="disabled",
+                    reason="MCP_SAMPLING_ENABLED is false",
+                    purpose=purpose_norm,
+                    execution_mode=resolved_mode,
+                    execution_mode_source=mode_source,
+                    policy=policy,
+                    capability=capability,
+                )
+            elif capability.get("status") != "available":
+                result = _sampling_base_result(
+                    status="unsupported",
+                    reason=str(capability.get("reason", "sampling_unavailable")),
+                    purpose=purpose_norm,
+                    execution_mode=resolved_mode,
+                    execution_mode_source=mode_source,
+                    policy=policy,
+                    capability=capability,
+                )
+            else:
+                context_text, context_meta = _sampling_context_from_paths(paths, budget=budget)
+                if context_meta.get("budget_violation") == "path_budget_exceeded":
+                    result = _sampling_base_result(
+                        status="denied",
+                        reason="path_budget_exceeded",
+                        purpose=purpose_norm,
+                        execution_mode=resolved_mode,
+                        execution_mode_source=mode_source,
+                        policy=policy,
+                        capability=capability,
+                        context=context_meta,
+                    )
+                elif not context_meta.get("sources"):
+                    result = _sampling_base_result(
+                        status="denied",
+                        reason="no_allowed_repository_context",
+                        purpose=purpose_norm,
+                        execution_mode=resolved_mode,
+                        execution_mode_source=mode_source,
+                        policy=policy,
+                        capability=capability,
+                        context=context_meta,
+                    )
+                else:
+                    prompt, question_redactions = _sampling_prompt(
+                        purpose=purpose_norm,
+                        question=question,
+                        context_text=context_text,
+                        execution_mode=resolved_mode,
+                    )
+                    for code in question_redactions:
+                        if code not in context_meta["redactions_applied"]:
+                            context_meta["redactions_applied"].append(code)
+                    prompt_digest = _sampling_digest_text(prompt)
+                    metadata = {
+                        "schema": "mcp_sampling_request_metadata.v1",
+                        "server": "codebase-tooling-mcp",
+                        "purpose": purpose_norm,
+                        "execution_mode": resolved_mode,
+                        "human_review_expected": True,
+                        "advisory_only": True,
+                        "repository_boundary_enforced": True,
+                        "redaction_applied": True,
+                        "prompt_digest": prompt_digest,
+                        "context_source_count": len(context_meta.get("sources", [])),
+                        "forbidden_decisions": [
+                            "mutation",
+                            "release_approval",
+                            "security_conclusion",
+                            "credential_handling",
+                        ],
+                    }
+                    request_meta = {
+                        "would_call_client": not dry_run,
+                        "dry_run": bool(dry_run),
+                        "human_review_expected": True,
+                        "include_context": "none",
+                        "max_tokens": budget["effective"]["max_output_tokens"],
+                        "metadata": metadata,
+                        "model_preferences": policy["model_preferences"],
+                        "prompt_digest": prompt_digest,
+                    }
+                    audit_meta = {
+                        "records_raw_prompt": False,
+                        "records_raw_response": False,
+                        "records_repository_content": False,
+                        "approval_status": "not_observed",
+                        "prompt_digest": prompt_digest,
+                        "output_digest": {},
+                    }
+                    if dry_run:
+                        result = _sampling_base_result(
+                            status="prepared",
+                            reason="dry_run_prepared_without_client_call",
+                            purpose=purpose_norm,
+                            execution_mode=resolved_mode,
+                            execution_mode_source=mode_source,
+                            policy=policy,
+                            capability=capability,
+                            context=context_meta,
+                            request=request_meta,
+                            audit=audit_meta,
+                        )
+                    else:
+                        try:
+                            response = await asyncio.wait_for(
+                                _maybe_await(
+                                    session.create_message(
+                                        messages=_sampling_make_messages(prompt),
+                                        max_tokens=budget["effective"]["max_output_tokens"],
+                                        system_prompt=(
+                                            "Return bounded summary/classification only. Output is advisory; do not make release, security, or mutation decisions."
+                                        ),
+                                        include_context="none",
+                                        temperature=0.1,
+                                        metadata=metadata,
+                                        model_preferences=_sampling_model_preferences(),
+                                    )
+                                ),
+                                timeout=max(1.0, min(float(timeout_seconds), 30.0)),
+                            )
+                        except Exception as exc:
+                            status = "denied" if _sampling_denial_error(exc) else "error"
+                            reason = "client_denied_sampling" if status == "denied" else exc.__class__.__name__
+                            audit_meta["approval_status"] = "denied" if status == "denied" else "not_observed"
+                            request_meta["would_call_client"] = True
+                            result = _sampling_base_result(
+                                status=status,
+                                reason=reason,
+                                purpose=purpose_norm,
+                                execution_mode=resolved_mode,
+                                execution_mode_source=mode_source,
+                                policy=policy,
+                                capability=capability,
+                                context=context_meta,
+                                request=request_meta,
+                                audit=audit_meta,
+                            )
+                        else:
+                            raw_output = _sampling_extract_response_text(response)
+                            safe_output, output_redactions = _sampling_redact_text(raw_output)
+                            for code in output_redactions:
+                                if code not in context_meta["redactions_applied"]:
+                                    context_meta["redactions_applied"].append(code)
+                            safe_output = _trim_text(safe_output, max_chars=MAX_OUTPUT_CHARS)
+                            output_digest = _sampling_digest_text(safe_output)
+                            response_meta = _sampling_response_meta(response)
+                            approval_status = str(
+                                response_meta.get("approval_status")
+                                or response_meta.get("human_review")
+                                or response_meta.get("review_status")
+                                or "client_mediated"
+                            )
+                            audit_meta["approval_status"] = approval_status
+                            audit_meta["output_digest"] = output_digest
+                            sampling_payload = {
+                                "model": str(_sampling_value(response, "model", "")),
+                                "stop_reason": str(_sampling_value(response, "stopReason", "") or _sampling_value(response, "stop_reason", "")),
+                                "summary": safe_output,
+                                "output_digest": output_digest,
+                                "response_redacted": bool(output_redactions),
+                            }
+                            result = _sampling_base_result(
+                                status="approved",
+                                reason="client_returned_sampling_response",
+                                purpose=purpose_norm,
+                                execution_mode=resolved_mode,
+                                execution_mode_source=mode_source,
+                                policy=policy,
+                                capability=capability,
+                                context=context_meta,
+                                request=request_meta,
+                                sampling=sampling_payload,
+                                audit=audit_meta,
+                            )
+        except Exception as exc:
+            if sensitive:
+                _append_audit_event(
+                    "model_assisted_summary",
+                    categories,
+                    False,
+                    audit_args,
+                    exc.__class__.__name__,
+                    required_scope=_required_scope_for_categories(categories),
+                    granted_scopes=(
+                        _http_request_granted_scopes_for_tools() if _inside_http_request() else None
+                    ),
+                )
+            raise
+        _otel_set_result_attributes(span, result)
+        span.set_attribute("mcp.sampling.status", result.get("status", ""))
+        span.set_attribute("mcp.sampling.purpose", purpose_norm)
+        span.set_attribute("mcp.sampling.approval_status", result.get("audit", {}).get("approval_status", "not_observed"))
+        prompt_digest_value = result.get("audit", {}).get("prompt_digest", {}).get("value", "")
+        if prompt_digest_value:
+            span.set_attribute("mcp.sampling.prompt_digest", prompt_digest_value)
+        output_digest_value = result.get("audit", {}).get("output_digest", {}).get("value", "")
+        if output_digest_value:
+            span.set_attribute("mcp.sampling.output_digest", output_digest_value)
+        if sensitive:
+            _append_audit_event(
+                "model_assisted_summary",
+                categories,
+                _tool_result_success(result),
+                _sampling_audit_payload(result),
+                _tool_result_failure_reason(result),
+                required_scope=_required_scope_for_categories(categories),
+                granted_scopes=(
+                    _http_request_granted_scopes_for_tools() if _inside_http_request() else None
+                ),
+            )
+        return result
 
 
 @mcp.tool()

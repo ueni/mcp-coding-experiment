@@ -172,6 +172,8 @@ For VS Code MCP Apps-capable clients, `release_readiness` can include a read-onl
 
 For MCP client workspace boundary checks, `roots_diagnostics` compares request-scoped MCP Roots with the configured `REPO_PATH` and reports advisory, redacted relationship states without changing authorization. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
 
+For MCP Sampling-capable clients, `model_assisted_summary` provides a disabled-by-default safety adapter for bounded summary/classification/workflow-selection use cases. It requires `MCP_SAMPLING_ENABLED=true`, client-declared sampling capability, repository-relative redacted context, hard path/byte/token caps, and human/client-mediated review metadata. Generated text is advisory only and cannot be the sole basis for mutation, release, or security decisions. See [MCP sampling safety adapter](./docs/sampling-safety.md).
+
 ## Sandbox profiles for autonomous agents
 
 Before giving an autonomous coding agent mutation access, review [Sandbox Profiles for Autonomous Coding Agents](./docs/sandbox-profiles.md). It includes copy-pasteable VS Code/devcontainer and disposable container/microVM-oriented profiles, warnings for Docker socket and privileged-container escape paths, host secret handling, network egress, and rollback checks.
@@ -567,7 +569,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `tool_output_contracts`
 - `policy_insights` for read-only maintainer policy/tool-gate regression summaries
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `dependency_security_report`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `dependency_security_report`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
 
 `task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `mode="workflow_select"` plus `execution_mode="online" | "offline" | "auto"` as a read-only preflight when an agent is unsure which workflow/prompt/tool to choose. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
@@ -576,6 +578,8 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 `workflow_lineage()` is a read-only verifier for deterministic lineage manifests emitted by `governance_report(export=true)`. It recomputes the redacted plan inputs for the recorded governance-report execution and compares artifact digests without duplicating tracing/attestation backends. See [Workflow lineage manifests](./docs/workflow-lineage.md).
 
 `roots_diagnostics()` is a read-only advisory setup diagnostic that feature-detects MCP client roots support and compares available `file://` roots with `REPO_PATH`. It returns redacted relationship metadata (`exact_match`, overlaps, multiple roots, no overlap, unsupported, unavailable, or error) without exposing absolute client paths outside the repository and without changing `_resolve_repo_path` enforcement. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
+
+`model_assisted_summary()` is a disabled-by-default MCP Sampling adapter for bounded advisory summaries/classifications. It returns explicit `disabled`/`unsupported`/`denied` statuses unless server config, client-declared sampling capability, allowed purpose, and redacted budgeted context all permit a client-mediated request.
 
 `tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
 
