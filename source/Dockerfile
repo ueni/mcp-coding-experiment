@@ -134,7 +134,8 @@ RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sh
        else \
          /opt/codebase-tooling/coding-venv/bin/pip install \
            --root-user-action=ignore \
-           -r requirements.txt; \
+           -r requirements.txt \
+           ; \
        fi \
     && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
          if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
