@@ -150,7 +150,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
 | `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
-| `self_optimization_report` | `schema`, `report_id`, `generated_at`, `window`, `summary`, `metrics`, `optimization_candidates`, `security` | `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `_meta` |
+| `self_optimization_report` | `schema`, `report_id`, `generated_at`, `window`, `summary`, `metrics`, `optimization_candidates`, `security` | `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `_meta` |
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |
 | `workflow_lineage` | `schema`, `read_only`, `manifest_path`, `plan_id`, `status`, `ok`, `checks`, `conditions` | `mode`, `security` |
