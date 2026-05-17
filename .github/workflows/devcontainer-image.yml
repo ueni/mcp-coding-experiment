@@ -58,6 +58,9 @@ jobs:
       - name: Check dependency locks
         run: python3 scripts/dependency_lock.py check --compact
 
+      - name: Check build download cache contract
+        run: python3 scripts/build_download_cache_check.py --compact
+
       - name: Build test image
         timeout-minutes: 150
         env:

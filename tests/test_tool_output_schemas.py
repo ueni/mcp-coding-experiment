@@ -24,6 +24,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             (
                 "repo_info",
                 "roots_diagnostics",
+                "model_assisted_summary",
                 "runtime_state",
                 "git_status",
                 "grep",
@@ -76,6 +77,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         outputs = {
             "repo_info": self.server.repo_info(),
             "roots_diagnostics": asyncio.run(self.server.roots_diagnostics()),
+            "model_assisted_summary": asyncio.run(self.server.model_assisted_summary()),
             "runtime_state": self.server.runtime_state(),
             "git_status": self.server.git_status(),
             "grep": self.server.grep(pattern="schema_marker", path="src"),

@@ -290,14 +290,26 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
 
     def test_dockerfile_installs_app_requirements_into_coding_venv(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
+        helper = (REPO_ROOT / "source" / "build-download-cache.sh").read_text(encoding="utf-8")
         self.assertIn(
             "--mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked",
             dockerfile,
         )
+        self.assertIn(
+            "--mount=type=cache,id=codebase-tooling-pip-wheelhouse,target=/var/cache/buildkit/pip-wheelhouse,sharing=locked",
+            dockerfile,
+        )
         self.assertIn('python -m venv /opt/codebase-tooling/coding-venv', dockerfile)
-        self.assertIn('/opt/codebase-tooling/coding-venv/bin/pip install \\', dockerfile)
-        self.assertIn('--root-user-action=ignore \\', dockerfile)
-        self.assertIn('-r requirements.txt \\', dockerfile)
+        self.assertIn(
+            'build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-runtime requirements.txt false',
+            dockerfile,
+        )
+        self.assertIn(
+            'build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-tools requirements-coding-tools.txt false',
+            dockerfile,
+        )
+        self.assertIn('"${python_bin}" -m pip download', helper)
+        self.assertIn('--no-index --find-links "${wheelhouse}"', helper)
 
     def test_sentence_transformers_dependency_is_optional_for_default_image(self):
         dockerfile = (REPO_ROOT / "source" / "Dockerfile").read_text(encoding="utf-8")
@@ -383,13 +395,16 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             "--mount=type=cache,id=codebase-tooling-vscode-vsix,target=/var/cache/buildkit/vscode-vsix,sharing=locked",
             dockerfile,
         )
+        self.assertIn('if [[ "${extension_ref}" == *@* ]]', dockerfile)
         self.assertIn(
-            'vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"',
+            'vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.${version_label}.vsix"',
             dockerfile,
         )
-        self.assertIn('tmp_vsix="${vsix_path}.tmp"', dockerfile)
-        self.assertIn("curl --fail --location --retry 5", dockerfile)
-        self.assertIn('mv "${tmp_vsix}" "${vsix_path}"', dockerfile)
+        self.assertIn(
+            'build_cache_download "${vsix_path}" "${vsix_url}" "VS Code extension ${extension_ref}"',
+            dockerfile,
+        )
+        self.assertIn('build_cache_bool "${MCP_BUILD_OFFLINE}"', dockerfile)
         self.assertLess(
             dockerfile.index("codebase-tooling-vscode-vsix"),
             dockerfile.index("COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/"),

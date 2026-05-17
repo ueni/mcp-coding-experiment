@@ -152,6 +152,10 @@ The prompts are workflow starters, not bypasses: they route users toward existin
 
 Use cloud mode for quality/speed/audit/token savings. Use offline mode for privacy/availability with scripted agent emulation. See [Agent execution modes](./docs/execution-modes.md).
 
+### Explicit OpenAI-compatible agent API proxy
+
+An opt-in proxy can serve `POST /v1/chat/completions` for clients that deliberately configure this server as their OpenAI-compatible `base_url`. It is disabled by default and is not hidden MITM/TLS interception or credential capture. The first slice supports non-streaming responses, `stream: true` SSE chunks, local/offline routing, explicit online provider controls, request-local anonymization, irreversible secret redaction, fail-closed disclosure audit, durable buyer/auditor evidence packets, disclosure summaries, and gated compact memory capture. See [Explicit Agent API Proxy](./docs/agent-api-proxy.md).
+
 ### Static test impact map workflow
 
 Use `test_impact_map` when you need a repeatable, TDAD-style view of which Python tests should cover a source change. In normal read mode it loads the repository-local artifact at `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json`, checks that it is still fresh, and returns `selected_tests`, `test_details`, `confidence`, `impacted_sources`, `coverage_gaps`, and `unmapped_changed_files` for explicit `changed_files`.
@@ -171,6 +175,8 @@ For underspecified high-risk workflows, `clarification_gate` returns structured 
 For VS Code MCP Apps-capable clients, `release_readiness` can include a read-only dashboard when `MCP_APPS_DASHBOARD_ENABLED=true`. The default is disabled so existing clients keep the same response contract. See [MCP Apps release readiness dashboard](./docs/mcp-apps-release-readiness.md).
 
 For MCP client workspace boundary checks, `roots_diagnostics` compares request-scoped MCP Roots with the configured `REPO_PATH` and reports advisory, redacted relationship states without changing authorization. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
+
+For MCP Sampling-capable clients, `model_assisted_summary` provides a disabled-by-default safety adapter for bounded summary/classification/workflow-selection use cases. It requires `MCP_SAMPLING_ENABLED=true`, client-declared sampling capability, repository-relative redacted context, hard path/byte/token caps, and human/client-mediated review metadata. Generated text is advisory only and cannot be the sole basis for mutation, release, or security decisions. See [MCP sampling safety adapter](./docs/sampling-safety.md).
 
 ## Sandbox profiles for autonomous agents
 
@@ -216,20 +222,29 @@ package metadata, wheels, VSIX archives, the Ollama binary archive, and
 preloaded model blobs. Download cache mounts use stable explicit IDs, including
 `codebase-tooling-apt-cache` for `/var/cache/apt`,
 `codebase-tooling-apt-lists` for `/var/lib/apt/lists`,
-`codebase-tooling-pip` for `/var/cache/buildkit/pip`, and
+`codebase-tooling-build-downloads` for standalone build artifacts,
+`codebase-tooling-pip` for `/var/cache/buildkit/pip`,
+`codebase-tooling-pip-wheelhouse` for requirements-digest keyed wheelhouses, and
 `codebase-tooling-vscode-vsix` for `/var/cache/buildkit/vscode-vsix`, so the
 cache namespace does not depend on the exact Dockerfile instruction text.
 Marketplace VS Code extensions are preloaded before repository defaults are
 copied, so edits under `source/defaults/` do not invalidate the network download
 layer. The build removes Debian slim's `/etc/apt/apt.conf.d/docker-clean` hook
 before installing packages so downloaded `.deb` archives can remain in the cache
-mount.
+mount. Pip installs go through cached wheelhouses and then run with
+`--no-index --find-links` so a warmed cache can be reused without contacting an
+index.
 Keep BuildKit enabled and use the same persistent builder/cache store when
 building this image or those cache mounts will be ignored or lost between builds.
 With `docker buildx` on ephemeral builders, persist the cache explicitly with
 matching import/export options, for example
 `--cache-to=type=local,dest=.buildx-cache,mode=max` and
-`--cache-from=type=local,src=.buildx-cache`.
+`--cache-from=type=local,src=.buildx-cache`. After a warm build, use
+`--build-arg MCP_BUILD_OFFLINE=true` to fail closed instead of downloading a
+missing resource; use `--build-arg MCP_REFRESH_BUILD_DOWNLOAD_CACHE=true` during
+an online build to refresh cached downloads intentionally. Run
+`python3 scripts/build_download_cache_check.py --compact` for the local/CI static
+cache-contract gate. See [Build download cache verification](./docs/build-download-cache.md).
 
 The default image keeps `LOCAL_EMBED_BACKEND=hash` and does not install the optional
 `sentence-transformers`/PyTorch stack, which is large and is not needed for the
@@ -558,7 +573,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `tool_output_contracts`
 - `policy_insights` for read-only maintainer policy/tool-gate regression summaries
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `dependency_security_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `dependency_security_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
 
 `task_router()` remains the default public entrypoint and now defaults to `mode="task"`. It classifies the request, encodes the routing packet, reads and writes compact task/session memory automatically, and dispatches to the selected specialist flow. Use `mode="workflow_select"` plus `execution_mode="online" | "offline" | "auto"` as a read-only preflight when an agent is unsure which workflow/prompt/tool to choose. Use `memory_session` when you want related requests to share that compact context or to isolate a separate task thread.
 
@@ -569,6 +584,8 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 `self_optimization_report()` is the direct software-team efficiency report for this repository. Run `self_optimization_report(window_hours=168, export=true)` after issue/PR batches or noisy MCP runs to summarize local usage, savings, task/state/test-gate/retry/blocked-time metrics, throughput, bottlenecks, confidence/caveats, and duplicate-suppressed optimization candidates without exposing raw traces or secrets. GitHub issue create/update remains off unless explicitly gated with high-confidence candidates. See [Self-optimization efficiency report](./docs/self-optimization-report.md).
 
 `roots_diagnostics()` is a read-only advisory setup diagnostic that feature-detects MCP client roots support and compares available `file://` roots with `REPO_PATH`. It returns redacted relationship metadata (`exact_match`, overlaps, multiple roots, no overlap, unsupported, unavailable, or error) without exposing absolute client paths outside the repository and without changing `_resolve_repo_path` enforcement. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
+
+`model_assisted_summary()` is a disabled-by-default MCP Sampling adapter for bounded advisory summaries/classifications. It returns explicit `disabled`/`unsupported`/`denied` statuses unless server config, client-declared sampling capability, allowed purpose, and redacted budgeted context all permit a client-mediated request.
 
 `tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
 
