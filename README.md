@@ -69,6 +69,20 @@ Expected result (example):
 Added MCP server 'codebase-tooling-mcp'
 ```
 
+### HTTP transport hardening
+
+Protected HTTP MCP endpoints (`/mcp` and `/sse`) validate browser `Origin` headers in addition to bearer auth. Non-browser clients that omit `Origin` continue to work. By default, local/devcontainer origins on loopback hosts are allowed (`localhost`, `127.0.0.0/8`, and `[::1]`, with HTTP or HTTPS and any port) so VS Code port forwarding and local clients keep working.
+
+Use `MCP_HTTP_ALLOWED_ORIGINS` only when a browser-based client needs a non-loopback origin. Set it to comma-separated exact origins or explicit port wildcards, for example:
+
+```bash
+-e MCP_HTTP_ALLOWED_ORIGINS="https://mcp.example.test,http://localhost:*"
+```
+
+Prefer exact HTTPS origins for tunnels. Avoid `*` except for a short local diagnostic, and never put bearer-token values in origin settings or logs.
+
+When a client sends `MCP-Protocol-Version`, the server accepts only configured supported versions and rejects malformed or unsupported values with `400` before tool execution. The default supported versions are `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`; override with `MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS` only when intentionally narrowing or extending client compatibility. Missing protocol-version headers are accepted for legacy/fallback clients. `MCP-Session-Id` is session continuity only; it never replaces `Authorization: Bearer ...`.
+
 ### 4) Verify health endpoint
 
 ```bash

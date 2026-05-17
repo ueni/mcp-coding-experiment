@@ -24,6 +24,12 @@ This path starts from a fresh clone or downstream repository using the devcontai
 7. Copy `.vscode/mcp.example.json` to your user/workspace MCP config if your VS Code build expects active MCP registrations outside the repository sample, then keep the token out of git. The sample uses a password input rather than a committed secret.
 8. Make a test tool call from your MCP client against `http://localhost:8000/mcp` using `Authorization: Bearer <token>`.
 
+HTTP transport hardening is enabled on `/mcp` and `/sse`:
+
+- Missing `Origin` is accepted for non-browser MCP clients. Present browser origins must be allowed; the default allows loopback/devcontainer origins on `localhost`, `127.0.0.0/8`, and `[::1]` with HTTP or HTTPS on any port.
+- If a browser client or tunnel needs another origin, set `MCP_HTTP_ALLOWED_ORIGINS` to comma-separated exact origins such as `https://mcp.example.test` and keep bearer tokens out of config, logs, and screenshots. Use `http://localhost:*` only for local port-forwarding diagnostics; avoid `*` except for a short local test.
+- Clients that send `MCP-Protocol-Version` must send a supported version. The server accepts absent headers for legacy/fallback clients and rejects malformed or unsupported present values with `400` before tool execution. `MCP-Session-Id` preserves session continuity only and never replaces the bearer token.
+
 The checked-in devcontainer preloads `qwen2.5-coder:1.5b` during
 `docker build` with `OLLAMA_PRELOAD_MODELS=qwen2.5-coder:1.5b`. Use a
 persistent BuildKit cache so repeated rebuilds can reuse the downloaded model
