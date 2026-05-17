@@ -467,6 +467,9 @@ MCP_AGENT_PROXY_MEMORY_CAPTURE_ENABLED = _env_flag(
 MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS = _env_flag(
     "MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS", True
 )
+MCP_AGENT_PROXY_POLICY_VERSION = "mcp_agent_proxy.policy.v1"
+MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "default-request-local-redaction.v1"
+MCP_AGENT_PROXY_AGENT_FACADE_PROFILE = "chat-completions-controlled-facade.v1"
 _AGENT_PROXY_DISCLOSURE_AUDIT_LOCK = threading.Lock()
 AGENT_EXECUTION_MODE_PROMPT_TERMS = {
     "online": (
@@ -2026,8 +2029,14 @@ def _agent_proxy_audit_inventory(mapping: dict[str, Any] | None) -> dict[str, An
             except (TypeError, ValueError):
                 continue
             safe_counts[safe_key] = safe_counts.get(safe_key, 0) + count
+    safe_inventory["profile"] = MCP_AGENT_PROXY_ANONYMIZATION_PROFILE
     safe_inventory["counts"] = dict(sorted(safe_counts.items()))
     safe_inventory["placeholder_categories"] = sorted(safe_counts.keys())
+    safe_inventory["residual_sensitive_class_status"] = {
+        "secrets_irreversibly_redacted": bool(safe_counts.get("opaque_redactions", 0)),
+        "raw_sensitive_values_logged": False,
+        "placeholder_mappings_persisted": False,
+    }
     return safe_inventory
 
 
@@ -2055,6 +2064,7 @@ def _agent_proxy_audit_base(
             "fallback": route.get("fallback"),
         },
         "policy": {
+            "version": MCP_AGENT_PROXY_POLICY_VERSION,
             "limits": policy,
             "allow_online": MCP_AGENT_PROXY_ALLOW_ONLINE,
             "offline_no_network": route.get("offline_no_network"),
@@ -2253,16 +2263,18 @@ def _agent_proxy_metadata(
             "risk_class": route.get("risk_class"),
             "fallback": route.get("fallback"),
         },
-        "policy": policy,
+        "policy": {"version": MCP_AGENT_PROXY_POLICY_VERSION, **policy},
         "privacy": {
-            "anonymization": (mapping or {}).get("inventory", {"counts": {}}),
+            "anonymization": _agent_proxy_audit_inventory(mapping),
             "raw_prompt_stored": False,
             "raw_response_stored": False,
         },
         "memory": memory or {"captured": False, "reason": "not_evaluated"},
         "agent_facade": {
+            "profile": MCP_AGENT_PROXY_AGENT_FACADE_PROFILE,
             "native_provider_agent_mode_claimed": False,
             "metadata_generated_by_proxy": True,
+            "chat_backend_wrapped_by_proxy": True,
         },
     }
 
@@ -2538,6 +2550,42 @@ def _agent_proxy_memory_capture(
     return {"captured": True, "namespace": "agent_proxy", "raw_conversation_stored": False}
 
 
+def _agent_proxy_parse_filter_time(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _agent_proxy_event_timestamp(event: dict[str, Any]) -> datetime | None:
+    return _agent_proxy_parse_filter_time(str(event.get("timestamp", "")))
+
+
+def _agent_proxy_event_matches_filters(event: dict[str, Any], filters: dict[str, str]) -> bool:
+    trace_filter = str(filters.get("trace_id", "")).strip()
+    if trace_filter and event.get("trace_id") != trace_filter:
+        return False
+    since = _agent_proxy_parse_filter_time(filters.get("since", ""))
+    until = _agent_proxy_parse_filter_time(filters.get("until", ""))
+    if since or until:
+        timestamp = _agent_proxy_event_timestamp(event)
+        if timestamp is None:
+            return False
+        if since and timestamp < since:
+            return False
+        if until and timestamp > until:
+            return False
+    return True
+
+
 def _agent_proxy_disclosure_summary(filters: dict[str, str] | None = None) -> dict[str, Any]:
     filters = filters or {}
     path = _agent_proxy_resolve_audit_path(MCP_AGENT_PROXY_DISCLOSURE_AUDIT_FILE)
@@ -2548,8 +2596,9 @@ def _agent_proxy_disclosure_summary(filters: dict[str, str] | None = None) -> di
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            trace_filter = filters.get("trace_id", "")
-            if trace_filter and event.get("trace_id") != trace_filter:
+            if not isinstance(event, dict):
+                continue
+            if not _agent_proxy_event_matches_filters(event, filters):
                 continue
             events.append(event)
     by_backend: dict[str, int] = {}
@@ -2580,6 +2629,11 @@ def _agent_proxy_disclosure_summary(filters: dict[str, str] | None = None) -> di
         "trace_count": len(traces),
         "by_backend": dict(sorted(by_backend.items())),
         "disclosure_categories": dict(sorted(categories.items())),
+        "filters": {
+            key: str(filters.get(key, ""))
+            for key in ("trace_id", "since", "until")
+            if str(filters.get(key, "")).strip()
+        },
         "privacy": {
             "raw_prompts_returned": False,
             "raw_responses_returned": False,
@@ -23433,6 +23487,9 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         "schema": "mcp_agent_proxy.status.v1",
         "enabled": MCP_AGENT_PROXY_ENABLED,
         "endpoint": "/v1/chat/completions",
+        "policy_version": MCP_AGENT_PROXY_POLICY_VERSION,
+        "anonymization_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "agent_facade_profile": MCP_AGENT_PROXY_AGENT_FACADE_PROFILE,
         "disabled_by_default": True,
         "explicit_proxy_only": True,
         "hidden_mitm_tls_interception": False,
@@ -23470,7 +23527,11 @@ async def agent_proxy_status(_request):
 
 
 async def agent_proxy_disclosures(request):
-    filters = {"trace_id": request.query_params.get("trace_id", "").strip()}
+    filters = {
+        "trace_id": request.query_params.get("trace_id", "").strip(),
+        "since": request.query_params.get("since", "").strip(),
+        "until": request.query_params.get("until", "").strip(),
+    }
     return JSONResponse(_agent_proxy_disclosure_summary(filters))
 
 

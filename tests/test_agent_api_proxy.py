@@ -284,6 +284,93 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(payload["error"]["code"], "agent_proxy_route_blocked")
         self.assertIn("model_not_allowlisted", payload["error"]["message"])
 
+    def test_policy_limits_block_before_provider_call(self):
+        self.enable_online()
+        called = {"count": 0}
+
+        def fake_post(url, payload, timeout):
+            called["count"] += 1
+            return {}
+
+        self.server._agent_proxy_http_post_json = fake_post
+        self.server.MCP_AGENT_PROXY_MAX_OUTPUT_TOKENS = 10
+        response = asyncio.run(
+            self.server.openai_chat_completions(FakeRequest(self.base_payload(max_tokens=11)))
+        )
+        payload = self.response_json(response)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(payload["error"]["code"], "agent_proxy_policy_denied")
+        self.assertEqual(called["count"], 0)
+
+        self.server.MCP_AGENT_PROXY_MAX_OUTPUT_TOKENS = 100
+        self.server.MCP_AGENT_PROXY_MAX_COST_USD = 0.0001
+        self.server.MCP_AGENT_PROXY_COST_PER_1K_OUTPUT_USD = 1
+        response = asyncio.run(
+            self.server.openai_chat_completions(FakeRequest(self.base_payload(max_tokens=64)))
+        )
+        payload = self.response_json(response)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(payload["error"]["code"], "agent_proxy_policy_denied")
+        self.assertEqual(called["count"], 0)
+
+    def test_disclosure_summary_filters_by_trace_and_time_range(self):
+        self.enable_online()
+        self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = "Acme Corp"
+
+        def fake_post(url, payload, timeout):
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        self.server._agent_proxy_http_post_json = fake_post
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(
+                    self.base_payload(messages=[{"role": "user", "content": "Hello Acme Corp"}])
+                )
+            )
+        )
+        trace_id = self.response_json(response)["agent_proxy"]["trace_id"]
+
+        summary = self.server._agent_proxy_disclosure_summary(
+            {
+                "trace_id": trace_id,
+                "since": "1970-01-01T00:00:00+00:00",
+                "until": "2999-01-01T00:00:00+00:00",
+            }
+        )
+        self.assertEqual(summary["event_count"], 2)
+        self.assertEqual(summary["trace_count"], 1)
+        self.assertEqual(summary["filters"]["trace_id"], trace_id)
+        self.assertGreaterEqual(summary["disclosure_categories"].get("term", 0), 1)
+
+        future = self.server._agent_proxy_disclosure_summary(
+            {"since": "2999-01-01T00:00:00+00:00"}
+        )
+        self.assertEqual(future["event_count"], 0)
+
+        endpoint_response = asyncio.run(
+            self.server.agent_proxy_disclosures(
+                FakeRequest(
+                    query_params={
+                        "trace_id": trace_id,
+                        "since": "1970-01-01T00:00:00Z",
+                    }
+                )
+            )
+        )
+        endpoint_payload = self.response_json(endpoint_response)
+        self.assertEqual(endpoint_payload["event_count"], 2)
+        self.assertFalse(endpoint_payload["privacy"]["raw_prompts_returned"])
+
     def test_memory_capture_is_policy_gated_and_redacted(self):
         self.server.MCP_AGENT_PROXY_ENABLED = True
         self.server.MCP_AGENT_PROXY_ALLOW_ONLINE = False
