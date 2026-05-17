@@ -28,8 +28,10 @@ Each card contains:
 - `routing_terms`: deterministic keyword/phrase hints used by the selector.
 - `supported_execution_modes`: `online`, `offline`, or both.
 - `mode_routing`: per-mode routing guidance; the selected match also includes `selected_mode_routing`.
+- `trust`: `workflow_card_trust.v1` provenance and permission metadata. Built-in cards use an explicit repository-owned trusted default with `source="repository_builtin"`, `trust_tier="trusted_repository"`, `review_status="repository_owned"`, bounded permissions, no network access, sandbox guidance, and a deterministic `provenance_digest`.
+- `safety`: compact `workflow_card_safety.v1` lint/trust summary with `lint_status`, finding counts, trust tier, risk, and whether a card was suppressed by default.
 
-The selector returns `workflow_selection.v1` with ranked `matches`, per-match `confidence`, `match_reasons`, global `caveats`, and an `agent_execution_mode.v1` profile. High-risk phrasings surface snapshot, clarification, release, security, or mode-fallback gates where relevant.
+The selector returns `workflow_selection.v1` with ranked `matches`, per-match `confidence`, `match_reasons`, trust/safety metadata, global `caveats`, and an `agent_execution_mode.v1` profile. High-risk phrasings surface snapshot, clarification, release, security, or mode-fallback gates where relevant. If an injected/test card is untrusted and high risk, the selector suppresses it by default and reports it in `suppressed_matches` instead of ranking it like a repository-owned card.
 
 ## Seeded cards
 
@@ -44,6 +46,22 @@ The built-in card index covers:
 - `test-impact`
 - `governance-report`
 - `workflow-diagnostics`
+
+## Trust linting and import posture
+
+`source/server.py` exposes the deterministic helper `lint_workflow_cards(cards=None)`. With no arguments it checks the repository-owned built-in card index using the trusted default metadata. For proposed generated or external cards, call the helper with those cards before any import path is considered.
+
+Structured findings include:
+
+- `missing_trust_metadata` for absent provenance/trust fields.
+- `missing_do_not_use_when` for missing negative routing guidance.
+- `overbroad_permissions` for wildcard, privileged, host-filesystem, broad network, or secret permissions.
+- `dangerous_shell_obfuscation` for shell pipes, eval, base64 decode-to-shell, chmod, or destructive shell phrases.
+- `network_exfiltration_pattern` for upload/post/exfiltration-style network instructions.
+- `outside_repo_write` for writes, moves, chmods, or deletes outside `REPO_PATH`.
+- `missing_sandbox_guidance` when high-risk cards do not explain sandbox/`REPO_PATH` expectations.
+
+External/generated workflow-card or agent-skill loading remains disabled by default. To accept a future card, reviewers must require complete trust metadata, a passing lint report or documented rejection of each finding, a provenance digest tied to the reviewed card content, least-privilege permissions, explicit `do_not_use_when` guardrails, sandbox guidance for high-risk flows, and confirmation that no card asks agents to bypass MCP mutation, secret, auth, network, or `REPO_PATH` boundaries.
 
 ## Usage
 

@@ -141,7 +141,7 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 - `devcontainer_health_check` - VS Code/devcontainer MCP endpoint, auth, port, and Ollama diagnostics.
 - `snapshot_before_refactor` - pre-refactor snapshot and rollback planning before mutation work.
 
-The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails. When unsure which workflow to use, call `task_router(mode="workflow_select", prompt="...", execution_mode="auto")` first; it returns read-only, ranked workflow cards with confidence, caveats, and online/offline execution-mode guidance. See [Workflow selection cards](./docs/workflow-selection.md).
+The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails. When unsure which workflow to use, call `task_router(mode="workflow_select", prompt="...", execution_mode="auto")` first; it returns read-only, ranked workflow cards with confidence, caveats, online/offline execution-mode guidance, and compact trust/safety metadata. External workflow-card loading remains disabled by default; proposed generated or external cards must pass the documented trust-lint review before import. See [Workflow selection cards](./docs/workflow-selection.md).
 
 ## Agent execution modes
 

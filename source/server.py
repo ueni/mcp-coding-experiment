@@ -761,6 +761,10 @@ TASK_ROUTE_SYSTEM_PROMPTS = {
 }
 WORKFLOW_CARD_SCHEMA_VERSION = "workflow_card.v1"
 WORKFLOW_SELECT_SCHEMA_VERSION = "workflow_selection.v1"
+WORKFLOW_CARD_TRUST_SCHEMA_VERSION = "workflow_card_trust.v1"
+WORKFLOW_CARD_LINT_SCHEMA_VERSION = "workflow_card_lint.v1"
+WORKFLOW_CARD_SAFETY_SCHEMA_VERSION = "workflow_card_safety.v1"
+WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED = False
 WORKFLOW_CARD_FIELDS = (
     "id",
     "schema",
@@ -777,6 +781,59 @@ WORKFLOW_CARD_FIELDS = (
     "supported_execution_modes",
     "mode_routing",
 )
+WORKFLOW_CARD_TRUST_REQUIRED_FIELDS = (
+    "source",
+    "trust_tier",
+    "review_status",
+    "permissions",
+    "sandbox_expectation",
+    "network_access",
+    "sensitive_paths",
+    "provenance_digest",
+)
+WORKFLOW_CARD_REPOSITORY_TRUST_DEFAULT = {
+    "schema": WORKFLOW_CARD_TRUST_SCHEMA_VERSION,
+    "source": "repository_builtin",
+    "trust_tier": "trusted_repository",
+    "review_status": "repository_owned",
+    "permissions": ["read_repository_context", "recommend_existing_workflow"],
+    "sandbox_expectation": "Selector is read-only; any later mutations must use explicit mutation mode and REPO_PATH-bound tools.",
+    "network_access": "none",
+    "sensitive_paths": [],
+}
+WORKFLOW_CARD_TRUSTED_TIERS = {"trusted_repository", "trusted_internal"}
+WORKFLOW_CARD_OVERBROAD_PERMISSION_PATTERNS = (
+    r"^\*$",
+    r"\ball\b",
+    r"\badmin\b",
+    r"\broot\b",
+    r"\bprivileged\b",
+    r"\bhost(?:[-_ ]?filesystem|[-_ ]?mount|[-_ ]?access)?\b",
+    r"\bdocker[-_ ]?socket\b",
+    r"\bnetwork:\*\b",
+    r"\bfilesystem:\*\b",
+    r"\bsecrets?:\*\b",
+    r"\bcredentials?:\*\b",
+)
+WORKFLOW_CARD_DANGEROUS_SHELL_PATTERNS = (
+    r"\bcurl\b[^|\n]{0,160}\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b",
+    r"\bwget\b[^|\n]{0,160}\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b",
+    r"\bbase64\s+(?:-d|--decode)\b[^|\n]{0,160}\|\s*(?:sh|bash|zsh)\b",
+    r"\beval\s+[`\"'$]",
+    r"\b(?:bash|sh|zsh)\s+-c\b",
+    r"\bchmod\s+\+x\b",
+    r"\brm\s+-rf\s+(?:/|~|\$HOME|\.\.)",
+)
+WORKFLOW_CARD_NETWORK_EXFILTRATION_PATTERNS = (
+    r"\bcurl\b[^\n]{0,200}\b(?:-d|--data|--data-binary|--upload-file|-F|--form|-X\s*POST|--request\s+POST)\b",
+    r"\bwget\b[^\n]{0,200}\b(?:--post-data|--post-file|--method\s*=\s*POST)\b",
+    r"\b(?:nc|netcat)\b[^\n]{0,160}(?:<|>|-e\b|--exec\b)",
+    r"\b(?:scp|sftp|rsync)\b[^\n]{0,160}(?:@|https?://|ssh://)",
+    r"\b(?:upload|post|send|exfiltrate)\b[^\n]{0,160}\b(?:secret|token|credential|archive|tarball|repo|repository)\b",
+    r"https?://[^\s`\"')]+/(?:collect|upload|paste|webhook|exfil|ingest)",
+)
+WORKFLOW_CARD_OUTSIDE_REPO_WRITE_VERBS = r"\b(?:write|append|create|copy|cp|move|mv|save|touch|mkdir|chmod|rm|delete|tee)\b"
+WORKFLOW_CARD_OUTSIDE_REPO_PATHS = r"(?:/(?:tmp|etc|var|home|root|usr|bin|sbin|opt)(?:/|\b)|~(?:/|\b)|\.\./)"
 WORKFLOW_CARDS: tuple[dict[str, Any], ...] = (
     {
         "id": "cloud-assisted-agent-mode",
@@ -14001,7 +14058,273 @@ def _offline_small_model_decision_policy(
     }
 
 
-def _workflow_card_public(card: dict[str, Any], execution_mode: str | None = None) -> dict[str, Any]:
+def _workflow_card_provenance_digest(card: dict[str, Any]) -> str:
+    payload = {field: card.get(field) for field in WORKFLOW_CARD_FIELDS if field in card}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _workflow_card_repository_trust_metadata(card: dict[str, Any]) -> dict[str, Any]:
+    trust = json.loads(json.dumps(WORKFLOW_CARD_REPOSITORY_TRUST_DEFAULT))
+    trust["provenance_digest"] = _workflow_card_provenance_digest(card)
+    return trust
+
+
+def _workflow_card_trust_metadata(card: dict[str, Any], apply_repository_default: bool = False) -> dict[str, Any]:
+    raw = card.get("trust")
+    if isinstance(raw, dict):
+        return json.loads(json.dumps(raw))
+    if apply_repository_default:
+        return _workflow_card_repository_trust_metadata(card)
+    return {}
+
+
+def _workflow_card_text(card: dict[str, Any]) -> str:
+    parts: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                collect(key)
+                collect(item)
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect(item)
+        elif value is not None:
+            parts.append(str(value))
+
+    collect(card)
+    return "\n".join(parts)
+
+
+def _workflow_card_add_finding(
+    findings: list[dict[str, Any]],
+    *,
+    card_id: str,
+    code: str,
+    severity: str,
+    message: str,
+    field: str = "",
+    evidence: str = "",
+) -> None:
+    finding: dict[str, Any] = {
+        "code": code,
+        "severity": severity,
+        "card_id": card_id,
+        "message": message,
+    }
+    if field:
+        finding["field"] = field
+    if evidence:
+        finding["evidence"] = evidence[:240]
+    findings.append(finding)
+
+
+def _workflow_card_lint_findings(card: dict[str, Any], apply_repository_trust_default: bool = False) -> list[dict[str, Any]]:
+    card_id = str(card.get("id") or "<unknown>")
+    findings: list[dict[str, Any]] = []
+    trust = _workflow_card_trust_metadata(card, apply_repository_default=apply_repository_trust_default)
+    if not trust:
+        _workflow_card_add_finding(
+            findings,
+            card_id=card_id,
+            code="missing_trust_metadata",
+            severity="error",
+            message="Card has no trust/provenance metadata.",
+            field="trust",
+        )
+    else:
+        for field in WORKFLOW_CARD_TRUST_REQUIRED_FIELDS:
+            value = trust.get(field)
+            missing = field not in trust
+            if field == "permissions":
+                missing = missing or not isinstance(value, list) or not any(str(item).strip() for item in value)
+            elif field == "sensitive_paths":
+                missing = missing or not isinstance(value, list)
+            else:
+                missing = missing or not str(value or "").strip()
+            if missing:
+                _workflow_card_add_finding(
+                    findings,
+                    card_id=card_id,
+                    code="missing_trust_metadata",
+                    severity="error",
+                    message=f"Trust metadata is missing required field `{field}`.",
+                    field=f"trust.{field}",
+                )
+
+    do_not_use_when = card.get("do_not_use_when")
+    if not isinstance(do_not_use_when, list) or not any(str(item).strip() for item in do_not_use_when):
+        _workflow_card_add_finding(
+            findings,
+            card_id=card_id,
+            code="missing_do_not_use_when",
+            severity="warning",
+            message="Card is missing non-empty do_not_use_when routing guardrails.",
+            field="do_not_use_when",
+        )
+
+    permissions = trust.get("permissions", []) if trust else []
+    if isinstance(permissions, str):
+        permission_values = [permissions]
+    elif isinstance(permissions, list):
+        permission_values = [str(item) for item in permissions]
+    else:
+        permission_values = []
+    overbroad = []
+    for permission in permission_values:
+        normalized = permission.strip().lower()
+        if any(re.search(pattern, normalized) for pattern in WORKFLOW_CARD_OVERBROAD_PERMISSION_PATTERNS):
+            overbroad.append(permission)
+    if overbroad:
+        _workflow_card_add_finding(
+            findings,
+            card_id=card_id,
+            code="overbroad_permissions",
+            severity="error",
+            message="Card declares broad host, secret, network, privileged, or wildcard permissions.",
+            field="trust.permissions",
+            evidence=", ".join(overbroad),
+        )
+
+    text = _workflow_card_text(card)
+    lower_text = text.lower()
+    for pattern in WORKFLOW_CARD_DANGEROUS_SHELL_PATTERNS:
+        match = re.search(pattern, lower_text, flags=re.DOTALL)
+        if match:
+            _workflow_card_add_finding(
+                findings,
+                card_id=card_id,
+                code="dangerous_shell_obfuscation",
+                severity="error",
+                message="Card contains dangerous shell execution or command-obfuscation phrasing.",
+                evidence=match.group(0),
+            )
+            break
+
+    for pattern in WORKFLOW_CARD_NETWORK_EXFILTRATION_PATTERNS:
+        match = re.search(pattern, lower_text, flags=re.DOTALL)
+        if match:
+            _workflow_card_add_finding(
+                findings,
+                card_id=card_id,
+                code="network_exfiltration_pattern",
+                severity="error",
+                message="Card contains network upload/exfiltration-style instructions.",
+                evidence=match.group(0),
+            )
+            break
+
+    outside_repo_pattern = f"{WORKFLOW_CARD_OUTSIDE_REPO_WRITE_VERBS}.{{0,160}}(?:{WORKFLOW_CARD_OUTSIDE_REPO_PATHS}|outside\\s+(?:repo_path|the\\s+repository|the\\s+repo))"
+    redirect_pattern = rf"(?:>|>>)\s*{WORKFLOW_CARD_OUTSIDE_REPO_PATHS}"
+    match = re.search(outside_repo_pattern, lower_text, flags=re.DOTALL) or re.search(redirect_pattern, lower_text, flags=re.DOTALL)
+    if match:
+        _workflow_card_add_finding(
+            findings,
+            card_id=card_id,
+            code="outside_repo_write",
+            severity="error",
+            message="Card appears to write, move, delete, or chmod paths outside REPO_PATH.",
+            evidence=match.group(0),
+        )
+
+    risk = str(card.get("risk") or "").strip().lower()
+    sandbox = str(trust.get("sandbox_expectation") or "").strip().lower() if trust else ""
+    if risk == "high" and sandbox in {"", "none", "n/a", "na", "not needed"}:
+        _workflow_card_add_finding(
+            findings,
+            card_id=card_id,
+            code="missing_sandbox_guidance",
+            severity="error",
+            message="High-risk card lacks sandbox or REPO_PATH-boundary guidance.",
+            field="trust.sandbox_expectation",
+        )
+    return findings
+
+
+def _workflow_card_suppression_reason(card: dict[str, Any], trust: dict[str, Any], findings: list[dict[str, Any]]) -> str:
+    risk = str(card.get("risk") or "").strip().lower()
+    trust_tier = str(trust.get("trust_tier") or "missing").strip().lower()
+    if risk == "high" and trust_tier not in WORKFLOW_CARD_TRUSTED_TIERS:
+        return "untrusted_high_risk"
+    if risk == "high" and trust_tier in {"", "missing", "untrusted", "external_untrusted", "generated_unreviewed"}:
+        if any(str(finding.get("severity")) == "error" for finding in findings):
+            return "untrusted_high_risk_lint_errors"
+    return ""
+
+
+def _workflow_card_safety_summary(
+    card: dict[str, Any],
+    findings: list[dict[str, Any]],
+    trust: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = trust if trust is not None else _workflow_card_trust_metadata(card)
+    errors = [finding for finding in findings if finding.get("severity") == "error"]
+    warnings = [finding for finding in findings if finding.get("severity") == "warning"]
+    lint_status = "fail" if errors else "warn" if warnings else "pass"
+    suppression_reason = _workflow_card_suppression_reason(card, metadata, findings)
+    return {
+        "schema": WORKFLOW_CARD_SAFETY_SCHEMA_VERSION,
+        "source": metadata.get("source", "missing"),
+        "trust_tier": metadata.get("trust_tier", "missing"),
+        "review_status": metadata.get("review_status", "missing"),
+        "risk": str(card.get("risk") or "unknown"),
+        "lint_status": lint_status,
+        "finding_count": len(findings),
+        "high_severity_findings": len(errors),
+        "warning_findings": len(warnings),
+        "suppressed_by_default": bool(suppression_reason),
+        "suppression_reason": suppression_reason,
+        "external_card_loading_enabled": WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED,
+    }
+
+
+def lint_workflow_cards(
+    cards: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    apply_repository_trust_defaults: bool | None = None,
+) -> dict[str, Any]:
+    """Deterministically lint workflow_card.v1 cards before any external import path is enabled."""
+    cards_to_check = WORKFLOW_CARDS if cards is None else tuple(cards)
+    if apply_repository_trust_defaults is None:
+        apply_repository_trust_defaults = cards is None
+    all_findings: list[dict[str, Any]] = []
+    card_summaries: list[dict[str, Any]] = []
+    for card in cards_to_check:
+        trust = _workflow_card_trust_metadata(card, apply_repository_default=apply_repository_trust_defaults)
+        findings = _workflow_card_lint_findings(card, apply_repository_trust_default=apply_repository_trust_defaults)
+        all_findings.extend(findings)
+        card_summaries.append(
+            {
+                "id": str(card.get("id") or "<unknown>"),
+                "safety": _workflow_card_safety_summary(card, findings, trust=trust),
+                "finding_count": len(findings),
+            }
+        )
+    errors = sum(1 for finding in all_findings if finding.get("severity") == "error")
+    warnings = sum(1 for finding in all_findings if finding.get("severity") == "warning")
+    status = "fail" if errors else "warn" if warnings else "pass"
+    return {
+        "schema": WORKFLOW_CARD_LINT_SCHEMA_VERSION,
+        "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "external_card_loading_enabled": WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED,
+        "cards_checked": len(cards_to_check),
+        "status": status,
+        "summary": {"error": errors, "warning": warnings, "total": len(all_findings)},
+        "findings": all_findings,
+        "cards": card_summaries,
+    }
+
+
+def _workflow_card_public(
+    card: dict[str, Any],
+    execution_mode: str | None = None,
+    *,
+    apply_repository_trust_default: bool = False,
+    lint_findings: list[dict[str, Any]] | None = None,
+    safety: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     public = {field: card[field] for field in WORKFLOW_CARD_FIELDS if field in card}
     supported = list(card.get("supported_execution_modes", AGENT_EXECUTION_MODES))
     mode_routing = dict(card.get("mode_routing", {}))
@@ -14016,6 +14339,11 @@ def _workflow_card_public(card: dict[str, Any], execution_mode: str | None = Non
     public["mode_routing"] = mode_routing
     if execution_mode in mode_routing:
         public["selected_mode_routing"] = mode_routing[execution_mode]
+    trust = _workflow_card_trust_metadata(card, apply_repository_default=apply_repository_trust_default)
+    if trust:
+        public["trust"] = trust
+    findings = lint_findings if lint_findings is not None else _workflow_card_lint_findings(card, apply_repository_trust_default=apply_repository_trust_default)
+    public["safety"] = safety if safety is not None else _workflow_card_safety_summary(card, findings, trust=trust)
     return public
 
 
@@ -14108,8 +14436,12 @@ def _workflow_selection_caveats(
     tokens: set[str],
     execution_mode: str,
     execution_mode_source: str,
+    suppressed_count: int = 0,
 ) -> list[str]:
-    caveats: list[str] = ["Read-only selector: it recommends existing workflows/prompts/tools but does not execute them."]
+    caveats: list[str] = [
+        "Read-only selector: it recommends existing workflows/prompts/tools but does not execute them.",
+        "External workflow-card loading is disabled by default; selected cards include trust/safety metadata.",
+    ]
     high_risk = tokens.intersection({"delete", "remove", "rewrite", "refactor", "migration", "release", "ship", "publish", "deploy", "security", "secret", "token", "auth", "credential"})
     match_ids = {str(match.get("id")) for match in matches}
     if execution_mode_source == "prompt":
@@ -14118,6 +14450,8 @@ def _workflow_selection_caveats(
         caveats.append("Online/cloud-assisted mode: use MCP for compact context, audit/memory, deterministic prechecks, compression, and local autocomplete while the cloud model reasons.")
     else:
         caveats.append("Offline/onboard-only mode: keep local-model decisions structured, confidence-scored, retry-limited, and ready to clarify or escalate when confidence is low.")
+    if suppressed_count:
+        caveats.append(f"Suppressed {suppressed_count} untrusted high-risk workflow card(s) by default.")
     if high_risk:
         caveats.append("High-risk wording detected: clarify scope, confirm mutation mode, and preserve a rollback path before edits.")
     if tokens.intersection({"delete", "remove", "rewrite", "refactor", "migration"}) and "snapshot-before-refactor" in match_ids:
@@ -14131,13 +14465,21 @@ def _workflow_selection_caveats(
     return caveats
 
 
-def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -> dict[str, Any]:
-    """Read-only workflow-card selector for natural-language MCP workflow choice."""
+def _workflow_select_from_cards(
+    prompt: str,
+    top_k: int = 3,
+    execution_mode: str = "auto",
+    *,
+    cards: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    apply_repository_trust_defaults: bool = False,
+) -> dict[str, Any]:
+    """Read-only workflow-card selector with an injectable card set for tests/import review."""
     query = str(prompt or "").strip()
     if not query:
         raise ValueError("prompt must not be empty")
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
+    cards_to_select = WORKFLOW_CARDS if cards is None else tuple(cards)
     selected_mode, selected_mode_source = _resolve_agent_execution_mode(execution_mode, query)
     attrs = {
         "mcp.schema": "mcp.workflow_selection.v1",
@@ -14146,7 +14488,7 @@ def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -
         "mcp.execution_mode": selected_mode,
         "mcp.execution_mode.requested": execution_mode,
         "mcp.execution_mode.source": selected_mode_source,
-        "mcp.workflow.top_k": min(top_k, len(WORKFLOW_CARDS)),
+        "mcp.workflow.top_k": min(top_k, len(cards_to_select)),
         "mcp.input.prompt.length": len(query),
         "mcp.content_capture.enabled": False,
     }
@@ -14154,16 +14496,31 @@ def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -
         tokens = _workflow_selection_tokens(query)
         span.set_attribute("mcp.input.prompt.token_count", len(tokens))
         scored: list[dict[str, Any]] = []
+        suppressed: list[dict[str, Any]] = []
         max_score = 1.0
-        for card in WORKFLOW_CARDS:
+        for card in cards_to_select:
             details = _workflow_card_score(card, query, tokens, selected_mode, selected_mode_source)
+            trust = _workflow_card_trust_metadata(card, apply_repository_default=apply_repository_trust_defaults)
+            findings = _workflow_card_lint_findings(card, apply_repository_trust_default=apply_repository_trust_defaults)
+            safety = _workflow_card_safety_summary(card, findings, trust=trust)
+            row = {"card": card, "trust": trust, "findings": findings, "safety": safety, **details}
+            if safety.get("suppressed_by_default"):
+                suppressed.append(row)
+                continue
             max_score = max(max_score, float(details["score"]))
-            scored.append({"card": card, **details})
+            scored.append(row)
         scored.sort(key=lambda row: (float(row["score"]), str(row["card"].get("id", ""))), reverse=True)
+        suppressed.sort(key=lambda row: (float(row["score"]), str(row["card"].get("id", ""))), reverse=True)
 
         matches: list[dict[str, Any]] = []
         for row in scored[: min(top_k, len(scored))]:
-            card = _workflow_card_public(row["card"], execution_mode=selected_mode)
+            card = _workflow_card_public(
+                row["card"],
+                execution_mode=selected_mode,
+                apply_repository_trust_default=apply_repository_trust_defaults,
+                lint_findings=row["findings"],
+                safety=row["safety"],
+            )
             score = float(row["score"])
             confidence = round(min(0.99, score / max(max_score, 6.0)), 2)
             if score <= 0:
@@ -14176,13 +14533,26 @@ def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -
                     "match_reasons": row["reasons"],
                 }
             )
+        suppressed_matches = [
+            {
+                "id": str(row["card"].get("id") or "<unknown>"),
+                "title": str(row["card"].get("title") or ""),
+                "score": round(float(row["score"]), 2),
+                "match_reasons": row["reasons"],
+                "safety": row["safety"],
+            }
+            for row in suppressed[:5]
+        ]
         if matches:
             span.set_attribute("mcp.workflow.top_match", matches[0].get("id", ""))
             span.set_attribute("mcp.workflow.top_match.confidence", matches[0].get("confidence", 0.0))
         span.set_attribute("mcp.workflow.match_count", len(matches))
+        span.set_attribute("mcp.workflow.suppressed_count", len(suppressed))
         result = {
             "schema": WORKFLOW_SELECT_SCHEMA_VERSION,
             "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
+            "trust_schema": WORKFLOW_CARD_TRUST_SCHEMA_VERSION,
+            "safety_schema": WORKFLOW_CARD_SAFETY_SCHEMA_VERSION,
             "execution_mode_schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
             "execution_mode": selected_mode,
             "execution_mode_source": selected_mode_source,
@@ -14190,12 +14560,26 @@ def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -
             "query": query,
             "read_only": True,
             "selection_mode": "ranked_keyword_cards",
-            "cards_available": len(WORKFLOW_CARDS),
+            "external_card_loading_enabled": WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED,
+            "cards_available": len(cards_to_select),
+            "cards_suppressed": len(suppressed),
+            "suppressed_matches": suppressed_matches,
             "matches": matches,
-            "caveats": _workflow_selection_caveats(matches, tokens, selected_mode, selected_mode_source),
+            "caveats": _workflow_selection_caveats(matches, tokens, selected_mode, selected_mode_source, len(suppressed)),
         }
         _otel_set_result_attributes(span, result)
         return result
+
+
+def workflow_select(prompt: str, top_k: int = 3, execution_mode: str = "auto") -> dict[str, Any]:
+    """Read-only workflow-card selector for natural-language MCP workflow choice."""
+    return _workflow_select_from_cards(
+        prompt=prompt,
+        top_k=top_k,
+        execution_mode=execution_mode,
+        cards=WORKFLOW_CARDS,
+        apply_repository_trust_defaults=True,
+    )
 
 
 class TaskRouterService:
