@@ -9,6 +9,7 @@ SPDX-License-Identifier: MIT
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting plus first-slice `workflow_lineage.v1` manifests for MCP policy and tool-gate decisions.
 - [Workflow lineage manifests](./workflow-lineage.md) - deterministic redacted plan identity, lineage graph, artifact digests, and read-only drift verification for replayable MCP executions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
+- [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Agent execution modes](./execution-modes.md) - online/cloud-assisted and offline/onboard-only routing contracts layered onto workflow selection.
@@ -35,6 +36,7 @@ This index lists documentation ownership and status.
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`
 - [MCP roots diagnostics](./roots-diagnostics.md) (`docs/roots-diagnostics.md`) - Status: `operational guidance`
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) (`docs/opentelemetry-tracing.md`) - Status: `prototype`
+- [Self-optimization efficiency report](./self-optimization-report.md) (`docs/self-optimization-report.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Agent execution modes](./execution-modes.md) (`docs/execution-modes.md`) - Status: `operational guidance`
 - Bootstrap instructions for external repositories live in `README.md` under `Bootstrap Another Repository`.

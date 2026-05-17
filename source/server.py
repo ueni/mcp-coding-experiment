@@ -209,6 +209,9 @@ GOLDEN_BASELINE_FILE = Path(".codebase-tooling-mcp/reports/TOOL_GOLDEN_BASELINE.
 FLAKY_HISTORY_FILE = Path(".codebase-tooling-mcp/reports/FLAKY_TEST_HISTORY.json")
 TEST_IMPACT_MAP_FILE = Path(".codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json")
 TEST_IMPACT_MAP_MAX_AGE_HOURS = 24
+SELF_OPTIMIZATION_RECOMMENDATION_INDEX_FILE = Path(
+    ".codebase-tooling-mcp/reports/SELF_OPTIMIZATION_RECOMMENDATIONS.json"
+)
 STATE_SNAPSHOT_DIR = Path(".codebase-tooling-mcp/snapshots")
 EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
 ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
@@ -302,6 +305,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
     "governance_report": {"categories": ["read-only"]},
+    "self_optimization_report": {"categories": ["read-only"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
     "workflow_lineage": {"categories": ["read-only"]},
@@ -2084,6 +2088,1271 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             else {},
         },
     }
+
+
+SELF_OPTIMIZATION_REPORT_SCHEMA = "self_optimization_report.v1"
+SELF_OPTIMIZATION_NO_ATTRIBUTION = "unattributed"
+SELF_OPTIMIZATION_NAME_PLACEHOLDER = "<redacted:name>"
+SELF_OPTIMIZATION_COMPANY_SUFFIX_RE = re.compile(
+    r"\b[A-Z][A-Za-z0-9&_.-]*(?:\s+[A-Z][A-Za-z0-9&_.-]*)*\s+(?:Inc|LLC|Ltd|GmbH|Corp|Corporation|Company)\b"
+)
+SELF_OPTIMIZATION_SENSITIVE_NAME_KEYS = {
+    "actor",
+    "assignee",
+    "author",
+    "company",
+    "organization",
+    "owner",
+    "person",
+    "project",
+    "repo",
+    "repository",
+    "user",
+    "username",
+}
+SELF_OPTIMIZATION_SAFE_BOOLEAN_KEYS = {"contains_secrets", "records_secrets", "secrets_exposed"}
+SELF_OPTIMIZATION_SAFE_TOKEN_KEYS = {
+    "compressed_tokens",
+    "compression_estimated_saved_tokens",
+    "estimated_saved_tokens",
+    "input_tokens",
+    "output_tokens",
+    "raw_tokens",
+    "saved_tokens",
+    "token_estimates",
+    "tokens",
+    "total_tokens",
+}
+SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL = {
+    "find_paths": 20.0,
+    "grep": 30.0,
+    "read_snippet": 20.0,
+    "summarize_diff": 45.0,
+    "risk_scoring": 45.0,
+    "test_impact_map": 60.0,
+    "release_readiness": 120.0,
+    "governance_report": 180.0,
+    "workflow_diagnostics": 90.0,
+    "workflow_task": 180.0,
+    "task_router": 45.0,
+    "quality_router": 90.0,
+    "command_runner": 120.0,
+    "docker_router": 180.0,
+    "vscode_router": 120.0,
+}
+
+
+def _self_opt_parse_window(start_time: str, end_time: str, window_hours: int) -> tuple[datetime, datetime]:
+    if window_hours < 1:
+        raise ValueError("window_hours must be >= 1")
+    if window_hours > 24 * 366:
+        raise ValueError("window_hours must be <= 8784")
+    end_dt = _parse_iso_datetime(end_time) if end_time.strip() else datetime.now(timezone.utc)
+    start_dt = _parse_iso_datetime(start_time) if start_time.strip() else None
+    if end_time.strip() and end_dt is None:
+        raise ValueError("end_time must be an ISO-8601 timestamp")
+    if start_time.strip() and start_dt is None:
+        raise ValueError("start_time must be an ISO-8601 timestamp")
+    if end_dt is None:
+        end_dt = datetime.now(timezone.utc)
+    if start_dt is None:
+        start_dt = end_dt - timedelta(hours=window_hours)
+    if start_dt > end_dt:
+        raise ValueError("start_time must be before end_time")
+    return start_dt, end_dt
+
+
+def _self_opt_in_window(ts: datetime | None, start_dt: datetime, end_dt: datetime) -> bool:
+    if ts is None:
+        return False
+    return start_dt <= ts <= end_dt
+
+
+def _self_opt_relpath(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(REPO_PATH))
+    except Exception:
+        return "<outside_repo_boundary>"
+
+
+def _self_opt_resolve_local_file(configured: Path) -> tuple[Path, str]:
+    resolved = configured.resolve() if configured.is_absolute() else (REPO_PATH / configured).resolve()
+    try:
+        resolved.relative_to(REPO_PATH)
+    except ValueError:
+        return resolved, "outside_repo_boundary"
+    return resolved, "repo_relative" if not configured.is_absolute() else "configured_absolute"
+
+
+def _self_opt_public_source_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(meta)
+    for key in ("resolved_path", "path"):
+        value = safe.get(key)
+        if isinstance(value, str) and value:
+            safe[key] = _self_opt_relpath(Path(value))
+    return safe
+
+
+def _self_opt_default_redact_terms(extra_terms: list[str] | None = None) -> list[str]:
+    terms: set[str] = set()
+    for raw in extra_terms or []:
+        value = str(raw).strip()
+        if value:
+            terms.add(value)
+    for raw in os.getenv("MCP_SELF_OPTIMIZATION_REDACT_TERMS", "").split(","):
+        value = raw.strip()
+        if value:
+            terms.add(value)
+    if _is_git_repo():
+        for key in ("user.name", "user.email"):
+            proc = _git("config", "--get", key, check=False)
+            value = proc.stdout.strip()
+            if value:
+                terms.add(value)
+                if "@" in value:
+                    terms.update(part for part in re.split(r"[@.]", value) if part)
+        remotes = _git("remote", "-v", check=False).stdout
+        ignored = {"https", "http", "ssh", "git", "github", "com", "origin", "fetch", "push"}
+        for token in re.split(r"[^A-Za-z0-9_.-]+", remotes):
+            cleaned = token.strip().removesuffix(".git")
+            if len(cleaned) >= 4 and cleaned.lower() not in ignored:
+                terms.add(cleaned)
+        if len(REPO_PATH.name) >= 4:
+            terms.add(REPO_PATH.name)
+    return sorted(terms, key=lambda item: (-len(item), item.lower()))
+
+
+def _self_opt_redact_string(value: str, redact_terms: list[str]) -> str:
+    redacted = _redact_audit_string(value)
+    repo_text = str(REPO_PATH)
+    if repo_text and repo_text in redacted:
+        redacted = redacted.replace(repo_text, "<repo>")
+    redacted = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "<redacted:email>", redacted)
+    redacted = SELF_OPTIMIZATION_COMPANY_SUFFIX_RE.sub(SELF_OPTIMIZATION_NAME_PLACEHOLDER, redacted)
+    for term in redact_terms:
+        if len(term) < 3:
+            continue
+        redacted = re.sub(re.escape(term), SELF_OPTIMIZATION_NAME_PLACEHOLDER, redacted, flags=re.IGNORECASE)
+    return redacted
+
+
+def _self_opt_redact_value(value: Any, redact_terms: list[str], depth: int = 0) -> Any:
+    if depth > 6:
+        return "<redacted-depth>"
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if key_lower in SELF_OPTIMIZATION_SAFE_BOOLEAN_KEYS and isinstance(item, bool):
+                out[key_str] = item
+            elif key_lower in SELF_OPTIMIZATION_SAFE_TOKEN_KEYS or key_lower.endswith("_tokens"):
+                out[key_str] = _self_opt_redact_value(item, redact_terms, depth + 1)
+            elif key_lower in SELF_OPTIMIZATION_SENSITIVE_NAME_KEYS and isinstance(item, str):
+                out[key_str] = SELF_OPTIMIZATION_NAME_PLACEHOLDER
+            elif SENSITIVE_AUDIT_KEY_RE.search(key_str):
+                out[key_str] = "<redacted>"
+            else:
+                out[key_str] = _self_opt_redact_value(item, redact_terms, depth + 1)
+        return out
+    if isinstance(value, list):
+        return [_self_opt_redact_value(item, redact_terms, depth + 1) for item in value[:100]]
+    if isinstance(value, tuple):
+        return [_self_opt_redact_value(item, redact_terms, depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        return _self_opt_redact_string(value, redact_terms)
+    return value
+
+
+def _self_opt_json_text(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=True, default=str)
+    except Exception:
+        return str(value)
+
+
+def _self_opt_extract_refs(value: Any) -> dict[str, list[str]]:
+    text = _self_opt_json_text(value)
+    issues: set[str] = set()
+    prs: set[str] = set()
+    for match in re.finditer(r"(?i)\b(?:pr|pull request|pull-request|pull/|pulls/)\s*#?(\d+)\b", text):
+        prs.add(f"#{match.group(1)}")
+    for match in re.finditer(r"(?i)\b(?:issue|issues|closes|fixes|resolves)\s*#?(\d+)\b", text):
+        issues.add(f"#{match.group(1)}")
+    for match in re.finditer(r"#(\d+)", text):
+        prefix = text[max(0, match.start() - 32) : match.start()].lower()
+        if "pull request" in prefix or re.search(r"\bpr\s*$", prefix):
+            prs.add(f"#{match.group(1)}")
+        else:
+            issues.add(f"#{match.group(1)}")
+    return {"issues": sorted(issues), "prs": sorted(prs)}
+
+
+def _self_opt_first_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("timestamp", "start_time", "created_at", "started_at", "updated_at", "end_time", "completed_at"):
+        raw = value.get(key)
+        if isinstance(raw, str):
+            parsed = _parse_iso_datetime(raw)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _self_opt_workflow_from_payload(tool: str, value: Any) -> str:
+    if isinstance(value, dict):
+        for key in (
+            "workflow",
+            "workflow_name",
+            "mcp.workflow.name",
+            "mode",
+            "mcp.tool.mode",
+            "operation",
+            "task",
+        ):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()[:120]
+        args = value.get("arguments") if isinstance(value.get("arguments"), dict) else None
+        if args:
+            nested = _self_opt_workflow_from_payload(tool, args)
+            if nested:
+                return nested
+        attrs = value.get("attributes") if isinstance(value.get("attributes"), dict) else None
+        if attrs:
+            nested = _self_opt_workflow_from_payload(tool, attrs)
+            if nested:
+                return nested
+    if tool in {"governance_report", "workflow_diagnostics", "release_readiness", "test_impact_map", "workflow_task"}:
+        return tool
+    return ""
+
+
+def _self_opt_collect_numeric_metrics(value: Any, metrics: dict[str, float], depth: int = 0) -> None:
+    if depth > 6:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower().replace(".", "_").replace("-", "_")
+            if isinstance(item, (int, float)) and not isinstance(item, bool):
+                amount = float(item)
+                if "input_tokens" in key_lower or "prompt_tokens" in key_lower:
+                    metrics["input_tokens"] += amount
+                elif "output_tokens" in key_lower or "completion_tokens" in key_lower:
+                    metrics["output_tokens"] += amount
+                elif "total_tokens" in key_lower:
+                    metrics["total_tokens"] += amount
+                elif "saved_tokens" in key_lower or "tokens_saved" in key_lower:
+                    metrics["saved_tokens"] += amount
+                elif "raw_tokens" in key_lower:
+                    metrics["raw_tokens"] += amount
+                elif "compressed_tokens" in key_lower:
+                    metrics["compressed_tokens"] += amount
+            _self_opt_collect_numeric_metrics(item, metrics, depth + 1)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            _self_opt_collect_numeric_metrics(item, metrics, depth + 1)
+
+
+def _self_opt_token_metrics(value: Any) -> dict[str, int]:
+    metrics = {
+        "input_tokens": 0.0,
+        "output_tokens": 0.0,
+        "total_tokens": 0.0,
+        "saved_tokens": 0.0,
+        "raw_tokens": 0.0,
+        "compressed_tokens": 0.0,
+    }
+    _self_opt_collect_numeric_metrics(value, metrics)
+    if metrics["total_tokens"] <= 0:
+        metrics["total_tokens"] = metrics["input_tokens"] + metrics["output_tokens"]
+    if metrics["saved_tokens"] <= 0 and metrics["raw_tokens"] > metrics["compressed_tokens"] > 0:
+        metrics["saved_tokens"] = metrics["raw_tokens"] - metrics["compressed_tokens"]
+    return {key: int(round(value)) for key, value in metrics.items() if key in {"input_tokens", "output_tokens", "total_tokens", "saved_tokens"}}
+
+
+def _self_opt_collect_routing(value: Any, models: set[str], backends: set[str], execution_modes: set[str], depth: int = 0) -> None:
+    if depth > 6:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower()
+            if isinstance(item, str) and item.strip():
+                if "model" in key_lower and "schema" not in key_lower:
+                    models.add(item.strip()[:120])
+                if key_lower in {"backend", "provider", "route", "mcp.backend", "gen_ai.system"} or key_lower.endswith(".backend"):
+                    backends.add(item.strip()[:120])
+                if "execution_mode" in key_lower:
+                    execution_modes.add(item.strip()[:120])
+            _self_opt_collect_routing(item, models, backends, execution_modes, depth + 1)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            _self_opt_collect_routing(item, models, backends, execution_modes, depth + 1)
+
+
+def _self_opt_model_routing(value: Any, redact_terms: list[str]) -> dict[str, list[str]]:
+    models: set[str] = set()
+    backends: set[str] = set()
+    execution_modes: set[str] = set()
+    _self_opt_collect_routing(value, models, backends, execution_modes)
+    return {
+        "models": sorted(_self_opt_redact_string(item, redact_terms) for item in models),
+        "backends": sorted(_self_opt_redact_string(item, redact_terms) for item in backends),
+        "execution_modes": sorted(_self_opt_redact_string(item, redact_terms) for item in execution_modes),
+    }
+
+
+def _self_opt_collect_cache_hits(value: Any, depth: int = 0) -> int:
+    if depth > 6:
+        return 0
+    hits = 0
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower().replace(".", "_").replace("-", "_")
+            if key_lower in {"cached", "cache_hit", "mcp_cache_hit"} and bool(item):
+                hits += 1
+            hits += _self_opt_collect_cache_hits(item, depth + 1)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            hits += _self_opt_collect_cache_hits(item, depth + 1)
+    return hits
+
+
+def _self_opt_collect_compression(value: Any, metrics: dict[str, float], depth: int = 0) -> None:
+    if depth > 6:
+        return
+    if isinstance(value, dict):
+        if value.get("schema") == "compressed_observation.v1":
+            metrics["compressed_observation_count"] += 1
+            metrics["compressed_payload_bytes"] += _payload_size_bytes(value)
+            omitted = value.get("omitted", [])
+            if isinstance(omitted, list):
+                for row in omitted:
+                    if isinstance(row, dict) and isinstance(row.get("count"), int):
+                        metrics["omitted_signal_count"] += int(row["count"])
+        for key, item in value.items():
+            key_lower = str(key).lower().replace(".", "_").replace("-", "_")
+            if isinstance(item, (int, float)) and not isinstance(item, bool):
+                if "raw_bytes" in key_lower:
+                    metrics["raw_bytes"] += float(item)
+                elif "compressed_bytes" in key_lower:
+                    metrics["compressed_bytes"] += float(item)
+            _self_opt_collect_compression(item, metrics, depth + 1)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            _self_opt_collect_compression(item, metrics, depth + 1)
+
+
+def _self_opt_compression_metrics(value: Any) -> dict[str, int]:
+    metrics = {
+        "compressed_observation_count": 0.0,
+        "omitted_signal_count": 0.0,
+        "raw_bytes": 0.0,
+        "compressed_bytes": 0.0,
+        "compressed_payload_bytes": 0.0,
+    }
+    _self_opt_collect_compression(value, metrics)
+    saved_tokens = 0
+    if metrics["raw_bytes"] > metrics["compressed_bytes"] > 0:
+        saved_tokens = int(round((metrics["raw_bytes"] - metrics["compressed_bytes"]) / 4.0))
+    elif metrics["omitted_signal_count"] > 0:
+        saved_tokens = int(metrics["omitted_signal_count"] * 80)
+    elif metrics["compressed_observation_count"] > 0:
+        saved_tokens = int(metrics["compressed_observation_count"] * 120)
+    return {
+        "compressed_observation_count": int(metrics["compressed_observation_count"]),
+        "omitted_signal_count": int(metrics["omitted_signal_count"]),
+        "estimated_saved_tokens": saved_tokens,
+    }
+
+
+def _self_opt_normalize_audit_event(event: dict[str, Any], redact_terms: list[str]) -> dict[str, Any]:
+    safe_event = _self_opt_redact_value(event, redact_terms)
+    tool = str(event.get("tool_name", "unknown") or "unknown")
+    timestamp = _self_opt_first_timestamp(event)
+    refs = _self_opt_extract_refs(safe_event)
+    routing = _self_opt_model_routing(safe_event, redact_terms)
+    token_metrics = _self_opt_token_metrics(event)
+    compression = _self_opt_compression_metrics(event)
+    categories = event.get("categories", []) if isinstance(event.get("categories"), list) else []
+    return {
+        "source": "audit",
+        "timestamp": timestamp,
+        "tool": tool,
+        "workflow": _self_opt_workflow_from_payload(tool, safe_event),
+        "success": bool(event.get("success", False)),
+        "reason": _self_opt_redact_string(str(event.get("reason", "")), redact_terms),
+        "duration_ms": None,
+        "categories": [str(item) for item in categories],
+        "issue_refs": refs["issues"],
+        "pr_refs": refs["prs"],
+        "routing": routing,
+        "tokens": token_metrics,
+        "cache_hit_count": _self_opt_collect_cache_hits(event),
+        "compression": compression,
+    }
+
+
+def _self_opt_normalize_span(span: dict[str, Any], redact_terms: list[str]) -> dict[str, Any]:
+    safe_span = _self_opt_redact_value(span, redact_terms)
+    attrs = span.get("attributes", {}) if isinstance(span.get("attributes"), dict) else {}
+    safe_attrs = safe_span.get("attributes", {}) if isinstance(safe_span.get("attributes"), dict) else {}
+    name = str(span.get("name", ""))
+    tool = str(attrs.get("mcp.tool.name") or attrs.get("gen_ai.tool.name") or "")
+    if not tool and name.startswith("mcp.tool."):
+        tool = name.removeprefix("mcp.tool.")
+    if not tool:
+        tool = name or "unknown"
+    status = span.get("status", {}) if isinstance(span.get("status"), dict) else {}
+    status_code = str(status.get("code", "OK"))
+    duration_raw = span.get("duration_ms")
+    duration_ms = float(duration_raw) if isinstance(duration_raw, (int, float)) and not isinstance(duration_raw, bool) else None
+    refs = _self_opt_extract_refs(safe_span)
+    routing = _self_opt_model_routing(safe_span, redact_terms)
+    return {
+        "source": "trace",
+        "timestamp": _self_opt_first_timestamp(span),
+        "tool": tool,
+        "workflow": _self_opt_workflow_from_payload(tool, safe_attrs),
+        "success": status_code.upper() != "ERROR",
+        "reason": _self_opt_redact_string(str(status.get("description", "")), redact_terms),
+        "duration_ms": duration_ms,
+        "categories": [],
+        "issue_refs": refs["issues"],
+        "pr_refs": refs["prs"],
+        "routing": routing,
+        "tokens": _self_opt_token_metrics(span),
+        "cache_hit_count": _self_opt_collect_cache_hits(span),
+        "compression": _self_opt_compression_metrics(span),
+    }
+
+
+def _self_opt_load_jsonl_records(configured_path: Path, start_dt: datetime, end_dt: datetime) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    path, source = _self_opt_resolve_local_file(configured_path)
+    meta = {
+        "configured_path": str(configured_path),
+        "resolved_path": str(path),
+        "source": source,
+        "exists": path.exists(),
+        "readable": False,
+        "records_total": 0,
+        "records_in_window": 0,
+        "malformed_lines": 0,
+    }
+    if source == "outside_repo_boundary":
+        meta["reason"] = "configured path resolves outside repository boundary"
+        return [], meta
+    if not path.exists():
+        meta["readable"] = True
+        return [], meta
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    row = json.loads(raw)
+                except json.JSONDecodeError:
+                    meta["malformed_lines"] += 1
+                    continue
+                if not isinstance(row, dict):
+                    meta["malformed_lines"] += 1
+                    continue
+                meta["records_total"] += 1
+                if _self_opt_in_window(_self_opt_first_timestamp(row), start_dt, end_dt):
+                    rows.append(row)
+    except OSError as exc:
+        meta["reason"] = exc.__class__.__name__
+        return [], meta
+    meta["readable"] = True
+    meta["records_in_window"] = len(rows)
+    return rows, meta
+
+
+def _self_opt_load_task_records(start_dt: datetime, end_dt: datetime, redact_terms: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    task_dir = _resolve_repo_path(str(WORKFLOW_TASKS_DIR))
+    meta = {
+        "path": str(task_dir),
+        "exists": task_dir.exists(),
+        "readable": False,
+        "records_total": 0,
+        "records_in_window": 0,
+        "malformed_files": 0,
+    }
+    records: list[dict[str, Any]] = []
+    if not task_dir.exists():
+        meta["readable"] = True
+        return records, meta
+    try:
+        files = sorted(task_dir.glob("*.json"))[:500]
+    except OSError as exc:
+        meta["reason"] = exc.__class__.__name__
+        return records, meta
+    for file_path in files:
+        try:
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta["malformed_files"] += 1
+            continue
+        if not isinstance(payload, dict):
+            meta["malformed_files"] += 1
+            continue
+        meta["records_total"] += 1
+        ts = _self_opt_first_timestamp(payload)
+        if not _self_opt_in_window(ts, start_dt, end_dt):
+            continue
+        safe_payload = _self_opt_redact_value(payload, redact_terms)
+        tool = "workflow_task"
+        refs = _self_opt_extract_refs(safe_payload)
+        status = str(payload.get("status", payload.get("state", ""))).lower()
+        records.append(
+            {
+                "source": "task",
+                "timestamp": ts,
+                "tool": tool,
+                "workflow": _self_opt_workflow_from_payload(tool, safe_payload),
+                "success": status not in {"failed", "error", "cancelled", "timeout"},
+                "reason": _self_opt_redact_string(str(payload.get("error", payload.get("reason", ""))), redact_terms),
+                "duration_ms": None,
+                "categories": [],
+                "issue_refs": refs["issues"],
+                "pr_refs": refs["prs"],
+                "routing": _self_opt_model_routing(safe_payload, redact_terms),
+                "tokens": _self_opt_token_metrics(payload),
+                "cache_hit_count": _self_opt_collect_cache_hits(payload),
+                "compression": _self_opt_compression_metrics(payload),
+            }
+        )
+    meta["readable"] = True
+    meta["records_in_window"] = len(records)
+    return records, meta
+
+
+def _self_opt_git_commit_records(start_dt: datetime, end_dt: datetime, redact_terms: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    meta = {
+        "available": False,
+        "network_used": False,
+        "records_total": 0,
+        "records_in_window": 0,
+        "reason": "",
+    }
+    if not _is_git_repo():
+        meta["reason"] = "not_a_git_repo"
+        return [], meta
+    proc = _git(
+        "log",
+        "--since",
+        start_dt.isoformat(),
+        "--until",
+        end_dt.isoformat(),
+        "--pretty=format:%H%x00%ct%x00%s",
+        check=False,
+    )
+    if proc.returncode != 0:
+        meta["reason"] = _redact_audit_string(proc.stderr.strip()[:200])
+        return [], meta
+    records: list[dict[str, Any]] = []
+    meta["available"] = True
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\x00", 2)
+        if len(parts) != 3:
+            continue
+        commit_hash, ts_raw, subject = parts
+        try:
+            ts = datetime.fromtimestamp(int(ts_raw), tz=timezone.utc)
+        except ValueError:
+            ts = None
+        safe_subject = _self_opt_redact_string(subject, redact_terms)
+        refs = _self_opt_extract_refs(safe_subject)
+        meta["records_total"] += 1
+        records.append(
+            {
+                "source": "git_commit",
+                "timestamp": ts,
+                "tool": "git",
+                "workflow": "git_commit",
+                "success": True,
+                "reason": "",
+                "duration_ms": 0.0,
+                "categories": ["git"],
+                "issue_refs": refs["issues"],
+                "pr_refs": refs["prs"],
+                "routing": {"models": [], "backends": [], "execution_modes": []},
+                "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "saved_tokens": 0},
+                "cache_hit_count": 0,
+                "compression": {"compressed_observation_count": 0, "omitted_signal_count": 0, "estimated_saved_tokens": 0},
+                "commit": commit_hash[:12],
+                "subject": safe_subject[:160],
+            }
+        )
+    meta["records_in_window"] = len(records)
+    return records, meta
+
+
+def _self_opt_record_baseline_seconds(record: dict[str, Any]) -> float:
+    if record.get("source") == "git_commit":
+        return 0.0
+    tool = str(record.get("tool", "")).lower()
+    workflow = str(record.get("workflow", "")).lower()
+    if tool in SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL:
+        return SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL[tool]
+    if workflow in SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL:
+        return SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL[workflow]
+    categories = {str(item).lower() for item in record.get("categories", []) if isinstance(item, str)}
+    if "shell/process" in categories or "network" in categories:
+        return 90.0
+    if "write" in categories or "git mutation" in categories:
+        return 120.0
+    return 30.0
+
+
+def _self_opt_record_spent_seconds(record: dict[str, Any]) -> float:
+    duration = record.get("duration_ms")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        return max(0.0, float(duration) / 1000.0)
+    if record.get("source") == "git_commit":
+        return 0.0
+    return 4.0
+
+
+def _self_opt_is_noisy(record: dict[str, Any], spent_seconds: float) -> bool:
+    if not bool(record.get("success", True)):
+        return True
+    reason = str(record.get("reason", "")).lower()
+    if any(term in reason for term in ("timeout", "failed", "error", "retry", "noisy")):
+        return True
+    return spent_seconds >= 60.0
+
+
+def _self_opt_blank_bucket(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "observed_record_count": 0,
+        "tool_call_count": 0,
+        "commit_count": 0,
+        "success_count": 0,
+        "failed_or_noisy_count": 0,
+        "estimated_spent_seconds": 0.0,
+        "estimated_baseline_seconds": 0.0,
+        "estimated_saved_seconds": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "estimated_saved_tokens": 0,
+    }
+
+
+def _self_opt_update_bucket(bucket: dict[str, dict[str, Any]], key: str, record: dict[str, Any], baseline: float, spent: float, saved: float, noisy: bool) -> None:
+    row = bucket.setdefault(key, _self_opt_blank_bucket(key))
+    row["observed_record_count"] += 1
+    if record.get("source") == "git_commit":
+        row["commit_count"] += 1
+    else:
+        row["tool_call_count"] += 1
+    if bool(record.get("success", True)):
+        row["success_count"] += 1
+    if noisy:
+        row["failed_or_noisy_count"] += 1
+    row["estimated_spent_seconds"] += spent
+    row["estimated_baseline_seconds"] += baseline
+    row["estimated_saved_seconds"] += saved
+    tokens = record.get("tokens", {}) if isinstance(record.get("tokens"), dict) else {}
+    compression = record.get("compression", {}) if isinstance(record.get("compression"), dict) else {}
+    for key_name in ("input_tokens", "output_tokens", "total_tokens", "saved_tokens"):
+        metric_name = "estimated_saved_tokens" if key_name == "saved_tokens" else key_name
+        value = tokens.get(key_name, 0)
+        if isinstance(value, int):
+            row[metric_name] += value
+    saved_tokens = compression.get("estimated_saved_tokens", 0)
+    if isinstance(saved_tokens, int):
+        row["estimated_saved_tokens"] += saved_tokens
+
+
+def _self_opt_bucket_rows(bucket: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in bucket.values():
+        copied = dict(row)
+        for key in ("estimated_spent_seconds", "estimated_baseline_seconds", "estimated_saved_seconds"):
+            copied[key] = round(float(copied[key]), 3)
+        rows.append(copied)
+    return sorted(rows, key=lambda item: (-int(item.get("tool_call_count", 0)) - int(item.get("commit_count", 0)), str(item.get("name", ""))))
+
+
+def _self_opt_counter_rows(counter: dict[str, int], value_name: str = "count") -> list[dict[str, Any]]:
+    return [
+        {"name": key, value_name: value}
+        for key, value in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict[str, Any]) -> dict[str, Any]:
+    by_tool: dict[str, dict[str, Any]] = {}
+    by_workflow: dict[str, dict[str, Any]] = {}
+    by_issue: dict[str, dict[str, Any]] = {}
+    by_pr: dict[str, dict[str, Any]] = {}
+    failure_reasons: dict[str, int] = {}
+    models: dict[str, int] = {}
+    backends: dict[str, int] = {}
+    execution_modes: dict[str, int] = {}
+    timestamps: list[datetime] = []
+    totals = {
+        "observed_record_count": len(records),
+        "audit_event_count": 0,
+        "trace_span_count": 0,
+        "task_record_count": 0,
+        "commit_count": 0,
+        "tool_call_count": 0,
+        "success_count": 0,
+        "failed_or_noisy_count": 0,
+        "estimated_spent_seconds": 0.0,
+        "estimated_baseline_seconds": 0.0,
+        "estimated_saved_seconds": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "estimated_saved_tokens": 0,
+        "cache_hit_count": 0,
+        "compressed_observation_count": 0,
+        "omitted_signal_count": 0,
+        "compression_estimated_saved_tokens": 0,
+        "attributed_record_count": 0,
+        "verbose_tool_call_count": 0,
+    }
+    issue_refs: set[str] = set()
+    pr_refs: set[str] = set()
+    workflow_refs: set[str] = set()
+
+    for record in records:
+        source = str(record.get("source", ""))
+        if source == "audit":
+            totals["audit_event_count"] += 1
+        elif source == "trace":
+            totals["trace_span_count"] += 1
+        elif source == "task":
+            totals["task_record_count"] += 1
+        elif source == "git_commit":
+            totals["commit_count"] += 1
+        if source != "git_commit":
+            totals["tool_call_count"] += 1
+        if bool(record.get("success", True)):
+            totals["success_count"] += 1
+        ts = record.get("timestamp")
+        if isinstance(ts, datetime):
+            timestamps.append(ts)
+        baseline = _self_opt_record_baseline_seconds(record)
+        spent = _self_opt_record_spent_seconds(record)
+        saved = max(0.0, baseline - spent)
+        noisy = _self_opt_is_noisy(record, spent)
+        if noisy:
+            totals["failed_or_noisy_count"] += 1
+            reason = str(record.get("reason", "") or "unspecified")[:120]
+            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+        totals["estimated_spent_seconds"] += spent
+        totals["estimated_baseline_seconds"] += baseline
+        totals["estimated_saved_seconds"] += saved
+        tool = str(record.get("tool", "unknown") or "unknown")
+        _self_opt_update_bucket(by_tool, tool, record, baseline, spent, saved, noisy)
+        workflow = str(record.get("workflow", "") or "")
+        if workflow:
+            workflow_refs.add(workflow)
+            _self_opt_update_bucket(by_workflow, workflow, record, baseline, spent, saved, noisy)
+        issues = [str(item) for item in record.get("issue_refs", []) if str(item)]
+        prs = [str(item) for item in record.get("pr_refs", []) if str(item)]
+        for issue in issues:
+            issue_refs.add(issue)
+            _self_opt_update_bucket(by_issue, issue, record, baseline, spent, saved, noisy)
+        for pr in prs:
+            pr_refs.add(pr)
+            _self_opt_update_bucket(by_pr, pr, record, baseline, spent, saved, noisy)
+        if issues or prs or workflow:
+            totals["attributed_record_count"] += 1
+        tokens = record.get("tokens", {}) if isinstance(record.get("tokens"), dict) else {}
+        compression = record.get("compression", {}) if isinstance(record.get("compression"), dict) else {}
+        totals["input_tokens"] += int(tokens.get("input_tokens", 0) or 0)
+        totals["output_tokens"] += int(tokens.get("output_tokens", 0) or 0)
+        totals["total_tokens"] += int(tokens.get("total_tokens", 0) or 0)
+        totals["estimated_saved_tokens"] += int(tokens.get("saved_tokens", 0) or 0)
+        totals["cache_hit_count"] += int(record.get("cache_hit_count", 0) or 0)
+        totals["compressed_observation_count"] += int(compression.get("compressed_observation_count", 0) or 0)
+        totals["omitted_signal_count"] += int(compression.get("omitted_signal_count", 0) or 0)
+        compression_saved = int(compression.get("estimated_saved_tokens", 0) or 0)
+        totals["compression_estimated_saved_tokens"] += compression_saved
+        totals["estimated_saved_tokens"] += compression_saved
+        if tool in {"grep", "governance_report", "read_snippet", "summarize_diff"}:
+            totals["verbose_tool_call_count"] += 1
+        routing = record.get("routing", {}) if isinstance(record.get("routing"), dict) else {}
+        for model in routing.get("models", []) if isinstance(routing.get("models"), list) else []:
+            models[str(model)] = models.get(str(model), 0) + 1
+        for backend in routing.get("backends", []) if isinstance(routing.get("backends"), list) else []:
+            backends[str(backend)] = backends.get(str(backend), 0) + 1
+        for mode in routing.get("execution_modes", []) if isinstance(routing.get("execution_modes"), list) else []:
+            execution_modes[str(mode)] = execution_modes.get(str(mode), 0) + 1
+
+    cache_tools = cache_stats.get("tools", {}) if isinstance(cache_stats.get("tools"), dict) else {}
+    cache_entry_count = int(cache_stats.get("total_entries", 0) or 0)
+    cache_estimated_saved_seconds = round(cache_entry_count * 10.0, 3)
+    totals["estimated_saved_seconds"] += cache_estimated_saved_seconds
+    totals["estimated_saved_tokens"] += cache_entry_count * 250
+    elapsed_seconds = 0.0
+    if timestamps:
+        elapsed_seconds = max(0.0, (max(timestamps) - min(timestamps)).total_seconds())
+    attribution_rate = (totals["attributed_record_count"] / len(records)) if records else 0.0
+    success_rate = (totals["success_count"] / len(records)) if records else 1.0
+    rounded_totals = dict(totals)
+    for key in ("estimated_spent_seconds", "estimated_baseline_seconds", "estimated_saved_seconds"):
+        rounded_totals[key] = round(float(rounded_totals[key]), 3)
+    rounded_totals["elapsed_seconds"] = round(elapsed_seconds, 3)
+    rounded_totals["success_rate"] = round(success_rate, 4)
+    rounded_totals["attribution_rate"] = round(attribution_rate, 4)
+    return {
+        "totals": rounded_totals,
+        "by_tool": _self_opt_bucket_rows(by_tool),
+        "by_workflow": _self_opt_bucket_rows(by_workflow),
+        "by_issue": _self_opt_bucket_rows(by_issue),
+        "by_pr": _self_opt_bucket_rows(by_pr),
+        "routing": {
+            "models": _self_opt_counter_rows(models),
+            "backends": _self_opt_counter_rows(backends),
+            "execution_modes": _self_opt_counter_rows(execution_modes),
+            "data_available": bool(models or backends or execution_modes),
+        },
+        "cache": {
+            "entry_count": cache_entry_count,
+            "by_tool": dict(sorted((str(k), int(v)) for k, v in cache_tools.items())),
+            "observed_cache_hit_count": totals["cache_hit_count"],
+            "estimated_saved_seconds": cache_estimated_saved_seconds,
+            "estimated_saved_tokens": cache_entry_count * 250,
+            "data_available": cache_entry_count > 0 or totals["cache_hit_count"] > 0,
+        },
+        "compression": {
+            "compressed_observation_count": totals["compressed_observation_count"],
+            "omitted_signal_count": totals["omitted_signal_count"],
+            "estimated_saved_tokens": totals["compression_estimated_saved_tokens"],
+            "data_available": totals["compressed_observation_count"] > 0,
+        },
+        "throughput": {
+            "issues_touched": sorted(issue_refs),
+            "prs_touched": sorted(pr_refs),
+            "workflows_touched": sorted(workflow_refs),
+            "issue_count": len(issue_refs),
+            "pr_count": len(pr_refs),
+            "workflow_count": len(workflow_refs),
+            "commit_count": totals["commit_count"],
+            "attribution_rate": round(attribution_rate, 4),
+        },
+        "failures": {
+            "failed_or_noisy_count": totals["failed_or_noisy_count"],
+            "reasons": _self_opt_counter_rows(failure_reasons),
+        },
+        "estimation_basis": {
+            "baseline_seconds_by_tool": SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL,
+            "default_untraced_spent_seconds": 4.0,
+            "cache_entry_saved_seconds": 10.0,
+            "cache_entry_saved_tokens": 250,
+            "token_estimates": "Uses explicit local token fields when present; otherwise only compression/cache estimates are counted.",
+        },
+    }
+
+
+def _self_opt_recommendation_key(category: str, title: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", f"{category}-{title}".lower()).strip("-")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"{normalized[:80]}-{digest}"
+
+
+def _self_opt_candidate(
+    category: str,
+    title: str,
+    rationale: str,
+    evidence: dict[str, Any],
+    action: str,
+    *,
+    estimated_saved_seconds: float = 0.0,
+    estimated_saved_tokens: int = 0,
+) -> dict[str, Any]:
+    duplicate_key = _self_opt_recommendation_key(category, title)
+    return {
+        "id": f"self-opt-{hashlib.sha256(duplicate_key.encode('utf-8')).hexdigest()[:10]}",
+        "duplicate_key": duplicate_key,
+        "category": category,
+        "title": title,
+        "rationale": rationale,
+        "evidence": evidence,
+        "recommended_action": action,
+        "estimated_impact": {
+            "saved_seconds": round(float(estimated_saved_seconds), 3),
+            "saved_tokens": int(estimated_saved_tokens),
+        },
+        "suppressed": False,
+        "duplicate_of": "",
+    }
+
+
+def _self_opt_existing_recommendations() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    payload = _json_file_load(SELF_OPTIMIZATION_RECOMMENDATION_INDEX_FILE, {"recommendations": []})
+    if isinstance(payload, dict) and isinstance(payload.get("recommendations"), list):
+        rows.extend(item for item in payload["recommendations"] if isinstance(item, dict))
+    reports_dir = _resolve_repo_path(str(REPORTS_DIR))
+    if reports_dir.exists():
+        for path in sorted(reports_dir.glob("self-optimization-report-*.json"))[-20:]:
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(report, dict) and isinstance(report.get("optimization_candidates"), list):
+                rows.extend(item for item in report["optimization_candidates"] if isinstance(item, dict))
+    return rows
+
+
+def _self_opt_suppress_duplicate_recommendations(
+    candidates: list[dict[str, Any]],
+    existing_recommendations: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    existing_recommendations = existing_recommendations if existing_recommendations is not None else _self_opt_existing_recommendations()
+    seen: dict[str, str] = {}
+    for row in existing_recommendations:
+        key = str(row.get("duplicate_key", ""))
+        if key:
+            seen[key] = str(row.get("id") or row.get("title") or "existing_recommendation")
+    out: list[dict[str, Any]] = []
+    for candidate in candidates:
+        copied = dict(candidate)
+        key = str(copied.get("duplicate_key") or _self_opt_recommendation_key(str(copied.get("category", "")), str(copied.get("title", ""))))
+        copied["duplicate_key"] = key
+        if key in seen:
+            copied["suppressed"] = True
+            copied["duplicate_of"] = seen[key]
+        else:
+            copied["suppressed"] = False
+            copied["duplicate_of"] = ""
+            seen[key] = str(copied.get("id") or copied.get("title") or key)
+        out.append(copied)
+    return out
+
+
+def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    totals = metrics.get("totals", {}) if isinstance(metrics.get("totals"), dict) else {}
+    throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
+    cache = metrics.get("cache", {}) if isinstance(metrics.get("cache"), dict) else {}
+    compression = metrics.get("compression", {}) if isinstance(metrics.get("compression"), dict) else {}
+    failures = metrics.get("failures", {}) if isinstance(metrics.get("failures"), dict) else {}
+    candidates: list[dict[str, Any]] = []
+    failed_or_noisy = int(totals.get("failed_or_noisy_count", 0) or 0)
+    if failed_or_noisy:
+        candidates.append(
+            _self_opt_candidate(
+                "workflow-reliability",
+                "Investigate repeated failed or noisy MCP runs",
+                "Failed/noisy tool runs create rework and inflate token spend before issue handoff.",
+                {"failed_or_noisy_count": failed_or_noisy, "top_reasons": failures.get("reasons", [])[:3]},
+                "Create or update a focused optimization issue for the top repeated failure category before adding new workflow features.",
+                estimated_saved_seconds=float(totals.get("estimated_spent_seconds", 0) or 0) * 0.2,
+            )
+        )
+    tool_call_count = int(totals.get("tool_call_count", 0) or 0)
+    cache_hits = int(cache.get("observed_cache_hit_count", 0) or 0)
+    if tool_call_count >= 3 and cache_hits == 0:
+        candidates.append(
+            _self_opt_candidate(
+                "cache-reuse",
+                "Reuse cache or index artifacts for repeated inspection",
+                "Recent MCP usage shows repeated tool calls without observed cache hits.",
+                {"tool_call_count": tool_call_count, "cache_entry_count": cache.get("entry_count", 0)},
+                "Prefer fresh `test_impact_map`, symbol/dependency cache, and result handles before rerunning broad search/read workflows.",
+                estimated_saved_seconds=float(cache.get("estimated_saved_seconds", 0) or 0),
+                estimated_saved_tokens=int(cache.get("estimated_saved_tokens", 0) or 0),
+            )
+        )
+    if int(totals.get("verbose_tool_call_count", 0) or 0) > 0 and int(compression.get("compressed_observation_count", 0) or 0) == 0:
+        candidates.append(
+            _self_opt_candidate(
+                "token-compression",
+                "Use compressed observations for verbose MCP outputs",
+                "Verbose report/search tools ran without local compressed-observation evidence.",
+                {"verbose_tool_call_count": totals.get("verbose_tool_call_count", 0)},
+                "Enable `compressed_observation=true` on supported verbose tools and keep raw artifacts behind repo-local resource links.",
+                estimated_saved_tokens=max(0, int(totals.get("tool_call_count", 0) or 0) * 120),
+            )
+        )
+    if int(totals.get("total_tokens", 0) or 0) == 0:
+        candidates.append(
+            _self_opt_candidate(
+                "telemetry-coverage",
+                "Record token and model routing fields in redacted local telemetry",
+                "No explicit token usage was available in the selected window, so savings are only estimated.",
+                {"trace_span_count": totals.get("trace_span_count", 0), "total_tokens": 0},
+                "Populate local span attributes for prompt/completion/total tokens, model, backend, and cache status without storing prompts or raw traces.",
+            )
+        )
+    if float(throughput.get("attribution_rate", 0.0) or 0.0) < 0.75 and tool_call_count:
+        candidates.append(
+            _self_opt_candidate(
+                "throughput-attribution",
+                "Attach issue and PR identifiers to MCP task prompts",
+                "Low attribution makes it harder to connect MCP usage to issue/PR throughput.",
+                {"attribution_rate": throughput.get("attribution_rate", 0.0), "tool_call_count": tool_call_count},
+                "Include `issue #N`, `PR #N`, or workflow names in task memory and audit-safe arguments for software-team work.",
+            )
+        )
+    trace_source = sources.get("traces", {}) if isinstance(sources.get("traces"), dict) else {}
+    if not trace_source.get("exists"):
+        candidates.append(
+            _self_opt_candidate(
+                "timing-coverage",
+                "Enable redacted local OTel spans for timing analysis",
+                "Trace spans were absent, so elapsed/spent time relies on conservative baseline estimates.",
+                {"trace_source_exists": False},
+                "Use `MCP_OTEL_TRACING_ENABLED=true` with the local JSONL exporter when measuring workflow throughput.",
+            )
+        )
+    return _self_opt_suppress_duplicate_recommendations(candidates[: max(0, limit)])
+
+
+def _self_opt_bottlenecks(metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    bottlenecks: list[dict[str, Any]] = []
+    failures = metrics.get("failures", {}) if isinstance(metrics.get("failures"), dict) else {}
+    for row in failures.get("reasons", [])[:5] if isinstance(failures.get("reasons"), list) else []:
+        bottlenecks.append(
+            {
+                "type": "failure_or_noisy_run",
+                "name": row.get("name", "unspecified"),
+                "count": row.get("count", 0),
+                "suggestion": "Inspect the repeated failure category and add a focused regression or workflow guard.",
+            }
+        )
+    slow_tools = [row for row in metrics.get("by_tool", []) if isinstance(row, dict) and float(row.get("estimated_spent_seconds", 0) or 0) >= 30]
+    for row in slow_tools[:3]:
+        bottlenecks.append(
+            {
+                "type": "high_spend_tool",
+                "name": row.get("name", "unknown"),
+                "estimated_spent_seconds": row.get("estimated_spent_seconds", 0),
+                "suggestion": "Check whether a narrower query, cache, or compressed observation can replace repeated broad calls.",
+            }
+        )
+    return bottlenecks
+
+
+def _self_opt_summary(metrics: dict[str, Any]) -> dict[str, Any]:
+    totals = metrics.get("totals", {}) if isinstance(metrics.get("totals"), dict) else {}
+    throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
+    return {
+        "headline": (
+            f"Observed {totals.get('tool_call_count', 0)} MCP/tool record(s), "
+            f"{throughput.get('issue_count', 0)} issue(s), {throughput.get('pr_count', 0)} PR(s), "
+            f"and {totals.get('failed_or_noisy_count', 0)} failed/noisy run(s)."
+        ),
+        "estimated_spent_seconds": totals.get("estimated_spent_seconds", 0),
+        "estimated_saved_seconds": totals.get("estimated_saved_seconds", 0),
+        "estimated_saved_tokens": totals.get("estimated_saved_tokens", 0),
+        "success_rate": totals.get("success_rate", 1.0),
+        "attribution_rate": totals.get("attribution_rate", 0.0),
+    }
+
+
+def _self_opt_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
+
+def _self_opt_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    metrics = report.get("metrics", {}) if isinstance(report.get("metrics"), dict) else {}
+    throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
+    candidates = report.get("optimization_candidates", []) if isinstance(report.get("optimization_candidates"), list) else []
+    lines = [
+        f"# Self-optimization report `{report.get('report_id', '')}`",
+        "",
+        str(summary.get("headline", "")),
+        "",
+        "## Window",
+        "",
+        f"- Start: `{report.get('window', {}).get('start_time', '') if isinstance(report.get('window'), dict) else ''}`",
+        f"- End: `{report.get('window', {}).get('end_time', '') if isinstance(report.get('window'), dict) else ''}`",
+        "",
+        "## Throughput",
+        "",
+        f"- Issues touched: {', '.join(throughput.get('issues_touched', []) or []) or 'none observed'}",
+        f"- PRs touched: {', '.join(throughput.get('prs_touched', []) or []) or 'none observed'}",
+        f"- Workflows touched: {', '.join(throughput.get('workflows_touched', []) or []) or 'none observed'}",
+        "",
+        "## Optimization candidates",
+        "",
+    ]
+    if candidates:
+        for item in candidates:
+            status = "suppressed duplicate" if item.get("suppressed") else "new"
+            lines.append(f"- **{item.get('title', '')}** ({status}): {item.get('recommended_action', '')}")
+    else:
+        lines.append("- No candidates generated for this window.")
+    lines.extend(
+        [
+            "",
+            "## Privacy",
+            "",
+            "This report is generated from repo-local, redacted summaries and does not embed raw traces, prompts, secrets, or absolute host paths.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _write_self_opt_report_exports(report: dict[str, Any]) -> dict[str, str]:
+    paths = _self_opt_report_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(_self_opt_markdown(report), encoding="utf-8")
+    return {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+
+
+def _self_optimization_report_impl(
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    export: bool = False,
+    recommendation_limit: int = 10,
+    include_git: bool = True,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    redact_terms: list[str] | None = None,
+) -> dict[str, Any]:
+    _ensure_repo_path_exists()
+    if recommendation_limit < 0 or recommendation_limit > 50:
+        raise ValueError("recommendation_limit must be between 0 and 50")
+    start_dt, end_dt = _self_opt_parse_window(start_time, end_time, window_hours)
+    redaction_terms = _self_opt_default_redact_terms(redact_terms)
+    records: list[dict[str, Any]] = []
+    sources: dict[str, Any] = {
+        "network": {"used": False, "policy": "repo-local/offline only; no GitHub/API/network calls are made"},
+    }
+
+    if include_audit:
+        audit_events, audit_meta = _load_audit_events(start_dt, end_dt)
+        records.extend(_self_opt_normalize_audit_event(event, redaction_terms) for event in audit_events)
+        sources["audit"] = _self_opt_public_source_meta(audit_meta)
+    else:
+        sources["audit"] = {"enabled": False}
+
+    if include_traces:
+        span_rows, span_meta = _self_opt_load_jsonl_records(MCP_OTEL_SPANS_FILE, start_dt, end_dt)
+        records.extend(_self_opt_normalize_span(span, redaction_terms) for span in span_rows)
+        sources["traces"] = _self_opt_public_source_meta(span_meta)
+    else:
+        sources["traces"] = {"enabled": False}
+
+    task_records, task_meta = _self_opt_load_task_records(start_dt, end_dt, redaction_terms)
+    records.extend(task_records)
+    sources["tasks"] = _self_opt_public_source_meta(task_meta)
+
+    if include_git:
+        git_records, git_meta = _self_opt_git_commit_records(start_dt, end_dt, redaction_terms)
+        records.extend(git_records)
+        sources["git"] = git_meta
+    else:
+        sources["git"] = {"enabled": False, "network_used": False}
+
+    try:
+        cache_stats = _cache_stats()
+        sources["cache"] = {"readable": True, **cache_stats}
+    except Exception as exc:
+        cache_stats = {"total_entries": 0, "tools": {}}
+        sources["cache"] = {"readable": False, "reason": exc.__class__.__name__}
+
+    metrics = _self_opt_aggregate_records(records, cache_stats)
+    generated_at = _now_iso()
+    report_seed = json.dumps(
+        {
+            "start": start_dt.isoformat(),
+            "end": end_dt.isoformat(),
+            "metrics": metrics.get("totals", {}),
+            "sources": {key: value for key, value in sources.items() if key != "network"},
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+        default=str,
+    )
+    report_id = f"self-optimization-report-{_now_stamp()}-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}"
+    report: dict[str, Any] = {
+        "schema": SELF_OPTIMIZATION_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "window": {
+            "start_time": start_dt.isoformat(),
+            "end_time": end_dt.isoformat(),
+            "window_hours": round((end_dt - start_dt).total_seconds() / 3600.0, 3),
+        },
+        "summary": _self_opt_summary(metrics),
+        "metrics": metrics,
+        "sources": sources,
+        "bottlenecks": _self_opt_bottlenecks(metrics),
+        "optimization_candidates": [],
+        "usage_guidance": {
+            "direct_tool": "self_optimization_report",
+            "when_to_run": [
+                "after a batch of issue/PR work",
+                "after noisy or failed MCP workflows",
+                "before creating optimization issues for the software team",
+            ],
+            "recommended_call": "self_optimization_report(window_hours=168, export=true)",
+            "issue_creation_policy": "Use unsuppressed candidates as issue drafts only after checking project priorities; this tool does not create network issues.",
+        },
+        "security": {
+            "offline_capable": True,
+            "network_used": False,
+            "repo_boundary_enforced": True,
+            "redaction_applied": True,
+            "raw_traces_exposed": False,
+            "raw_prompts_exposed": False,
+            "records_secrets": False,
+            "sensitive_names_redacted": True,
+        },
+        "exports": {},
+        "resource_links": [],
+    }
+    report["optimization_candidates"] = _self_opt_build_recommendations(metrics, report["sources"], recommendation_limit)
+    report = _self_opt_redact_value(report, redaction_terms)
+    if export:
+        exports = _write_self_opt_report_exports(report)
+        report["exports"] = exports
+        links = [
+            _artifact_resource_link(
+                title="Self-optimization report JSON",
+                rel_path=exports["json"],
+                mime_type="application/json",
+                created_at=generated_at,
+                redacted=True,
+                safety_note="JSON export contains redacted aggregate metrics and recommendation metadata only.",
+            ),
+            _artifact_resource_link(
+                title="Self-optimization report Markdown",
+                rel_path=exports["markdown"],
+                mime_type="text/markdown",
+                created_at=generated_at,
+                redacted=True,
+                safety_note="Markdown export is generated from redacted aggregate report fields.",
+            ),
+        ]
+        for link in links:
+            if isinstance(link.get("path"), str):
+                path = _resolve_repo_path(str(link["path"]))
+                if path.exists():
+                    link["size_bytes"] = path.stat().st_size
+        report["resource_links"] = links
+        report["_meta"] = _artifact_meta(links)
+        # Rewrite exports after resource links/_meta are known.
+        _write_self_opt_report_exports(report)
+    else:
+        report["_meta"] = _artifact_meta([])
+    return report
+
 
 
 
@@ -17287,6 +18556,49 @@ def _governance_report_impl(
                 lineage_manifest=lineage_rel,
             )
     return report
+
+
+@mcp.tool()
+def self_optimization_report(
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    export: bool = False,
+    recommendation_limit: int = 10,
+    include_git: bool = True,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    redact_terms: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build a repo-local efficiency report for MCP usage, token savings, throughput, bottlenecks, and optimization candidates."""
+    arguments = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "window_hours": window_hours,
+        "export": export,
+        "recommendation_limit": recommendation_limit,
+        "include_git": include_git,
+        "include_audit": include_audit,
+        "include_traces": include_traces,
+        "redact_terms": redact_terms or [],
+    }
+    with _otel_span(
+        "mcp.tool.self_optimization_report",
+        _otel_tool_attributes("self_optimization_report", arguments),
+    ) as span:
+        result = _self_optimization_report_impl(
+            start_time=start_time,
+            end_time=end_time,
+            window_hours=window_hours,
+            export=export,
+            recommendation_limit=recommendation_limit,
+            include_git=include_git,
+            include_audit=include_audit,
+            include_traces=include_traces,
+            redact_terms=redact_terms,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 @mcp.tool()

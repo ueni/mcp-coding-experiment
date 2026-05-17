@@ -36,6 +36,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "clarification_gate",
                 "release_readiness",
                 "governance_report",
+                "self_optimization_report",
                 "artifact_provenance",
                 "workflow_diagnostics",
                 "workflow_lineage",
