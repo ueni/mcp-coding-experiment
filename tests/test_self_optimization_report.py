@@ -334,8 +334,8 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
 
         self.server.ALLOW_MUTATIONS = False
         try:
-            with self.assertRaises(PermissionError):
-                self.server.self_optimization_report(
+            try:
+                blocked_apply = self.server.self_optimization_report(
                     start_time="2026-05-10T00:00:00+00:00",
                     end_time="2026-05-11T00:00:00+00:00",
                     export=False,
@@ -344,8 +344,15 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
                     github_issue_update_mode="apply",
                     github_repository="owner/repo",
                 )
+            except PermissionError:
+                blocked_apply = None
         finally:
             self.server.ALLOW_MUTATIONS = True
+        if blocked_apply is not None:
+            self.assertEqual(blocked_apply["github_issue_gate"]["status"], "blocked")
+            self.assertTrue(
+                any(action.get("reason") == "mutations_disabled" for action in blocked_apply["github_issue_gate"]["blocked_actions"])
+            )
 
         existing_title = "Record token and model routing fields in redacted local telemetry"
         deduped = self.server.self_optimization_report(
@@ -390,6 +397,80 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         self.assertTrue(local_candidate["suppressed"])
         self.assertEqual(local_candidate["duplicate_of"], "#124")
         self.assertEqual(local_deduped["sources"]["github_issues"]["status"], "local_index")
+
+    def test_github_issue_apply_uses_explicit_token_and_fake_network(self):
+        self._write_jsonl(
+            ".codebase-tooling-mcp/audit/security_events.jsonl",
+            [
+                {
+                    "timestamp": "2026-05-10T10:00:00+00:00",
+                    "tool_name": "command_runner",
+                    "categories": ["shell/process"],
+                    "success": False,
+                    "reason": "timeout noisy log",
+                    "arguments": {"issue_number": 90, "pr_number": 12},
+                }
+            ],
+        )
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        calls = []
+        original_urlopen = self.server._urlopen_with_host_certs
+        original_token = os.environ.get("SELF_OPT_TEST_GITHUB_TOKEN")
+
+        def fake_urlopen(request, timeout=0):
+            calls.append(
+                {
+                    "url": request.full_url,
+                    "method": request.get_method(),
+                    "payload": json.loads(request.data.decode("utf-8")),
+                    "timeout": timeout,
+                }
+            )
+            return FakeResponse({"html_url": "https://github.com/owner/repo/issues/456"})
+
+        try:
+            os.environ["SELF_OPT_TEST_GITHUB_TOKEN"] = "test-token-value"
+            self.server._urlopen_with_host_certs = fake_urlopen
+            report = self.server.self_optimization_report(
+                start_time="2026-05-10T00:00:00+00:00",
+                end_time="2026-05-11T00:00:00+00:00",
+                export=False,
+                include_git=False,
+                include_traces=False,
+                github_issue_update_mode="apply",
+                github_repository="owner/repo",
+                github_token_env="SELF_OPT_TEST_GITHUB_TOKEN",
+                recommendation_limit=3,
+            )
+        finally:
+            self.server._urlopen_with_host_certs = original_urlopen
+            if original_token is None:
+                os.environ.pop("SELF_OPT_TEST_GITHUB_TOKEN", None)
+            else:
+                os.environ["SELF_OPT_TEST_GITHUB_TOKEN"] = original_token
+
+        self.assertTrue(report["security"]["network_used"])
+        self.assertTrue(report["github_issue_gate"]["network_used"])
+        self.assertTrue(calls)
+        self.assertTrue(any(call["url"].endswith("/repos/owner/repo/issues") for call in calls))
+        self.assertTrue(all(call["method"] == "POST" for call in calls))
+        self.assertTrue(any("Duplicate key" in call["payload"]["body"] for call in calls))
+        self.assertNotIn("test-token-value", json.dumps(report, sort_keys=True))
+        self.assertIn("#90", report["metrics"]["throughput"]["issues_touched"])
+        self.assertIn("#12", report["metrics"]["throughput"]["prs_touched"])
 
     def test_report_output_is_stable_except_generated_metadata(self):
         self._write_sample_usage_fixtures()
