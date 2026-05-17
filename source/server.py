@@ -219,6 +219,9 @@ TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.js
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
 POLICY_INSIGHTS_FILE = Path("source/policy_insights.json")
+DEPENDENCY_LOCK_MANIFEST_SCHEMA = "codebase_tooling_mcp.dependency_locks.v1"
+DEPENDENCY_LOCK_STATUS_SCHEMA = "dependency_locks.runtime.v1"
+DEPENDENCY_LOCK_MANIFEST_FILE = "dependency-locks.json"
 # Keep the external MCP contract focused: task_router remains the normal entrypoint,
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
@@ -8083,6 +8086,107 @@ def _probe_http(url: str, timeout: float = 2.0) -> dict[str, Any]:
     return result
 
 
+def _sha256_file_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _dependency_lock_manifest_candidates() -> list[Path]:
+    module_dir = Path(__file__).resolve().parent
+    return [
+        module_dir / DEPENDENCY_LOCK_MANIFEST_FILE,
+        module_dir / "source" / DEPENDENCY_LOCK_MANIFEST_FILE,
+        module_dir.parent / "source" / DEPENDENCY_LOCK_MANIFEST_FILE,
+    ]
+
+
+def _resolve_dependency_lock_artifact(manifest_path: Path, recorded_path: str) -> Path:
+    recorded = Path(recorded_path)
+    candidates = [
+        manifest_path.parent / recorded.name,
+        manifest_path.parent / recorded,
+        Path.cwd() / recorded,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
+def _dependency_lock_status() -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "schema": DEPENDENCY_LOCK_STATUS_SCHEMA,
+        "mode": os.getenv("MCP_LOCKED_DEPS_MODE", "unknown").strip() or "unknown",
+        "ok": False,
+        "manifest": None,
+        "manifest_digest": "",
+        "generated_at": "",
+        "sections": {},
+    }
+    manifest_path = next(
+        (path for path in _dependency_lock_manifest_candidates() if path.is_file()),
+        None,
+    )
+    if manifest_path is None:
+        status["error"] = "dependency lock manifest is not present"
+        return status
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema") != DEPENDENCY_LOCK_MANIFEST_SCHEMA:
+            raise ValueError("unexpected dependency lock manifest schema")
+        sections = manifest.get("sections")
+        if not isinstance(sections, dict):
+            raise ValueError("dependency lock manifest sections must be an object")
+        status.update(
+            {
+                "manifest": manifest_path.name,
+                "manifest_digest": _sha256_file_digest(manifest_path),
+                "generated_at": str(manifest.get("generated_at", "")),
+            }
+        )
+        section_status: dict[str, Any] = {}
+        ok = True
+        for name, section in sorted(sections.items()):
+            errors: list[str] = []
+            if not isinstance(section, dict):
+                section_status[str(name)] = {"ok": False, "errors": ["invalid section"]}
+                ok = False
+                continue
+            input_path = _resolve_dependency_lock_artifact(
+                manifest_path,
+                str(section.get("input", "")),
+            )
+            lock_path = _resolve_dependency_lock_artifact(
+                manifest_path,
+                str(section.get("lock", "")),
+            )
+            input_digest = _sha256_file_digest(input_path) if input_path.is_file() else "missing"
+            lock_digest = _sha256_file_digest(lock_path) if lock_path.is_file() else "missing"
+            if input_digest != section.get("input_digest"):
+                errors.append("input_digest_mismatch")
+            if lock_digest != section.get("lock_digest"):
+                errors.append("lock_digest_mismatch")
+            section_ok = not errors
+            ok = ok and section_ok
+            section_status[str(name)] = {
+                "ok": section_ok,
+                "input": str(section.get("input", "")),
+                "lock": str(section.get("lock", "")),
+                "input_digest": input_digest,
+                "lock_digest": lock_digest,
+                "content_digest": str(section.get("content_digest", "")),
+                "package_count": int(section.get("package_count", 0) or 0),
+                "hash_count": int(section.get("hash_count", 0) or 0),
+                "optional": bool(section.get("optional", False)),
+                "errors": errors,
+            }
+        status["sections"] = section_status
+        status["ok"] = ok
+    except Exception as exc:
+        status["error"] = str(exc)
+    return status
+
+
 def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
     listening_ports = _list_listening_ports()
     http_mode = MCP_TRANSPORT in {"http", "streamable-http", "streamable_http"}
@@ -8125,6 +8229,7 @@ def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
             "tags_probe": ollama_probe,
         },
         "docker": _docker_cli_status(),
+        "dependency_locks": _dependency_lock_status(),
     }
 
 
@@ -15830,6 +15935,7 @@ def self_test(
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
 
+    dependency_locks = _dependency_lock_status()
     out_cap = _token_budget_apply_max(None)
     target_raw = target.strip()
     force_repo_target = target_raw.startswith("repo:")
@@ -15912,6 +16018,7 @@ def self_test(
             "command": cmd,
             "stdout": "",
             "stderr": str(exc),
+            "dependency_locks": dependency_locks,
         }
     except subprocess.TimeoutExpired as exc:
         stdout = exc.output if isinstance(exc.output, str) else getattr(exc, "stdout", "") or ""
@@ -15935,6 +16042,7 @@ def self_test(
             "command": cmd,
             "stdout": _trim_text(stdout, max_chars=out_cap),
             "stderr": _trim_text(stderr, max_chars=out_cap),
+            "dependency_locks": dependency_locks,
         }
 
     if proc.returncode != 0:
@@ -15951,12 +16059,13 @@ def self_test(
         "target": target,
         "resolved_target": resolved_target,
         "execution_root": execution_root,
-        "ok": proc.returncode == 0,
+        "ok": proc.returncode == 0 and bool(dependency_locks.get("ok", False)),
         "timeout": False,
         "exit_code": proc.returncode,
         "command": cmd,
         "stdout": _trim_text(proc.stdout, max_chars=out_cap),
         "stderr": _trim_text(proc.stderr, max_chars=out_cap),
+        "dependency_locks": dependency_locks,
     }
 
 
