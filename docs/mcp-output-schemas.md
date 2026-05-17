@@ -21,6 +21,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `policy_simulator`
 - `clarification_gate`
 - `release_readiness`
+- `dependency_security_report`
 - `governance_report`
 - `self_optimization_report`
 - `artifact_provenance`
@@ -112,6 +113,8 @@ Example client response excerpt for `governance_report(export=true)`:
 
 `state_snapshot` uses the same contract for the repository-local snapshot index and, when a stash-backed rollback object exists, adds a `git-ref://refs/mcp-snapshots/...` rollback pointer without embedding snapshot contents. These links are intended to become task artifact references in future async task work, but this contract does not add async task behavior.
 
+`dependency_security_report(export=true)` writes a JSON dependency security report and, by default, a CycloneDX-compatible SBOM JSON artifact under `.codebase-tooling-mcp/reports/`; both use `artifact_resource_link.v1` links and local provenance sidecars. The report status is one of `clean`, `vulnerable`, `skipped`, `stale-cache`, `network-disabled`, or `scanner-unavailable`, so clients can distinguish "not checked" from "no vulnerabilities matched".
+
 `governance_report(export=true)` and `state_snapshot` also write local `mcp_artifact_provenance.v1` sidecars next to their generated artifacts. `governance_report(export=true)` additionally writes a redacted `workflow_lineage.v1` manifest and links it from the report/provenance metadata. `self_optimization_report(export=true)` writes redacted JSON/Markdown efficiency reports under `.codebase-tooling-mcp/reports/` with the same artifact resource-link shape but does not persist raw traces or prompts. The read-only `artifact_provenance` helper verifies artifact presence, sidecar presence, SHA-256 digest match, schema match, freshness, and optional `mcp_artifact_attestation.v1` status without mutating artifacts. Unsigned sidecars report `unsigned` / `local-only`; `local-dsse-fixture` verifies deterministic inline DSSE fixture envelopes with no network access. The opt-in `github-artifact-attestations` backend uses the same stable attestation fields (`backend`, `subject_digest`, `signer_identity`, `bundle_ref`/`envelope_ref`, and `verification.status`) plus policy data under `signing.verification`: `enabled`, `mode`, `trusted_root_ref`, expected owner/repo, workflow path or name, ref or commit, and predicate type. It is offline by default and verifies caller-provided bundle/trusted-root files for the artifact digest; online verification requires explicit enablement and reports `network_access=true` only when network verification is attempted. Disabled/missing prerequisites produce `unavailable`, mismatched digest/repo/workflow/ref/commit/predicate evidence produces `invalid`, and unknown future backends such as Sigstore/cosign remain `unsupported`. Results redact tokens, unnecessary bundle internals, artifact contents, and host absolute paths. The read-only `workflow_lineage(mode="verify")` helper verifies deterministic governance-report plan identity and observed artifact digests without mutating artifacts; its `status` is one of `matched`, `input_changed`, or `artifact_changed`, with `non_deterministic_node` listed in `conditions` when a node is intentionally observed-only.
 
 ## Error shape
@@ -149,6 +152,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
+| `dependency_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `components`, `vulnerabilities`, `advisory`, `gate`, `exports`, `resource_links` | `inputs`, skipped/unresolved details, warnings, local provenance sidecars, and SBOM export metadata |
 | `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
 | `self_optimization_report` | `schema`, `report_id`, `generated_at`, `window`, `summary`, `metrics`, `optimization_candidates`, `security` | `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `_meta` |
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
