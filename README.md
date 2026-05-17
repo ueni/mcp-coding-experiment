@@ -214,20 +214,29 @@ package metadata, wheels, VSIX archives, the Ollama binary archive, and
 preloaded model blobs. Download cache mounts use stable explicit IDs, including
 `codebase-tooling-apt-cache` for `/var/cache/apt`,
 `codebase-tooling-apt-lists` for `/var/lib/apt/lists`,
-`codebase-tooling-pip` for `/var/cache/buildkit/pip`, and
+`codebase-tooling-build-downloads` for standalone build artifacts,
+`codebase-tooling-pip` for `/var/cache/buildkit/pip`,
+`codebase-tooling-pip-wheelhouse` for requirements-digest keyed wheelhouses, and
 `codebase-tooling-vscode-vsix` for `/var/cache/buildkit/vscode-vsix`, so the
 cache namespace does not depend on the exact Dockerfile instruction text.
 Marketplace VS Code extensions are preloaded before repository defaults are
 copied, so edits under `source/defaults/` do not invalidate the network download
 layer. The build removes Debian slim's `/etc/apt/apt.conf.d/docker-clean` hook
 before installing packages so downloaded `.deb` archives can remain in the cache
-mount.
+mount. Pip installs go through cached wheelhouses and then run with
+`--no-index --find-links` so a warmed cache can be reused without contacting an
+index.
 Keep BuildKit enabled and use the same persistent builder/cache store when
 building this image or those cache mounts will be ignored or lost between builds.
 With `docker buildx` on ephemeral builders, persist the cache explicitly with
 matching import/export options, for example
 `--cache-to=type=local,dest=.buildx-cache,mode=max` and
-`--cache-from=type=local,src=.buildx-cache`.
+`--cache-from=type=local,src=.buildx-cache`. After a warm build, use
+`--build-arg MCP_BUILD_OFFLINE=true` to fail closed instead of downloading a
+missing resource; use `--build-arg MCP_REFRESH_BUILD_DOWNLOAD_CACHE=true` during
+an online build to refresh cached downloads intentionally. Run
+`python3 scripts/build_download_cache_check.py --compact` for the local/CI static
+cache-contract gate. See [Build download cache verification](./docs/build-download-cache.md).
 
 The default image keeps `LOCAL_EMBED_BACKEND=hash` and does not install the optional
 `sentence-transformers`/PyTorch stack, which is large and is not needed for the

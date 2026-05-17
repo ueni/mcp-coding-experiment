@@ -17,6 +17,7 @@ SPDX-License-Identifier: MIT
 - [MCP roots diagnostics](./roots-diagnostics.md) - read-only advisory diagnostics for client roots vs `REPO_PATH`.
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) - disabled-by-default, redacted local span records for MCP tool/workflow execution.
 - [Hash-pinned dependency locks](./dependency-locks.md) - checked-in pip hash locks, refresh/check tooling, and opt-in Docker locked installs.
+- [Build download cache verification](./build-download-cache.md) - stable BuildKit cache IDs, offline/no-network gates, and cache audit tooling for Docker builds.
 
 This index lists documentation ownership and status.
 
@@ -37,6 +38,7 @@ This index lists documentation ownership and status.
 - [MCP roots diagnostics](./roots-diagnostics.md) (`docs/roots-diagnostics.md`) - Status: `operational guidance`
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) (`docs/opentelemetry-tracing.md`) - Status: `prototype`
 - [Hash-pinned dependency locks](./dependency-locks.md) (`docs/dependency-locks.md`) - Status: `operational guidance`
+- [Build download cache verification](./build-download-cache.md) (`docs/build-download-cache.md`) - Status: `operational verification`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Agent execution modes](./execution-modes.md) (`docs/execution-modes.md`) - Status: `operational guidance`
 - Bootstrap instructions for external repositories live in `README.md` under `Bootstrap Another Repository`.
