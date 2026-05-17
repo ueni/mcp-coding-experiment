@@ -129,7 +129,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `dependency_security_report`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -224,6 +224,10 @@ Restore:
 - Missing header detection.
 - Optional remediation and report generation.
 
+### 8.1.1 Dependency Security Governance
+
+`dependency_security_report` adds a read-only dependency inventory and vulnerability-evidence slice alongside `license_monitor`. It consumes repository-local requirements, optional advisory fixtures, or externally generated scanner JSON, then exports JSON and CycloneDX-compatible SBOM artifacts with provenance sidecars. Offline and stale-advisory states are explicit (`network-disabled`, `scanner-unavailable`, `stale-cache`) so release/governance summaries do not mistake "not checked" for "clean". Blocking is opt-in through `MCP_DEPENDENCY_SECURITY_BLOCKING` or the tool call, keeping the first slice informational by default.
+
 ### 8.2 Release Governance
 
 `clarification_gate`, `release_readiness`, `required_tool_chain`, and `change_impact_gate` allow policy-gated release decisions based on:
@@ -231,6 +235,7 @@ Restore:
 - Testing outcomes, including selected tests from a fresh static impact map where available.
 - Documentation sync.
 - Security findings.
+- Dependency-security status from `dependency_security_report`, including vulnerable, stale, skipped, and network-disabled advisory states.
 - Risk score thresholds.
 - Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
 - First-slice replay lineage for `governance_report` via redacted `workflow_lineage.v1` manifests and read-only `workflow_lineage(mode="verify")` drift reports.
@@ -247,7 +252,7 @@ Restore:
 ### 9.1 Result Handles and Persistent Reports
 
 - `result_handle` enables referential linking of prior tool outputs.
-- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison. `governance_report` writes adjacent local provenance sidecars plus a `workflow_lineage.v1` manifest, `artifact_provenance` verifies report/snapshot sidecars read-only, and `workflow_lineage` verifies governance-report lineage drift read-only. `TEST_IMPACT_MAP.json` is the refreshable static Python test-impact report consumed by `test_impact_map` and preferred by `impact_tests` when fresh.
+- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison. `dependency_security_report` writes dependency-security JSON/SBOM artifacts with adjacent local provenance sidecars, `governance_report` writes adjacent local provenance sidecars plus a `workflow_lineage.v1` manifest, `artifact_provenance` verifies report/snapshot sidecars read-only, and `workflow_lineage` verifies governance-report lineage drift read-only. `TEST_IMPACT_MAP.json` is the refreshable static Python test-impact report consumed by `test_impact_map` and preferred by `impact_tests` when fresh.
 
 ### 9.2 Replay and Memory
 

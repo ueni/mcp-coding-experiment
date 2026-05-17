@@ -204,9 +204,11 @@ PROVENANCE_SCHEMA = "mcp_artifact_provenance.v1"
 PROVENANCE_SUFFIX = ".provenance.json"
 ATTESTATION_SCHEMA = "mcp_artifact_attestation.v1"
 ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE = "local-dsse-fixture"
+ATTESTATION_BACKEND_GITHUB_ARTIFACT_ATTESTATIONS = "github-artifact-attestations"
 ATTESTATION_PAYLOAD_TYPE = "application/vnd.codebase-tooling-mcp.artifact-attestation.v1+json"
 ATTESTATION_FIXTURE_KEY_ID = "local-dsse-fixture-v1"
 ATTESTATION_FIXTURE_SIGNER_IDENTITY = "local-fixture://codebase-tooling-mcp/offline-dsse-fixture"
+ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS = 30
 # Fixture-only verifier material. This is intentionally public/non-secret and is
 # not a production signing key; it exists only to make offline DSSE verification
 # deterministic in tests and local demos without network or transparency-log IO.
@@ -226,6 +228,12 @@ RESULT_STORE_FILE = Path(".codebase-tooling-mcp/cache/result_store.json")
 OUTPUT_BASELINE_FILE = Path(".codebase-tooling-mcp/reports/TOOL_OUTPUT_BASELINE.json")
 REUSE_SPDX_REPORT = Path(".codebase-tooling-mcp/reports/REUSE.spdx")
 REUSE_LINT_REPORT = Path(".codebase-tooling-mcp/reports/REUSE_LINT.txt")
+DEPENDENCY_SECURITY_REPORT_PREFIX = "dependency-security-report"
+DEPENDENCY_SECURITY_REPORT_SCHEMA = "dependency_security_report.v1"
+DEPENDENCY_SECURITY_SBOM_SCHEMA = "dependency_security_sbom.cyclonedx-lite.v1"
+DEPENDENCY_SECURITY_BLOCKING = os.getenv(
+    "MCP_DEPENDENCY_SECURITY_BLOCKING", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 GOLDEN_BASELINE_FILE = Path(".codebase-tooling-mcp/reports/TOOL_GOLDEN_BASELINE.json")
 FLAKY_HISTORY_FILE = Path(".codebase-tooling-mcp/reports/FLAKY_TEST_HISTORY.json")
 TEST_IMPACT_MAP_FILE = Path(".codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json")
@@ -326,6 +334,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "policy_simulator": {"categories": ["read-only"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
+    "dependency_security_report": {"categories": ["read-only"]},
     "governance_report": {"categories": ["read-only"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
@@ -2393,6 +2402,955 @@ def _latest_governance_report(max_age_hours: int = 24) -> dict[str, Any]:
     return latest or {"present": False, "required": False, "max_age_hours": max_age_hours}
 
 
+
+def _dependency_security_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {
+        "json": str(base.with_suffix(".json")),
+        "sbom": str(base.with_suffix(".sbom.cdx.json")),
+    }
+
+
+def _dependency_security_normalize_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name.strip().lower())
+
+
+DEPENDENCY_SECURITY_URL_VALUE_RE = re.compile(
+    r"\b(?:[A-Za-z][A-Za-z0-9+.-]*\+)?(?:https?|ssh|git|file)://[^\s'\"<>]+",
+    re.IGNORECASE,
+)
+DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE = re.compile(
+    r"(?<!\S)[^\s/@:]+:[^\s/@]+@[^\s]+"
+)
+DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE = re.compile(
+    r"(?<![A-Za-z0-9._~+%/-])"
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*\+)?"
+    r"(?:"
+    r"[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+(?::|/)[^\s'\"<>]+"
+    r"|(?:localhost|[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+)(?::|/)[^\s'\"<>]+"
+    r"|[A-Za-z0-9.-]+:/*[^\s'\"<>/]+/[^\s'\"<>]*?(?:\.git(?:[#?][^\s'\"<>]*)?|$)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _dependency_security_safe_requirement_input(requirement_text: str) -> str:
+    """Return a diagnostic requirement snippet without URLs, credentials, or host paths."""
+    text = requirement_text.strip()
+    if not text:
+        return ""
+
+    if text.startswith("-"):
+        option_name = text.split(maxsplit=1)[0].split("=", 1)[0]
+        if len(text) > len(option_name):
+            return f"{option_name} <redacted:option_value>"
+        return option_name
+
+    redacted = DEPENDENCY_SECURITY_URL_VALUE_RE.sub("<redacted:url>", text)
+    redacted = DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.sub("<redacted:credential>", redacted)
+    redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:credential>", redacted)
+    redacted = DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE.sub("<redacted:vcs_ref>", redacted)
+    redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute_path>", redacted)
+    return _trim_text(redacted, max_chars=200)
+
+
+def _dependency_security_safe_input_path(path_value: str) -> str:
+    if not path_value.strip():
+        return ""
+    if (
+        DEPENDENCY_SECURITY_URL_VALUE_RE.search(path_value)
+        or DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.search(path_value)
+        or DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE.search(path_value)
+        or SENSITIVE_AUDIT_VALUE_RE.search(path_value)
+    ):
+        return _dependency_security_safe_requirement_input(path_value)
+    if ABSOLUTE_PATH_VALUE_RE.search(path_value):
+        try:
+            return _dependency_security_rel_path(_resolve_repo_path(path_value))
+        except ValueError:
+            return _dependency_security_safe_requirement_input(path_value)
+    try:
+        return _dependency_security_rel_path(_resolve_repo_path(path_value))
+    except ValueError:
+        return _dependency_security_safe_requirement_input(path_value)
+
+
+def _dependency_security_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _dependency_security_rel_path(path: Path) -> str:
+    return str(path.resolve().relative_to(REPO_PATH))
+
+
+def _dependency_security_candidate_input_paths(path: str, requirements_paths: list[str] | None) -> list[str]:
+    if requirements_paths:
+        seen: set[str] = set()
+        selected: list[str] = []
+        for raw in requirements_paths:
+            rel = _dependency_security_rel_path(_resolve_repo_path(str(raw)))
+            if rel not in seen:
+                seen.add(rel)
+                selected.append(rel)
+        return selected
+
+    root = _resolve_repo_path(path)
+    candidates: list[Path] = []
+    if root.is_file():
+        candidates.append(root)
+    elif root.is_dir():
+        search_dirs = [root]
+        source_dir = root / "source"
+        if source_dir.is_dir():
+            search_dirs.append(source_dir)
+        for directory in search_dirs:
+            for pattern in ("requirements*.txt", "constraints*.txt"):
+                candidates.extend(sorted(directory.glob(pattern)))
+            pyproject = directory / "pyproject.toml"
+            if pyproject.is_file():
+                candidates.append(pyproject)
+    seen = set()
+    rels: list[str] = []
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            rel = _dependency_security_rel_path(candidate)
+        except ValueError:
+            continue
+        if rel not in seen:
+            seen.add(rel)
+            rels.append(rel)
+    return rels
+
+
+def _dependency_security_component(
+    *,
+    name: str,
+    version: str = "",
+    specifier: str = "",
+    source: str,
+    line: int = 0,
+    evidence: str = "declared_requirement",
+    marker: str = "",
+    extras: list[str] | None = None,
+    status: str | None = None,
+    skipped_reason: str = "",
+) -> dict[str, Any]:
+    normalized = _dependency_security_normalize_name(name)
+    resolved = bool(version)
+    component_status = status or ("resolved" if resolved else "skipped")
+    reason = skipped_reason or ("" if resolved else "version_unresolved")
+    row: dict[str, Any] = {
+        "name": name,
+        "normalized_name": normalized,
+        "version": version,
+        "specifier": specifier,
+        "source": source,
+        "line": line,
+        "evidence": evidence,
+        "status": component_status,
+    }
+    if marker:
+        row["marker"] = marker
+    if extras:
+        row["extras"] = sorted(str(item) for item in extras)
+    if reason:
+        row["skipped_reason"] = reason
+    return row
+
+
+def _dependency_security_parse_requirement_string(
+    requirement_text: str,
+    *,
+    source: str,
+    line: int = 0,
+    evidence: str = "declared_requirement",
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    text = requirement_text.strip()
+    if not text:
+        return None, None
+    try:
+        from packaging.requirements import InvalidRequirement, Requirement  # type: ignore
+    except Exception:  # pragma: no cover - fallback for very small runtimes
+        InvalidRequirement = ValueError  # type: ignore
+        Requirement = None  # type: ignore
+
+    if Requirement is not None:
+        try:
+            parsed = Requirement(text)
+            pinned_version = ""
+            for spec in parsed.specifier:
+                if spec.operator == "==" and "*" not in spec.version:
+                    pinned_version = spec.version
+                    break
+            return (
+                _dependency_security_component(
+                    name=parsed.name,
+                    version=pinned_version,
+                    specifier=str(parsed.specifier),
+                    source=source,
+                    line=line,
+                    evidence=evidence,
+                    marker=str(parsed.marker) if parsed.marker else "",
+                    extras=sorted(parsed.extras),
+                    skipped_reason="" if pinned_version else "unpinned_or_range_specifier",
+                ),
+                None,
+            )
+        except InvalidRequirement:
+            pass
+
+    match = re.match(r"^\s*([A-Za-z0-9_.-]+)\s*([<>=!~].*)?$", text)
+    if not match:
+        return None, {
+            "source": source,
+            "line": line,
+            "input": _dependency_security_safe_requirement_input(text),
+            "reason": "unsupported_requirement_syntax",
+        }
+    name = match.group(1)
+    specifier = (match.group(2) or "").strip()
+    pinned_match = re.search(r"(?:^|,)\s*==\s*([^,;\s]+)", specifier)
+    version = pinned_match.group(1) if pinned_match and "*" not in pinned_match.group(1) else ""
+    return (
+        _dependency_security_component(
+            name=name,
+            version=version,
+            specifier=specifier,
+            source=source,
+            line=line,
+            evidence=evidence,
+            skipped_reason="" if version else "unpinned_or_range_specifier",
+        ),
+        None,
+    )
+
+
+def _dependency_security_parse_requirements_file(
+    rel_path: str,
+    *,
+    seen: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    seen = seen or set()
+    rel = _dependency_security_rel_path(_resolve_repo_path(rel_path))
+    if rel in seen:
+        return [], []
+    seen.add(rel)
+    path = _resolve_repo_path(rel)
+    components: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return [], [{"source": rel, "line": 0, "reason": type(exc).__name__}]
+    for index, raw_line in enumerate(lines, start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith(("-r ", "--requirement ", "-c ", "--constraint ")):
+            include_name = line.split(maxsplit=1)[1].strip() if " " in line else ""
+            if not include_name:
+                skipped.append({"source": rel, "line": index, "reason": "empty_include"})
+                continue
+            try:
+                include_rel = _dependency_security_rel_path((path.parent / include_name).resolve())
+            except ValueError:
+                skipped.append({"source": rel, "line": index, "reason": "include_escapes_repo"})
+                continue
+            nested_components, nested_skipped = _dependency_security_parse_requirements_file(
+                include_rel,
+                seen=seen,
+            )
+            components.extend(nested_components)
+            skipped.extend(nested_skipped)
+            continue
+        if line.startswith("-e "):
+            line = line[3:].strip()
+        if line.startswith(("-", "git+", "http://", "https://", "file:")) or " @ " in line:
+            skipped.append(
+                {
+                    "source": rel,
+                    "line": index,
+                    "input": _dependency_security_safe_requirement_input(line),
+                    "reason": "non_pypi_or_option_requirement",
+                }
+            )
+            continue
+        component, skipped_row = _dependency_security_parse_requirement_string(
+            line,
+            source=rel,
+            line=index,
+        )
+        if component:
+            components.append(component)
+        if skipped_row:
+            skipped.append(skipped_row)
+    return components, skipped
+
+
+def _dependency_security_parse_pyproject(rel_path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rel = _dependency_security_rel_path(_resolve_repo_path(rel_path))
+    path = _resolve_repo_path(rel)
+    if tomllib is None:
+        return [], [{"source": rel, "line": 0, "reason": "tomllib_unavailable"}]
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [], [{"source": rel, "line": 0, "reason": type(exc).__name__}]
+    components: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    project = data.get("project", {}) if isinstance(data, dict) else {}
+    dep_groups: list[tuple[str, Any]] = []
+    if isinstance(project, dict):
+        dep_groups.append(("project.dependencies", project.get("dependencies", [])))
+        optional = project.get("optional-dependencies", {})
+        if isinstance(optional, dict):
+            for group, deps in optional.items():
+                dep_groups.append((f"project.optional-dependencies.{group}", deps))
+    poetry = data.get("tool", {}).get("poetry", {}) if isinstance(data.get("tool"), dict) else {}
+    if isinstance(poetry, dict):
+        dep_groups.append(("tool.poetry.dependencies", poetry.get("dependencies", {})))
+    for group_name, deps in dep_groups:
+        if isinstance(deps, dict):
+            iterable = []
+            for name, spec in deps.items():
+                if str(name).lower() == "python":
+                    continue
+                if isinstance(spec, str):
+                    iterable.append(f"{name}{spec if spec.startswith(('<', '>', '=', '!', '~')) else '==' + spec}")
+                else:
+                    iterable.append(str(name))
+        elif isinstance(deps, list):
+            iterable = [str(item) for item in deps]
+        else:
+            continue
+        for item in iterable:
+            component, skipped_row = _dependency_security_parse_requirement_string(
+                item,
+                source=f"{rel}:{group_name}",
+                evidence="pyproject_dependency",
+            )
+            if component:
+                components.append(component)
+            if skipped_row:
+                skipped.append(skipped_row)
+    return components, skipped
+
+
+def _dependency_security_collect_components(
+    *,
+    path: str,
+    requirements_paths: list[str] | None,
+    include_installed: bool,
+    max_installed: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    input_paths = _dependency_security_candidate_input_paths(path, requirements_paths)
+    components: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for rel in input_paths:
+        if rel.endswith(".toml") and Path(rel).name == "pyproject.toml":
+            parsed, skipped_rows = _dependency_security_parse_pyproject(rel)
+        else:
+            parsed, skipped_rows = _dependency_security_parse_requirements_file(rel)
+        components.extend(parsed)
+        skipped.extend(skipped_rows)
+    if include_installed:
+        try:
+            import importlib.metadata as importlib_metadata
+
+            installed = []
+            for dist in importlib_metadata.distributions():
+                name = dist.metadata.get("Name") or ""
+                if not name:
+                    continue
+                installed.append((name, dist.version or ""))
+            for name, version in sorted(installed, key=lambda item: _dependency_security_normalize_name(item[0]))[:max_installed]:
+                components.append(
+                    _dependency_security_component(
+                        name=name,
+                        version=version,
+                        source="installed_environment",
+                        evidence="installed_distribution",
+                    )
+                )
+        except Exception as exc:  # pragma: no cover - environment dependent
+            skipped.append({"source": "installed_environment", "line": 0, "reason": type(exc).__name__})
+    return components, skipped, input_paths
+
+
+def _dependency_security_advisory_from_raw(raw: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+    package_value = raw.get("package") or raw.get("name") or raw.get("package_name")
+    if isinstance(package_value, dict):
+        package_value = package_value.get("name")
+    if not package_value:
+        return None
+    fixed_versions = raw.get("fixed_versions", raw.get("fix_versions", []))
+    aliases = [str(item) for item in _dependency_security_list(raw.get("aliases")) if str(item)]
+    advisory_id = str(raw.get("id") or raw.get("vulnerability_id") or (aliases[0] if aliases else ""))
+    if not advisory_id:
+        advisory_id = f"advisory:{_dependency_security_normalize_name(str(package_value))}"
+    return {
+        "id": advisory_id,
+        "aliases": aliases,
+        "package": str(package_value),
+        "normalized_name": _dependency_security_normalize_name(str(package_value)),
+        "affected_versions": str(raw.get("affected_versions") or raw.get("specifier") or raw.get("affected_range") or ""),
+        "reported_version": str(raw.get("reported_version") or raw.get("version") or ""),
+        "fixed_versions": [str(item) for item in _dependency_security_list(fixed_versions) if str(item)],
+        "severity": str(raw.get("severity") or raw.get("cvss_severity") or "unknown").lower(),
+        "source": str(raw.get("source") or source),
+        "summary": str(raw.get("summary") or raw.get("description") or ""),
+        "url": str(raw.get("url") or raw.get("link") or ""),
+    }
+
+
+def _dependency_security_extract_fixture_advisories(
+    payload: Any,
+    *,
+    source: str,
+) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        raw_advisories = payload.get("advisories", [])
+        if not raw_advisories and payload.get("id") and payload.get("affected"):
+            raw_advisories = [payload]
+    elif isinstance(payload, list):
+        raw_advisories = payload
+    else:
+        raw_advisories = []
+    advisories: list[dict[str, Any]] = []
+    for raw in raw_advisories:
+        if not isinstance(raw, dict):
+            continue
+        if isinstance(raw.get("affected"), list) and raw.get("id"):
+            for affected in raw.get("affected", []):
+                if not isinstance(affected, dict):
+                    continue
+                package = affected.get("package", {}) if isinstance(affected.get("package"), dict) else {}
+                name = package.get("name") or affected.get("package_name")
+                if not name:
+                    continue
+                converted = dict(raw)
+                converted["package"] = name
+                events: list[str] = []
+                for range_row in affected.get("ranges", []) if isinstance(affected.get("ranges"), list) else []:
+                    if not isinstance(range_row, dict):
+                        continue
+                    introduced = ""
+                    fixed = ""
+                    for event in range_row.get("events", []) if isinstance(range_row.get("events"), list) else []:
+                        if not isinstance(event, dict):
+                            continue
+                        introduced = str(event.get("introduced") or introduced)
+                        fixed = str(event.get("fixed") or fixed)
+                    if introduced and introduced != "0":
+                        events.append(f">={introduced}")
+                    if fixed:
+                        events.append(f"<{fixed}")
+                        converted.setdefault("fixed_versions", [fixed])
+                converted["affected_versions"] = ",".join(events)
+                advisory = _dependency_security_advisory_from_raw(converted, source=source)
+                if advisory:
+                    advisories.append(advisory)
+            continue
+        advisory = _dependency_security_advisory_from_raw(raw, source=source)
+        if advisory:
+            advisories.append(advisory)
+    return advisories
+
+
+def _dependency_security_extract_pip_audit(
+    payload: Any,
+    *,
+    source: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    dependencies = payload.get("dependencies", []) if isinstance(payload, dict) else payload
+    if not isinstance(dependencies, list):
+        return [], []
+    components: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
+    for dep in dependencies:
+        if not isinstance(dep, dict):
+            continue
+        name = str(dep.get("name") or "")
+        if not name:
+            continue
+        version = str(dep.get("version") or "")
+        components.append(
+            _dependency_security_component(
+                name=name,
+                version=version,
+                source=source,
+                evidence="pip_audit_report",
+                skipped_reason="" if version else "version_unresolved",
+            )
+        )
+        vulns = dep.get("vulns", dep.get("vulnerabilities", []))
+        for vuln in vulns if isinstance(vulns, list) else []:
+            if not isinstance(vuln, dict):
+                continue
+            raw = {
+                "id": vuln.get("id") or vuln.get("vulnerability_id"),
+                "aliases": vuln.get("aliases", []),
+                "package": name,
+                "reported_version": version,
+                "fixed_versions": vuln.get("fix_versions", vuln.get("fixed_versions", [])),
+                "severity": vuln.get("severity", "unknown"),
+                "source": "pip-audit-json",
+                "summary": vuln.get("description") or vuln.get("summary") or "",
+                "url": vuln.get("url") or "",
+            }
+            advisory = _dependency_security_advisory_from_raw(raw, source=source)
+            if advisory:
+                advisories.append(advisory)
+    return components, advisories
+
+
+def _dependency_security_load_json(path_value: str, *, label: str) -> tuple[Any | None, dict[str, Any]]:
+    if not path_value.strip():
+        return None, {"path": "", "label": label, "loaded": False}
+    rel = _dependency_security_rel_path(_resolve_repo_path(path_value))
+    path = _resolve_repo_path(rel)
+    meta = {"path": rel, "label": label, "loaded": False}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        meta["error"] = type(exc).__name__
+        return None, meta
+    meta["loaded"] = True
+    if isinstance(payload, dict):
+        meta["schema"] = str(payload.get("schema") or "")
+        meta["generated_at"] = str(payload.get("generated_at") or payload.get("created_at") or "")
+    return payload, meta
+
+
+def _dependency_security_load_advisory_sources(
+    *,
+    advisory_fixture_path: str,
+    pip_audit_json_path: str,
+    advisory_max_age_hours: int,
+    allow_network: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    advisories: list[dict[str, Any]] = []
+    report_components: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    stale = False
+    missing_timestamp = False
+
+    fixture_payload, fixture_meta = _dependency_security_load_json(
+        advisory_fixture_path,
+        label="advisory_fixture",
+    )
+    if fixture_payload is not None:
+        fixture_meta["advisory_count"] = len(_dependency_security_extract_fixture_advisories(fixture_payload, source="advisory_fixture"))
+        advisories.extend(_dependency_security_extract_fixture_advisories(fixture_payload, source="advisory_fixture"))
+        sources.append(fixture_meta)
+    elif advisory_fixture_path.strip():
+        sources.append(fixture_meta)
+
+    audit_payload, audit_meta = _dependency_security_load_json(
+        pip_audit_json_path,
+        label="pip_audit_json",
+    )
+    if audit_payload is not None:
+        components, audit_advisories = _dependency_security_extract_pip_audit(
+            audit_payload,
+            source=str(audit_meta.get("path", "pip_audit_json")),
+        )
+        report_components.extend(components)
+        advisories.extend(audit_advisories)
+        audit_meta["component_count"] = len(components)
+        audit_meta["advisory_count"] = len(audit_advisories)
+        sources.append(audit_meta)
+    elif pip_audit_json_path.strip():
+        sources.append(audit_meta)
+
+    for source_meta in sources:
+        generated_raw = str(source_meta.get("generated_at", ""))
+        if not generated_raw:
+            missing_timestamp = True
+            continue
+        generated = _parse_iso_datetime(generated_raw)
+        if generated is None:
+            missing_timestamp = True
+            continue
+        age_hours = max(0.0, (now - generated).total_seconds() / 3600)
+        source_meta["age_hours"] = round(age_hours, 3)
+        source_meta["max_age_hours"] = advisory_max_age_hours
+        if age_hours > advisory_max_age_hours:
+            stale = True
+
+    loaded_sources = [row for row in sources if row.get("loaded")]
+    if loaded_sources and stale:
+        status = "stale-cache"
+    elif loaded_sources:
+        status = "fresh"
+    elif allow_network:
+        status = "scanner-unavailable"
+    else:
+        status = "network-disabled"
+
+    scanner_available = bool(shutil.which("pip-audit")) or bool(importlib.util.find_spec("pip_audit"))
+    advisory = {
+        "status": status,
+        "source_count": len([row for row in sources if row.get("loaded")]),
+        "sources": sources,
+        "advisory_count": len(advisories),
+        "max_age_hours": advisory_max_age_hours,
+        "missing_timestamp": missing_timestamp,
+        "network": {
+            "allowed": bool(allow_network),
+            "used": False,
+            "status": "disabled" if not allow_network else "not_used_caller_report_required",
+        },
+        "scanner": {
+            "name": "pip-audit",
+            "available": scanner_available,
+            "invoked": False,
+            "reason": "live scanner execution is not performed by this read-only slice; pass pip_audit_json_path or advisory_fixture_path",
+        },
+    }
+    return advisories, report_components, advisory
+
+
+def _dependency_security_version_equal(left: str, right: str) -> bool:
+    try:
+        from packaging.version import Version  # type: ignore
+
+        return Version(left) == Version(right)
+    except Exception:
+        return left == right
+
+
+def _dependency_security_version_in_specifier(version: str, specifier: str) -> bool:
+    if not version or not specifier:
+        return False
+    try:
+        from packaging.specifiers import SpecifierSet  # type: ignore
+        from packaging.version import Version  # type: ignore
+
+        return SpecifierSet(specifier).contains(Version(version), prereleases=True)
+    except Exception:
+        pass
+    for part in [item.strip() for item in specifier.split(",") if item.strip()]:
+        match = re.match(r"^(==|!=|<=|>=|<|>)\s*([^,\s]+)$", part)
+        if not match:
+            return False
+        op, target = match.groups()
+        try:
+            from packaging.version import Version  # type: ignore
+
+            current: Any = Version(version)
+            wanted: Any = Version(target)
+        except Exception:
+            current = version
+            wanted = target
+        comparisons = {
+            "==": current == wanted,
+            "!=": current != wanted,
+            "<": current < wanted,
+            "<=": current <= wanted,
+            ">": current > wanted,
+            ">=": current >= wanted,
+        }
+        if not comparisons[op]:
+            return False
+    return True
+
+
+def _dependency_security_advisory_matches_component(
+    advisory: dict[str, Any],
+    component: dict[str, Any],
+) -> bool:
+    if advisory.get("normalized_name") != component.get("normalized_name"):
+        return False
+    component_version = str(component.get("version") or "")
+    reported_version = str(advisory.get("reported_version") or "")
+    if reported_version:
+        return bool(component_version) and _dependency_security_version_equal(component_version, reported_version)
+    affected = str(advisory.get("affected_versions") or "")
+    if affected:
+        return _dependency_security_version_in_specifier(component_version, affected)
+    return False
+
+
+def _dependency_security_match_vulnerabilities(
+    components: list[dict[str, Any]],
+    advisories: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    vulnerabilities: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    advisories_by_name: dict[str, list[dict[str, Any]]] = {}
+    for advisory in advisories:
+        advisories_by_name.setdefault(str(advisory.get("normalized_name", "")), []).append(advisory)
+    for component in components:
+        if component.get("status") != "resolved" or not component.get("version"):
+            if component.get("normalized_name") in advisories_by_name or component.get("status") == "skipped":
+                skipped.append(
+                    {
+                        "component": component.get("name", ""),
+                        "source": component.get("source", ""),
+                        "line": component.get("line", 0),
+                        "reason": component.get("skipped_reason", "version_unresolved"),
+                    }
+                )
+            continue
+        for advisory in advisories_by_name.get(str(component.get("normalized_name", "")), []):
+            if not _dependency_security_advisory_matches_component(advisory, component):
+                continue
+            vulnerabilities.append(
+                {
+                    "id": advisory.get("id", ""),
+                    "aliases": advisory.get("aliases", []),
+                    "component": {
+                        "name": component.get("name", ""),
+                        "version": component.get("version", ""),
+                        "source": component.get("source", ""),
+                        "line": component.get("line", 0),
+                    },
+                    "severity": advisory.get("severity", "unknown"),
+                    "source": advisory.get("source", ""),
+                    "affected_versions": advisory.get("affected_versions", ""),
+                    "fixed_versions": advisory.get("fixed_versions", []),
+                    "summary": advisory.get("summary", ""),
+                    "url": advisory.get("url", ""),
+                }
+            )
+    return vulnerabilities, skipped
+
+
+def _dependency_security_status(
+    *,
+    components: list[dict[str, Any]],
+    vulnerabilities: list[dict[str, Any]],
+    advisory_status: str,
+    skipped: list[dict[str, Any]],
+) -> str:
+    if not components:
+        return "skipped"
+    if vulnerabilities:
+        return "vulnerable"
+    if advisory_status in {"network-disabled", "scanner-unavailable", "stale-cache"}:
+        return advisory_status
+    if skipped and len(skipped) >= len(components):
+        return "skipped"
+    return "clean"
+
+
+def _dependency_security_gate(
+    *,
+    status: str,
+    vulnerability_count: int,
+    blocking_enabled: bool,
+) -> dict[str, Any]:
+    block_reasons: list[str] = []
+    if vulnerability_count:
+        block_reasons.append("known_vulnerabilities_present")
+    if status in {"stale-cache", "network-disabled", "scanner-unavailable"}:
+        block_reasons.append(f"advisory_status_{status}")
+    if status == "skipped":
+        block_reasons.append("dependency_security_not_checked")
+    return {
+        "blocking_enabled": bool(blocking_enabled),
+        "would_block": bool(blocking_enabled and block_reasons),
+        "block_reasons": block_reasons if blocking_enabled else [],
+        "informational_reasons": block_reasons if not blocking_enabled else [],
+        "config": {
+            "env": "MCP_DEPENDENCY_SECURITY_BLOCKING",
+            "default_blocking": DEPENDENCY_SECURITY_BLOCKING,
+        },
+    }
+
+
+def _dependency_security_sbom(report: dict[str, Any]) -> dict[str, Any]:
+    components = []
+    bom_ref_by_component: dict[tuple[str, str, str], str] = {}
+    for index, component in enumerate(report.get("components", []), start=1):
+        if not isinstance(component, dict):
+            continue
+        name = str(component.get("name", ""))
+        version = str(component.get("version", ""))
+        source = str(component.get("source", ""))
+        bom_ref = f"pkg:pypi/{_dependency_security_normalize_name(name)}@{version or 'unresolved'}#{index}"
+        bom_ref_by_component[(name, version, source)] = bom_ref
+        row: dict[str, Any] = {
+            "type": "library",
+            "bom-ref": bom_ref,
+            "name": name,
+            "version": version,
+            "scope": "required",
+            "properties": [
+                {"name": "codebase-tooling-mcp:source", "value": source},
+                {"name": "codebase-tooling-mcp:evidence", "value": str(component.get("evidence", ""))},
+                {"name": "codebase-tooling-mcp:status", "value": str(component.get("status", ""))},
+            ],
+        }
+        if version:
+            row["purl"] = f"pkg:pypi/{_dependency_security_normalize_name(name)}@{version}"
+        components.append(row)
+    vulnerabilities = []
+    for vulnerability in report.get("vulnerabilities", []):
+        if not isinstance(vulnerability, dict):
+            continue
+        component = vulnerability.get("component", {}) if isinstance(vulnerability.get("component"), dict) else {}
+        bom_ref = bom_ref_by_component.get(
+            (
+                str(component.get("name", "")),
+                str(component.get("version", "")),
+                str(component.get("source", "")),
+            ),
+            "",
+        )
+        vuln_row: dict[str, Any] = {
+            "id": str(vulnerability.get("id", "")),
+            "source": {"name": str(vulnerability.get("source", ""))},
+            "ratings": [{"severity": str(vulnerability.get("severity", "unknown"))}],
+            "description": str(vulnerability.get("summary", "")),
+            "recommendation": "Upgrade to a fixed version when one is available; this tool does not auto-modify dependency files.",
+        }
+        if bom_ref:
+            vuln_row["affects"] = [{"ref": bom_ref}]
+        fixed = vulnerability.get("fixed_versions", []) if isinstance(vulnerability.get("fixed_versions"), list) else []
+        if fixed:
+            vuln_row["analysis"] = {"response": ["update"], "detail": "Known fixed versions: " + ", ".join(str(item) for item in fixed)}
+        vulnerabilities.append(vuln_row)
+    return {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "serialNumber": f"urn:uuid:{uuid.uuid4()}",
+        "version": 1,
+        "metadata": {
+            "timestamp": report.get("generated_at", _now_iso()),
+            "tools": [
+                {
+                    "vendor": "codebase-tooling-mcp",
+                    "name": "dependency_security_report",
+                    "version": DEPENDENCY_SECURITY_SBOM_SCHEMA,
+                }
+            ],
+            "properties": [
+                {"name": "codebase-tooling-mcp:report_id", "value": str(report.get("report_id", ""))},
+                {"name": "codebase-tooling-mcp:schema", "value": DEPENDENCY_SECURITY_SBOM_SCHEMA},
+            ],
+        },
+        "components": components,
+        "vulnerabilities": vulnerabilities,
+    }
+
+
+def _write_dependency_security_report_exports(
+    report: dict[str, Any],
+    *,
+    include_sbom: bool,
+    provenance_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    paths = _dependency_security_report_paths(str(report["report_id"]))
+    json_rel = str(_resolve_repo_path(paths["json"]).relative_to(REPO_PATH))
+    exports: dict[str, Any] = {"json": json_rel}
+    artifact_paths = [json_rel]
+    artifact_schemas = {json_rel: DEPENDENCY_SECURITY_REPORT_SCHEMA}
+    if include_sbom:
+        sbom_rel = str(_resolve_repo_path(paths["sbom"]).relative_to(REPO_PATH))
+        exports["sbom"] = sbom_rel
+        artifact_paths.append(sbom_rel)
+        artifact_schemas[sbom_rel] = DEPENDENCY_SECURITY_SBOM_SCHEMA
+    provenance_paths = {
+        artifact: str(_artifact_provenance_path(artifact).relative_to(REPO_PATH))
+        for artifact in artifact_paths
+    }
+    report["exports"] = exports
+    report["provenance"] = {"schema": PROVENANCE_SCHEMA, "sidecars": provenance_paths}
+    json_link = _artifact_resource_link(
+        title="Dependency security report JSON",
+        rel_path=json_rel,
+        mime_type="application/json",
+        created_at=str(report.get("generated_at", "")),
+        redacted=True,
+        safety_note="Dependency report contains package names, versions, advisory IDs, and repository-relative source paths only; no dependency files are modified.",
+    )
+    resource_links = [json_link]
+    if include_sbom:
+        resource_links.append(
+            _artifact_resource_link(
+                title="Dependency security SBOM",
+                rel_path=str(exports["sbom"]),
+                mime_type="application/vnd.cyclonedx+json",
+                created_at=str(report.get("generated_at", "")),
+                redacted=True,
+                safety_note="SBOM artifact is generated from declared/caller-provided dependency metadata and does not include host absolute paths.",
+            )
+        )
+    report["resource_links"] = resource_links
+    report["_meta"] = _artifact_meta(resource_links)
+
+    json_path = _resolve_repo_path(json_rel)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    if include_sbom:
+        sbom_path = _resolve_repo_path(str(exports["sbom"]))
+        sbom_path.parent.mkdir(parents=True, exist_ok=True)
+        sbom_path.write_text(
+            json.dumps(_dependency_security_sbom(report), indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    _write_artifact_provenance_sidecars(
+        tool_name="dependency_security_report",
+        artifact_paths=artifact_paths,
+        inputs=provenance_inputs,
+        git_state=_git_state_for_provenance(),
+        artifact_schemas=artifact_schemas,
+    )
+    return exports
+
+
+def _latest_dependency_security_report(max_age_hours: int = 24) -> dict[str, Any]:
+    reports_dir = _resolve_repo_path(str(REPORTS_DIR))
+    now = datetime.now(timezone.utc)
+    latest: dict[str, Any] | None = None
+    if not reports_dir.exists():
+        return {"present": False, "required": False, "max_age_hours": max_age_hours}
+    for path in sorted(reports_dir.glob(f"{DEPENDENCY_SECURITY_REPORT_PREFIX}-*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("schema") != DEPENDENCY_SECURITY_REPORT_SCHEMA:
+            continue
+        generated = _parse_iso_datetime(str(payload.get("generated_at", "")))
+        age_hours = None
+        recent = False
+        if generated:
+            age_hours = max(0.0, (now - generated).total_seconds() / 3600)
+            recent = age_hours <= max_age_hours
+        summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+        advisory = payload.get("advisory", {}) if isinstance(payload.get("advisory"), dict) else {}
+        entry = {
+            "present": True,
+            "required": False,
+            "recent": recent,
+            "max_age_hours": max_age_hours,
+            "report_id": str(payload.get("report_id", path.stem)),
+            "generated_at": str(payload.get("generated_at", "")),
+            "path": str(path.relative_to(REPO_PATH)),
+            "age_hours": round(age_hours, 3) if age_hours is not None else None,
+            "status": str(payload.get("status", "")),
+            "ok": bool(payload.get("ok", False)),
+            "component_count": int(summary.get("component_count", 0) or 0),
+            "vulnerability_count": int(summary.get("vulnerability_count", 0) or 0),
+            "skipped_count": int(summary.get("skipped_count", 0) or 0),
+            "advisory_status": str(advisory.get("status", "")),
+        }
+        if latest is None or entry["generated_at"] >= latest.get("generated_at", ""):
+            latest = entry
+    return latest or {"present": False, "required": False, "max_age_hours": max_age_hours}
+
 def _governance_markdown(report: dict[str, Any]) -> str:
     counts = report.get("audit", {}).get("counts", {}) if isinstance(report.get("audit"), dict) else {}
     lines = [
@@ -2439,6 +3397,18 @@ def _governance_markdown(report: dict[str, Any]) -> str:
     for name in ("policy_simulator", "release_readiness", "required_tool_chain"):
         row = hooks.get(name, {}) if isinstance(hooks.get(name), dict) else {}
         lines.append(f"- `{name}`: {row.get('count', 0)} recorded result(s), latest ok={row.get('latest', {}).get('ok') if isinstance(row.get('latest'), dict) else None}")
+    dependency_security = report.get("dependency_security", {}) if isinstance(report.get("dependency_security"), dict) else {}
+    if dependency_security:
+        lines.extend(
+            [
+                "",
+                "## Dependency security",
+                f"- Report present: {dependency_security.get('present', False)}",
+                f"- Status: `{dependency_security.get('status', 'absent')}`",
+                f"- Vulnerabilities: {dependency_security.get('vulnerability_count', 0)}",
+                f"- Advisory status: `{dependency_security.get('advisory_status', '')}`",
+            ]
+        )
     snapshots = report.get("snapshots", {}) if isinstance(report.get("snapshots"), dict) else {}
     lines.extend(["", "## Snapshot / rollback references", f"- Snapshot references: {snapshots.get('count', 0)}"])
     lineage = report.get("lineage", {}) if isinstance(report.get("lineage"), dict) else {}
@@ -3119,6 +4089,16 @@ def _attach_local_dsse_fixture_attestation(
     return provenance
 
 
+def _safe_attestation_ref(value: Any) -> str:
+    text = _redact_audit_string(str(value or "").strip())
+    if not text:
+        return ""
+    redacted = _otel_redact_paths(text)
+    if len(redacted) > 240:
+        return redacted[:240] + "...[truncated]"
+    return redacted
+
+
 def _attestation_result(
     *,
     status: str,
@@ -3129,27 +4109,37 @@ def _attestation_result(
     bundle_ref: str = "",
     envelope_ref: str = "",
     messages: list[str] | None = None,
+    network_access: bool = False,
+    offline: bool = True,
+    verifier: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result_messages = messages or []
-    return {
+    result: dict[str, Any] = {
         "schema": ATTESTATION_SCHEMA,
         "status": status,
         "backend": backend,
         "signed": signed,
         "local_only": backend in {"local-only", ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE},
-        "network_access": False,
+        "network_access": bool(network_access),
         "subject_digest": _coerce_sha256_digest(subject_digest or {}),
-        "signer_identity": signer_identity,
-        "bundle_ref": bundle_ref,
-        "envelope_ref": envelope_ref,
+        "signer_identity": _redact_audit_string(signer_identity),
+        "bundle_ref": _safe_attestation_ref(bundle_ref),
+        "envelope_ref": _safe_attestation_ref(envelope_ref),
         "verification": {
             "status": status,
             "backend": backend,
-            "offline": True,
+            "offline": bool(offline),
+            "network_access": bool(network_access),
             "messages": result_messages,
         },
         "findings": result_messages,
     }
+    if verifier:
+        result["verifier"] = _redact_audit_value(verifier)
+    if policy:
+        result["policy"] = _redact_audit_value(policy)
+    return result
 
 
 def _verify_local_dsse_fixture_attestation(
@@ -3255,6 +4245,654 @@ def _verify_local_dsse_fixture_attestation(
     )
 
 
+def _truthy_attestation_config(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return False
+
+
+def _github_config_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _github_attestation_config_containers(signing: dict[str, Any]) -> list[dict[str, Any]]:
+    verification = _github_config_dict(signing.get("verification"))
+    containers = [signing, verification]
+    for parent in (signing, verification):
+        for key in ("policy", "expected", "github", "artifact_attestation"):
+            child = parent.get(key)
+            if isinstance(child, dict):
+                containers.append(child)
+    return containers
+
+
+def _github_first_value(containers: list[dict[str, Any]], *keys: str) -> Any:
+    for container in containers:
+        for key in keys:
+            if key in container and container[key] is not None:
+                return container[key]
+    return None
+
+
+def _github_first_text(containers: list[dict[str, Any]], *keys: str) -> str:
+    value = _github_first_value(containers, *keys)
+    if isinstance(value, (str, int, float, bool)):
+        return str(value).strip()
+    return ""
+
+
+def _split_github_repository(value: Any) -> tuple[str, str]:
+    text = str(value or "").strip().removesuffix(".git")
+    if not text:
+        return "", ""
+    text = text.replace("git@github.com:", "https://github.com/")
+    if "github.com/" in text:
+        text = text.split("github.com/", 1)[1]
+    text = text.strip("/")
+    if text.startswith("repos/"):
+        text = text.removeprefix("repos/")
+    parts = [part for part in text.split("/") if part]
+    if len(parts) >= 2:
+        return parts[0], parts[1].removesuffix(".git")
+    return "", ""
+
+
+def _parse_github_workflow_ref(value: Any) -> dict[str, str]:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    text = text.replace("https://github.com/", "")
+    match = re.search(
+        r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/(?P<path>\.github/workflows/[^@\s]+)@(?P<ref>[^\s]+)",
+        text,
+    )
+    if not match:
+        return {}
+    return {
+        "owner": match.group("owner"),
+        "repo": match.group("repo"),
+        "path": match.group("path"),
+        "ref": match.group("ref"),
+    }
+
+
+def _github_attestation_expected_policy(signing: dict[str, Any]) -> dict[str, Any]:
+    containers = _github_attestation_config_containers(signing)
+    verification = _github_config_dict(signing.get("verification"))
+    repository_config = _github_config_dict(
+        _github_first_value(containers, "repository", "expected_repository")
+    )
+    workflow_config = _github_config_dict(_github_first_value(containers, "workflow", "expected_workflow"))
+
+    repo_slug = _github_first_text(containers, "expected_repository", "repository_slug", "repo_slug")
+    owner, repo_name = _split_github_repository(repo_slug)
+    if not owner:
+        owner = _github_first_text(containers + [repository_config], "expected_owner", "owner", "repository_owner")
+    if not repo_name:
+        repo_name = _github_first_text(
+            containers + [repository_config],
+            "expected_repo",
+            "expected_repository_name",
+            "repository_name",
+            "repo",
+        )
+    if not repo_name and repo_slug:
+        _owner, _repo = _split_github_repository(repo_slug)
+        owner = owner or _owner
+        repo_name = _repo
+
+    workflow = _github_first_text(
+        containers + [workflow_config],
+        "expected_workflow",
+        "expected_workflow_path",
+        "workflow_path",
+        "workflow_name",
+        "name",
+    )
+    workflow_ref = _github_first_text(containers + [workflow_config], "workflow_ref", "job_workflow_ref")
+    parsed_workflow_ref = _parse_github_workflow_ref(workflow_ref)
+    if not workflow and parsed_workflow_ref:
+        workflow = parsed_workflow_ref.get("path", "")
+    if not owner and parsed_workflow_ref:
+        owner = parsed_workflow_ref.get("owner", "")
+    if not repo_name and parsed_workflow_ref:
+        repo_name = parsed_workflow_ref.get("repo", "")
+
+    mode = _github_first_text(containers, "mode", "verification_mode", "attestation_mode").lower() or "offline"
+    online_requested = mode in {"online", "github-online", "network"}
+    allow_online = _truthy_attestation_config(
+        _github_first_value(containers, "allow_online", "online_enabled", "network_enabled")
+    ) or _truthy_attestation_config(os.getenv("MCP_ARTIFACT_ATTESTATION_GITHUB_ALLOW_ONLINE", ""))
+    enabled = _truthy_attestation_config(
+        _github_first_value(containers, "enabled", "opt_in", "github_artifact_attestations_enabled")
+    ) or _truthy_attestation_config(os.getenv("MCP_ARTIFACT_ATTESTATION_GITHUB_ENABLED", ""))
+
+    timeout_value = _github_first_text(containers, "timeout_seconds", "timeout")
+    try:
+        timeout_seconds = min(max(1, int(float(timeout_value))), 120) if timeout_value else ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS
+    except ValueError:
+        timeout_seconds = ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS
+
+    bundle_ref = str(signing.get("bundle_ref") or _github_first_text(containers, "bundle_ref", "bundle_path") or "")
+    trusted_root_ref = _github_first_text(
+        containers,
+        "trusted_root_ref",
+        "custom_trusted_root",
+        "custom_trusted_root_ref",
+        "trusted_root_path",
+    )
+    return {
+        "enabled": enabled,
+        "mode": "online" if online_requested else "offline",
+        "allow_online": allow_online,
+        "expected_owner": owner,
+        "expected_repo": repo_name,
+        "expected_repository": f"{owner}/{repo_name}" if owner and repo_name else repo_slug,
+        "expected_workflow": workflow,
+        "expected_ref": _github_first_text(containers + [workflow_config], "expected_ref", "ref", "git_ref"),
+        "expected_commit": _github_first_text(containers, "expected_commit", "commit", "commit_sha", "sha"),
+        "predicate_type": _github_first_text(containers, "predicate_type", "expected_predicate_type"),
+        "bundle_ref": bundle_ref,
+        "trusted_root_ref": trusted_root_ref,
+        "timeout_seconds": timeout_seconds,
+        "verification": verification,
+    }
+
+
+def _github_attestation_policy_summary(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "expected_repository": policy.get("expected_repository", ""),
+            "expected_workflow": policy.get("expected_workflow", ""),
+            "expected_ref": policy.get("expected_ref", ""),
+            "expected_commit": policy.get("expected_commit", ""),
+            "predicate_type": policy.get("predicate_type", ""),
+            "mode": policy.get("mode", "offline"),
+        }.items()
+        if value
+    }
+
+
+def _resolve_github_attestation_file_ref(ref: str) -> tuple[Path | None, str, str]:
+    display_ref = _safe_attestation_ref(ref)
+    text = str(ref or "").strip()
+    if not text:
+        return None, display_ref, "missing"
+    if text.startswith("repo://file/"):
+        text = urllib.parse.unquote(text.removeprefix("repo://file/")).lstrip("/")
+    elif text.startswith("file://"):
+        text = urllib.parse.urlparse(text).path
+    elif text.startswith("file:"):
+        text = text.removeprefix("file:")
+    if re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
+        return None, display_ref, "remote"
+    try:
+        path = _resolve_repo_path(text)
+    except ValueError:
+        return None, display_ref, "unsafe"
+    try:
+        display_ref = str(path.relative_to(REPO_PATH))
+    except ValueError:
+        display_ref = _safe_attestation_ref(text)
+    if not path.is_file():
+        return path, display_ref, "missing"
+    return path, display_ref, "ok"
+
+
+def _github_cli_token_available() -> bool:
+    if os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN"):
+        return True
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _github_sha256_from_value(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("sha256", "SHA256", "value", "digest"):
+            digest = _github_sha256_from_value(value.get(key))
+            if digest:
+                return digest
+        algorithm = str(value.get("algorithm", "")).lower()
+        if algorithm == "sha256":
+            return _github_sha256_from_value(value.get("value"))
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("sha256:"):
+            text = text.removeprefix("sha256:")
+        if re.fullmatch(r"[0-9a-fA-F]{64}", text):
+            return text.lower()
+    return ""
+
+
+def _iter_json_dicts(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 8:
+        return []
+    if isinstance(value, dict):
+        rows = [value]
+        for item in value.values():
+            rows.extend(_iter_json_dicts(item, depth=depth + 1))
+        return rows[:500]
+    if isinstance(value, list):
+        rows: list[dict[str, Any]] = []
+        for item in value[:100]:
+            rows.extend(_iter_json_dicts(item, depth=depth + 1))
+        return rows[:500]
+    return []
+
+
+def _append_unique(values: list[str], value: Any, *, lower: bool = False) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    text = text.lower() if lower else text
+    if text not in values:
+        values.append(text)
+
+
+def _github_attestation_extract_info(parsed: Any) -> dict[str, list[str]]:
+    info: dict[str, list[str]] = {
+        "subject_digests": [],
+        "predicate_types": [],
+        "repositories": [],
+        "workflow_paths": [],
+        "workflow_names": [],
+        "workflow_refs": [],
+        "refs": [],
+        "commits": [],
+        "signer_identities": [],
+    }
+    for row in _iter_json_dicts(parsed):
+        subject = row.get("subject")
+        subject_rows = subject if isinstance(subject, list) else [subject]
+        for subject_row in subject_rows:
+            if isinstance(subject_row, dict):
+                digest = _github_sha256_from_value(subject_row.get("digest")) or _github_sha256_from_value(subject_row)
+                _append_unique(info["subject_digests"], digest, lower=True)
+
+        for key, value in row.items():
+            key_lower = str(key).lower()
+            if key_lower in {"predicatetype", "predicate_type"}:
+                _append_unique(info["predicate_types"], value)
+            if key_lower in {
+                "repository",
+                "repositoryuri",
+                "repo",
+                "source_repository",
+                "source_repository_uri",
+                "sourcerepository",
+                "sourcerepositoryuri",
+                "github_repository",
+            }:
+                if isinstance(value, dict):
+                    owner = str(value.get("owner") or value.get("repository_owner") or "").strip()
+                    repo = str(value.get("name") or value.get("repo") or value.get("repository") or "").strip()
+                    if owner and repo:
+                        _append_unique(info["repositories"], f"{owner}/{repo}", lower=True)
+                else:
+                    owner, repo = _split_github_repository(value)
+                    if owner and repo:
+                        _append_unique(info["repositories"], f"{owner}/{repo}", lower=True)
+            if isinstance(value, str):
+                parsed_ref = _parse_github_workflow_ref(value)
+                if parsed_ref:
+                    _append_unique(info["repositories"], f"{parsed_ref['owner']}/{parsed_ref['repo']}", lower=True)
+                    _append_unique(info["workflow_refs"], value)
+                    _append_unique(info["workflow_paths"], parsed_ref["path"])
+                    _append_unique(info["refs"], parsed_ref["ref"])
+                if key_lower in {"workflow_path", "workflowpath", "workflow_file", "workflowfile", "path"} and ".github/workflows/" in value:
+                    _append_unique(info["workflow_paths"], value.split("@", 1)[0])
+                if key_lower in {"workflow_name", "workflowname", "workflow", "name"}:
+                    _append_unique(info["workflow_names"], value)
+                if key_lower in {"ref", "git_ref", "gitref", "source_ref", "sourceref", "github_ref", "githubref"} and value.startswith("refs/"):
+                    _append_unique(info["refs"], value)
+                if key_lower in {
+                    "sha",
+                    "commit",
+                    "commit_sha",
+                    "commitsha",
+                    "source_sha",
+                    "sourcesha",
+                    "git_commit",
+                    "gitcommit",
+                    "source_commit",
+                    "sourcecommit",
+                }:
+                    digest = value.strip().lower()
+                    if re.fullmatch(r"[0-9a-f]{40}", digest):
+                        _append_unique(info["commits"], digest)
+                if "identity" in key_lower and ("github.com" in value or ".github/workflows/" in value):
+                    _append_unique(info["signer_identities"], value)
+
+    return info
+
+
+def _workflow_policy_candidates(value: str) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    parsed = _parse_github_workflow_ref(text)
+    if parsed:
+        text = parsed["path"]
+    text = text.split("@", 1)[0]
+    if "github.com/" in text:
+        marker = "/.github/workflows/"
+        if marker in text:
+            text = ".github/workflows/" + text.split(marker, 1)[1]
+    values = {text.lower()}
+    if "/" in text:
+        values.add(Path(text).name.lower())
+    return values
+
+
+def _github_signer_workflow_arg(policy: dict[str, Any]) -> str:
+    workflow = str(policy.get("expected_workflow", "")).strip()
+    if not workflow:
+        return ""
+    parsed = _parse_github_workflow_ref(workflow)
+    owner = parsed.get("owner", "") or str(policy.get("expected_owner", "")).strip()
+    repo = parsed.get("repo", "") or str(policy.get("expected_repo", "")).strip()
+    path = parsed.get("path", "") or workflow.split("@", 1)[0]
+    if "github.com/" in path:
+        marker = "/.github/workflows/"
+        if marker in path:
+            path = ".github/workflows/" + path.split(marker, 1)[1]
+    if not (owner and repo and path.startswith(".github/workflows/")):
+        return ""
+    return f"{owner}/{repo}/{path}"
+
+
+def _github_policy_validation_messages(
+    info: dict[str, list[str]],
+    policy: dict[str, Any],
+    actual_digest: str,
+) -> tuple[str, list[str]]:
+    unavailable: list[str] = []
+    invalid: list[str] = []
+
+    expected_owner = str(policy.get("expected_owner", "")).strip()
+    expected_repo = str(policy.get("expected_repo", "")).strip()
+    expected_workflow = str(policy.get("expected_workflow", "")).strip()
+    expected_ref = str(policy.get("expected_ref", "")).strip()
+    expected_commit = str(policy.get("expected_commit", "")).strip().lower()
+    predicate_type = str(policy.get("predicate_type", "")).strip()
+
+    if not expected_owner:
+        unavailable.append("attestation_policy_expected_owner_missing")
+    if not expected_repo:
+        unavailable.append("attestation_policy_expected_repo_missing")
+    if not expected_workflow:
+        unavailable.append("attestation_policy_expected_workflow_missing")
+    if not predicate_type:
+        unavailable.append("attestation_policy_predicate_type_missing")
+    if not expected_ref and not expected_commit:
+        unavailable.append("attestation_policy_expected_ref_or_commit_missing")
+
+    if unavailable:
+        return "unavailable", unavailable
+
+    if not info["subject_digests"]:
+        unavailable.append("attestation_subject_digest_unavailable")
+    elif actual_digest.lower() not in info["subject_digests"]:
+        invalid.append("attestation_subject_digest_mismatch")
+
+    expected_repository = f"{expected_owner}/{expected_repo}".lower()
+    if not info["repositories"]:
+        unavailable.append("attestation_repository_unavailable")
+    elif expected_repository not in info["repositories"]:
+        invalid.append("attestation_repository_mismatch")
+
+    actual_workflows = set()
+    for value in info["workflow_paths"] + info["workflow_names"] + info["workflow_refs"]:
+        actual_workflows.update(_workflow_policy_candidates(value))
+    expected_workflows = _workflow_policy_candidates(expected_workflow)
+    if not actual_workflows:
+        unavailable.append("attestation_workflow_unavailable")
+    elif not expected_workflows.intersection(actual_workflows):
+        invalid.append("attestation_workflow_mismatch")
+
+    if predicate_type:
+        if not info["predicate_types"]:
+            unavailable.append("attestation_predicate_type_unavailable")
+        elif predicate_type not in info["predicate_types"]:
+            invalid.append("attestation_predicate_type_mismatch")
+
+    if expected_ref:
+        if not info["refs"]:
+            unavailable.append("attestation_ref_unavailable")
+        elif expected_ref not in info["refs"]:
+            invalid.append("attestation_ref_mismatch")
+    if expected_commit:
+        if not info["commits"]:
+            unavailable.append("attestation_commit_unavailable")
+        elif expected_commit not in info["commits"]:
+            invalid.append("attestation_commit_mismatch")
+
+    if invalid:
+        return "invalid", invalid + unavailable
+    if unavailable:
+        return "unavailable", unavailable
+    return "verified", []
+
+
+def _github_policy_prerequisite_messages(policy: dict[str, Any]) -> list[str]:
+    messages: list[str] = []
+    if not str(policy.get("expected_owner", "")).strip():
+        messages.append("attestation_policy_expected_owner_missing")
+    if not str(policy.get("expected_repo", "")).strip():
+        messages.append("attestation_policy_expected_repo_missing")
+    if not str(policy.get("expected_workflow", "")).strip():
+        messages.append("attestation_policy_expected_workflow_missing")
+    if not str(policy.get("predicate_type", "")).strip():
+        messages.append("attestation_policy_predicate_type_missing")
+    expected_ref = str(policy.get("expected_ref", "")).strip()
+    expected_commit = str(policy.get("expected_commit", "")).strip()
+    if not expected_ref and not expected_commit:
+        messages.append("attestation_policy_expected_ref_or_commit_missing")
+    return messages
+
+
+def _github_cli_failure_is_unavailable(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    network_access: bool,
+) -> bool:
+    stderr = str(completed.stderr or "")
+    stdout = str(completed.stdout or "")
+    output = f"{stderr}\n{stdout}".lower()
+    tooling_or_config_markers = (
+        "only 'gh auth token' is implemented",
+        "unknown command",
+        "unknown flag",
+        "not a gh command",
+        "usage:",
+        "permission denied",
+        "no such file",
+    )
+    if any(marker in output for marker in tooling_or_config_markers):
+        return True
+    network_or_auth_markers = (
+        "authentication",
+        "authorization",
+        "unauthorized",
+        "forbidden",
+        "token",
+        "rate limit",
+        "network",
+        "connection",
+        "could not resolve",
+        "no such host",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "service unavailable",
+        "transparency data unavailable",
+    )
+    return network_access and any(marker in output for marker in network_or_auth_markers)
+
+
+def _verify_github_artifact_attestation(
+    provenance: dict[str, Any],
+    artifact_rel: str,
+    actual_digest: str,
+) -> dict[str, Any]:
+    signing = provenance.get("signing", {}) if isinstance(provenance.get("signing"), dict) else {}
+    subject_digest = signing.get("subject_digest", {})
+    signer_identity = str(signing.get("signer_identity", ""))
+    bundle_ref = str(signing.get("bundle_ref", ""))
+    envelope_ref = str(signing.get("envelope_ref", ""))
+    policy = _github_attestation_expected_policy(signing)
+    policy_summary = _github_attestation_policy_summary(policy)
+    verifier: dict[str, Any] = {
+        "tool": "gh attestation verify",
+        "mode": policy.get("mode", "offline"),
+        "network_access": False,
+        "timeout_seconds": policy.get("timeout_seconds", ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS),
+    }
+
+    def result(status: str, messages: list[str], *, network_access: bool = False, offline: bool = True) -> dict[str, Any]:
+        verifier["network_access"] = bool(network_access)
+        return _attestation_result(
+            status=status,
+            backend=ATTESTATION_BACKEND_GITHUB_ARTIFACT_ATTESTATIONS,
+            signed=True,
+            subject_digest=subject_digest,
+            signer_identity=signer_identity,
+            bundle_ref=bundle_ref,
+            envelope_ref=envelope_ref,
+            messages=messages,
+            network_access=network_access,
+            offline=offline,
+            verifier=verifier,
+            policy=policy_summary,
+        )
+
+    if not policy["enabled"]:
+        return result("unavailable", ["attestation_backend_disabled"])
+
+    preflight_messages: list[str] = []
+    if not _sha256_digest_matches(subject_digest, actual_digest):
+        preflight_messages.append("attestation_signing_subject_digest_mismatch")
+
+    policy_prerequisites = _github_policy_prerequisite_messages(policy)
+    if policy_prerequisites:
+        return result("unavailable", preflight_messages + policy_prerequisites)
+
+    artifact_path = _resolve_repo_path(artifact_rel)
+    cmd = ["gh", "attestation", "verify", str(artifact_path)]
+    expected_owner = str(policy.get("expected_owner", "")).strip()
+    expected_repo = str(policy.get("expected_repo", "")).strip()
+    predicate_type = str(policy.get("predicate_type", "")).strip()
+    if expected_owner and expected_repo:
+        cmd.extend(["--repo", f"{expected_owner}/{expected_repo}"])
+    elif expected_owner:
+        cmd.extend(["--owner", expected_owner])
+    signer_workflow = _github_signer_workflow_arg(policy)
+    if signer_workflow:
+        cmd.extend(["--signer-workflow", signer_workflow])
+    expected_ref = str(policy.get("expected_ref", "")).strip()
+    expected_commit = str(policy.get("expected_commit", "")).strip()
+    if expected_ref:
+        cmd.extend(["--source-ref", expected_ref])
+    if expected_commit:
+        cmd.extend(["--source-digest", expected_commit])
+    if predicate_type:
+        cmd.extend(["--predicate-type", predicate_type])
+
+    network_access = policy["mode"] == "online"
+    if network_access:
+        if not policy["allow_online"]:
+            return result(
+                "unavailable",
+                preflight_messages + ["attestation_online_verification_disabled"],
+                network_access=False,
+                offline=False,
+            )
+        if not _github_cli_token_available():
+            return result(
+                "unavailable",
+                preflight_messages + ["attestation_online_token_unavailable"],
+                network_access=False,
+                offline=False,
+            )
+    else:
+        bundle_path, bundle_display, bundle_status = _resolve_github_attestation_file_ref(str(policy.get("bundle_ref", "")))
+        root_path, root_display, root_status = _resolve_github_attestation_file_ref(str(policy.get("trusted_root_ref", "")))
+        verifier["bundle_ref"] = bundle_display
+        verifier["trusted_root_ref"] = root_display
+        if bundle_status != "ok":
+            return result("unavailable", preflight_messages + [f"attestation_bundle_{bundle_status}"])
+        if root_status != "ok":
+            return result("unavailable", preflight_messages + [f"attestation_trusted_root_{root_status}"])
+        assert bundle_path is not None and root_path is not None
+        cmd.extend(["--bundle", str(bundle_path), "--custom-trusted-root", str(root_path)])
+
+    if shutil.which("gh") is None:
+        return result(
+            "unavailable",
+            preflight_messages + ["attestation_verifier_dependency_missing"],
+            network_access=False,
+            offline=not network_access,
+        )
+
+    cmd.extend(["--format", "json"])
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=int(policy.get("timeout_seconds") or ATTESTATION_GITHUB_DEFAULT_TIMEOUT_SECONDS),
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return result("unavailable", preflight_messages + ["attestation_verifier_unavailable"], network_access=network_access, offline=not network_access)
+    if completed.returncode != 0:
+        status = (
+            "unavailable"
+            if _github_cli_failure_is_unavailable(
+                completed,
+                network_access=network_access,
+            )
+            else "invalid"
+        )
+        if preflight_messages:
+            status = "invalid"
+        message = (
+            "attestation_verification_unavailable"
+            if status == "unavailable"
+            else "attestation_verification_failed"
+        )
+        return result(
+            status,
+            preflight_messages + [message],
+            network_access=network_access,
+            offline=not network_access,
+        )
+    try:
+        parsed = json.loads(completed.stdout or "null")
+    except json.JSONDecodeError:
+        return result("unavailable", preflight_messages + ["attestation_verification_output_unreadable"], network_access=network_access, offline=not network_access)
+
+    info = _github_attestation_extract_info(parsed)
+    status, messages = _github_policy_validation_messages(info, policy, actual_digest)
+    if preflight_messages and status == "verified":
+        status = "invalid"
+    return result(status, preflight_messages + messages, network_access=network_access, offline=not network_access)
+
+
 def _verify_artifact_attestation(
     provenance: dict[str, Any],
     artifact_rel: str,
@@ -3275,6 +4913,8 @@ def _verify_artifact_attestation(
     signer_identity = str(signing.get("signer_identity", ""))
     bundle_ref = str(signing.get("bundle_ref", ""))
     envelope_ref = str(signing.get("envelope_ref", ""))
+    if backend == ATTESTATION_BACKEND_GITHUB_ARTIFACT_ATTESTATIONS:
+        return _verify_github_artifact_attestation(provenance, artifact_rel, actual_digest)
     if backend != ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE:
         return _attestation_result(
             status="unsupported",
@@ -3340,7 +4980,7 @@ def _write_artifact_provenance_sidecars(
                 "provenance_schema": PROVENANCE_SCHEMA,
             },
             "repository": {
-                "path": str(REPO_PATH),
+                "path": "repo://root",
                 "git": git_state or _git_state_for_provenance(),
             },
             "invocation": {
@@ -18122,6 +19762,7 @@ def _governance_report_impl(
             _build_workflow_diagnostics(events, limit=50)
         ),
         "governance_hooks": _governance_result_store_summary(),
+        "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "snapshots": _governance_snapshot_references(),
         "security": {
             "redaction": "audit events and report summaries are passed through MCP audit redaction",
@@ -18263,6 +19904,198 @@ def _governance_report_impl(
             )
     return report
 
+
+
+def _dependency_security_report_impl(
+    path: str = ".",
+    requirements_paths: list[str] | None = None,
+    advisory_fixture_path: str = "",
+    pip_audit_json_path: str = "",
+    allow_network: bool = False,
+    advisory_max_age_hours: int = 168,
+    include_installed: bool = False,
+    max_installed: int = 500,
+    export: bool = True,
+    include_sbom: bool = True,
+    block_on_vulnerabilities: bool = False,
+) -> dict[str, Any]:
+    _require_git_repo()
+    if advisory_max_age_hours < 1:
+        raise ValueError("advisory_max_age_hours must be >= 1")
+    if max_installed < 1 or max_installed > 5000:
+        raise ValueError("max_installed must be between 1 and 5000")
+    _resolve_repo_path(path)
+    components, skipped_inputs, input_paths = _dependency_security_collect_components(
+        path=path,
+        requirements_paths=requirements_paths,
+        include_installed=include_installed,
+        max_installed=max_installed,
+    )
+    advisories, report_components, advisory = _dependency_security_load_advisory_sources(
+        advisory_fixture_path=advisory_fixture_path,
+        pip_audit_json_path=pip_audit_json_path,
+        advisory_max_age_hours=advisory_max_age_hours,
+        allow_network=allow_network,
+    )
+    components.extend(report_components)
+    vulnerabilities, skipped_components = _dependency_security_match_vulnerabilities(
+        components,
+        advisories,
+    )
+    skipped = skipped_inputs + skipped_components
+    status = _dependency_security_status(
+        components=components,
+        vulnerabilities=vulnerabilities,
+        advisory_status=str(advisory.get("status", "")),
+        skipped=skipped,
+    )
+    gate = _dependency_security_gate(
+        status=status,
+        vulnerability_count=len(vulnerabilities),
+        blocking_enabled=bool(block_on_vulnerabilities or DEPENDENCY_SECURITY_BLOCKING),
+    )
+    warnings: list[str] = []
+    if status == "vulnerable":
+        warnings.append("known vulnerabilities matched dependency inputs")
+    if advisory.get("status") == "stale-cache":
+        warnings.append("advisory data is older than advisory_max_age_hours")
+    if advisory.get("status") == "network-disabled":
+        warnings.append("no advisory source was provided and network lookups are disabled")
+    if advisory.get("status") == "scanner-unavailable":
+        warnings.append("online lookup was requested but this read-only slice requires a caller-provided scanner report")
+    if status == "skipped":
+        warnings.append("no resolvable dependency inputs were available for vulnerability matching")
+    if skipped:
+        warnings.append("some dependency inputs were skipped or unresolved")
+
+    generated_at = _now_iso()
+    safe_path = _dependency_security_safe_input_path(path)
+    safe_advisory_fixture_path = _dependency_security_safe_input_path(advisory_fixture_path)
+    safe_pip_audit_json_path = _dependency_security_safe_input_path(pip_audit_json_path)
+    summary = {
+        "component_count": len(components),
+        "resolved_component_count": sum(1 for row in components if row.get("status") == "resolved"),
+        "vulnerability_count": len(vulnerabilities),
+        "skipped_count": len(skipped),
+        "advisory_count": len(advisories),
+        "input_path_count": len(input_paths),
+    }
+    report_seed = json.dumps(
+        {
+            "generated_at": generated_at,
+            "summary": summary,
+            "status": status,
+            "inputs": input_paths,
+            "advisory": advisory,
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    report_id = f"{DEPENDENCY_SECURITY_REPORT_PREFIX}-{_now_stamp()}-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}"
+    report: dict[str, Any] = {
+        "schema": DEPENDENCY_SECURITY_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "read_only": True,
+        "status": status,
+        "ok": not bool(gate.get("would_block", False)),
+        "summary": summary,
+        "inputs": {
+            "path": safe_path,
+            "requirements_paths": input_paths,
+            "include_installed": include_installed,
+            "advisory_fixture_path": safe_advisory_fixture_path,
+            "pip_audit_json_path": safe_pip_audit_json_path,
+        },
+        "advisory": advisory,
+        "gate": gate,
+        "components": components[:1000],
+        "vulnerabilities": vulnerabilities[:1000],
+        "skipped": skipped[:1000],
+        "warnings": warnings,
+        "security": {
+            "read_only": True,
+            "mutates_dependency_files": False,
+            "auto_fix": False,
+            "network_used": False,
+            "repo_boundary_enforced": True,
+            "host_absolute_paths_exposed": False,
+            "raw_unsupported_requirement_inputs_persisted": False,
+            "unsupported_requirement_input_redaction": "urls_credentials_host_paths_and_schemeless_vcs_refs",
+        },
+        "exports": {},
+        "resource_links": [],
+        "_meta": _artifact_meta([]),
+    }
+    provenance_inputs = {
+        "path": safe_path,
+        "requirements_paths": input_paths,
+        "advisory_fixture_path": safe_advisory_fixture_path,
+        "pip_audit_json_path": safe_pip_audit_json_path,
+        "allow_network": allow_network,
+        "advisory_max_age_hours": advisory_max_age_hours,
+        "include_installed": include_installed,
+        "max_installed": max_installed,
+        "export": export,
+        "include_sbom": include_sbom,
+        "block_on_vulnerabilities": block_on_vulnerabilities,
+    }
+    if export:
+        _write_dependency_security_report_exports(
+            report,
+            include_sbom=include_sbom,
+            provenance_inputs=provenance_inputs,
+        )
+    return report
+
+
+@mcp.tool()
+def dependency_security_report(
+    path: str = ".",
+    requirements_paths: list[str] | None = None,
+    advisory_fixture_path: str = "",
+    pip_audit_json_path: str = "",
+    allow_network: bool = False,
+    advisory_max_age_hours: int = 168,
+    include_installed: bool = False,
+    max_installed: int = 500,
+    export: bool = True,
+    include_sbom: bool = True,
+    block_on_vulnerabilities: bool = False,
+) -> dict[str, Any]:
+    """Build a read-only dependency SBOM/vulnerability report from local inputs."""
+    arguments = {
+        "path": path,
+        "requirements_paths": requirements_paths,
+        "advisory_fixture_path": advisory_fixture_path,
+        "pip_audit_json_path": pip_audit_json_path,
+        "allow_network": allow_network,
+        "advisory_max_age_hours": advisory_max_age_hours,
+        "include_installed": include_installed,
+        "max_installed": max_installed,
+        "export": export,
+        "include_sbom": include_sbom,
+        "block_on_vulnerabilities": block_on_vulnerabilities,
+    }
+    with _otel_span(
+        "mcp.tool.dependency_security_report",
+        _otel_tool_attributes("dependency_security_report", arguments),
+    ) as span:
+        result = _dependency_security_report_impl(
+            path=path,
+            requirements_paths=requirements_paths,
+            advisory_fixture_path=advisory_fixture_path,
+            pip_audit_json_path=pip_audit_json_path,
+            allow_network=allow_network,
+            advisory_max_age_hours=advisory_max_age_hours,
+            include_installed=include_installed,
+            max_installed=max_installed,
+            export=export,
+            include_sbom=include_sbom,
+            block_on_vulnerabilities=block_on_vulnerabilities,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
 
 @mcp.tool()
 def governance_report(
@@ -18515,6 +20348,11 @@ def _release_readiness_check_item(name: str, check: dict[str, Any]) -> dict[str,
         "finding_count",
         "missing_spdx_header_count",
         "missing_license_text_count",
+        "component_count",
+        "vulnerability_count",
+        "skipped_count",
+        "advisory_status",
+        "blocking_enabled",
         "risk_level",
         "risk_score",
         "present",
@@ -18550,7 +20388,7 @@ def _release_readiness_dashboard_payload(result: dict[str, Any]) -> dict[str, An
     groups: list[dict[str, Any]] = []
     for title, names in (
         ("Release gate", ("tests", "impact_tests")),
-        ("Policy and compliance", ("docs", "security", "license")),
+        ("Policy and compliance", ("docs", "security", "dependency_security", "license")),
         ("Risk and governance", ("risk", "governance_report")),
     ):
         items = [
@@ -18640,6 +20478,7 @@ def release_readiness(
     test_target: str = "tests",
     run_docs_check: bool = True,
     run_security_check: bool = True,
+    run_dependency_security_check: bool = True,
     run_license_check: bool = True,
     run_risk_check: bool = True,
     run_impact_check: bool = True,
@@ -18712,6 +20551,35 @@ def release_readiness(
         if finding_count > 0:
             result["ok"] = False
 
+    if run_dependency_security_check:
+        try:
+            dependency_out = dependency_security_report(
+                export=False,
+                include_sbom=False,
+                allow_network=False,
+                block_on_vulnerabilities=False,
+            )
+            dep_summary = dependency_out.get("summary", {}) if isinstance(dependency_out.get("summary"), dict) else {}
+            dep_advisory = dependency_out.get("advisory", {}) if isinstance(dependency_out.get("advisory"), dict) else {}
+            dep_gate = dependency_out.get("gate", {}) if isinstance(dependency_out.get("gate"), dict) else {}
+            dep_status = str(dependency_out.get("status", ""))
+            dep_warning = dep_status in {"vulnerable", "stale-cache", "network-disabled", "scanner-unavailable", "skipped"}
+            result["checks"]["dependency_security"] = {
+                "ok": not bool(dep_gate.get("would_block", False)),
+                "status": dep_status,
+                "component_count": dep_summary.get("component_count", 0),
+                "vulnerability_count": dep_summary.get("vulnerability_count", 0),
+                "skipped_count": dep_summary.get("skipped_count", 0),
+                "advisory_status": dep_advisory.get("status", ""),
+                "blocking_enabled": dep_gate.get("blocking_enabled", False),
+                "warning": dep_warning,
+                "warning_reason": "; ".join(dependency_out.get("warnings", [])[:3]) if isinstance(dependency_out.get("warnings"), list) else "",
+            }
+            if dep_gate.get("would_block", False):
+                result["ok"] = False
+        except Exception as exc:
+            result["checks"]["dependency_security"] = {"ok": True, "status": "scanner-unavailable", "warning": True, "warning_reason": str(exc)}
+
     if run_license_check:
         try:
             license_out = license_monitor(
@@ -18783,6 +20651,11 @@ def release_readiness(
                         "risk_level",
                         "missing_spdx_header_count",
                         "missing_license_text_count",
+                        "component_count",
+                        "vulnerability_count",
+                        "skipped_count",
+                        "advisory_status",
+                        "blocking_enabled",
                         "selected_count",
                         "needs_docs_update",
                         "present",
@@ -22181,6 +24054,7 @@ def quality_router(
     run_docs_check: bool = True,
     run_license_check: bool = True,
     run_security_check: bool = True,
+    run_dependency_security_check: bool = True,
     run_tests: bool = True,
     history_path: str = str(FLAKY_HISTORY_FILE),
     runs: int = 5,
@@ -22230,6 +24104,7 @@ def quality_router(
             run_license_check=run_license_check,
             run_risk_check=run_risk_check,
             run_security_check=run_security_check,
+            run_dependency_security_check=run_dependency_security_check,
             run_tests=run_tests,
             summary_mode=summary_mode,
             test_runner=test_runner,

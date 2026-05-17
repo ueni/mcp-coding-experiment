@@ -1844,6 +1844,194 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertGreaterEqual(execute["applied_count"], 1)
         self.assertIn("return x + 2", (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"))
 
+    def _write_dependency_advisory_fixture(self, rel_path, generated_at, advisories):
+        return self.write_repo_text(
+            rel_path,
+            json.dumps(
+                {
+                    "schema": "dependency_advisory_fixture.v1",
+                    "generated_at": generated_at,
+                    "advisories": advisories,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+    def test_dependency_security_report_vulnerable_fixture_exports_artifacts(self):
+        self.write_repo_text("requirements.txt", "vulnerable-pkg==1.0.0\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-test-vuln",
+                    "package": "vulnerable-pkg",
+                    "affected_versions": "<2.0.0",
+                    "severity": "high",
+                    "fixed_versions": ["2.0.0"],
+                    "summary": "fixture vulnerability",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/advisories.json",
+            export=True,
+            include_sbom=True,
+            advisory_max_age_hours=24,
+        )
+
+        self.assertEqual(out["schema"], "dependency_security_report.v1")
+        self.assertEqual(out["status"], "vulnerable")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["summary"]["component_count"], 1)
+        self.assertEqual(out["summary"]["vulnerability_count"], 1)
+        self.assertEqual(out["vulnerabilities"][0]["id"], "GHSA-test-vuln")
+        self.assertIn("json", out["exports"])
+        self.assertIn("sbom", out["exports"])
+        self.assertEqual(len(out["resource_links"]), 2)
+        self.assertFalse(out["security"]["mutates_dependency_files"])
+
+        verify = self.server.artifact_provenance(artifact_path=out["exports"]["json"])
+        self.assertTrue(verify["ok"], verify)
+        governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        self.assertTrue(governance["dependency_security"]["present"])
+        self.assertEqual(governance["dependency_security"]["status"], "vulnerable")
+
+    def test_dependency_security_report_clean_fixture(self):
+        self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/clean-advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-other",
+                    "package": "other-pkg",
+                    "affected_versions": "<9",
+                    "severity": "low",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/clean-advisories.json",
+            export=False,
+        )
+
+        self.assertEqual(out["status"], "clean")
+        self.assertEqual(out["summary"]["vulnerability_count"], 0)
+        self.assertEqual(out["advisory"]["status"], "fresh")
+        self.assertEqual(out["exports"], {})
+
+    def test_dependency_security_report_redacts_skipped_requirement_inputs_in_exports(self):
+        self.write_repo_text(
+            "requirements.txt",
+            "\n".join(
+                [
+                    "--index-url https://user:pa55word@private.example/simple",
+                    "--extra-index-url=https://token@example.org/simple",
+                    "-e git+https://oauth2:ghp_secret1234567890@github.example/private/repo.git#egg=private_pkg",
+                    "direct-pkg @ https://user:secret@files.example.com/direct-pkg-1.0.0.whl",
+                    "private-pkg @ git@github.example:private/repo.git",
+                    "hosted-pkg @ build-host:/srv/private/repo.git",
+                    "local-pkg @ file:///home/alice/private/wheels/local_pkg-1.0.0.whl",
+                    "/home/alice/private/raw/path/pkg.whl",
+                    "bad req @@@ /home/alice/other",
+                    "safe-pkg==1.2.3",
+                ]
+            )
+            + "\n",
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            export=True,
+            include_sbom=True,
+        )
+
+        skipped_inputs = [row.get("input", "") for row in out["skipped"]]
+        self.assertIn("--index-url <redacted:option_value>", skipped_inputs)
+        self.assertIn("--extra-index-url <redacted:option_value>", skipped_inputs)
+        self.assertTrue(any(item == "<redacted:url>" for item in skipped_inputs))
+        self.assertTrue(any(item == "direct-pkg @ <redacted:url>" for item in skipped_inputs))
+        self.assertTrue(any(item == "private-pkg @ <redacted:vcs_ref>" for item in skipped_inputs))
+        self.assertTrue(any(item == "hosted-pkg @ <redacted:vcs_ref>" for item in skipped_inputs))
+        self.assertTrue(any("<redacted:absolute_path>" in item for item in skipped_inputs))
+        self.assertFalse(out["security"]["raw_unsupported_requirement_inputs_persisted"])
+
+        payloads = [json.dumps(out, sort_keys=True)]
+        payloads.extend(
+            (self.repo_path / rel_path).read_text(encoding="utf-8")
+            for rel_path in out["exports"].values()
+        )
+        payloads.extend(
+            (self.repo_path / rel_path).read_text(encoding="utf-8")
+            for rel_path in out["provenance"]["sidecars"].values()
+        )
+        exported_and_returned = "\n".join(payloads)
+
+        for leaked_fragment in (
+            "https://",
+            "file://",
+            "private.example",
+            "github.example",
+            "git@github.example:private/repo.git",
+            "private/repo.git",
+            "build-host",
+            "/srv/private",
+            "files.example.com",
+            "pa55word",
+            "oauth2",
+            "ghp_secret1234567890",
+            "/home/alice/private",
+            "/home/alice/other",
+            str(self.repo_path),
+        ):
+            self.assertNotIn(leaked_fragment, exported_and_returned)
+        self.assertIn("<redacted:url>", exported_and_returned)
+        self.assertIn("<redacted:vcs_ref>", exported_and_returned)
+        self.assertIn("<redacted:absolute_path>", exported_and_returned)
+
+    def test_dependency_security_report_stale_offline_fixture(self):
+        self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/stale-advisories.json",
+            "2000-01-01T00:00:00+00:00",
+            [],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/stale-advisories.json",
+            advisory_max_age_hours=1,
+            export=False,
+        )
+
+        self.assertEqual(out["status"], "stale-cache")
+        self.assertEqual(out["advisory"]["status"], "stale-cache")
+        self.assertTrue(any("older" in warning for warning in out["warnings"]))
+
+    def test_release_readiness_includes_dependency_security_summary(self):
+        out = self.server.release_readiness(
+            base_ref="HEAD",
+            head_ref="HEAD",
+            run_tests=False,
+            run_docs_check=False,
+            run_security_check=False,
+            run_license_check=False,
+            run_risk_check=False,
+            run_impact_check=False,
+            summary_mode="quick",
+        )
+
+        self.assertIn("dependency_security", out["checks"])
+        dep = out["checks"]["dependency_security"]
+        self.assertIn(dep["status"], {"clean", "vulnerable", "skipped", "stale-cache", "network-disabled", "scanner-unavailable"})
+        self.assertIn("vulnerability_count", dep)
+
     def test_release_readiness_quick(self):
         out = self.server.release_readiness(
             base_ref="HEAD",
@@ -2327,6 +2515,122 @@ class ServerToolsTest(ServerToolsTestBase):
         )
         return json_artifact, sidecar_path
 
+    def _github_attested_governance_artifact(
+        self,
+        *,
+        verification_overrides=None,
+        signing_overrides=None,
+        write_bundle=True,
+        write_trusted_root=True,
+    ):
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        json_artifact = out["exports"]["json"]
+        sidecar_path = self.repo_path / out["exports"]["provenance"][json_artifact]
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        attestation_dir = self.repo_path / ".codebase-tooling-mcp" / "attestations"
+        attestation_dir.mkdir(parents=True, exist_ok=True)
+        attestation_suffix = sidecar["artifact"]["digest"]["value"][:12]
+        bundle_path = attestation_dir / f"github-bundle-{attestation_suffix}.json"
+        trusted_root_path = attestation_dir / f"github-trusted-root-{attestation_suffix}.jsonl"
+        if write_bundle:
+            bundle_path.write_text('{"bundle":"fixture"}\n', encoding="utf-8")
+        if write_trusted_root:
+            trusted_root_path.write_text('{"root":"fixture"}\n', encoding="utf-8")
+        verification = {
+            "enabled": True,
+            "mode": "offline",
+            "trusted_root_ref": str(trusted_root_path.relative_to(self.repo_path)),
+            "expected_owner": "ueni",
+            "expected_repo": "mcp-coding-experiment",
+            "expected_workflow": ".github/workflows/release.yml",
+            "expected_ref": "refs/heads/main",
+            "predicate_type": "https://slsa.dev/provenance/v1",
+        }
+        verification.update(verification_overrides or {})
+        signing = {
+            "signed": True,
+            "backend": "github-artifact-attestations",
+            "subject_digest": sidecar["artifact"]["digest"],
+            "signer_identity": "https://github.com/ueni/mcp-coding-experiment/.github/workflows/release.yml@refs/heads/main",
+            "bundle_ref": str(bundle_path.relative_to(self.repo_path)),
+            "envelope_ref": "",
+            "verification": verification,
+        }
+        signing.update(signing_overrides or {})
+        sidecar["signing"] = signing
+        sidecar_path.write_text(
+            json.dumps(sidecar, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return json_artifact, sidecar_path, sidecar, bundle_path, trusted_root_path
+
+    def _github_attestation_cli_output(
+        self,
+        digest,
+        *,
+        repo="ueni/mcp-coding-experiment",
+        workflow=".github/workflows/release.yml",
+        ref="refs/heads/main",
+        predicate_type="https://slsa.dev/provenance/v1",
+        commit="0123456789abcdef0123456789abcdef01234567",
+    ):
+        return {
+            "attestations": [
+                {
+                    "verificationResult": {
+                        "statement": {
+                            "predicateType": predicate_type,
+                            "subject": [
+                                {"name": "governance-report.json", "digest": {"sha256": digest}}
+                            ],
+                            "predicate": {
+                                "buildDefinition": {
+                                    "externalParameters": {
+                                        "workflow": {
+                                            "repository": repo,
+                                            "path": workflow,
+                                            "name": "release",
+                                            "ref": ref,
+                                        }
+                                    }
+                                },
+                                "runDetails": {"metadata": {"commit_sha": commit}},
+                            },
+                        }
+                    },
+                    "certificate": {
+                        "identity": f"https://github.com/{repo}/{workflow}@{ref}",
+                        "workflow_ref": f"{repo}/{workflow}@{ref}",
+                    },
+                }
+            ]
+        }
+
+    def _fake_github_attestation_runner(
+        self,
+        output,
+        seen_commands=None,
+        *,
+        returncode=0,
+        stderr="",
+    ):
+        real_run = subprocess.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and list(cmd[:3]) == ["gh", "attestation", "verify"]:
+                if seen_commands is not None:
+                    seen_commands.append(list(cmd))
+                stdout = json.dumps(output) if output is not None else ""
+                return subprocess.CompletedProcess(
+                    cmd,
+                    returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            return real_run(cmd, *args, **kwargs)
+
+        return fake_run
+
     def test_artifact_provenance_verifies_local_dsse_fixture_attestation(self):
         json_artifact, _sidecar_path = self._fixture_attested_governance_artifact()
 
@@ -2339,6 +2643,235 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(check["attestation"]["backend"], "local-dsse-fixture")
         self.assertFalse(check["attestation"]["network_access"])
         self.assertEqual(check["checks"]["attestation_status"], "verified")
+
+    def test_artifact_provenance_verifies_github_artifact_attestation_offline(self):
+        json_artifact, _sidecar_path, sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact()
+        output = self._github_attestation_cli_output(sidecar["artifact"]["digest"]["value"])
+        seen_commands = []
+
+        with patch.object(self.server.shutil, "which", return_value="/usr/bin/gh"), patch.object(
+            self.server.subprocess,
+            "run",
+            side_effect=self._fake_github_attestation_runner(output, seen_commands),
+        ):
+            verify = self.server.artifact_provenance(artifact_path=json_artifact)
+
+        self.assertTrue(verify["ok"])
+        check = verify["checks"][0]
+        self.assertEqual(check["attestation"]["status"], "verified")
+        self.assertEqual(check["attestation"]["backend"], "github-artifact-attestations")
+        self.assertFalse(check["attestation"]["network_access"])
+        self.assertEqual(check["attestation"]["verification"]["offline"], True)
+        self.assertEqual(check["checks"]["attestation_status"], "verified")
+        self.assertEqual(len(seen_commands), 1)
+        self.assertIn("--bundle", seen_commands[0])
+        self.assertIn("--custom-trusted-root", seen_commands[0])
+        self.assertIn("--repo", seen_commands[0])
+        self.assertNotIn("--owner", seen_commands[0])
+        self.assertIn("--signer-workflow", seen_commands[0])
+        self.assertIn("--source-ref", seen_commands[0])
+        serialized = json.dumps(check["attestation"], sort_keys=True)
+        self.assertNotIn(str(self.repo_path), serialized)
+        self.assertNotIn("Test Repo", serialized)
+
+    def test_artifact_provenance_rejects_wrong_github_attestation_policy(self):
+        cases = [
+            (
+                "wrong_digest",
+                {"digest": "0" * 64},
+                {},
+                "attestation_subject_digest_mismatch",
+            ),
+            (
+                "wrong_repo",
+                {"repo": "ueni/other-repo"},
+                {},
+                "attestation_repository_mismatch",
+            ),
+            (
+                "wrong_workflow",
+                {"workflow": ".github/workflows/other.yml"},
+                {},
+                "attestation_workflow_mismatch",
+            ),
+            (
+                "wrong_ref",
+                {"ref": "refs/tags/v1.0.0"},
+                {},
+                "attestation_ref_mismatch",
+            ),
+            (
+                "wrong_commit",
+                {},
+                {"expected_ref": "", "expected_commit": "f" * 40},
+                "attestation_commit_mismatch",
+            ),
+            (
+                "wrong_predicate",
+                {"predicate_type": "https://example.invalid/predicate/v1"},
+                {},
+                "attestation_predicate_type_mismatch",
+            ),
+        ]
+        for case, overrides, verification_overrides, expected_finding in cases:
+            with self.subTest(case=case):
+                json_artifact, _sidecar_path, sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+                    verification_overrides=verification_overrides,
+                )
+                output = self._github_attestation_cli_output(
+                    overrides.get("digest", sidecar["artifact"]["digest"]["value"]),
+                    repo=overrides.get("repo", "ueni/mcp-coding-experiment"),
+                    workflow=overrides.get("workflow", ".github/workflows/release.yml"),
+                    ref=overrides.get("ref", "refs/heads/main"),
+                    predicate_type=overrides.get("predicate_type", "https://slsa.dev/provenance/v1"),
+                    commit=overrides.get("commit", "0123456789abcdef0123456789abcdef01234567"),
+                )
+
+                with patch.object(self.server.shutil, "which", return_value="/usr/bin/gh"), patch.object(
+                    self.server.subprocess,
+                    "run",
+                    side_effect=self._fake_github_attestation_runner(output),
+                ):
+                    verify = self.server.artifact_provenance(artifact_path=json_artifact)
+
+                self.assertFalse(verify["ok"])
+                check = verify["checks"][0]
+                self.assertEqual(check["attestation"]["status"], "invalid")
+                self.assertIn(expected_finding, check["findings"])
+                self.assertFalse(check["attestation"]["network_access"])
+
+        json_artifact, _sidecar_path, sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+            verification_overrides={"expected_ref": "", "expected_commit": "f" * 40},
+        )
+        output = self._github_attestation_cli_output(sidecar["artifact"]["digest"]["value"])
+        with patch.object(self.server.shutil, "which", return_value="/usr/bin/gh"), patch.object(
+            self.server.subprocess,
+            "run",
+            side_effect=self._fake_github_attestation_runner(output),
+        ):
+            verify = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertFalse(verify["ok"])
+        self.assertEqual(verify["checks"][0]["attestation"]["status"], "invalid")
+        self.assertIn("attestation_commit_mismatch", verify["checks"][0]["findings"])
+        self.assertFalse(verify["checks"][0]["attestation"]["network_access"])
+
+    def test_artifact_provenance_marks_github_cli_verification_failures_invalid(self):
+        cases = [
+            ("wrong_digest", {"subject_digest": {"algorithm": "sha256", "value": "0" * 64}}, {}),
+            ("wrong_repo", {}, {"expected_repo": "other-repo"}),
+            ("wrong_workflow", {}, {"expected_workflow": ".github/workflows/other.yml"}),
+            ("wrong_ref", {}, {"expected_ref": "refs/tags/v1.0.0"}),
+            ("wrong_commit", {}, {"expected_ref": "", "expected_commit": "f" * 40}),
+            ("wrong_predicate", {}, {"predicate_type": "https://example.invalid/predicate/v1"}),
+        ]
+        for case, signing_overrides, verification_overrides in cases:
+            with self.subTest(case=case):
+                json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+                    signing_overrides=signing_overrides,
+                    verification_overrides=verification_overrides,
+                )
+
+                with patch.object(self.server.shutil, "which", return_value="/usr/bin/gh"), patch.object(
+                    self.server.subprocess,
+                    "run",
+                    side_effect=self._fake_github_attestation_runner(
+                        None,
+                        returncode=1,
+                        stderr="gh attestation verify: policy verification failed",
+                    ),
+                ):
+                    verify = self.server.artifact_provenance(artifact_path=json_artifact)
+
+                self.assertFalse(verify["ok"])
+                check = verify["checks"][0]
+                self.assertEqual(check["attestation"]["status"], "invalid")
+                self.assertIn("attestation_verification_failed", check["findings"])
+                self.assertFalse(check["attestation"]["network_access"])
+
+    def test_artifact_provenance_github_attestation_prerequisites_fail_closed(self):
+        missing_cases = [
+            ("bundle", False, True, "attestation_bundle_missing"),
+            ("trusted_root", True, False, "attestation_trusted_root_missing"),
+        ]
+        for case, write_bundle, write_root, expected_finding in missing_cases:
+            with self.subTest(case=case):
+                json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+                    write_bundle=write_bundle,
+                    write_trusted_root=write_root,
+                )
+
+                verify = self.server.artifact_provenance(artifact_path=json_artifact)
+
+                self.assertFalse(verify["ok"])
+                check = verify["checks"][0]
+                self.assertEqual(check["attestation"]["status"], "unavailable")
+                self.assertIn(expected_finding, check["findings"])
+                self.assertFalse(check["attestation"]["network_access"])
+
+        json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact()
+        with patch.object(self.server.shutil, "which", return_value=None):
+            missing_gh = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertFalse(missing_gh["ok"])
+        self.assertEqual(missing_gh["checks"][0]["attestation"]["status"], "unavailable")
+        self.assertIn("attestation_verifier_dependency_missing", missing_gh["checks"][0]["findings"])
+
+        json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+            verification_overrides={"enabled": False},
+        )
+        disabled = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertFalse(disabled["ok"])
+        self.assertEqual(disabled["checks"][0]["attestation"]["status"], "unavailable")
+        self.assertIn("attestation_backend_disabled", disabled["checks"][0]["findings"])
+
+        json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+            verification_overrides={"mode": "online", "allow_online": False},
+        )
+        online_disabled = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertFalse(online_disabled["ok"])
+        self.assertEqual(online_disabled["checks"][0]["attestation"]["status"], "unavailable")
+        self.assertIn("attestation_online_verification_disabled", online_disabled["checks"][0]["findings"])
+        self.assertFalse(online_disabled["checks"][0]["attestation"]["network_access"])
+
+    def test_artifact_provenance_github_online_failures_are_unavailable(self):
+        json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+            verification_overrides={"mode": "online", "allow_online": True},
+        )
+        with patch.object(self.server, "_github_cli_token_available", return_value=False):
+            missing_token = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertFalse(missing_token["ok"])
+        self.assertEqual(missing_token["checks"][0]["attestation"]["status"], "unavailable")
+        self.assertIn("attestation_online_token_unavailable", missing_token["checks"][0]["findings"])
+        self.assertFalse(missing_token["checks"][0]["attestation"]["network_access"])
+
+        json_artifact, _sidecar_path, _sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact(
+            verification_overrides={"mode": "online", "allow_online": True},
+        )
+        real_run = subprocess.run
+
+        def unavailable_online_verifier(cmd, *args, **kwargs):
+            if isinstance(cmd, (list, tuple)) and list(cmd[:3]) == ["gh", "attestation", "verify"]:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    stdout="",
+                    stderr="private repository transparency data unavailable",
+                )
+            return real_run(cmd, *args, **kwargs)
+
+        with patch.object(self.server, "_github_cli_token_available", return_value=True), patch.object(
+            self.server.shutil,
+            "which",
+            return_value="/usr/bin/gh",
+        ), patch.object(
+            self.server.subprocess,
+            "run",
+            side_effect=unavailable_online_verifier,
+        ):
+            unavailable = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertFalse(unavailable["ok"])
+        self.assertEqual(unavailable["checks"][0]["attestation"]["status"], "unavailable")
+        self.assertIn("attestation_verification_unavailable", unavailable["checks"][0]["findings"])
+        self.assertTrue(unavailable["checks"][0]["attestation"]["network_access"])
 
     def test_artifact_provenance_rejects_invalid_attestation_cases(self):
         cases = [
@@ -2372,10 +2905,10 @@ class ServerToolsTest(ServerToolsTestBase):
                     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
                     sidecar["signing"] = {
                         "signed": True,
-                        "backend": "github-artifact-attestations",
+                        "backend": "sigstore-cosign-future",
                         "subject_digest": sidecar["artifact"]["digest"],
                         "signer_identity": "https://github.com/ueni/mcp-coding-experiment/.github/workflows/release.yml@refs/heads/main",
-                        "bundle_ref": "github://artifact-attestations/future",
+                        "bundle_ref": "sigstore://attestations/future",
                         "envelope_ref": "",
                         "verification": {"status": "unsupported"},
                     }
@@ -2414,6 +2947,21 @@ class ServerToolsTest(ServerToolsTestBase):
             fixture = self.server.artifact_provenance(artifact_path=json_artifact)
         self.assertTrue(fixture["ok"])
         self.assertEqual(fixture["checks"][0]["attestation"]["status"], "verified")
+
+        json_artifact, _sidecar_path, sidecar, _bundle_path, _root_path = self._github_attested_governance_artifact()
+        output = self._github_attestation_cli_output(sidecar["artifact"]["digest"]["value"])
+        with patch("urllib.request.urlopen", side_effect=network_error), patch(
+            "socket.socket",
+            side_effect=network_error,
+        ), patch.object(self.server.shutil, "which", return_value="/usr/bin/gh"), patch.object(
+            self.server.subprocess,
+            "run",
+            side_effect=self._fake_github_attestation_runner(output),
+        ):
+            github = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertTrue(github["ok"])
+        self.assertEqual(github["checks"][0]["attestation"]["status"], "verified")
+        self.assertFalse(github["checks"][0]["attestation"]["network_access"])
 
     def test_state_snapshot_writes_provenance_and_redacts_selected_inputs(self):
         snap = self.server.state_snapshot(label="token=super-secret-value", include_build_dir=False)
