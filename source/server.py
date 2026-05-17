@@ -2395,6 +2395,16 @@ DEPENDENCY_SECURITY_URL_VALUE_RE = re.compile(
 DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE = re.compile(
     r"(?<!\S)[^\s/@:]+:[^\s/@]+@[^\s]+"
 )
+DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE = re.compile(
+    r"(?<![A-Za-z0-9._~+%/-])"
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*\+)?"
+    r"(?:"
+    r"[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+(?::|/)[^\s'\"<>]+"
+    r"|(?:localhost|[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+)(?::|/)[^\s'\"<>]+"
+    r"|[A-Za-z0-9.-]+:/*[^\s'\"<>/]+/[^\s'\"<>]*?(?:\.git(?:[#?][^\s'\"<>]*)?|$)"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _dependency_security_safe_requirement_input(requirement_text: str) -> str:
@@ -2412,6 +2422,7 @@ def _dependency_security_safe_requirement_input(requirement_text: str) -> str:
     redacted = DEPENDENCY_SECURITY_URL_VALUE_RE.sub("<redacted:url>", text)
     redacted = DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.sub("<redacted:credential>", redacted)
     redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:credential>", redacted)
+    redacted = DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE.sub("<redacted:vcs_ref>", redacted)
     redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute_path>", redacted)
     return _trim_text(redacted, max_chars=200)
 
@@ -2422,6 +2433,7 @@ def _dependency_security_safe_input_path(path_value: str) -> str:
     if (
         DEPENDENCY_SECURITY_URL_VALUE_RE.search(path_value)
         or DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.search(path_value)
+        or DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE.search(path_value)
         or SENSITIVE_AUDIT_VALUE_RE.search(path_value)
     ):
         return _dependency_security_safe_requirement_input(path_value)
@@ -4271,7 +4283,7 @@ def _write_artifact_provenance_sidecars(
                 "provenance_schema": PROVENANCE_SCHEMA,
             },
             "repository": {
-                "path": str(REPO_PATH),
+                "path": "repo://root",
                 "git": git_state or _git_state_for_provenance(),
             },
             "invocation": {
@@ -18362,7 +18374,7 @@ def _dependency_security_report_impl(
             "repo_boundary_enforced": True,
             "host_absolute_paths_exposed": False,
             "raw_unsupported_requirement_inputs_persisted": False,
-            "unsupported_requirement_input_redaction": "urls_credentials_and_host_paths",
+            "unsupported_requirement_input_redaction": "urls_credentials_host_paths_and_schemeless_vcs_refs",
         },
         "exports": {},
         "resource_links": [],

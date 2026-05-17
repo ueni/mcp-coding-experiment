@@ -1935,6 +1935,8 @@ class ServerToolsTest(ServerToolsTestBase):
                     "--extra-index-url=https://token@example.org/simple",
                     "-e git+https://oauth2:ghp_secret1234567890@github.example/private/repo.git#egg=private_pkg",
                     "direct-pkg @ https://user:secret@files.example.com/direct-pkg-1.0.0.whl",
+                    "private-pkg @ git@github.example:private/repo.git",
+                    "hosted-pkg @ build-host:/srv/private/repo.git",
                     "local-pkg @ file:///home/alice/private/wheels/local_pkg-1.0.0.whl",
                     "/home/alice/private/raw/path/pkg.whl",
                     "bad req @@@ /home/alice/other",
@@ -1955,6 +1957,8 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("--extra-index-url <redacted:option_value>", skipped_inputs)
         self.assertTrue(any(item == "<redacted:url>" for item in skipped_inputs))
         self.assertTrue(any(item == "direct-pkg @ <redacted:url>" for item in skipped_inputs))
+        self.assertTrue(any(item == "private-pkg @ <redacted:vcs_ref>" for item in skipped_inputs))
+        self.assertTrue(any(item == "hosted-pkg @ <redacted:vcs_ref>" for item in skipped_inputs))
         self.assertTrue(any("<redacted:absolute_path>" in item for item in skipped_inputs))
         self.assertFalse(out["security"]["raw_unsupported_requirement_inputs_persisted"])
 
@@ -1974,15 +1978,21 @@ class ServerToolsTest(ServerToolsTestBase):
             "file://",
             "private.example",
             "github.example",
+            "git@github.example:private/repo.git",
+            "private/repo.git",
+            "build-host",
+            "/srv/private",
             "files.example.com",
             "pa55word",
             "oauth2",
             "ghp_secret1234567890",
             "/home/alice/private",
             "/home/alice/other",
+            str(self.repo_path),
         ):
             self.assertNotIn(leaked_fragment, exported_and_returned)
         self.assertIn("<redacted:url>", exported_and_returned)
+        self.assertIn("<redacted:vcs_ref>", exported_and_returned)
         self.assertIn("<redacted:absolute_path>", exported_and_returned)
 
     def test_dependency_security_report_stale_offline_fixture(self):
