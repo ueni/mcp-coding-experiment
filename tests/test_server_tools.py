@@ -1844,6 +1844,194 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertGreaterEqual(execute["applied_count"], 1)
         self.assertIn("return x + 2", (self.repo_path / "src" / "sample.py").read_text(encoding="utf-8"))
 
+    def _write_dependency_advisory_fixture(self, rel_path, generated_at, advisories):
+        return self.write_repo_text(
+            rel_path,
+            json.dumps(
+                {
+                    "schema": "dependency_advisory_fixture.v1",
+                    "generated_at": generated_at,
+                    "advisories": advisories,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+    def test_dependency_security_report_vulnerable_fixture_exports_artifacts(self):
+        self.write_repo_text("requirements.txt", "vulnerable-pkg==1.0.0\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-test-vuln",
+                    "package": "vulnerable-pkg",
+                    "affected_versions": "<2.0.0",
+                    "severity": "high",
+                    "fixed_versions": ["2.0.0"],
+                    "summary": "fixture vulnerability",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/advisories.json",
+            export=True,
+            include_sbom=True,
+            advisory_max_age_hours=24,
+        )
+
+        self.assertEqual(out["schema"], "dependency_security_report.v1")
+        self.assertEqual(out["status"], "vulnerable")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["summary"]["component_count"], 1)
+        self.assertEqual(out["summary"]["vulnerability_count"], 1)
+        self.assertEqual(out["vulnerabilities"][0]["id"], "GHSA-test-vuln")
+        self.assertIn("json", out["exports"])
+        self.assertIn("sbom", out["exports"])
+        self.assertEqual(len(out["resource_links"]), 2)
+        self.assertFalse(out["security"]["mutates_dependency_files"])
+
+        verify = self.server.artifact_provenance(artifact_path=out["exports"]["json"])
+        self.assertTrue(verify["ok"], verify)
+        governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        self.assertTrue(governance["dependency_security"]["present"])
+        self.assertEqual(governance["dependency_security"]["status"], "vulnerable")
+
+    def test_dependency_security_report_clean_fixture(self):
+        self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/clean-advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-other",
+                    "package": "other-pkg",
+                    "affected_versions": "<9",
+                    "severity": "low",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/clean-advisories.json",
+            export=False,
+        )
+
+        self.assertEqual(out["status"], "clean")
+        self.assertEqual(out["summary"]["vulnerability_count"], 0)
+        self.assertEqual(out["advisory"]["status"], "fresh")
+        self.assertEqual(out["exports"], {})
+
+    def test_dependency_security_report_redacts_skipped_requirement_inputs_in_exports(self):
+        self.write_repo_text(
+            "requirements.txt",
+            "\n".join(
+                [
+                    "--index-url https://user:pa55word@private.example/simple",
+                    "--extra-index-url=https://token@example.org/simple",
+                    "-e git+https://oauth2:ghp_secret1234567890@github.example/private/repo.git#egg=private_pkg",
+                    "direct-pkg @ https://user:secret@files.example.com/direct-pkg-1.0.0.whl",
+                    "private-pkg @ git@github.example:private/repo.git",
+                    "hosted-pkg @ build-host:/srv/private/repo.git",
+                    "local-pkg @ file:///home/alice/private/wheels/local_pkg-1.0.0.whl",
+                    "/home/alice/private/raw/path/pkg.whl",
+                    "bad req @@@ /home/alice/other",
+                    "safe-pkg==1.2.3",
+                ]
+            )
+            + "\n",
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            export=True,
+            include_sbom=True,
+        )
+
+        skipped_inputs = [row.get("input", "") for row in out["skipped"]]
+        self.assertIn("--index-url <redacted:option_value>", skipped_inputs)
+        self.assertIn("--extra-index-url <redacted:option_value>", skipped_inputs)
+        self.assertTrue(any(item == "<redacted:url>" for item in skipped_inputs))
+        self.assertTrue(any(item == "direct-pkg @ <redacted:url>" for item in skipped_inputs))
+        self.assertTrue(any(item == "private-pkg @ <redacted:vcs_ref>" for item in skipped_inputs))
+        self.assertTrue(any(item == "hosted-pkg @ <redacted:vcs_ref>" for item in skipped_inputs))
+        self.assertTrue(any("<redacted:absolute_path>" in item for item in skipped_inputs))
+        self.assertFalse(out["security"]["raw_unsupported_requirement_inputs_persisted"])
+
+        payloads = [json.dumps(out, sort_keys=True)]
+        payloads.extend(
+            (self.repo_path / rel_path).read_text(encoding="utf-8")
+            for rel_path in out["exports"].values()
+        )
+        payloads.extend(
+            (self.repo_path / rel_path).read_text(encoding="utf-8")
+            for rel_path in out["provenance"]["sidecars"].values()
+        )
+        exported_and_returned = "\n".join(payloads)
+
+        for leaked_fragment in (
+            "https://",
+            "file://",
+            "private.example",
+            "github.example",
+            "git@github.example:private/repo.git",
+            "private/repo.git",
+            "build-host",
+            "/srv/private",
+            "files.example.com",
+            "pa55word",
+            "oauth2",
+            "ghp_secret1234567890",
+            "/home/alice/private",
+            "/home/alice/other",
+            str(self.repo_path),
+        ):
+            self.assertNotIn(leaked_fragment, exported_and_returned)
+        self.assertIn("<redacted:url>", exported_and_returned)
+        self.assertIn("<redacted:vcs_ref>", exported_and_returned)
+        self.assertIn("<redacted:absolute_path>", exported_and_returned)
+
+    def test_dependency_security_report_stale_offline_fixture(self):
+        self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/stale-advisories.json",
+            "2000-01-01T00:00:00+00:00",
+            [],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/stale-advisories.json",
+            advisory_max_age_hours=1,
+            export=False,
+        )
+
+        self.assertEqual(out["status"], "stale-cache")
+        self.assertEqual(out["advisory"]["status"], "stale-cache")
+        self.assertTrue(any("older" in warning for warning in out["warnings"]))
+
+    def test_release_readiness_includes_dependency_security_summary(self):
+        out = self.server.release_readiness(
+            base_ref="HEAD",
+            head_ref="HEAD",
+            run_tests=False,
+            run_docs_check=False,
+            run_security_check=False,
+            run_license_check=False,
+            run_risk_check=False,
+            run_impact_check=False,
+            summary_mode="quick",
+        )
+
+        self.assertIn("dependency_security", out["checks"])
+        dep = out["checks"]["dependency_security"]
+        self.assertIn(dep["status"], {"clean", "vulnerable", "skipped", "stale-cache", "network-disabled", "scanner-unavailable"})
+        self.assertIn("vulnerability_count", dep)
+
     def test_release_readiness_quick(self):
         out = self.server.release_readiness(
             base_ref="HEAD",
