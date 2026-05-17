@@ -55,6 +55,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check dependency locks
+        run: python3 scripts/dependency_lock.py check --compact
+
       - name: Build test image
         timeout-minutes: 150
         env:
