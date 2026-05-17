@@ -2,6 +2,7 @@
 # Copyright (c) Nico Ueberfeldt
 
 import asyncio
+import base64
 import contextlib
 import contextvars
 import ast
@@ -180,6 +181,15 @@ LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
 PROVENANCE_SCHEMA = "mcp_artifact_provenance.v1"
 PROVENANCE_SUFFIX = ".provenance.json"
+ATTESTATION_SCHEMA = "mcp_artifact_attestation.v1"
+ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE = "local-dsse-fixture"
+ATTESTATION_PAYLOAD_TYPE = "application/vnd.codebase-tooling-mcp.artifact-attestation.v1+json"
+ATTESTATION_FIXTURE_KEY_ID = "local-dsse-fixture-v1"
+ATTESTATION_FIXTURE_SIGNER_IDENTITY = "local-fixture://codebase-tooling-mcp/offline-dsse-fixture"
+# Fixture-only verifier material. This is intentionally public/non-secret and is
+# not a production signing key; it exists only to make offline DSSE verification
+# deterministic in tests and local demos without network or transparency-log IO.
+ATTESTATION_FIXTURE_HMAC_KEY = b"codebase-tooling-mcp local dsse fixture verifier v1"
 WORKFLOW_LINEAGE_SCHEMA = "workflow_lineage.v1"
 WORKFLOW_LINEAGE_VERIFY_SCHEMA = "workflow_lineage.verify.v1"
 WORKFLOW_LINEAGE_SUFFIX = ".workflow-lineage.json"
@@ -2928,6 +2938,36 @@ def _artifact_digest(path: Path) -> dict[str, Any]:
     }
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _sha256_digest(value: bytes) -> dict[str, str]:
+    return {"algorithm": "sha256", "value": hashlib.sha256(value).hexdigest()}
+
+
+def _coerce_sha256_digest(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        return {
+            "algorithm": str(value.get("algorithm", "")).lower(),
+            "value": str(value.get("value", "")),
+        }
+    text = str(value or "")
+    if text.startswith("sha256:"):
+        return {"algorithm": "sha256", "value": text.removeprefix("sha256:")}
+    return {"algorithm": "", "value": text}
+
+
+def _sha256_digest_matches(value: Any, expected: str) -> bool:
+    digest = _coerce_sha256_digest(value)
+    return digest["algorithm"] == "sha256" and hmac.compare_digest(digest["value"], expected)
+
+
 def _artifact_schema_from_path(path: Path) -> str:
     if path.suffix.lower() != ".json" or not path.exists():
         return ""
@@ -2938,6 +2978,290 @@ def _artifact_schema_from_path(path: Path) -> str:
     if isinstance(payload, dict):
         return str(payload.get("schema", ""))
     return ""
+
+
+def _provenance_for_attestation_digest(provenance: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(provenance, sort_keys=True, ensure_ascii=True))
+    signing = normalized.get("signing")
+    if isinstance(signing, dict):
+        for key in ("bundle", "dsse", "envelope"):
+            signing.pop(key, None)
+        nested_attestation = signing.get("attestation")
+        if isinstance(nested_attestation, dict):
+            for key in ("bundle", "dsse", "envelope"):
+                nested_attestation.pop(key, None)
+    attestation = normalized.get("attestation")
+    if isinstance(attestation, dict):
+        for key in ("bundle", "dsse", "envelope"):
+            attestation.pop(key, None)
+    return normalized
+
+
+def _artifact_attestation_sidecar_digest(provenance: dict[str, Any]) -> dict[str, str]:
+    return _sha256_digest(_canonical_json_bytes(_provenance_for_attestation_digest(provenance)))
+
+
+def _dsse_pae(payload_type: str, payload: bytes) -> bytes:
+    payload_type_bytes = payload_type.encode("utf-8")
+    return b" ".join(
+        [
+            b"DSSEv1",
+            str(len(payload_type_bytes)).encode("ascii"),
+            payload_type_bytes,
+            str(len(payload)).encode("ascii"),
+            payload,
+        ]
+    )
+
+
+def _local_dsse_fixture_signature(payload_type: str, payload: bytes) -> str:
+    digest = hmac.new(
+        ATTESTATION_FIXTURE_HMAC_KEY,
+        _dsse_pae(payload_type, payload),
+        hashlib.sha256,
+    ).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _local_dsse_fixture_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    payload_bytes = _canonical_json_bytes(payload)
+    return {
+        "payloadType": ATTESTATION_PAYLOAD_TYPE,
+        "payload": base64.b64encode(payload_bytes).decode("ascii"),
+        "signatures": [
+            {
+                "keyid": ATTESTATION_FIXTURE_KEY_ID,
+                "sig": _local_dsse_fixture_signature(ATTESTATION_PAYLOAD_TYPE, payload_bytes),
+            }
+        ],
+    }
+
+
+def _attach_local_dsse_fixture_attestation(
+    provenance: dict[str, Any],
+    *,
+    subject_digest_value: str | None = None,
+) -> dict[str, Any]:
+    """Attach a deterministic local DSSE fixture envelope to a sidecar.
+
+    This helper is deliberately fixture-only. It lets tests and offline demos
+    exercise verifier plumbing without introducing a production signer, network
+    dependency, transparency log, or repository-stored private key.
+    """
+
+    artifact = provenance.get("artifact", {}) if isinstance(provenance.get("artifact"), dict) else {}
+    artifact_digest = _coerce_sha256_digest(artifact.get("digest", {}))
+    subject_digest = {
+        "algorithm": "sha256",
+        "value": subject_digest_value if subject_digest_value is not None else artifact_digest["value"],
+    }
+    provenance["signing"] = {
+        "signed": True,
+        "backend": ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE,
+        "subject_digest": subject_digest,
+        "signer_identity": ATTESTATION_FIXTURE_SIGNER_IDENTITY,
+        "bundle_ref": "",
+        "envelope_ref": "inline:signing.envelope",
+        "verification": {
+            "status": "verified",
+            "backend": ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE,
+            "offline": True,
+        },
+    }
+    payload = {
+        "schema": ATTESTATION_SCHEMA,
+        "backend": ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE,
+        "predicate_type": "https://codebase-tooling-mcp.local/attestations/artifact-provenance/v1",
+        "subject": {
+            "path": str(artifact.get("path", "")),
+            "digest": subject_digest,
+        },
+        "provenance": {
+            "schema": PROVENANCE_SCHEMA,
+            "digest": _artifact_attestation_sidecar_digest(provenance),
+        },
+        "signer": {
+            "identity": ATTESTATION_FIXTURE_SIGNER_IDENTITY,
+            "key_id": ATTESTATION_FIXTURE_KEY_ID,
+        },
+        "verification": {
+            "status": "verified",
+            "backend": ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE,
+            "offline": True,
+        },
+    }
+    provenance["signing"]["envelope"] = _local_dsse_fixture_envelope(payload)
+    return provenance
+
+
+def _attestation_result(
+    *,
+    status: str,
+    backend: str,
+    signed: bool,
+    subject_digest: Any | None = None,
+    signer_identity: str = "",
+    bundle_ref: str = "",
+    envelope_ref: str = "",
+    messages: list[str] | None = None,
+) -> dict[str, Any]:
+    result_messages = messages or []
+    return {
+        "schema": ATTESTATION_SCHEMA,
+        "status": status,
+        "backend": backend,
+        "signed": signed,
+        "local_only": backend in {"local-only", ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE},
+        "network_access": False,
+        "subject_digest": _coerce_sha256_digest(subject_digest or {}),
+        "signer_identity": signer_identity,
+        "bundle_ref": bundle_ref,
+        "envelope_ref": envelope_ref,
+        "verification": {
+            "status": status,
+            "backend": backend,
+            "offline": True,
+            "messages": result_messages,
+        },
+        "findings": result_messages,
+    }
+
+
+def _verify_local_dsse_fixture_attestation(
+    provenance: dict[str, Any],
+    artifact_rel: str,
+    actual_digest: str,
+) -> dict[str, Any]:
+    signing = provenance.get("signing", {}) if isinstance(provenance.get("signing"), dict) else {}
+    envelope = signing.get("envelope") or signing.get("dsse")
+    subject_digest = signing.get("subject_digest", {})
+    signer_identity = str(signing.get("signer_identity", ""))
+    bundle_ref = str(signing.get("bundle_ref", ""))
+    envelope_ref = str(signing.get("envelope_ref", ""))
+    if not isinstance(envelope, dict):
+        return _attestation_result(
+            status="unavailable",
+            backend=ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE,
+            signed=True,
+            subject_digest=subject_digest,
+            signer_identity=signer_identity,
+            bundle_ref=bundle_ref,
+            envelope_ref=envelope_ref,
+            messages=["attestation_envelope_unavailable"],
+        )
+
+    messages: list[str] = []
+    payload_type = str(envelope.get("payloadType", ""))
+    if payload_type != ATTESTATION_PAYLOAD_TYPE:
+        messages.append("attestation_payload_type_mismatch")
+    try:
+        payload_bytes = base64.b64decode(str(envelope.get("payload", "")), validate=True)
+    except (ValueError, TypeError):
+        payload_bytes = b""
+        messages.append("attestation_payload_unreadable")
+
+    signatures = envelope.get("signatures", [])
+    signature = ""
+    if isinstance(signatures, list):
+        for row in signatures:
+            if isinstance(row, dict) and str(row.get("keyid", "")) == ATTESTATION_FIXTURE_KEY_ID:
+                signature = str(row.get("sig", ""))
+                break
+    if not signature:
+        messages.append("attestation_signature_missing")
+    elif payload_bytes:
+        expected_signature = _local_dsse_fixture_signature(payload_type, payload_bytes)
+        if not hmac.compare_digest(signature, expected_signature):
+            messages.append("attestation_signature_mismatch")
+
+    payload: dict[str, Any] = {}
+    if payload_bytes:
+        try:
+            decoded = json.loads(payload_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            messages.append("attestation_payload_unreadable")
+        else:
+            if isinstance(decoded, dict):
+                payload = decoded
+            else:
+                messages.append("attestation_payload_schema_mismatch")
+    if payload.get("schema") != ATTESTATION_SCHEMA:
+        messages.append("attestation_payload_schema_mismatch")
+    if payload.get("backend") != ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE:
+        messages.append("attestation_payload_backend_mismatch")
+
+    subject = payload.get("subject", {}) if isinstance(payload.get("subject"), dict) else {}
+    if str(subject.get("path", "")) != artifact_rel:
+        messages.append("attestation_subject_path_mismatch")
+    payload_subject_digest = _coerce_sha256_digest(subject.get("digest", {}))
+    if not _sha256_digest_matches(payload_subject_digest, actual_digest):
+        messages.append("attestation_subject_digest_mismatch")
+    if not _sha256_digest_matches(subject_digest, actual_digest):
+        messages.append("attestation_signing_subject_digest_mismatch")
+
+    artifact = provenance.get("artifact", {}) if isinstance(provenance.get("artifact"), dict) else {}
+    if not _sha256_digest_matches(artifact.get("digest", {}), actual_digest):
+        messages.append("attestation_artifact_digest_mismatch")
+
+    provenance_payload = payload.get("provenance", {}) if isinstance(payload.get("provenance"), dict) else {}
+    if provenance_payload.get("schema") != PROVENANCE_SCHEMA:
+        messages.append("attestation_provenance_schema_mismatch")
+    sidecar_digest = _artifact_attestation_sidecar_digest(provenance)
+    if not _sha256_digest_matches(provenance_payload.get("digest", {}), sidecar_digest["value"]):
+        messages.append("attestation_sidecar_digest_mismatch")
+
+    signer = payload.get("signer", {}) if isinstance(payload.get("signer"), dict) else {}
+    if str(signer.get("identity", "")) != ATTESTATION_FIXTURE_SIGNER_IDENTITY:
+        messages.append("attestation_signer_identity_mismatch")
+    if str(signer.get("key_id", "")) != ATTESTATION_FIXTURE_KEY_ID:
+        messages.append("attestation_key_id_mismatch")
+    if signer_identity != ATTESTATION_FIXTURE_SIGNER_IDENTITY:
+        messages.append("attestation_signing_identity_mismatch")
+
+    return _attestation_result(
+        status="invalid" if messages else "verified",
+        backend=ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE,
+        signed=True,
+        subject_digest=payload_subject_digest or subject_digest,
+        signer_identity=signer_identity,
+        bundle_ref=bundle_ref,
+        envelope_ref=envelope_ref,
+        messages=messages,
+    )
+
+
+def _verify_artifact_attestation(
+    provenance: dict[str, Any],
+    artifact_rel: str,
+    actual_digest: str,
+) -> dict[str, Any]:
+    signing = provenance.get("signing", {}) if isinstance(provenance.get("signing"), dict) else {}
+    if not bool(signing.get("signed", False)):
+        artifact = provenance.get("artifact", {}) if isinstance(provenance.get("artifact"), dict) else {}
+        return _attestation_result(
+            status="unsigned",
+            backend="local-only",
+            signed=False,
+            subject_digest=artifact.get("digest", {}),
+            messages=[],
+        )
+    backend = str(signing.get("backend", "")).strip()
+    subject_digest = signing.get("subject_digest", {})
+    signer_identity = str(signing.get("signer_identity", ""))
+    bundle_ref = str(signing.get("bundle_ref", ""))
+    envelope_ref = str(signing.get("envelope_ref", ""))
+    if backend != ATTESTATION_BACKEND_LOCAL_DSSE_FIXTURE:
+        return _attestation_result(
+            status="unsupported",
+            backend=backend or "unknown",
+            signed=True,
+            subject_digest=subject_digest,
+            signer_identity=signer_identity,
+            bundle_ref=bundle_ref,
+            envelope_ref=envelope_ref,
+            messages=["attestation_backend_unsupported"],
+        )
+    return _verify_local_dsse_fixture_attestation(provenance, artifact_rel, actual_digest)
 
 
 def _git_state_for_provenance(base_ref: str = "", head_ref: str = "") -> dict[str, Any]:
@@ -3076,6 +3400,14 @@ def _verify_artifact_provenance_path(artifact_rel: str) -> dict[str, Any]:
     if not fresh:
         result["ok"] = False
         result["findings"].append("provenance_stale")
+    attestation = _verify_artifact_attestation(provenance, artifact_rel, actual_digest)
+    result["attestation"] = attestation
+    result["checks"]["attestation_status"] = attestation["status"]
+    result["checks"]["attestation_verified"] = attestation["status"] == "verified"
+    if attestation["status"] in {"invalid", "unsupported", "unavailable"}:
+        result["ok"] = False
+        result["findings"].extend(attestation.get("findings", []))
+        result["findings"].append(f"attestation_{attestation['status']}")
     return result
 
 
@@ -17034,6 +17366,7 @@ def _artifact_provenance_impl(
     return {
         "schema": "artifact_provenance_report.v1",
         "provenance_schema": PROVENANCE_SCHEMA,
+        "attestation_schema": ATTESTATION_SCHEMA,
         "artifact_count": len(checks),
         "ok": all(bool(row.get("ok", False)) for row in checks),
         "checks": checks,
