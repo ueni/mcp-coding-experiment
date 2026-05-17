@@ -14,7 +14,8 @@ status record.
 Initial supported workflows:
 
 - `governance_report` - read-only audit/governance report generation, including
-  the existing JSON/Markdown artifact resource links when `export=true`.
+  JSON/Markdown artifact resource links, local provenance sidecars, and the
+  linked `workflow_lineage.v1` manifest when `export=true`.
 - `vscode_task_run` - starts one approved VS Code task by label, with bounded
   retry metadata for transient failures.
 
