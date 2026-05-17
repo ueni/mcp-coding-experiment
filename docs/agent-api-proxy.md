@@ -24,7 +24,7 @@ export MCP_AGENT_PROXY_ALLOW_ONLINE=false
 export MCP_AGENT_PROXY_NO_NETWORK=true
 ```
 
-With online disabled or no-network mode enabled, requests route to the local/offline facade and no provider request is made. The response includes `agent_proxy.routing` metadata showing the selected backend and reason.
+With online disabled or no-network mode enabled, requests route to the local/offline facade and no provider request is made. The response includes `agent_proxy.routing` metadata showing the selected backend and reason. Agent/reasoning facade metadata is proxy-generated (`chat-completions-controlled-facade.v1`) and does not claim that an upstream chat provider has native agent mode.
 
 ## Explicit online forwarding configuration
 
@@ -64,14 +64,14 @@ Every online provider call writes a local disclosure audit event to:
 .codebase-tooling-mcp/audit/agent_proxy_disclosures.jsonl
 ```
 
-The event contains trace ID, backend/model, routing reason, policy limits, prompt/response digests, placeholder inventory counts, and privacy flags. It does not contain provider keys, authorization headers, raw prompts, raw responses, or placeholder mappings.
+The event contains trace ID, workflow/task ID when supplied, backend/model, routing reason, policy version and limits, anonymization profile, prompt/response digests, placeholder inventory counts, residual sensitive-class status, and privacy flags. Secret/token/password redactions are reported as `opaque_redactions` counts rather than raw values. It does not contain provider keys, authorization headers, raw prompts, raw responses, or placeholder mappings.
 
 Strict audit mode is enabled by default (`MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT=true`). If the disclosure audit event cannot be written, online forwarding is blocked before the provider call.
 
 Summaries are available through the protected endpoint:
 
 ```text
-GET /v1/agent-proxy/disclosures?trace_id=<trace>
+GET /v1/agent-proxy/disclosures?trace_id=<trace>&since=<iso8601>&until=<iso8601>
 ```
 
 ## Memory capture gate
@@ -92,4 +92,4 @@ The protected status endpoint returns current proxy controls without exposing se
 GET /v1/agent-proxy/status
 ```
 
-Use it to verify whether online forwarding, no-network mode, model allowlists, token/cost/time limits, strict audit mode, anonymization, and memory capture gates are active.
+Use it to verify whether online forwarding, no-network mode, model allowlists, token/cost/time limits, policy/anonymization/facade versions, strict audit mode, anonymization, and memory capture gates are active.
