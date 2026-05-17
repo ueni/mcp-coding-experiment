@@ -64,11 +64,11 @@ Every online provider call writes a local disclosure audit event to:
 .codebase-tooling-mcp/audit/agent_proxy_disclosures.jsonl
 ```
 
-The event contains trace ID, workflow/task ID when supplied, backend/model, routing reason, policy version and limits, anonymization profile, prompt/response digests, placeholder inventory counts, residual sensitive-class status, and privacy flags. Secret/token/password redactions are reported as `opaque_redactions` counts rather than raw values. It does not contain provider keys, authorization headers, raw prompts, raw responses, or placeholder mappings.
+The audit line is a durable buyer/auditor-facing evidence packet, not only an internal debug log. It contains trace/request ID, workflow/task ID when supplied, provider/model route, policy decision and reason (`online_allowed`, anonymizer profile, offline/no-network controls, and limits), canonical input digest, provider/anonymized input digest, redaction/anonymization result, output digest, memory-admission state, tool/repo context boundary, disclosure review/cure state, and a deterministic disclosure receipt digest for regression checks. Secret/token/password redactions are reported as `opaque_redactions` counts rather than raw values. It does not contain provider keys, authorization headers, raw prompts, raw responses, raw repository paths, NDA terms, or placeholder mappings.
 
 Strict audit mode is enabled by default (`MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT=true`). If the disclosure audit event cannot be written, online forwarding is blocked before the provider call.
 
-Summaries are available through the protected endpoint:
+Summaries are available through the protected endpoint. The summary returns event and trace counts, disclosure categories, backend counts, evidence packet counts, and stable disclosure receipt digests without returning raw prompts or responses:
 
 ```text
 GET /v1/agent-proxy/disclosures?trace_id=<trace>&since=<iso8601>&until=<iso8601>

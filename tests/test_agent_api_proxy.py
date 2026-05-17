@@ -104,6 +104,9 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         )
         return path.read_text(encoding="utf-8") if path.exists() else ""
 
+    def disclosure_events(self):
+        return [json.loads(line) for line in self.disclosure_text().splitlines() if line.strip()]
+
     def enable_online(self):
         self.server.MCP_AGENT_PROXY_ENABLED = True
         self.server.MCP_AGENT_PROXY_ALLOW_ONLINE = True
@@ -191,6 +194,125 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertGreaterEqual(summary["disclosure_categories"].get("term", 0), 1)
         self.assertGreaterEqual(summary["disclosure_categories"].get("email", 0), 1)
         self.assertGreaterEqual(summary["disclosure_categories"].get("opaque_redactions", 0), 1)
+
+    def test_online_call_writes_auditor_evidence_packet_without_raw_sensitive_text(self):
+        self.enable_online()
+        self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = "NDA Project"
+        self.server.MCP_AGENT_PROXY_MEMORY_CAPTURE_ENABLED = True
+        self.server.MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS = False
+        captured = {}
+
+        def fake_post(url, payload, timeout):
+            captured["payload"] = payload
+            return {
+                "id": "upstream-id",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "review complete"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+        self.server._agent_proxy_http_post_json = fake_post
+        request_payload = self.base_payload(
+            metadata={"workflow_task_id": "wf-123"},
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "repo_lookup",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            tool_choice="auto",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Review NDA Project in /home/user/repo with password=supersecret",
+                }
+            ],
+        )
+
+        response = asyncio.run(
+            self.server.openai_chat_completions(FakeRequest(request_payload))
+        )
+        payload = self.response_json(response)
+        trace_id = payload["agent_proxy"]["trace_id"]
+        response_event = next(
+            event for event in self.disclosure_events() if event.get("phase") == "response"
+        )
+        packet = response_event["evidence_packet"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(packet["schema"], "mcp_agent_proxy.provider_call_evidence.v1")
+        self.assertEqual(packet["audience"], "buyer_auditor")
+        self.assertEqual(packet["trace_id"], trace_id)
+        self.assertEqual(packet["provider_route"]["provider"], "openai-compatible")
+        self.assertEqual(packet["provider_route"]["model"], "gpt-proxy-test")
+        self.assertTrue(packet["policy_decision"]["online_allowed"])
+        self.assertEqual(
+            packet["policy_decision"]["anonymizer_profile"],
+            self.server.MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        )
+        self.assertFalse(packet["policy_decision"]["offline_controls"]["no_network"])
+        self.assertEqual(
+            packet["input"]["canonical_input_sha256"],
+            self.server._agent_proxy_digest(request_payload),
+        )
+        self.assertEqual(
+            packet["input"]["provider_input_sha256"],
+            self.server._agent_proxy_digest(captured["payload"]),
+        )
+        self.assertNotEqual(
+            packet["input"]["canonical_input_sha256"],
+            packet["input"]["provider_input_sha256"],
+        )
+        self.assertEqual(
+            packet["output"]["response_sha256"],
+            response_event["disclosure"]["response_digest"],
+        )
+        self.assertTrue(packet["memory_admission"]["admitted"])
+        self.assertEqual(packet["memory_admission"]["state"], "admitted")
+        self.assertFalse(packet["memory_admission"]["raw_conversation_stored"])
+        self.assertTrue(packet["context_boundary"]["tool_boundary"]["tools_present"])
+        self.assertFalse(packet["context_boundary"]["repo_boundary"]["repo_path_disclosed"])
+        self.assertFalse(
+            packet["context_boundary"]["repo_boundary"]["raw_repo_files_attached_by_proxy"]
+        )
+        self.assertEqual(packet["review_cure"]["review_state"], "not_reviewed")
+        self.assertFalse(packet["review_cure"]["disclosure_violation_found"])
+        self.assertEqual(len(packet["disclosure_receipt"]["stable_digest"]), 64)
+
+        second_response = asyncio.run(
+            self.server.openai_chat_completions(FakeRequest(request_payload))
+        )
+        self.assertEqual(second_response.status_code, 200)
+        response_events = [
+            event for event in self.disclosure_events() if event.get("phase") == "response"
+        ]
+        second_packet = response_events[-1]["evidence_packet"]
+        self.assertNotEqual(second_packet["trace_id"], trace_id)
+        self.assertEqual(second_packet["provider_route"], packet["provider_route"])
+        self.assertEqual(second_packet["policy_decision"], packet["policy_decision"])
+        self.assertEqual(
+            second_packet["disclosure_receipt"]["stable_digest"],
+            packet["disclosure_receipt"]["stable_digest"],
+        )
+
+        audit = self.disclosure_text()
+        self.assertNotIn("NDA Project", audit)
+        self.assertNotIn("supersecret", audit)
+        self.assertNotIn("/home/user/repo", audit)
+        summary = self.server._agent_proxy_disclosure_summary({"trace_id": trace_id})
+        self.assertEqual(summary["event_count"], 2)
+        self.assertEqual(summary["evidence_packet_count"], 2)
+        self.assertIn(
+            packet["disclosure_receipt"]["stable_digest"], summary["disclosure_receipts"]
+        )
 
     def test_online_streaming_uses_sse_and_restores_split_placeholders(self):
         self.enable_online()

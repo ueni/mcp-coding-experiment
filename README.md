@@ -154,7 +154,7 @@ Use cloud mode for quality/speed/audit/token savings. Use offline mode for priva
 
 ### Explicit OpenAI-compatible agent API proxy
 
-An opt-in proxy can serve `POST /v1/chat/completions` for clients that deliberately configure this server as their OpenAI-compatible `base_url`. It is disabled by default and is not hidden MITM/TLS interception or credential capture. The first slice supports non-streaming responses, `stream: true` SSE chunks, local/offline routing, explicit online provider controls, request-local anonymization, irreversible secret redaction, fail-closed disclosure audit, disclosure summaries, and gated compact memory capture. See [Explicit Agent API Proxy](./docs/agent-api-proxy.md).
+An opt-in proxy can serve `POST /v1/chat/completions` for clients that deliberately configure this server as their OpenAI-compatible `base_url`. It is disabled by default and is not hidden MITM/TLS interception or credential capture. The first slice supports non-streaming responses, `stream: true` SSE chunks, local/offline routing, explicit online provider controls, request-local anonymization, irreversible secret redaction, fail-closed disclosure audit, durable buyer/auditor evidence packets, disclosure summaries, and gated compact memory capture. See [Explicit Agent API Proxy](./docs/agent-api-proxy.md).
 
 ### Static test impact map workflow
 

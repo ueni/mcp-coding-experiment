@@ -2040,6 +2040,158 @@ def _agent_proxy_audit_inventory(mapping: dict[str, Any] | None) -> dict[str, An
     return safe_inventory
 
 
+def _agent_proxy_context_boundary(payload: dict[str, Any]) -> dict[str, Any]:
+    context_classes = ["chat_messages", "model_id", "sampling_parameters"]
+    if payload.get("tools"):
+        context_classes.append("client_supplied_tool_schemas")
+    if "tool_choice" in payload:
+        context_classes.append("client_tool_choice")
+    if isinstance(payload.get("metadata"), dict):
+        context_classes.append("client_metadata")
+    return {
+        "schema": "mcp_agent_proxy.context_boundary.v1",
+        "endpoint": "/v1/chat/completions",
+        "explicit_proxy_only": True,
+        "repo_boundary": {
+            "repo_path_disclosed": False,
+            "repo_root_digest": _agent_proxy_digest(str(REPO_PATH)),
+            "raw_repo_files_attached_by_proxy": False,
+            "host_absolute_paths_generalized": True,
+        },
+        "tool_boundary": {
+            "tools_present": bool(payload.get("tools")),
+            "tool_choice_present": "tool_choice" in payload,
+            "tool_schema_forwarding": (
+                "client_supplied_tool_schemas_only" if payload.get("tools") else "none"
+            ),
+            "mcp_tools_executed_by_proxy": False,
+        },
+        "context_classes_sent": sorted(set(context_classes)),
+    }
+
+
+def _agent_proxy_policy_decision(route: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    online_allowed = bool(
+        route.get("backend") == "online"
+        and MCP_AGENT_PROXY_ALLOW_ONLINE
+        and not route.get("offline_no_network")
+    )
+    return {
+        "schema": "mcp_agent_proxy.policy_decision.v1",
+        "decision": "online_allowed" if online_allowed else str(route.get("reason", "blocked")),
+        "reason": route.get("reason"),
+        "online_allowed": online_allowed,
+        "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "anonymizer_required_before_online": route.get("backend") == "online",
+        "offline_controls": {
+            "no_network": bool(route.get("offline_no_network")),
+            "execution_mode_offline": _agent_proxy_execution_mode_offline(),
+            "local_fallback": route.get("fallback"),
+        },
+        "limits": policy,
+        "policy_version": MCP_AGENT_PROXY_POLICY_VERSION,
+    }
+
+
+def _agent_proxy_memory_admission(memory: dict[str, Any] | None) -> dict[str, Any]:
+    memory = memory or {"captured": False, "reason": "not_evaluated"}
+    captured = bool(memory.get("captured"))
+    reason = "captured" if captured else str(memory.get("reason", "not_evaluated"))
+    return {
+        "schema": "mcp_agent_proxy.memory_admission.v1",
+        "candidate_evaluated": True,
+        "admitted": captured,
+        "state": "admitted" if captured else reason,
+        "raw_conversation_stored": bool(memory.get("raw_conversation_stored", False)),
+    }
+
+
+def _agent_proxy_output_digest_material(response: Any) -> Any:
+    if isinstance(response, dict):
+        # Proxy metadata includes per-request trace IDs. The provider-output digest
+        # should cover the durable response material without making the stable
+        # disclosure receipt vary just because the proxy attached local metadata.
+        return {str(key): value for key, value in response.items() if str(key) != "agent_proxy"}
+    return response
+
+
+def _agent_proxy_review_cure_state(*, success: bool, reason: str) -> dict[str, Any]:
+    return {
+        "schema": "mcp_agent_proxy.disclosure_review_cure.v1",
+        "review_state": "not_reviewed",
+        "disclosure_violation_found": False,
+        "cure_state": "none_pending",
+        "call_success": bool(success),
+        "call_reason": _redact_audit_reason(reason),
+        "future_update_contract": "append follow-up disclosure event with the same trace_id",
+    }
+
+
+def _agent_proxy_provider_call_evidence_packet(
+    trace_id: str,
+    payload: dict[str, Any],
+    anonymized_payload: dict[str, Any] | None,
+    route: dict[str, Any],
+    policy: dict[str, Any],
+    mapping: dict[str, Any],
+    response: Any,
+    memory: dict[str, Any] | None,
+    *,
+    success: bool,
+    reason: str,
+) -> dict[str, Any]:
+    provider_payload = anonymized_payload or payload
+    output_digest = (
+        "pending" if response is None else _agent_proxy_digest(_agent_proxy_output_digest_material(response))
+    )
+    packet = {
+        "schema": "mcp_agent_proxy.provider_call_evidence.v1",
+        "audience": "buyer_auditor",
+        "trace_id": trace_id,
+        "request_id": trace_id,
+        "provider_route": {
+            "backend": route.get("backend"),
+            "provider": route.get("provider"),
+            "model": route.get("requested_model"),
+            "provider_url_configured": bool(route.get("provider_configured")),
+        },
+        "policy_decision": _agent_proxy_policy_decision(route, policy),
+        "input": {
+            "canonical_input_sha256": _agent_proxy_digest(payload),
+            "provider_input_sha256": _agent_proxy_digest(provider_payload),
+            "prompt_digest_sha256": _agent_proxy_digest(
+                _agent_proxy_request_text_digest_input(provider_payload)
+            ),
+            "digest_algorithm": "sha256",
+            "canonicalization": "json.dumps(sort_keys=True, default=str)",
+            "raw_input_stored": False,
+        },
+        "anonymization_result": _agent_proxy_audit_inventory(mapping),
+        "output": {
+            "response_sha256": output_digest,
+            "digest_algorithm": "sha256" if response is not None else "pending",
+            "raw_output_stored": False,
+            "success": bool(success),
+            "reason": _redact_audit_reason(reason),
+        },
+        "memory_admission": _agent_proxy_memory_admission(memory),
+        "context_boundary": _agent_proxy_context_boundary(payload),
+        "review_cure": _agent_proxy_review_cure_state(success=success, reason=reason),
+    }
+    receipt_input = {
+        key: value
+        for key, value in packet.items()
+        if key not in {"trace_id", "request_id", "disclosure_receipt"}
+    }
+    packet["disclosure_receipt"] = {
+        "schema": "mcp_agent_proxy.disclosure_receipt.v1",
+        "stable_digest": _agent_proxy_digest(receipt_input),
+        "digest_algorithm": "sha256",
+        "excludes": ["trace_id", "request_id", "event_timestamp"],
+    }
+    return packet
+
+
 def _agent_proxy_audit_base(
     trace_id: str,
     payload: dict[str, Any],
@@ -2067,9 +2219,11 @@ def _agent_proxy_audit_base(
             "version": MCP_AGENT_PROXY_POLICY_VERSION,
             "limits": policy,
             "allow_online": MCP_AGENT_PROXY_ALLOW_ONLINE,
+            "online_allowed": route.get("backend") == "online" and MCP_AGENT_PROXY_ALLOW_ONLINE,
             "offline_no_network": route.get("offline_no_network"),
             "model_allowlist_configured": route.get("model_allowlist_configured"),
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
+            "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
         },
         "anonymization": _agent_proxy_audit_inventory(mapping),
         "privacy": {
@@ -2169,6 +2323,18 @@ def _agent_proxy_record_online_request_audit(
                 ),
                 "response_digest": "pending",
             },
+            "evidence_packet": _agent_proxy_provider_call_evidence_packet(
+                trace_id,
+                payload,
+                anonymized_payload,
+                route,
+                policy,
+                mapping,
+                None,
+                {"captured": False, "reason": "pending_response"},
+                success=True,
+                reason="request audit written before provider call",
+            ),
         }
     )
     _agent_proxy_record_disclosure(event, strict=MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT)
@@ -2177,11 +2343,13 @@ def _agent_proxy_record_online_request_audit(
 def _agent_proxy_record_online_response_audit(
     trace_id: str,
     payload: dict[str, Any],
+    anonymized_payload: dict[str, Any],
     route: dict[str, Any],
     policy: dict[str, Any],
     mapping: dict[str, Any],
     response: Any,
     *,
+    memory: dict[str, Any] | None = None,
     success: bool = True,
     reason: str = "response received",
 ) -> None:
@@ -2193,9 +2361,24 @@ def _agent_proxy_record_online_response_audit(
             "reason": reason,
             "disclosure": {
                 "categories": _agent_proxy_audit_inventory(mapping).get("counts", {}),
-                "prompt_digest": _agent_proxy_digest(_agent_proxy_request_text_digest_input(payload)),
-                "response_digest": _agent_proxy_digest(response),
+                "prompt_digest": _agent_proxy_digest(
+                    _agent_proxy_request_text_digest_input(anonymized_payload)
+                ),
+                "response_digest": _agent_proxy_digest(_agent_proxy_output_digest_material(response)),
             },
+            "memory": _agent_proxy_memory_admission(memory),
+            "evidence_packet": _agent_proxy_provider_call_evidence_packet(
+                trace_id,
+                payload,
+                anonymized_payload,
+                route,
+                policy,
+                mapping,
+                response,
+                memory,
+                success=success,
+                reason=reason,
+            ),
         }
     )
     _agent_proxy_record_disclosure(event, strict=False)
@@ -2421,10 +2604,12 @@ def _agent_proxy_online_stream(
                     _agent_proxy_record_online_response_audit(
                         trace_id,
                         payload,
+                        anonymized_payload,
                         route,
                         policy,
                         mapping,
                         {"stream_cancelled": True, "response_parts": response_parts},
+                        memory={"captured": False, "reason": "client_disconnected"},
                         success=False,
                         reason="client disconnected",
                     )
@@ -2466,19 +2651,28 @@ def _agent_proxy_online_stream(
                         _agent_proxy_stream_chunk(payload, trace_id, {"content": emit})
                     )
             response_summary = {"response_digest_input": "".join(response_parts)}
+            memory = _agent_proxy_memory_capture(trace_id, payload, response_summary, route, policy)
             _agent_proxy_record_online_response_audit(
-                trace_id, payload, route, policy, mapping, response_summary
+                trace_id,
+                payload,
+                anonymized_payload,
+                route,
+                policy,
+                mapping,
+                response_summary,
+                memory=memory,
             )
-            _agent_proxy_memory_capture(trace_id, payload, response_summary, route, policy)
             yield _agent_proxy_sse_data("[DONE]")
         except Exception:
             _agent_proxy_record_online_response_audit(
                 trace_id,
                 payload,
+                anonymized_payload,
                 route,
                 policy,
                 mapping,
                 {"error": "provider stream failed", "response_parts": response_parts},
+                memory={"captured": False, "reason": "provider_stream_failed"},
                 success=False,
                 reason="provider stream failed",
             )
@@ -2604,6 +2798,8 @@ def _agent_proxy_disclosure_summary(filters: dict[str, str] | None = None) -> di
     by_backend: dict[str, int] = {}
     categories: dict[str, int] = {}
     traces: set[str] = set()
+    evidence_packet_count = 0
+    disclosure_receipts: set[str] = set()
     for event in events:
         backend = event.get("backend", {}) if isinstance(event.get("backend"), dict) else {}
         backend_key = "/".join(
@@ -2623,10 +2819,18 @@ def _agent_proxy_disclosure_summary(filters: dict[str, str] | None = None) -> di
                 categories[str(key)] = categories.get(str(key), 0) + int(value)
             except (TypeError, ValueError):
                 continue
+        evidence_packet = event.get("evidence_packet", {})
+        if isinstance(evidence_packet, dict) and evidence_packet:
+            evidence_packet_count += 1
+            receipt = evidence_packet.get("disclosure_receipt", {})
+            if isinstance(receipt, dict) and receipt.get("stable_digest"):
+                disclosure_receipts.add(str(receipt["stable_digest"]))
     return {
         "schema": "mcp_agent_proxy.disclosure_summary.v1",
         "event_count": len(events),
         "trace_count": len(traces),
+        "evidence_packet_count": evidence_packet_count,
+        "disclosure_receipts": sorted(disclosure_receipts)[:50],
         "by_backend": dict(sorted(by_backend.items())),
         "disclosure_categories": dict(sorted(categories.items())),
         "filters": {
@@ -23668,10 +23872,12 @@ async def openai_chat_completions(request):
         _agent_proxy_record_online_response_audit(
             trace_id,
             payload,
+            anonymized_payload,
             route,
             policy,
             mapping,
             {"error": "provider request failed"},
+            memory={"captured": False, "reason": "provider_request_failed"},
             success=False,
             reason="provider request failed",
         )
@@ -23693,7 +23899,14 @@ async def openai_chat_completions(request):
         safe_response.setdefault("model", str(payload.get("model", "")))
         safe_response["agent_proxy"] = _agent_proxy_metadata(trace_id, route, policy, mapping, memory)
     _agent_proxy_record_online_response_audit(
-        trace_id, payload, route, policy, mapping, safe_response
+        trace_id,
+        payload,
+        anonymized_payload,
+        route,
+        policy,
+        mapping,
+        safe_response,
+        memory=memory,
     )
     return JSONResponse(safe_response)
 
