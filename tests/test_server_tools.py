@@ -1831,16 +1831,27 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("markdown", out["exports"])
         self.assertTrue((self.repo_path / out["exports"]["json"]).exists())
         self.assertTrue((self.repo_path / out["exports"]["markdown"]).exists())
+        self.assertIn("lineage", out["exports"])
+        self.assertTrue((self.repo_path / out["exports"]["lineage"]).exists())
         self.assertIn("provenance", out["exports"])
         self.assertTrue((self.repo_path / out["exports"]["provenance"][out["exports"]["json"]]).exists())
         self.assertTrue((self.repo_path / out["exports"]["provenance"][out["exports"]["markdown"]]).exists())
+        self.assertTrue((self.repo_path / out["exports"]["provenance"][out["exports"]["lineage"]]).exists())
         provenance = self.server.artifact_provenance(artifact_path=out["exports"]["json"])
         self.assertTrue(provenance["ok"])
         self.assertEqual(provenance["artifact_count"], 1)
         self.assertTrue(provenance["checks"][0]["checks"]["digest_match"])
-        self.assertEqual({link["path"] for link in out["resource_links"]}, {out["exports"]["json"], out["exports"]["markdown"]})
+        self.assertEqual(
+            {link["path"] for link in out["resource_links"]},
+            {out["exports"]["json"], out["exports"]["markdown"], out["exports"]["lineage"]},
+        )
         self.assertTrue(all(link["uri"].startswith("repo://file/") for link in out["resource_links"]))
-        self.assertTrue(all(link.get("size_bytes", 0) > 0 for link in out["resource_links"]))
+        sized_links = [
+            link
+            for link in out["resource_links"]
+            if link["path"] in {out["exports"]["json"], out["exports"]["markdown"]}
+        ]
+        self.assertTrue(all(link.get("size_bytes", 0) > 0 for link in sized_links))
         self.assertFalse(out["_meta"]["artifact_resources"]["safety"]["secrets_exposed"])
         self.assertEqual(out["audit"]["counts"]["digest"]["chain_head"], "")
 

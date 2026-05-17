@@ -6,7 +6,8 @@ SPDX-License-Identifier: MIT
 
 # Documentation Index
 
-- [Governance report workflow](./governance-report.md) - read-only audit/export reporting for MCP policy and tool-gate decisions.
+- [Governance report workflow](./governance-report.md) - read-only audit/export reporting plus first-slice `workflow_lineage.v1` manifests for MCP policy and tool-gate decisions.
+- [Workflow lineage manifests](./workflow-lineage.md) - deterministic redacted plan identity, lineage graph, artifact digests, and read-only drift verification for replayable MCP executions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
@@ -28,6 +29,7 @@ This index lists documentation ownership and status.
 - [Release Notes and Documentation Policy](./release-notes-policy.md) (`docs/release-notes-policy.md`) - Status: `canonical`
 - [Docker resource monitoring](./resource-monitoring.md) (`docs/resource-monitoring.md`) - Status: `operational verification`
 - [MCP Output Schemas](./mcp-output-schemas.md) (`docs/mcp-output-schemas.md`) - Status: `canonical`
+- [Workflow lineage manifests](./workflow-lineage.md) (`docs/workflow-lineage.md`) - Status: `prototype`
 - [Policy insight regression bank](./policy-insights.md) (`docs/policy-insights.md`) - Status: `canonical`
 - [Adaptive observation compression](./observation-compression.md) (`docs/observation-compression.md`) - Status: `prototype`
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`

@@ -34,6 +34,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "governance_report",
     "artifact_provenance",
     "workflow_diagnostics",
+    "workflow_lineage",
     "interaction_invariant_audit",
 )
 
@@ -54,6 +55,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports", "resource_links"),
     "artifact_provenance": ("schema", "provenance_schema", "artifact_count", "ok", "checks"),
     "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
+    "workflow_lineage": ("schema", "read_only", "manifest_path", "plan_id", "status", "ok", "checks", "conditions"),
     "interaction_invariant_audit": ("schema", "read_only", "advisory_only", "ok_to_continue", "confidence", "extracted_invariants", "suspected_smells", "safe_next_actions", "linked_gates"),
 }
 
@@ -71,9 +73,10 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "policy_simulator": (),
     "clarification_gate": ("audit", "inputs", "decision_reasons"),
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "provenance", "compressed_observation", "_meta"),
+    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "lineage", "provenance", "compressed_observation", "_meta"),
     "artifact_provenance": (),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
+    "workflow_lineage": ("mode", "security"),
     "interaction_invariant_audit": ("security", "redactions_applied", "input_summary"),
 }
 
@@ -355,6 +358,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "snapshots": {"type": "object"},
             "security": {"type": "object"},
             "exports": {"type": "object"},
+            "lineage": {"type": "object"},
             "provenance": {"type": "object"},
             "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
             "_meta": {"type": "object"},
@@ -387,6 +391,29 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "read_only": {"type": "boolean"},
             "security": {"type": "object"},
             "trajectory": {"type": "array", "items": {"type": "object"}},
+        },
+    ),
+    "workflow_lineage": _object_schema(
+        ["schema", "read_only", "manifest_path", "plan_id", "status", "ok", "checks", "conditions"],
+        {
+            "schema": {"type": "string", "const": "workflow_lineage.verify.v1"},
+            "mode": {"type": "string", "const": "verify"},
+            "read_only": {"type": "boolean", "const": True},
+            "manifest_path": {"type": "string"},
+            "plan_id": {"type": "string"},
+            "status": {"type": "string", "enum": ["matched", "input_changed", "artifact_changed"]},
+            "ok": {"type": "boolean"},
+            "conditions": {"type": "array", "items": {"type": "string"}},
+            "checks": {
+                "type": "object",
+                "properties": {
+                    "plan": {"type": "object"},
+                    "artifacts": {"type": "object"},
+                    "non_deterministic_nodes": {"type": "array", "items": {"type": "object"}},
+                },
+                "additionalProperties": True,
+            },
+            "security": {"type": "object"},
         },
     ),
     "interaction_invariant_audit": _object_schema(

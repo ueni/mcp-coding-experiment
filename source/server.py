@@ -167,6 +167,9 @@ LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
 PROVENANCE_SCHEMA = "mcp_artifact_provenance.v1"
 PROVENANCE_SUFFIX = ".provenance.json"
+WORKFLOW_LINEAGE_SCHEMA = "workflow_lineage.v1"
+WORKFLOW_LINEAGE_VERIFY_SCHEMA = "workflow_lineage.verify.v1"
+WORKFLOW_LINEAGE_SUFFIX = ".workflow-lineage.json"
 MEMORY_FILE = Path(".codebase-tooling-mcp/memory/context_memory.json")
 MEMORY_STATS_FILE = Path(".codebase-tooling-mcp/memory/memory_stats.json")
 FAILURE_MEMORY_FILE = Path(".codebase-tooling-mcp/memory/failure_memory.json")
@@ -201,6 +204,7 @@ PUBLIC_MCP_TOOL_NAMES = {
     "tool_annotations",
     "tool_output_contracts",
     "workflow_task",
+    "workflow_lineage",
     "task_status",
     "roots_diagnostics",
     "policy_insights",
@@ -274,6 +278,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "governance_report": {"categories": ["read-only"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
+    "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
@@ -296,6 +301,10 @@ SENSITIVE_AUDIT_VALUE_RE = re.compile(
     r"|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
     r")",
     re.IGNORECASE,
+)
+ABSOLUTE_PATH_VALUE_RE = re.compile(
+    r"(?<![A-Za-z0-9._~+%/-])(?:/[A-Za-z0-9._~+@%=-][^\s,;:'\"{}\]<>]*)"
+    r"|(?:[A-Za-z]:\\[^\s,;:'\"{}\]<>]+)"
 )
 _HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
     "http_request_authorized", default=None
@@ -2089,8 +2098,513 @@ def _governance_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- `{name}`: {row.get('count', 0)} recorded result(s), latest ok={row.get('latest', {}).get('ok') if isinstance(row.get('latest'), dict) else None}")
     snapshots = report.get("snapshots", {}) if isinstance(report.get("snapshots"), dict) else {}
     lines.extend(["", "## Snapshot / rollback references", f"- Snapshot references: {snapshots.get('count', 0)}"])
+    lineage = report.get("lineage", {}) if isinstance(report.get("lineage"), dict) else {}
+    if lineage:
+        lines.extend(
+            [
+                "",
+                "## Workflow lineage",
+                f"- Schema: `{lineage.get('schema', WORKFLOW_LINEAGE_SCHEMA)}`",
+                f"- Plan ID: `{lineage.get('plan_id', '')}`",
+                f"- Manifest: `{lineage.get('manifest', '')}`",
+                "- Verification: `workflow_lineage(mode='verify', manifest_path='...')` recomputes deterministic inputs read-only and reports matched, input_changed, artifact_changed, and non_deterministic_node conditions.",
+            ]
+        )
     lines.extend(["", "## Digest", f"- Algorithm: `{counts.get('digest', {}).get('algorithm', '') if isinstance(counts.get('digest'), dict) else ''}`", f"- Chain head: `{counts.get('digest', {}).get('chain_head', '') if isinstance(counts.get('digest'), dict) else ''}`", "", "External OPA / Agent Governance Toolkit integrations are out of scope for this first slice.", ""])
     return "\n".join(lines)
+
+
+def _workflow_lineage_json_digest(value: Any) -> dict[str, str]:
+    canonical = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return {
+        "algorithm": "sha256",
+        "value": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
+
+
+def _workflow_lineage_canonical_path(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        path = Path(text)
+        if path.is_absolute():
+            resolved = path.resolve(strict=False)
+            try:
+                return str(resolved.relative_to(REPO_PATH))
+            except ValueError:
+                return "<absolute_path_outside_repo>"
+    except (OSError, RuntimeError, ValueError):
+        return "<absolute_path>"
+    return text
+
+
+def _workflow_lineage_redact_paths(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return _workflow_lineage_canonical_path(match.group(0))
+
+    return ABSOLUTE_PATH_VALUE_RE.sub(replace, value)
+
+
+def _workflow_lineage_sanitize(value: Any, depth: int = 0) -> Any:
+    if depth > 5:
+        return "<redacted-depth>"
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if SENSITIVE_AUDIT_KEY_RE.search(key_str):
+                sanitized[key_str] = "<redacted>"
+            elif key_lower in {"prompt", "raw_prompt", "transcript", "snippet", "content", "file_contents"}:
+                sanitized[key_str] = "<redacted>"
+            else:
+                sanitized[key_str] = _workflow_lineage_sanitize(item, depth + 1)
+        return sanitized
+    if isinstance(value, list):
+        return [_workflow_lineage_sanitize(item, depth + 1) for item in value[:50]]
+    if isinstance(value, str):
+        redacted = _redact_audit_string(value)
+        return _workflow_lineage_redact_paths(redacted)
+    return value
+
+
+def _workflow_lineage_normalize_time(value: str) -> str:
+    parsed = _parse_iso_datetime(value) if str(value).strip() else None
+    return parsed.isoformat() if parsed else ""
+
+
+def _workflow_lineage_request_constraints(
+    *,
+    start_time: str,
+    end_time: str,
+    base_ref: str,
+    head_ref: str,
+    export: bool,
+    compressed_observation: bool,
+) -> dict[str, Any]:
+    return _workflow_lineage_sanitize(
+        {
+            "start_time": _workflow_lineage_normalize_time(start_time),
+            "end_time": _workflow_lineage_normalize_time(end_time),
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "export": bool(export),
+            "compressed_observation": bool(compressed_observation),
+        }
+    )
+
+
+def _workflow_lineage_audit_source(audit_meta: dict[str, Any]) -> dict[str, Any]:
+    return _workflow_lineage_sanitize(
+        {
+            "configured_path": str(audit_meta.get("configured_path", "")),
+            "source": str(audit_meta.get("source", "")),
+            "exists": bool(audit_meta.get("exists", False)),
+            "readable": bool(audit_meta.get("readable", False)),
+            "events_total": int(audit_meta.get("events_total", 0) or 0),
+            "events_in_window": int(audit_meta.get("events_in_window", 0) or 0),
+            "malformed_lines": int(audit_meta.get("malformed_lines", 0) or 0),
+        }
+    )
+
+
+def _governance_workflow_lineage_plan_inputs(
+    *,
+    constraints: dict[str, Any],
+    git_info: dict[str, Any],
+    counts: dict[str, Any],
+    audit_meta: dict[str, Any],
+) -> dict[str, Any]:
+    selected_mode, selected_source = _resolve_agent_execution_mode("auto", "governance_report")
+    plan_inputs = {
+        "schema": WORKFLOW_LINEAGE_SCHEMA,
+        "workflow": {
+            "name": "governance_report",
+            "card_id": "governance-report",
+            "entrypoint": "governance_report",
+            "tool_sequence": [
+                "load_redacted_audit_events",
+                "aggregate_governance_counts",
+                "workflow_diagnostics.summary",
+                "export_governance_report",
+                "write_local_provenance_sidecars",
+            ],
+        },
+        "execution_mode": {
+            "schema": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
+            "mode": selected_mode,
+            "source": selected_source,
+        },
+        "repository": {
+            "git": {
+                "base_ref": str(git_info.get("base_ref", "")),
+                "head_ref": str(git_info.get("head_ref", "")),
+                "base_commit": str(git_info.get("base_commit", "")),
+                "head_commit": str(git_info.get("head_commit", "")),
+            }
+        },
+        "request_constraints": constraints,
+        "policy_profile": {
+            "mutation_mode": "read-only",
+            "redaction": "mcp_audit_redaction",
+            "records_raw_prompts": False,
+            "records_transcript_snippets": False,
+            "records_file_contents": False,
+        },
+        "audit": {
+            "source": _workflow_lineage_audit_source(audit_meta),
+            "digest": counts.get("digest", {}) if isinstance(counts.get("digest"), dict) else {},
+        },
+        "schema_versions": {
+            "governance_report": "governance_report.v1",
+            "workflow_diagnostics": "workflow_diagnostics.summary.v1",
+            "artifact_provenance": PROVENANCE_SCHEMA,
+            "execution_mode": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
+        },
+    }
+    return _workflow_lineage_sanitize(plan_inputs)
+
+
+def _workflow_lineage_plan_id(plan_inputs: dict[str, Any]) -> str:
+    digest = _workflow_lineage_json_digest(_workflow_lineage_sanitize(plan_inputs))["value"]
+    return f"workflow-plan-{digest[:32]}"
+
+
+def _workflow_lineage_export_path(report_id: str) -> str:
+    base = REPORTS_DIR / f"{report_id}{WORKFLOW_LINEAGE_SUFFIX}"
+    return str(base)
+
+
+def _workflow_lineage_artifact_ref(rel_path: str, role: str) -> dict[str, Any]:
+    path = _resolve_repo_path(rel_path)
+    ref: dict[str, Any] = {
+        "path": rel_path,
+        "role": role,
+        "schema": _artifact_schema_from_path(path),
+        "digest": {},
+        "exists": path.exists() and path.is_file(),
+    }
+    if path.exists() and path.is_file():
+        ref["digest"] = _artifact_digest(path)
+    return ref
+
+
+def _workflow_lineage_node_id(plan_id: str, logical_id: str) -> str:
+    digest = hashlib.sha256(f"{plan_id}:{logical_id}".encode("utf-8")).hexdigest()
+    return f"node-{digest[:16]}"
+
+
+def _workflow_lineage_node(
+    *,
+    plan_id: str,
+    logical_id: str,
+    node_type: str,
+    tool: str,
+    schema_version: str,
+    status: str = "succeeded",
+    deterministic: bool = True,
+    input_digests: dict[str, Any] | None = None,
+    output_digests: dict[str, Any] | None = None,
+    artifact_refs: list[dict[str, Any]] | None = None,
+    rationale_summary: str = "",
+    non_deterministic_reason: str = "",
+) -> dict[str, Any]:
+    node: dict[str, Any] = {
+        "node_id": _workflow_lineage_node_id(plan_id, logical_id),
+        "logical_id": logical_id,
+        "type": node_type,
+        "tool": tool,
+        "schema_version": schema_version,
+        "status": status,
+        "deterministic": deterministic,
+        "input_digests": input_digests or {},
+        "output_digests": output_digests or {},
+        "artifact_refs": artifact_refs or [],
+        "rationale_summary": _workflow_lineage_sanitize(rationale_summary),
+    }
+    if not deterministic:
+        node["non_deterministic"] = {
+            "marker": "non_deterministic_node",
+            "observed_only": True,
+            "reason": non_deterministic_reason
+            or "Observed run output; deterministic replay identity does not promise bit-for-bit regeneration.",
+        }
+    return node
+
+
+def _build_governance_workflow_lineage_manifest(
+    report: dict[str, Any],
+    *,
+    provenance_inputs: dict[str, Any],
+    audit_meta: dict[str, Any],
+    counts: dict[str, Any],
+) -> dict[str, Any]:
+    git_info = report.get("git", {}) if isinstance(report.get("git"), dict) else {}
+    constraints = _workflow_lineage_request_constraints(
+        start_time=str(provenance_inputs.get("start_time", "")),
+        end_time=str(provenance_inputs.get("end_time", "")),
+        base_ref=str(provenance_inputs.get("base_ref", git_info.get("base_ref", ""))),
+        head_ref=str(provenance_inputs.get("head_ref", git_info.get("head_ref", ""))),
+        export=bool(provenance_inputs.get("export", False)),
+        compressed_observation=bool(report.get("compressed_observation")),
+    )
+    plan_inputs = _governance_workflow_lineage_plan_inputs(
+        constraints=constraints,
+        git_info=git_info,
+        counts=counts,
+        audit_meta=audit_meta,
+    )
+    plan_id = _workflow_lineage_plan_id(plan_inputs)
+    exports = report.get("exports", {}) if isinstance(report.get("exports"), dict) else {}
+    artifact_refs: list[dict[str, Any]] = []
+    if isinstance(exports.get("json"), str):
+        artifact_refs.append(_workflow_lineage_artifact_ref(exports["json"], "governance_report_json"))
+    if isinstance(exports.get("markdown"), str):
+        artifact_refs.append(_workflow_lineage_artifact_ref(exports["markdown"], "governance_report_markdown"))
+    diagnostic = report.get("workflow_diagnostics", {}) if isinstance(report.get("workflow_diagnostics"), dict) else {}
+    nodes = [
+        _workflow_lineage_node(
+            plan_id=plan_id,
+            logical_id="context.audit_window",
+            node_type="context_retrieval",
+            tool="governance_report",
+            schema_version="audit_event_digest.sha256_chain.v1",
+            input_digests={"constraints": _workflow_lineage_json_digest(constraints)},
+            output_digests={"audit_chain": counts.get("digest", {}) if isinstance(counts.get("digest"), dict) else {}},
+            rationale_summary="Load only redacted audit events in the requested time window; do not persist raw audit lines.",
+        ),
+        _workflow_lineage_node(
+            plan_id=plan_id,
+            logical_id="repository.git_range",
+            node_type="context_retrieval",
+            tool="git",
+            schema_version="git.rev-parse",
+            input_digests={"refs": _workflow_lineage_json_digest(git_info)},
+            output_digests={
+                "base_commit": {"algorithm": "git-object-id", "value": str(git_info.get("base_commit", ""))},
+                "head_commit": {"algorithm": "git-object-id", "value": str(git_info.get("head_commit", ""))},
+            },
+            rationale_summary="Resolve repository refs to commit identities without recording absolute repository paths.",
+        ),
+        _workflow_lineage_node(
+            plan_id=plan_id,
+            logical_id="policy.redaction_profile",
+            node_type="policy_check",
+            tool="governance_report",
+            schema_version="mcp_audit_redaction.v1",
+            input_digests={"policy_profile": _workflow_lineage_json_digest(plan_inputs.get("policy_profile", {}))},
+            output_digests={"redacted_counts": _workflow_lineage_json_digest(counts)},
+            rationale_summary="Apply MCP audit redaction before aggregate report and lineage digests are emitted.",
+        ),
+        _workflow_lineage_node(
+            plan_id=plan_id,
+            logical_id="workflow_diagnostics.summary",
+            node_type="report_summary",
+            tool="workflow_diagnostics",
+            schema_version="workflow_diagnostics.summary.v1",
+            input_digests={"audit_chain": counts.get("digest", {}) if isinstance(counts.get("digest"), dict) else {}},
+            output_digests={"summary": _workflow_lineage_json_digest(diagnostic)},
+            rationale_summary="Summarize failed workflow steps using redacted audit events only.",
+        ),
+        _workflow_lineage_node(
+            plan_id=plan_id,
+            logical_id="governance_report.artifacts",
+            node_type="generated_artifact",
+            tool="governance_report",
+            schema_version="governance_report.v1",
+            deterministic=False,
+            input_digests={"plan_inputs": _workflow_lineage_json_digest(plan_inputs)},
+            output_digests={"artifact_refs": _workflow_lineage_json_digest(artifact_refs)},
+            artifact_refs=artifact_refs,
+            rationale_summary="Record observed report artifacts and digests without claiming bit-for-bit replay of run timestamps or future model-generated summaries.",
+            non_deterministic_reason="Generated artifact names, timestamps, and any future model-authored summaries are observed outputs; verify checks their recorded digests instead of promising bit-for-bit regeneration.",
+        ),
+    ]
+    edges = [
+        {"from": nodes[0]["node_id"], "to": nodes[2]["node_id"], "reason": "redacted audit events feed policy aggregation"},
+        {"from": nodes[0]["node_id"], "to": nodes[3]["node_id"], "reason": "redacted failures feed diagnostics summary"},
+        {"from": nodes[1]["node_id"], "to": nodes[4]["node_id"], "reason": "git range identifies report scope"},
+        {"from": nodes[2]["node_id"], "to": nodes[4]["node_id"], "reason": "governance counts feed report artifact"},
+        {"from": nodes[3]["node_id"], "to": nodes[4]["node_id"], "reason": "diagnostics summary is embedded in report artifact"},
+    ]
+    return {
+        "schema": WORKFLOW_LINEAGE_SCHEMA,
+        "generated_at": _now_iso(),
+        "plan_id": plan_id,
+        "plan_identity": {
+            "algorithm": "sha256",
+            "inputs_digest": _workflow_lineage_json_digest(plan_inputs),
+            "inputs": plan_inputs,
+            "safe_input_policy": "redacted, repository-relative, no raw prompts, no transcript snippets, no file contents, no bearer tokens",
+        },
+        "workflow": plan_inputs["workflow"],
+        "execution_mode": plan_inputs["execution_mode"],
+        "repository": plan_inputs["repository"],
+        "request_constraints": constraints,
+        "nodes": nodes,
+        "edges": edges,
+        "artifacts": artifact_refs,
+        "links": {
+            "governance_report": str(report.get("report_id", "")),
+            "governance_report_json": exports.get("json", ""),
+            "governance_report_markdown": exports.get("markdown", ""),
+            "provenance_sidecars": exports.get("provenance", {}) if isinstance(exports.get("provenance"), dict) else {},
+        },
+        "verify": {
+            "tool": "workflow_lineage",
+            "mode": "verify",
+            "read_only": True,
+            "statuses": ["matched", "input_changed", "artifact_changed", "non_deterministic_node"],
+        },
+        "security": {
+            "redacted": True,
+            "contains_secrets": False,
+            "records_raw_prompts": False,
+            "records_transcript_snippets": False,
+            "records_absolute_host_paths": False,
+            "records_file_contents": False,
+            "repo_boundary_enforced": True,
+        },
+    }
+
+
+def _write_workflow_lineage_manifest(manifest: dict[str, Any], rel_path: str) -> None:
+    path = _resolve_repo_path(rel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _lineage_manifest_path_from_input(manifest_path: str = "") -> Path:
+    if manifest_path.strip():
+        return _resolve_repo_path(manifest_path.strip())
+    reports_dir = _resolve_repo_path(str(REPORTS_DIR))
+    candidates = sorted(reports_dir.glob(f"*{WORKFLOW_LINEAGE_SUFFIX}")) if reports_dir.exists() else []
+    if not candidates:
+        raise ValueError("manifest_path is required when no workflow lineage manifest exists")
+    return candidates[-1]
+
+
+def _governance_workflow_lineage_current_plan_inputs(manifest: dict[str, Any]) -> dict[str, Any]:
+    constraints = manifest.get("request_constraints", {}) if isinstance(manifest.get("request_constraints"), dict) else {}
+    start_dt = _parse_iso_datetime(str(constraints.get("start_time", ""))) if str(constraints.get("start_time", "")).strip() else None
+    end_dt = _parse_iso_datetime(str(constraints.get("end_time", ""))) if str(constraints.get("end_time", "")).strip() else None
+    events, audit_meta = _load_audit_events(start_dt, end_dt)
+    counts = _aggregate_audit_events(events)
+    base_ref = str(constraints.get("base_ref", "HEAD~1")) or "HEAD~1"
+    head_ref = str(constraints.get("head_ref", "HEAD")) or "HEAD"
+    git_info = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "base_commit": _git("rev-parse", base_ref, check=False).stdout.strip(),
+        "head_commit": _git("rev-parse", head_ref, check=False).stdout.strip(),
+        "range": f"{base_ref}...{head_ref}",
+    }
+    current_constraints = _workflow_lineage_request_constraints(
+        start_time=str(constraints.get("start_time", "")),
+        end_time=str(constraints.get("end_time", "")),
+        base_ref=base_ref,
+        head_ref=head_ref,
+        export=bool(constraints.get("export", True)),
+        compressed_observation=bool(constraints.get("compressed_observation", False)),
+    )
+    return _governance_workflow_lineage_plan_inputs(
+        constraints=current_constraints,
+        git_info=git_info,
+        counts=counts,
+        audit_meta=audit_meta,
+    )
+
+
+def _verify_workflow_lineage_manifest(manifest: dict[str, Any], manifest_rel_path: str) -> dict[str, Any]:
+    if manifest.get("schema") != WORKFLOW_LINEAGE_SCHEMA:
+        raise ValueError("manifest schema must be workflow_lineage.v1")
+    workflow = manifest.get("workflow", {}) if isinstance(manifest.get("workflow"), dict) else {}
+    if workflow.get("name") != "governance_report":
+        raise ValueError("only governance_report lineage verification is supported in this slice")
+    recorded_plan_id = str(manifest.get("plan_id", ""))
+    current_inputs = _governance_workflow_lineage_current_plan_inputs(manifest)
+    current_plan_id = _workflow_lineage_plan_id(current_inputs)
+    plan_status = "matched" if current_plan_id == recorded_plan_id else "input_changed"
+    artifact_checks: list[dict[str, Any]] = []
+    artifact_refs = manifest.get("artifacts", []) if isinstance(manifest.get("artifacts"), list) else []
+    for ref in artifact_refs:
+        if not isinstance(ref, dict):
+            continue
+        rel_path = str(ref.get("path", ""))
+        path = _resolve_repo_path(rel_path)
+        recorded_digest = ref.get("digest", {}) if isinstance(ref.get("digest"), dict) else {}
+        expected = str(recorded_digest.get("value", ""))
+        actual_digest = _artifact_digest(path) if path.exists() and path.is_file() else {}
+        actual = str(actual_digest.get("value", ""))
+        status = "matched" if expected and actual == expected else "artifact_changed"
+        if not path.exists():
+            status = "artifact_missing"
+        artifact_checks.append(
+            {
+                "path": rel_path,
+                "role": str(ref.get("role", "")),
+                "status": status,
+                "expected_digest": recorded_digest,
+                "actual_digest": actual_digest,
+            }
+        )
+    artifact_status = "matched" if all(row.get("status") == "matched" for row in artifact_checks) else "artifact_changed"
+    non_deterministic_nodes = [
+        {
+            "node_id": str(node.get("node_id", "")),
+            "logical_id": str(node.get("logical_id", "")),
+            "reason": str((node.get("non_deterministic", {}) if isinstance(node.get("non_deterministic"), dict) else {}).get("reason", "")),
+        }
+        for node in manifest.get("nodes", [])
+        if isinstance(node, dict) and not bool(node.get("deterministic", True))
+    ]
+    status = "matched"
+    if plan_status != "matched":
+        status = "input_changed"
+    elif artifact_status != "matched":
+        status = "artifact_changed"
+    conditions = [status]
+    if non_deterministic_nodes:
+        conditions.append("non_deterministic_node")
+    return {
+        "schema": WORKFLOW_LINEAGE_VERIFY_SCHEMA,
+        "mode": "verify",
+        "read_only": True,
+        "manifest_path": manifest_rel_path,
+        "plan_id": recorded_plan_id,
+        "status": status,
+        "ok": status == "matched",
+        "conditions": conditions,
+        "checks": {
+            "plan": {
+                "status": plan_status,
+                "recorded_plan_id": recorded_plan_id,
+                "current_plan_id": current_plan_id,
+                "recorded_inputs_digest": (manifest.get("plan_identity", {}) if isinstance(manifest.get("plan_identity"), dict) else {}).get("inputs_digest", {}),
+                "current_inputs_digest": _workflow_lineage_json_digest(current_inputs),
+            },
+            "artifacts": {
+                "status": artifact_status,
+                "checks": artifact_checks,
+            },
+            "non_deterministic_nodes": non_deterministic_nodes,
+        },
+        "security": {
+            "read_only": True,
+            "mutates_repository": False,
+            "records_raw_prompts": False,
+            "records_file_contents": False,
+        },
+    }
 
 
 def _artifact_provenance_path(artifact_rel_path: str) -> Path:
@@ -2141,6 +2655,7 @@ def _write_artifact_provenance_sidecars(
     inputs: dict[str, Any],
     git_state: dict[str, Any] | None = None,
     artifact_schemas: dict[str, str] | None = None,
+    lineage_manifest: str = "",
 ) -> dict[str, str]:
     generated_at = _now_iso()
     clean_inputs = _redact_audit_value(inputs)
@@ -2184,6 +2699,8 @@ def _write_artifact_provenance_sidecars(
                 "reason": "local provenance only; Sigstore/cosign/GitHub attestations deferred",
             },
         }
+        if lineage_manifest and artifact_rel != lineage_manifest:
+            provenance["links"]["workflow_lineage"] = lineage_manifest
         sidecar_path = _artifact_provenance_path(artifact_rel)
         sidecar_path.parent.mkdir(parents=True, exist_ok=True)
         sidecar_path.write_text(
@@ -2267,31 +2784,6 @@ def _write_governance_report_exports(
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
     md_path.write_text(_governance_markdown(report), encoding="utf-8")
-    provenance = _write_artifact_provenance_sidecars(
-        tool_name="governance_report",
-        artifact_paths=[exports["json"], exports["markdown"]],
-        inputs=provenance_inputs or {},
-        git_state=_git_state_for_provenance(
-            str(report.get("git", {}).get("base_ref", "")) if isinstance(report.get("git"), dict) else "",
-            str(report.get("git", {}).get("head_ref", "")) if isinstance(report.get("git"), dict) else "",
-        ),
-        artifact_schemas={exports["json"]: str(report.get("schema", "")), exports["markdown"]: "governance_report.markdown"},
-    )
-    if provenance:
-        exports["provenance"] = provenance
-        report["exports"] = exports
-        report["provenance"] = {"sidecars": provenance, "schema": PROVENANCE_SCHEMA}
-        json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
-        _write_artifact_provenance_sidecars(
-            tool_name="governance_report",
-            artifact_paths=[exports["json"], exports["markdown"]],
-            inputs=provenance_inputs or {},
-            git_state=_git_state_for_provenance(
-                str(report.get("git", {}).get("base_ref", "")) if isinstance(report.get("git"), dict) else "",
-                str(report.get("git", {}).get("head_ref", "")) if isinstance(report.get("git"), dict) else "",
-            ),
-            artifact_schemas={exports["json"]: str(report.get("schema", "")), exports["markdown"]: "governance_report.markdown"},
-        )
     return exports
 
 
@@ -15556,6 +16048,7 @@ def _governance_report_impl(
         "base_ref": base_ref,
         "head_ref": head_ref,
         "export": export,
+        "compressed_observation": compressed_observation,
     }
     if export:
         report["exports"] = _write_governance_report_exports(
@@ -15601,20 +16094,83 @@ def _governance_report_impl(
             report, raw_reference=raw_reference
         )
     if export and isinstance(report.get("exports"), dict) and isinstance(report["exports"].get("json"), str):
-        json_path = _resolve_repo_path(report["exports"]["json"])
-        json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
-        for link in resource_links:
-            if link.get("path") == report["exports"]["json"]:
-                link["size_bytes"] = json_path.stat().st_size
-        json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
         exports = report.get("exports", {}) if isinstance(report.get("exports"), dict) else {}
         if isinstance(exports.get("json"), str) and isinstance(exports.get("markdown"), str):
+            lineage_rel = _workflow_lineage_export_path(str(report["report_id"]))
+            provenance_paths = {
+                exports["json"]: str(_artifact_provenance_path(exports["json"]).relative_to(REPO_PATH)),
+                exports["markdown"]: str(_artifact_provenance_path(exports["markdown"]).relative_to(REPO_PATH)),
+                lineage_rel: str(_artifact_provenance_path(lineage_rel).relative_to(REPO_PATH)),
+            }
+            exports["lineage"] = lineage_rel
+            exports["provenance"] = provenance_paths
+            report["exports"] = exports
+            plan_inputs = _governance_workflow_lineage_plan_inputs(
+                constraints=_workflow_lineage_request_constraints(
+                    start_time=start_time,
+                    end_time=end_time,
+                    base_ref=base_ref,
+                    head_ref=head_ref,
+                    export=export,
+                    compressed_observation=compressed_observation,
+                ),
+                git_info=git_info,
+                counts=counts,
+                audit_meta=audit_meta,
+            )
+            report["lineage"] = {
+                "schema": WORKFLOW_LINEAGE_SCHEMA,
+                "manifest": lineage_rel,
+                "plan_id": _workflow_lineage_plan_id(plan_inputs),
+                "verify": {"tool": "workflow_lineage", "mode": "verify"},
+            }
+            resource_links.append(
+                _artifact_resource_link(
+                    title="Workflow lineage manifest",
+                    rel_path=lineage_rel,
+                    mime_type="application/json",
+                    created_at=generated_at,
+                    redacted=True,
+                    safety_note="Lineage manifest stores redacted deterministic plan identity and observed artifact digests only.",
+                )
+            )
+            report["provenance"] = {"sidecars": provenance_paths, "schema": PROVENANCE_SCHEMA}
+            json_path = _resolve_repo_path(exports["json"])
+            md_path = _resolve_repo_path(exports["markdown"])
+            json_path.write_text(
+                json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            md_path.write_text(_governance_markdown(report), encoding="utf-8")
+            for link in resource_links:
+                if link.get("path") == exports["json"]:
+                    link["size_bytes"] = json_path.stat().st_size
+                if link.get("path") == exports["markdown"]:
+                    link["size_bytes"] = md_path.stat().st_size
+            report["_meta"] = _artifact_meta(resource_links)
+            json_path.write_text(
+                json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            md_path.write_text(_governance_markdown(report), encoding="utf-8")
+            manifest = _build_governance_workflow_lineage_manifest(
+                report,
+                provenance_inputs=provenance_inputs,
+                audit_meta=audit_meta,
+                counts=counts,
+            )
+            _write_workflow_lineage_manifest(manifest, lineage_rel)
             _write_artifact_provenance_sidecars(
                 tool_name="governance_report",
-                artifact_paths=[exports["json"], exports["markdown"]],
+                artifact_paths=[exports["json"], exports["markdown"], lineage_rel],
                 inputs=provenance_inputs,
                 git_state=_git_state_for_provenance(base_ref, head_ref),
-                artifact_schemas={exports["json"]: str(report.get("schema", "")), exports["markdown"]: "governance_report.markdown"},
+                artifact_schemas={
+                    exports["json"]: str(report.get("schema", "")),
+                    exports["markdown"]: "governance_report.markdown",
+                    lineage_rel: WORKFLOW_LINEAGE_SCHEMA,
+                },
+                lineage_manifest=lineage_rel,
             )
     return report
 
@@ -15651,6 +16207,25 @@ def governance_report(
         )
         _otel_set_result_attributes(span, result)
         return result
+
+
+@mcp.tool()
+def workflow_lineage(mode: str = "verify", manifest_path: str = "") -> dict[str, Any]:
+    """Read-only verifier for workflow_lineage.v1 manifests."""
+    _require_git_repo()
+    if mode != "verify":
+        raise ValueError("mode must be: verify")
+    path = _lineage_manifest_path_from_input(manifest_path)
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("workflow lineage manifest is not valid JSON") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("workflow lineage manifest must be a JSON object")
+    return _verify_workflow_lineage_manifest(
+        manifest,
+        str(path.relative_to(REPO_PATH)),
+    )
 
 
 def _artifact_provenance_impl(
