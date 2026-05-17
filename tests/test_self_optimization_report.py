@@ -113,6 +113,41 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
             json.dumps({"entries": {"grep": {"k1": {"updated_at": "2026-05-10T10:00:00+00:00", "value": {"ok": True}}}}}),
             encoding="utf-8",
         )
+        task_dir = self.repo_path / ".codebase-tooling-mcp" / "tasks"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "task-issue-90.json").write_text(
+            json.dumps(
+                {
+                    "schema": "workflow_task.v1",
+                    "task_id": "task-issue-90",
+                    "workflow": "governance_report",
+                    "status": "completed",
+                    "state": "completed",
+                    "attempt": 2,
+                    "retry_of": "task-issue-90-prev",
+                    "retries": [{"at": "2026-05-10T10:07:00+00:00", "reason": "retry after noisy gate"}],
+                    "created_at": "2026-05-10T10:00:00+00:00",
+                    "started_at": "2026-05-10T10:03:00+00:00",
+                    "updated_at": "2026-05-10T10:14:00+00:00",
+                    "finished_at": "2026-05-10T10:15:00+00:00",
+                    "arguments": {"issue": "issue #90", "pr": "PR #12"},
+                    "audit_events": [
+                        {"event": "queued", "at": "2026-05-10T10:00:00+00:00"},
+                        {"event": "start", "at": "2026-05-10T10:03:00+00:00"},
+                        {"event": "test_gate", "state": "running", "at": "2026-05-10T10:05:00+00:00"},
+                        {"event": "blocked", "at": "2026-05-10T10:06:00+00:00"},
+                        {"event": "retry", "at": "2026-05-10T10:07:00+00:00"},
+                        {"event": "complete", "at": "2026-05-10T10:15:00+00:00"},
+                    ],
+                    "test_gates": [
+                        {"name": "pytest focused", "status": "passed"},
+                        {"name": "git diff --check", "status": "passed"},
+                    ],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         self._commit_with_date("Fixes #90 via PR #12")
 
     def test_aggregates_usage_by_issue_pr_workflow_and_routing(self):
@@ -136,8 +171,16 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         self.assertTrue(any(row["name"] == "governance_report" for row in report["metrics"]["by_workflow"]))
         self.assertTrue(any(row["name"] == "router-model-a" for row in report["metrics"]["routing"]["models"]))
         self.assertTrue(any(row["name"] == "local" for row in report["metrics"]["routing"]["backends"]))
+        self.assertEqual(totals["explicit_token_record_count"], 1)
         self.assertGreater(report["metrics"]["cache"]["entry_count"], 0)
         self.assertGreater(report["metrics"]["compression"]["estimated_saved_tokens"], 0)
+        self.assertIn("task-issue-90", report["metrics"]["throughput"]["tasks_touched"])
+        self.assertTrue(any(row["name"] == "task-issue-90" for row in report["metrics"]["by_task"]))
+        self.assertGreater(report["metrics"]["state_transitions"]["count"], 0)
+        self.assertGreater(report["metrics"]["test_gates"]["count"], 0)
+        self.assertGreater(report["metrics"]["retries_rework"]["retry_count"], 0)
+        self.assertGreater(report["metrics"]["blocked_waiting_time"]["seconds"], 0)
+        self.assertEqual(report["metrics"]["data_availability"]["test_gates"]["status"], "observed")
 
     def test_redacts_secrets_and_sensitive_names(self):
         self._write_jsonl(
@@ -148,11 +191,12 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
                     "tool_name": "task_router",
                     "categories": ["read-only"],
                     "success": False,
-                    "reason": "AcmeCo failed for Alice Example with token=ghp_12345678901234567890",
+                    "reason": "AcmeCo failed for Alice Example at /tmp/customer/raw-trace.json",
                     "arguments": {
                         "project": "AcmeCo",
                         "person": "Alice Example",
-                        "query": "Alice Example AcmeCo password=super-secret-value issue #90",
+                        "query": "Alice Example AcmeCo password=super-secret-value token=ghp_12345678901234567890 issue #90",
+                        "log_path": "/tmp/customer/raw-trace.json",
                     },
                 }
             ],
@@ -172,6 +216,8 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         self.assertNotIn("Alice", encoded)
         self.assertNotIn("ghp_12345678901234567890", encoded)
         self.assertNotIn("super-secret-value", encoded)
+        self.assertNotIn("/tmp/customer/raw-trace.json", encoded)
+        self.assertIn("<absolute_path_outside_repo>", encoded)
         self.assertIn("<redacted", encoded)
         self.assertFalse(report["security"]["raw_traces_exposed"])
         self.assertFalse(report["security"]["records_secrets"])
@@ -238,6 +284,112 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         self.assertFalse(report["security"]["network_used"])
         self.assertEqual(report["exports"], {})
         self.assertEqual(report["metrics"]["totals"]["tool_call_count"], 0)
+        self.assertEqual(report["confidence"], "low")
+        self.assertIn("No local audit", " ".join(report["caveats"]))
+        self.assertEqual(report["metrics"]["data_availability"]["token_usage"]["status"], "not_available")
+        self.assertEqual(report["metrics"]["data_availability"]["state_transitions"]["status"], "not_available")
+        self.assertEqual(report["metrics"]["test_gates"]["status"], "not_available")
+        self.assertEqual(report["github_issue_gate"]["status"], "disabled")
+
+    def test_github_issue_update_gate_requires_explicit_high_confidence(self):
+        self._write_jsonl(
+            ".codebase-tooling-mcp/audit/security_events.jsonl",
+            [
+                {
+                    "timestamp": "2026-05-10T10:00:00+00:00",
+                    "tool_name": "command_runner",
+                    "categories": ["shell/process"],
+                    "success": False,
+                    "reason": "timeout noisy log",
+                    "arguments": {"task": "issue #90 test run"},
+                }
+            ],
+        )
+
+        default_report = self.server.self_optimization_report(
+            start_time="2026-05-10T00:00:00+00:00",
+            end_time="2026-05-11T00:00:00+00:00",
+            export=False,
+            include_git=False,
+            include_traces=False,
+        )
+        self.assertEqual(default_report["github_issue_gate"]["status"], "disabled")
+        self.assertFalse(default_report["sources"]["network"]["used"])
+
+        dry_run = self.server.self_optimization_report(
+            start_time="2026-05-10T00:00:00+00:00",
+            end_time="2026-05-11T00:00:00+00:00",
+            export=False,
+            include_git=False,
+            include_traces=False,
+            github_issue_update_mode="dry_run",
+            github_repository="owner/repo",
+        )
+        self.assertEqual(dry_run["github_issue_gate"]["status"], "dry_run")
+        self.assertFalse(dry_run["github_issue_gate"]["network_used"])
+        self.assertGreaterEqual(dry_run["github_issue_gate"]["eligible_count"], 1)
+        self.assertTrue(
+            all(action["confidence"] == "high" for action in dry_run["github_issue_gate"]["planned_actions"])
+        )
+
+        self.server.ALLOW_MUTATIONS = False
+        try:
+            with self.assertRaises(PermissionError):
+                self.server.self_optimization_report(
+                    start_time="2026-05-10T00:00:00+00:00",
+                    end_time="2026-05-11T00:00:00+00:00",
+                    export=False,
+                    include_git=False,
+                    include_traces=False,
+                    github_issue_update_mode="apply",
+                    github_repository="owner/repo",
+                )
+        finally:
+            self.server.ALLOW_MUTATIONS = True
+
+        existing_title = "Record token and model routing fields in redacted local telemetry"
+        deduped = self.server.self_optimization_report(
+            start_time="2026-05-10T00:00:00+00:00",
+            end_time="2026-05-11T00:00:00+00:00",
+            export=False,
+            include_git=False,
+            include_traces=False,
+            github_issue_metadata=[{"number": 123, "title": existing_title, "state": "open", "body": ""}],
+            github_issue_update_mode="dry_run",
+            github_repository="owner/repo",
+        )
+        telemetry_candidate = next(
+            item for item in deduped["optimization_candidates"] if item["title"] == existing_title
+        )
+        self.assertTrue(telemetry_candidate["suppressed"])
+        self.assertEqual(telemetry_candidate["duplicate_of"], "#123")
+        self.assertTrue(
+            any(action["action"] == "update" and action["target_issue"] == "#123" for action in deduped["github_issue_gate"]["planned_actions"])
+        )
+        self.assertEqual(deduped["sources"]["github_issues"]["status"], "provided")
+        self.assertEqual(deduped["sources"]["proxy_anonymizer_disclosure"]["status"], "not_available")
+
+        local_index = self.repo_path / ".codebase-tooling-mcp" / "reports" / "SELF_OPTIMIZATION_GITHUB_ISSUES.json"
+        local_index.parent.mkdir(parents=True, exist_ok=True)
+        local_index.write_text(
+            json.dumps({"issues": [{"number": 124, "title": existing_title, "state": "open", "body": ""}]}),
+            encoding="utf-8",
+        )
+        local_deduped = self.server.self_optimization_report(
+            start_time="2026-05-10T00:00:00+00:00",
+            end_time="2026-05-11T00:00:00+00:00",
+            export=False,
+            include_git=False,
+            include_traces=False,
+            github_issue_update_mode="dry_run",
+            github_repository="owner/repo",
+        )
+        local_candidate = next(
+            item for item in local_deduped["optimization_candidates"] if item["title"] == existing_title
+        )
+        self.assertTrue(local_candidate["suppressed"])
+        self.assertEqual(local_candidate["duplicate_of"], "#124")
+        self.assertEqual(local_deduped["sources"]["github_issues"]["status"], "local_index")
 
     def test_report_output_is_stable_except_generated_metadata(self):
         self._write_sample_usage_fixtures()

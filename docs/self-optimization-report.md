@@ -27,7 +27,7 @@ Use `task_router(mode="workflow_select", ...)` only when the operator is unsure 
 
 ## Inputs and sources
 
-The report is offline/repo-local. It does not call GitHub, model APIs, package indexes, or other network services.
+The report is offline/repo-local by default. It does not call GitHub, model APIs, package indexes, or other network services unless GitHub issue updates are explicitly enabled with `github_issue_update_mode="apply"`, `github_repository`, a token environment variable, and server mutation permission.
 
 It reads available local evidence only:
 
@@ -35,7 +35,8 @@ It reads available local evidence only:
 - local OpenTelemetry JSONL spans from `MCP_OTEL_SPANS_FILE` when tracing was enabled;
 - persisted async task handles under `.codebase-tooling-mcp/tasks/`;
 - local cache metadata under `.codebase-tooling-mcp/cache/`;
-- local `git log` metadata for issue/PR throughput when `include_git=true`.
+- local `git log` metadata for issue/PR throughput when `include_git=true`;
+- optional caller-supplied `github_issue_metadata` or a local `.codebase-tooling-mcp/reports/SELF_OPTIMIZATION_GITHUB_ISSUES.json` issue index for de-duplicating candidates against already-open GitHub issues without a network lookup.
 
 Use `start_time`/`end_time` for exact ISO-8601 windows, or `window_hours` for a recent rolling window.
 
@@ -46,11 +47,14 @@ The tool returns `self_optimization_report.v1` with:
 - elapsed/spent baseline estimates and observed span duration where available;
 - token usage and token-savings estimates where local token/cache/compression fields are available;
 - backend/model/execution-mode routing counts when present in local spans or audit-safe arguments;
+- first-class task buckets plus state-transition, test-gate, retry/rework, and blocked/waiting-time metrics when task/status artifacts include that evidence;
 - cache entry counts, observed cache hits, and conservative cache savings estimates;
 - compressed-observation counts and estimated token savings from omitted signals;
 - failed/noisy run counts and bottleneck summaries;
-- issue/PR/workflow throughput attribution from local refs such as `issue #90` or `PR #12`;
+- issue/PR/workflow/task throughput attribution from local refs such as `issue #90`, `PR #12`, or persisted task IDs;
 - duplicate-suppressed optimization candidates with stable `duplicate_key` values.
+
+When evidence is absent, the report uses explicit `unknown` / `not_available` statuses in `metrics.data_availability`, lowers `confidence`, and adds caveats instead of inventing token usage, transition timing, test-gate coverage, or blocked-time savings.
 
 `export=true` writes redacted JSON and Markdown artifacts under `.codebase-tooling-mcp/reports/` and returns resource links.
 
@@ -66,8 +70,18 @@ self_optimization_report(window_hours=168, redact_terms=["CustomerName", "Person
 
 The tool also derives local redaction terms from Git config and remotes when possible, so report output should not rely on raw organization, repository, or person names for grouping. Use issue/PR numbers and workflow names for attribution instead.
 
-## Duplicate suppression
+## Duplicate suppression and optional GitHub issue gating
 
-Optimization candidates are recommendations, not automatic GitHub issues. Each candidate has a stable `duplicate_key`. The tool suppresses duplicates within the same report and against prior local self-optimization report exports or the optional local recommendation index at `.codebase-tooling-mcp/reports/SELF_OPTIMIZATION_RECOMMENDATIONS.json`.
+Optimization candidates are recommendations, not automatic GitHub issues. Each candidate has a stable `duplicate_key`, confidence, and caveats. The tool suppresses duplicates within the same report, against prior local self-optimization report exports, against the optional local recommendation index at `.codebase-tooling-mcp/reports/SELF_OPTIMIZATION_RECOMMENDATIONS.json`, against a local `.codebase-tooling-mcp/reports/SELF_OPTIMIZATION_GITHUB_ISSUES.json` issue index, and against caller-supplied `github_issue_metadata`.
 
-When turning a candidate into a GitHub issue, first check the current project board/issues and only file unsuppressed candidates that still match team priorities.
+GitHub create/update behavior is gated:
+
+- default `github_issue_update_mode="off"`: no issue writes and no network calls;
+- `github_issue_update_mode="dry_run"`: plans create/update actions for high-confidence candidates only, still without contacting GitHub;
+- `github_issue_update_mode="apply"`: requires explicit `github_repository`, a configured token environment variable, high candidate confidence, server mutation permission, and an authorized mutation-capable MCP session before creating a new issue or updating a matched issue with a comment.
+
+When turning a candidate into a GitHub issue, first check the current project board/issues and only file unsuppressed high-confidence candidates that still match team priorities.
+
+## #88 proxy/anonymizer/disclosure enrichment
+
+The report does not depend on #88. If an explicit agent API proxy/anonymizer/disclosure/router policy is later available, its redacted aggregate routing, provider, disclosure, anonymization, and policy-decision metadata can enrich routing/disclosure metrics. Those inputs remain non-blocking and must stay aggregate/redacted; raw online-provider traces, prompts, responses, API keys, or disclosure logs must not be embedded in this report.

@@ -212,6 +212,9 @@ TEST_IMPACT_MAP_MAX_AGE_HOURS = 24
 SELF_OPTIMIZATION_RECOMMENDATION_INDEX_FILE = Path(
     ".codebase-tooling-mcp/reports/SELF_OPTIMIZATION_RECOMMENDATIONS.json"
 )
+SELF_OPTIMIZATION_GITHUB_ISSUES_FILE = Path(
+    ".codebase-tooling-mcp/reports/SELF_OPTIMIZATION_GITHUB_ISSUES.json"
+)
 STATE_SNAPSHOT_DIR = Path(".codebase-tooling-mcp/snapshots")
 EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
 ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
@@ -2118,14 +2121,28 @@ SELF_OPTIMIZATION_SAFE_TOKEN_KEYS = {
     "compressed_tokens",
     "compression_estimated_saved_tokens",
     "estimated_saved_tokens",
+    "explicit_token_record_count",
     "input_tokens",
     "output_tokens",
     "raw_tokens",
     "saved_tokens",
     "token_estimates",
+    "token_usage",
     "tokens",
     "total_tokens",
 }
+SELF_OPTIMIZATION_SENSITIVE_VALUE_RE = re.compile(
+    r"("
+    r"\bBearer\s+\S+"
+    r"|\b(?:token|secret|password|credential|authorization|api[_-]?key)\b\s*[:=]\s*\S+"
+    r"|\b[A-Za-z0-9._%+-]+-secret-[A-Za-z0-9._%+-]+\b"
+    r"|\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{12,}\b"
+    r"|\bsk-[A-Za-z0-9_-]{16,}\b"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
+    r")",
+    re.IGNORECASE,
+)
 SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL = {
     "find_paths": 20.0,
     "grep": 30.0,
@@ -2143,6 +2160,40 @@ SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL = {
     "docker_router": 180.0,
     "vscode_router": 120.0,
 }
+SELF_OPTIMIZATION_WAITING_STATES = {
+    "blocked",
+    "needs-info",
+    "needs_info",
+    "paused",
+    "pending",
+    "queued",
+    "waiting",
+}
+SELF_OPTIMIZATION_TEST_GATE_TERMS = {
+    "build",
+    "check",
+    "gate",
+    "lint",
+    "py_compile",
+    "pytest",
+    "release_readiness",
+    "self_test",
+    "test",
+    "test_impact_map",
+    "typecheck",
+}
+SELF_OPTIMIZATION_REWORK_TERMS = {
+    "changes-requested",
+    "changes requested",
+    "fixup",
+    "redo",
+    "rerun",
+    "retry",
+    "retest",
+    "rework",
+}
+SELF_OPTIMIZATION_CONFIDENCE_ORDER = {"low": 0, "medium": 1, "high": 2}
+SELF_OPTIMIZATION_GITHUB_ISSUE_UPDATE_MODES = {"off", "dry_run", "apply"}
 
 
 def _self_opt_parse_window(start_time: str, end_time: str, window_hours: int) -> tuple[datetime, datetime]:
@@ -2213,7 +2264,8 @@ def _self_opt_default_redact_terms(extra_terms: list[str] | None = None) -> list
             if value:
                 terms.add(value)
                 if "@" in value:
-                    terms.update(part for part in re.split(r"[@.]", value) if part)
+                    ignored_email_parts = {"com", "net", "org", "de", "io", "co", "uk", "dev", "mail", "email"}
+                    terms.update(part for part in re.split(r"[@.]", value) if len(part) >= 4 and part.lower() not in ignored_email_parts)
         remotes = _git("remote", "-v", check=False).stdout
         ignored = {"https", "http", "ssh", "git", "github", "com", "origin", "fetch", "push"}
         for token in re.split(r"[^A-Za-z0-9_.-]+", remotes):
@@ -2225,8 +2277,33 @@ def _self_opt_default_redact_terms(extra_terms: list[str] | None = None) -> list
     return sorted(terms, key=lambda item: (-len(item), item.lower()))
 
 
+def _self_opt_canonical_path(value: str) -> str:
+    try:
+        path = Path(value)
+        if path.is_absolute():
+            resolved = path.resolve(strict=False)
+            try:
+                return str(resolved.relative_to(REPO_PATH))
+            except ValueError:
+                return "<absolute_path_outside_repo>"
+    except (OSError, RuntimeError, ValueError):
+        return "<absolute_path>"
+    return value
+
+
+def _self_opt_redact_paths(value: str) -> str:
+    return ABSOLUTE_PATH_VALUE_RE.sub(lambda match: _self_opt_canonical_path(match.group(0)), value)
+
+
 def _self_opt_redact_string(value: str, redact_terms: list[str]) -> str:
-    redacted = _redact_audit_string(value)
+    # The general audit redactor intentionally treats phrases like "token <value>"
+    # as sensitive, but report labels such as "token usage" and "token telemetry"
+    # are required non-secret metadata. Keep self-optimization narrative strings
+    # unless they contain credential-shaped values or explicit key/value secrets.
+    redacted = "<redacted>" if SELF_OPTIMIZATION_SENSITIVE_VALUE_RE.search(value) else value
+    if redacted != "<redacted>" and len(redacted) > 500:
+        redacted = redacted[:500] + "...[truncated]"
+    redacted = _self_opt_redact_paths(redacted)
     repo_text = str(REPO_PATH)
     if repo_text and repo_text in redacted:
         redacted = redacted.replace(repo_text, "<repo>")
@@ -2275,9 +2352,45 @@ def _self_opt_json_text(value: Any) -> str:
 
 
 def _self_opt_extract_refs(value: Any) -> dict[str, list[str]]:
-    text = _self_opt_json_text(value)
     issues: set[str] = set()
     prs: set[str] = set()
+
+    def add_ref(target: set[str], raw: Any) -> None:
+        if isinstance(raw, bool):
+            return
+        if isinstance(raw, (int, float)):
+            if int(raw) == raw and int(raw) > 0:
+                target.add(f"#{int(raw)}")
+            return
+        text_value = str(raw or "")
+        for match in re.finditer(r"#?(\d+)", text_value):
+            target.add(f"#{match.group(1)}")
+
+    def collect_structured_refs(raw: Any, depth: int = 0) -> None:
+        if depth > 5:
+            return
+        if isinstance(raw, dict):
+            for key, item in raw.items():
+                key_norm = str(key).lower().replace("-", "_").replace(".", "_")
+                if key_norm in {"issue", "issues", "issue_ref", "issue_refs", "issue_number", "github_issue", "github_issues"}:
+                    if isinstance(item, list):
+                        for row in item[:50]:
+                            add_ref(issues, row)
+                    else:
+                        add_ref(issues, item)
+                elif key_norm in {"pr", "prs", "pull_request", "pull_requests", "pull_request_number", "pr_number", "github_pr", "github_prs"}:
+                    if isinstance(item, list):
+                        for row in item[:50]:
+                            add_ref(prs, row)
+                    else:
+                        add_ref(prs, item)
+                collect_structured_refs(item, depth + 1)
+        elif isinstance(raw, list):
+            for item in raw[:100]:
+                collect_structured_refs(item, depth + 1)
+
+    collect_structured_refs(value)
+    text = _self_opt_json_text(value)
     for match in re.finditer(r"(?i)\b(?:pr|pull request|pull-request|pull/|pulls/)\s*#?(\d+)\b", text):
         prs.add(f"#{match.group(1)}")
     for match in re.finditer(r"(?i)\b(?:issue|issues|closes|fixes|resolves)\s*#?(\d+)\b", text):
@@ -2294,7 +2407,18 @@ def _self_opt_extract_refs(value: Any) -> dict[str, list[str]]:
 def _self_opt_first_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, dict):
         return None
-    for key in ("timestamp", "start_time", "created_at", "started_at", "updated_at", "end_time", "completed_at"):
+    for key in (
+        "timestamp",
+        "at",
+        "time",
+        "start_time",
+        "created_at",
+        "started_at",
+        "updated_at",
+        "end_time",
+        "finished_at",
+        "completed_at",
+    ):
         raw = value.get(key)
         if isinstance(raw, str):
             parsed = _parse_iso_datetime(raw)
@@ -2406,6 +2530,402 @@ def _self_opt_model_routing(value: Any, redact_terms: list[str]) -> dict[str, li
     }
 
 
+def _self_opt_normalized_status(raw: Any) -> str:
+    text = str(raw or "").strip().lower().replace(" ", "_")
+    text = text.replace("-", "_")
+    if not text:
+        return ""
+    aliases = {
+        "cancelled": "cancelled",
+        "canceled": "cancelled",
+        "complete": "succeeded",
+        "completed": "succeeded",
+        "done": "succeeded",
+        "error": "failed",
+        "failure": "failed",
+        "finished": "succeeded",
+        "in_progress": "running",
+        "ok": "succeeded",
+        "queued": "queued",
+        "running": "running",
+        "start": "running",
+        "started": "running",
+        "success": "succeeded",
+        "successful": "succeeded",
+        "timeout": "failed",
+    }
+    return aliases.get(text, text[:80])
+
+
+def _self_opt_state_from_event(raw: Any) -> str:
+    text = str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not text:
+        return ""
+    if text in {"block", "blocked", "needs_info", "needs-info"}:
+        return "blocked"
+    if text in {"queue", "queued"}:
+        return "queued"
+    if text in {"wait", "waiting", "pause", "paused"}:
+        return "waiting"
+    if text in {"retry", "retried", "rerun", "rework"}:
+        return "retrying"
+    if text in {"start", "started", "run", "running", "resume", "resumed"}:
+        return "running"
+    if text in {"finish", "finished", "complete", "completed", "success", "succeeded", "ok"}:
+        return "succeeded"
+    if text in {"fail", "failed", "failure", "error", "timeout", "cancelled", "canceled"}:
+        return "failed" if text != "cancelled" and text != "canceled" else "cancelled"
+    return _self_opt_normalized_status(text)
+
+
+def _self_opt_extract_task_id(value: Any, depth: int = 0) -> str:
+    if depth > 5:
+        return ""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_norm = str(key).lower().replace("-", "_").replace(".", "_")
+            if key_norm in {"task_id", "taskid", "mcp_task_id", "trace_task_id", "correlation_id"}:
+                if isinstance(item, str) and item.strip():
+                    return _self_opt_redact_string(item.strip(), [])[:120]
+        for item in value.values():
+            found = _self_opt_extract_task_id(item, depth + 1)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value[:50]:
+            found = _self_opt_extract_task_id(item, depth + 1)
+            if found:
+                return found
+    return ""
+
+
+def _self_opt_status_from_payload(value: Any, success: bool | None = None) -> str:
+    if isinstance(value, dict):
+        for key in ("status", "state", "phase"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return _self_opt_normalized_status(raw)
+        progress = value.get("progress_detail")
+        if isinstance(progress, dict):
+            raw = progress.get("phase")
+            if isinstance(raw, str) and raw.strip():
+                return _self_opt_normalized_status(raw)
+        status = value.get("status")
+        if isinstance(status, dict):
+            raw = status.get("code")
+            if isinstance(raw, str) and raw.strip():
+                return _self_opt_normalized_status(raw)
+    if success is not None:
+        return "succeeded" if success else "failed"
+    return "unknown"
+
+
+def _self_opt_transition_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    from_state = _self_opt_normalized_status(
+        row.get("from")
+        or row.get("from_state")
+        or row.get("previous")
+        or row.get("previous_state")
+    )
+    to_state = _self_opt_normalized_status(
+        row.get("to") or row.get("to_state") or row.get("new") or row.get("new_state") or row.get("state") or row.get("status")
+    )
+    if not to_state:
+        event_state = _self_opt_state_from_event(row.get("event") or row.get("name") or row.get("phase"))
+        to_state = event_state
+    if not from_state and not to_state:
+        return None
+    at = ""
+    for key in ("at", "timestamp", "time", "created_at", "updated_at", "started_at", "finished_at"):
+        raw = row.get(key)
+        if isinstance(raw, str) and raw.strip():
+            at = raw.strip()
+            break
+    return {
+        "from": from_state,
+        "to": to_state or "unknown",
+        "event": _self_opt_redact_string(str(row.get("event") or row.get("name") or ""), []),
+        "at": at,
+    }
+
+
+def _self_opt_collect_state_transitions(value: Any, out: list[dict[str, Any]], depth: int = 0) -> None:
+    if depth > 5 or len(out) >= 80:
+        return
+    if isinstance(value, dict):
+        explicit = value.get("state_transitions") or value.get("transitions")
+        if isinstance(explicit, list):
+            for item in explicit[:50]:
+                if isinstance(item, dict):
+                    transition = _self_opt_transition_from_row(item)
+                    if transition:
+                        out.append(transition)
+        audit_events = value.get("audit_events") or value.get("events")
+        if isinstance(audit_events, list):
+            previous = ""
+            for item in audit_events[:80]:
+                if not isinstance(item, dict):
+                    continue
+                state = _self_opt_state_from_event(item.get("state") or item.get("status") or item.get("event") or item.get("phase"))
+                if not state:
+                    continue
+                transition = _self_opt_transition_from_row({**item, "from": previous, "to": state})
+                if transition:
+                    out.append(transition)
+                    previous = state
+        transition = _self_opt_transition_from_row(value)
+        if transition and (transition["from"] or transition["to"] not in {"unknown", "succeeded", "failed"}):
+            out.append(transition)
+        for key, item in value.items():
+            if key in {"state_transitions", "transitions", "audit_events", "events"}:
+                continue
+            _self_opt_collect_state_transitions(item, out, depth + 1)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            _self_opt_collect_state_transitions(item, out, depth + 1)
+
+
+def _self_opt_extract_state_transitions(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    _self_opt_collect_state_transitions(value, rows)
+    seen: set[tuple[str, str, str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("from", "")), str(row.get("to", "")), str(row.get("event", "")), str(row.get("at", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+        if len(out) >= 50:
+            break
+    return out
+
+
+def _self_opt_gate_status_from_payload(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("status", "state", "result", "conclusion", "outcome"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                status = _self_opt_normalized_status(raw)
+                if status in {"succeeded", "passed", "ok"}:
+                    return "passed"
+                if status in {"failed", "cancelled", "timed_out"}:
+                    return "failed"
+                if status in {"skipped"}:
+                    return "skipped"
+                return status
+        if isinstance(value.get("success"), bool):
+            return "passed" if value.get("success") else "failed"
+        if isinstance(value.get("ok"), bool):
+            return "passed" if value.get("ok") else "failed"
+    return "unknown"
+
+
+def _self_opt_gate_name_from_payload(value: dict[str, Any]) -> str:
+    for key in ("name", "gate", "check", "tool_name", "tool", "command", "workflow"):
+        raw = value.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return _self_opt_redact_string(raw.strip(), [])[:120]
+    attrs = value.get("attributes")
+    if isinstance(attrs, dict):
+        for key in ("mcp.tool.name", "check.name", "test.name"):
+            raw = attrs.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return _self_opt_redact_string(raw.strip(), [])[:120]
+    args = value.get("arguments")
+    if isinstance(args, dict):
+        for key in ("command", "task", "workflow"):
+            raw = args.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return _self_opt_redact_string(raw.strip(), [])[:120]
+    return "test_gate"
+
+
+def _self_opt_collect_test_gates(value: Any, out: list[dict[str, Any]], depth: int = 0) -> None:
+    if depth > 5 or len(out) >= 80:
+        return
+    if isinstance(value, dict):
+        for key in ("test_gates", "quality_gates", "gates", "checks", "test_results"):
+            rows = value.get(key)
+            if isinstance(rows, list):
+                for item in rows[:50]:
+                    if isinstance(item, dict):
+                        out.append(
+                            {
+                                "name": _self_opt_gate_name_from_payload(item),
+                                "status": _self_opt_gate_status_from_payload(item),
+                                "source": key,
+                            }
+                        )
+            elif isinstance(rows, dict):
+                for gate_name, item in list(rows.items())[:50]:
+                    if isinstance(item, dict):
+                        out.append(
+                            {
+                                "name": _self_opt_redact_string(str(gate_name), [])[:120],
+                                "status": _self_opt_gate_status_from_payload(item),
+                                "source": key,
+                            }
+                        )
+        blob = _self_opt_json_text(value).lower()[:4000]
+        looks_like_gate = any(term in blob for term in SELF_OPTIMIZATION_TEST_GATE_TERMS)
+        if looks_like_gate:
+            name = _self_opt_gate_name_from_payload(value)
+            out.append({"name": name, "status": _self_opt_gate_status_from_payload(value), "source": "detected"})
+        for item in value.values():
+            _self_opt_collect_test_gates(item, out, depth + 1)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            _self_opt_collect_test_gates(item, out, depth + 1)
+
+
+def _self_opt_extract_test_gates(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    _self_opt_collect_test_gates(value, rows)
+    seen: set[tuple[str, str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("name", "")), str(row.get("status", "")), str(row.get("source", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+        if len(out) >= 30:
+            break
+    return out
+
+
+def _self_opt_retry_rework_metrics(value: Any, depth: int = 0) -> dict[str, Any]:
+    if depth > 6:
+        return {"retry_count": 0, "rework_count": 0, "reasons": []}
+    retry_count = 0
+    rework_count = 0
+    reasons: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_norm = str(key).lower().replace("-", "_")
+            if key_norm == "attempt" and isinstance(item, int) and item > 1:
+                retry_count = max(retry_count, item - 1)
+            elif key_norm == "retry_of" and item:
+                retry_count = max(retry_count, 1)
+                reasons.append("retry_of")
+            elif key_norm == "retries" and isinstance(item, list):
+                retry_count = max(retry_count, len(item))
+            if isinstance(item, str):
+                lowered = item.lower()
+                if any(
+                    term in lowered
+                    for term in SELF_OPTIMIZATION_REWORK_TERMS
+                    if term in {"retry", "rerun", "retest"}
+                ):
+                    retry_count += 1
+                    reasons.append(_self_opt_redact_string(item, [])[:120])
+                if any(
+                    term in lowered
+                    for term in SELF_OPTIMIZATION_REWORK_TERMS
+                    if term not in {"retry", "rerun", "retest"}
+                ):
+                    rework_count += 1
+                    reasons.append(_self_opt_redact_string(item, [])[:120])
+            nested = _self_opt_retry_rework_metrics(item, depth + 1)
+            retry_count += int(nested.get("retry_count", 0) or 0)
+            rework_count += int(nested.get("rework_count", 0) or 0)
+            reasons.extend(str(reason) for reason in nested.get("reasons", []) if reason)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            nested = _self_opt_retry_rework_metrics(item, depth + 1)
+            retry_count += int(nested.get("retry_count", 0) or 0)
+            rework_count += int(nested.get("rework_count", 0) or 0)
+            reasons.extend(str(reason) for reason in nested.get("reasons", []) if reason)
+    return {
+        "retry_count": retry_count,
+        "rework_count": rework_count,
+        "reasons": reasons[:10],
+    }
+
+
+def _self_opt_waiting_seconds(value: Any, depth: int = 0) -> tuple[float, int]:
+    if depth > 6:
+        return 0.0, 0
+    seconds = 0.0
+    signals = 0
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_norm = str(key).lower().replace("-", "_").replace(".", "_")
+            if isinstance(item, (int, float)) and not isinstance(item, bool):
+                if key_norm in {"blocked_seconds", "waiting_seconds", "blocked_time_seconds", "waiting_time_seconds", "queued_seconds", "queue_seconds"}:
+                    seconds += max(0.0, float(item))
+                    signals += 1
+        audit_events = value.get("audit_events") or value.get("events")
+        has_timed_lifecycle_events = False
+        if isinstance(audit_events, list):
+            has_timed_lifecycle_events = any(
+                isinstance(item, dict) and _self_opt_first_timestamp(item) is not None
+                for item in audit_events[:100]
+            )
+        created = _parse_iso_datetime(str(value.get("created_at", ""))) if value.get("created_at") else None
+        started = _parse_iso_datetime(str(value.get("started_at", ""))) if value.get("started_at") else None
+        if not has_timed_lifecycle_events and created is not None and started is not None and started >= created:
+            seconds += (started - created).total_seconds()
+            signals += 1
+        if isinstance(audit_events, list):
+            timeline: list[tuple[datetime, str]] = []
+            for item in audit_events[:100]:
+                if not isinstance(item, dict):
+                    continue
+                ts = _self_opt_first_timestamp(item)
+                state = _self_opt_state_from_event(item.get("state") or item.get("status") or item.get("event") or item.get("phase"))
+                if ts is not None and state:
+                    timeline.append((ts, state))
+            timeline.sort(key=lambda row: row[0])
+            for (current_ts, state), (next_ts, _next_state) in zip(timeline, timeline[1:]):
+                if state in SELF_OPTIMIZATION_WAITING_STATES and next_ts >= current_ts:
+                    seconds += (next_ts - current_ts).total_seconds()
+                    signals += 1
+        for key, item in value.items():
+            if key in {"audit_events", "events"}:
+                continue
+            nested_seconds, nested_signals = _self_opt_waiting_seconds(item, depth + 1)
+            seconds += nested_seconds
+            signals += nested_signals
+    elif isinstance(value, list):
+        for item in value[:100]:
+            nested_seconds, nested_signals = _self_opt_waiting_seconds(item, depth + 1)
+            seconds += nested_seconds
+            signals += nested_signals
+    return seconds, signals
+
+
+def _self_opt_has_numeric_signal(value: Any, key_terms: set[str], depth: int = 0) -> bool:
+    if depth > 6:
+        return False
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_norm = str(key).lower().replace("-", "_").replace(".", "_")
+            if any(term in key_norm for term in key_terms) and isinstance(item, (int, float)) and not isinstance(item, bool):
+                return True
+            if _self_opt_has_numeric_signal(item, key_terms, depth + 1):
+                return True
+    elif isinstance(value, list):
+        return any(_self_opt_has_numeric_signal(item, key_terms, depth + 1) for item in value[:100])
+    return False
+
+
+def _self_opt_record_context(value: Any, success: bool | None = None) -> dict[str, Any]:
+    waiting_seconds, waiting_signals = _self_opt_waiting_seconds(value)
+    return {
+        "task_id": _self_opt_extract_task_id(value),
+        "state": _self_opt_status_from_payload(value, success),
+        "state_transitions": _self_opt_extract_state_transitions(value),
+        "test_gates": _self_opt_extract_test_gates(value),
+        "retry_rework": _self_opt_retry_rework_metrics(value),
+        "blocked_waiting_seconds": round(waiting_seconds, 3),
+        "blocked_waiting_signal_count": waiting_signals,
+        "has_explicit_duration": _self_opt_has_numeric_signal(value, {"duration_ms", "elapsed_ms", "elapsed_seconds", "spent_seconds"}),
+        "has_explicit_tokens": _self_opt_has_numeric_signal(value, {"token", "tokens"}),
+    }
+
+
 def _self_opt_collect_cache_hits(value: Any, depth: int = 0) -> int:
     if depth > 6:
         return 0
@@ -2479,12 +2999,14 @@ def _self_opt_normalize_audit_event(event: dict[str, Any], redact_terms: list[st
     token_metrics = _self_opt_token_metrics(event)
     compression = _self_opt_compression_metrics(event)
     categories = event.get("categories", []) if isinstance(event.get("categories"), list) else []
+    success = bool(event.get("success", False))
+    context = _self_opt_record_context(event, success)
     return {
         "source": "audit",
         "timestamp": timestamp,
         "tool": tool,
         "workflow": _self_opt_workflow_from_payload(tool, safe_event),
-        "success": bool(event.get("success", False)),
+        "success": success,
         "reason": _self_opt_redact_string(str(event.get("reason", "")), redact_terms),
         "duration_ms": None,
         "categories": [str(item) for item in categories],
@@ -2494,6 +3016,7 @@ def _self_opt_normalize_audit_event(event: dict[str, Any], redact_terms: list[st
         "tokens": token_metrics,
         "cache_hit_count": _self_opt_collect_cache_hits(event),
         "compression": compression,
+        **context,
     }
 
 
@@ -2513,12 +3036,14 @@ def _self_opt_normalize_span(span: dict[str, Any], redact_terms: list[str]) -> d
     duration_ms = float(duration_raw) if isinstance(duration_raw, (int, float)) and not isinstance(duration_raw, bool) else None
     refs = _self_opt_extract_refs(safe_span)
     routing = _self_opt_model_routing(safe_span, redact_terms)
+    success = status_code.upper() != "ERROR"
+    context = _self_opt_record_context(span, success)
     return {
         "source": "trace",
         "timestamp": _self_opt_first_timestamp(span),
         "tool": tool,
         "workflow": _self_opt_workflow_from_payload(tool, safe_attrs),
-        "success": status_code.upper() != "ERROR",
+        "success": success,
         "reason": _self_opt_redact_string(str(status.get("description", "")), redact_terms),
         "duration_ms": duration_ms,
         "categories": [],
@@ -2528,6 +3053,7 @@ def _self_opt_normalize_span(span: dict[str, Any], redact_terms: list[str]) -> d
         "tokens": _self_opt_token_metrics(span),
         "cache_hit_count": _self_opt_collect_cache_hits(span),
         "compression": _self_opt_compression_metrics(span),
+        **context,
     }
 
 
@@ -2611,13 +3137,15 @@ def _self_opt_load_task_records(start_dt: datetime, end_dt: datetime, redact_ter
         tool = "workflow_task"
         refs = _self_opt_extract_refs(safe_payload)
         status = str(payload.get("status", payload.get("state", ""))).lower()
+        success = status not in {"failed", "error", "cancelled", "timeout"}
+        context = _self_opt_record_context(payload, success)
         records.append(
             {
                 "source": "task",
                 "timestamp": ts,
                 "tool": tool,
                 "workflow": _self_opt_workflow_from_payload(tool, safe_payload),
-                "success": status not in {"failed", "error", "cancelled", "timeout"},
+                "success": success,
                 "reason": _self_opt_redact_string(str(payload.get("error", payload.get("reason", ""))), redact_terms),
                 "duration_ms": None,
                 "categories": [],
@@ -2627,6 +3155,7 @@ def _self_opt_load_task_records(start_dt: datetime, end_dt: datetime, redact_ter
                 "tokens": _self_opt_token_metrics(payload),
                 "cache_hit_count": _self_opt_collect_cache_hits(payload),
                 "compression": _self_opt_compression_metrics(payload),
+                **context,
             }
         )
     meta["readable"] = True
@@ -2689,6 +3218,15 @@ def _self_opt_git_commit_records(start_dt: datetime, end_dt: datetime, redact_te
                 "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "saved_tokens": 0},
                 "cache_hit_count": 0,
                 "compression": {"compressed_observation_count": 0, "omitted_signal_count": 0, "estimated_saved_tokens": 0},
+                "task_id": "",
+                "state": "succeeded",
+                "state_transitions": [],
+                "test_gates": [],
+                "retry_rework": {"retry_count": 0, "rework_count": 0, "reasons": []},
+                "blocked_waiting_seconds": 0.0,
+                "blocked_waiting_signal_count": 0,
+                "has_explicit_duration": False,
+                "has_explicit_tokens": False,
                 "commit": commit_hash[:12],
                 "subject": safe_subject[:160],
             }
@@ -2747,6 +3285,11 @@ def _self_opt_blank_bucket(name: str) -> dict[str, Any]:
         "output_tokens": 0,
         "total_tokens": 0,
         "estimated_saved_tokens": 0,
+        "state_transition_count": 0,
+        "test_gate_count": 0,
+        "retry_count": 0,
+        "rework_count": 0,
+        "blocked_waiting_seconds": 0.0,
     }
 
 
@@ -2774,13 +3317,19 @@ def _self_opt_update_bucket(bucket: dict[str, dict[str, Any]], key: str, record:
     saved_tokens = compression.get("estimated_saved_tokens", 0)
     if isinstance(saved_tokens, int):
         row["estimated_saved_tokens"] += saved_tokens
+    row["state_transition_count"] += len(record.get("state_transitions", []) if isinstance(record.get("state_transitions"), list) else [])
+    row["test_gate_count"] += len(record.get("test_gates", []) if isinstance(record.get("test_gates"), list) else [])
+    retry_rework = record.get("retry_rework", {}) if isinstance(record.get("retry_rework"), dict) else {}
+    row["retry_count"] += int(retry_rework.get("retry_count", 0) or 0)
+    row["rework_count"] += int(retry_rework.get("rework_count", 0) or 0)
+    row["blocked_waiting_seconds"] += float(record.get("blocked_waiting_seconds", 0.0) or 0.0)
 
 
 def _self_opt_bucket_rows(bucket: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in bucket.values():
         copied = dict(row)
-        for key in ("estimated_spent_seconds", "estimated_baseline_seconds", "estimated_saved_seconds"):
+        for key in ("estimated_spent_seconds", "estimated_baseline_seconds", "estimated_saved_seconds", "blocked_waiting_seconds"):
             copied[key] = round(float(copied[key]), 3)
         rows.append(copied)
     return sorted(rows, key=lambda item: (-int(item.get("tool_call_count", 0)) - int(item.get("commit_count", 0)), str(item.get("name", ""))))
@@ -2798,7 +3347,13 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
     by_workflow: dict[str, dict[str, Any]] = {}
     by_issue: dict[str, dict[str, Any]] = {}
     by_pr: dict[str, dict[str, Any]] = {}
+    by_task: dict[str, dict[str, Any]] = {}
     failure_reasons: dict[str, int] = {}
+    state_counts: dict[str, int] = {}
+    transition_counts: dict[str, int] = {}
+    test_gate_counts: dict[str, int] = {}
+    test_gate_status_counts: dict[str, int] = {}
+    retry_rework_reasons: dict[str, int] = {}
     models: dict[str, int] = {}
     backends: dict[str, int] = {}
     execution_modes: dict[str, int] = {}
@@ -2825,10 +3380,20 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
         "compression_estimated_saved_tokens": 0,
         "attributed_record_count": 0,
         "verbose_tool_call_count": 0,
+        "state_transition_count": 0,
+        "test_gate_count": 0,
+        "retry_count": 0,
+        "rework_count": 0,
+        "blocked_waiting_seconds": 0.0,
+        "blocked_waiting_signal_count": 0,
+        "explicit_duration_record_count": 0,
+        "explicit_token_record_count": 0,
+        "explicit_routing_record_count": 0,
     }
     issue_refs: set[str] = set()
     pr_refs: set[str] = set()
     workflow_refs: set[str] = set()
+    task_refs: set[str] = set()
 
     for record in records:
         source = str(record.get("source", ""))
@@ -2864,6 +3429,10 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
         if workflow:
             workflow_refs.add(workflow)
             _self_opt_update_bucket(by_workflow, workflow, record, baseline, spent, saved, noisy)
+        task_id = str(record.get("task_id", "") or "")
+        if task_id:
+            task_refs.add(task_id)
+            _self_opt_update_bucket(by_task, task_id, record, baseline, spent, saved, noisy)
         issues = [str(item) for item in record.get("issue_refs", []) if str(item)]
         prs = [str(item) for item in record.get("pr_refs", []) if str(item)]
         for issue in issues:
@@ -2872,7 +3441,7 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
         for pr in prs:
             pr_refs.add(pr)
             _self_opt_update_bucket(by_pr, pr, record, baseline, spent, saved, noisy)
-        if issues or prs or workflow:
+        if issues or prs or workflow or task_id:
             totals["attributed_record_count"] += 1
         tokens = record.get("tokens", {}) if isinstance(record.get("tokens"), dict) else {}
         compression = record.get("compression", {}) if isinstance(record.get("compression"), dict) else {}
@@ -2888,13 +3457,54 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
         totals["estimated_saved_tokens"] += compression_saved
         if tool in {"grep", "governance_report", "read_snippet", "summarize_diff"}:
             totals["verbose_tool_call_count"] += 1
+        if bool(record.get("has_explicit_duration", False)):
+            totals["explicit_duration_record_count"] += 1
+        if bool(record.get("has_explicit_tokens", False)):
+            totals["explicit_token_record_count"] += 1
+        state = str(record.get("state", "") or "")
+        if state:
+            state_counts[state] = state_counts.get(state, 0) + 1
+        transitions = record.get("state_transitions", []) if isinstance(record.get("state_transitions"), list) else []
+        totals["state_transition_count"] += len(transitions)
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            from_state = str(transition.get("from", "") or "unknown")
+            to_state = str(transition.get("to", "") or "unknown")
+            key = f"{from_state}->{to_state}"
+            transition_counts[key] = transition_counts.get(key, 0) + 1
+        test_gates = record.get("test_gates", []) if isinstance(record.get("test_gates"), list) else []
+        totals["test_gate_count"] += len(test_gates)
+        for gate in test_gates:
+            if not isinstance(gate, dict):
+                continue
+            gate_name = str(gate.get("name", "test_gate") or "test_gate")
+            gate_status = str(gate.get("status", "unknown") or "unknown")
+            test_gate_counts[gate_name] = test_gate_counts.get(gate_name, 0) + 1
+            test_gate_status_counts[gate_status] = test_gate_status_counts.get(gate_status, 0) + 1
+        retry_rework = record.get("retry_rework", {}) if isinstance(record.get("retry_rework"), dict) else {}
+        retry_count = int(retry_rework.get("retry_count", 0) or 0)
+        rework_count = int(retry_rework.get("rework_count", 0) or 0)
+        totals["retry_count"] += retry_count
+        totals["rework_count"] += rework_count
+        for reason in retry_rework.get("reasons", []) if isinstance(retry_rework.get("reasons"), list) else []:
+            reason_key = str(reason or "unspecified")[:120]
+            retry_rework_reasons[reason_key] = retry_rework_reasons.get(reason_key, 0) + 1
+        totals["blocked_waiting_seconds"] += float(record.get("blocked_waiting_seconds", 0.0) or 0.0)
+        totals["blocked_waiting_signal_count"] += int(record.get("blocked_waiting_signal_count", 0) or 0)
         routing = record.get("routing", {}) if isinstance(record.get("routing"), dict) else {}
         for model in routing.get("models", []) if isinstance(routing.get("models"), list) else []:
             models[str(model)] = models.get(str(model), 0) + 1
         for backend in routing.get("backends", []) if isinstance(routing.get("backends"), list) else []:
             backends[str(backend)] = backends.get(str(backend), 0) + 1
+        routing_has_data = False
         for mode in routing.get("execution_modes", []) if isinstance(routing.get("execution_modes"), list) else []:
             execution_modes[str(mode)] = execution_modes.get(str(mode), 0) + 1
+            routing_has_data = True
+        if routing.get("models") or routing.get("backends"):
+            routing_has_data = True
+        if routing_has_data:
+            totals["explicit_routing_record_count"] += 1
 
     cache_tools = cache_stats.get("tools", {}) if isinstance(cache_stats.get("tools"), dict) else {}
     cache_entry_count = int(cache_stats.get("total_entries", 0) or 0)
@@ -2907,17 +3517,86 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
     attribution_rate = (totals["attributed_record_count"] / len(records)) if records else 0.0
     success_rate = (totals["success_count"] / len(records)) if records else 1.0
     rounded_totals = dict(totals)
-    for key in ("estimated_spent_seconds", "estimated_baseline_seconds", "estimated_saved_seconds"):
+    for key in ("estimated_spent_seconds", "estimated_baseline_seconds", "estimated_saved_seconds", "blocked_waiting_seconds"):
         rounded_totals[key] = round(float(rounded_totals[key]), 3)
     rounded_totals["elapsed_seconds"] = round(elapsed_seconds, 3)
     rounded_totals["success_rate"] = round(success_rate, 4)
     rounded_totals["attribution_rate"] = round(attribution_rate, 4)
+    record_count = len(records)
+    token_status = "observed" if totals["explicit_token_record_count"] else ("unknown" if record_count else "not_available")
+    duration_status = "observed" if totals["explicit_duration_record_count"] else ("estimated" if record_count else "not_available")
+    routing_status = "observed" if bool(models or backends or execution_modes) else ("unknown" if record_count else "not_available")
+    transition_status = "observed" if totals["state_transition_count"] else ("unknown" if record_count else "not_available")
+    test_gate_status = "observed" if totals["test_gate_count"] else ("unknown" if record_count else "not_available")
+    blocked_status = "observed" if totals["blocked_waiting_signal_count"] else ("unknown" if record_count else "not_available")
+    caveats: list[str] = []
+    if not record_count:
+        caveats.append("No local audit, trace, task, or git records were available in the selected window; usage dimensions are not_available.")
+    if token_status != "observed":
+        caveats.append("Token usage is unknown/not_available because no explicit local token fields were present; token savings are limited to cache/compression estimates.")
+    if duration_status != "observed":
+        caveats.append("Elapsed/spent time uses documented baseline estimates because explicit duration telemetry was missing.")
+    if transition_status != "observed":
+        caveats.append("State transition timing is unknown/not_available until task lifecycle or issue-status events are recorded.")
+    if test_gate_status != "observed":
+        caveats.append("Test-gate coverage is unknown/not_available until test/check events or task artifacts record gate names and outcomes.")
+    if blocked_status != "observed":
+        caveats.append("Blocked/waiting time is unknown/not_available until queued/blocked lifecycle timestamps are recorded.")
+    confidence_score = 0
+    confidence_score += 1 if record_count else 0
+    confidence_score += 1 if token_status == "observed" else 0
+    confidence_score += 1 if duration_status == "observed" else 0
+    confidence_score += 1 if transition_status == "observed" else 0
+    confidence_score += 1 if test_gate_status == "observed" else 0
+    confidence_score += 1 if blocked_status == "observed" else 0
+    overall_confidence = "high" if confidence_score >= 5 else ("medium" if confidence_score >= 3 else "low")
+    data_availability = {
+        "token_usage": {"status": token_status, "confidence": "high" if token_status == "observed" else "low"},
+        "elapsed_time": {"status": duration_status, "confidence": "high" if duration_status == "observed" else "medium" if duration_status == "estimated" else "low"},
+        "routing": {"status": routing_status, "confidence": "high" if routing_status == "observed" else "low"},
+        "state_transitions": {"status": transition_status, "confidence": "high" if transition_status == "observed" else "low"},
+        "test_gates": {"status": test_gate_status, "confidence": "high" if test_gate_status == "observed" else "low"},
+        "blocked_waiting_time": {"status": blocked_status, "confidence": "high" if blocked_status == "observed" else "low"},
+    }
+    confidence = {
+        "level": overall_confidence,
+        "caveats": caveats,
+        "unknown_or_not_available": [key for key, value in data_availability.items() if value.get("status") in {"unknown", "not_available"}],
+    }
     return {
         "totals": rounded_totals,
         "by_tool": _self_opt_bucket_rows(by_tool),
         "by_workflow": _self_opt_bucket_rows(by_workflow),
         "by_issue": _self_opt_bucket_rows(by_issue),
         "by_pr": _self_opt_bucket_rows(by_pr),
+        "by_task": _self_opt_bucket_rows(by_task),
+        "state_transitions": {
+            "count": totals["state_transition_count"],
+            "by_state": _self_opt_counter_rows(state_counts),
+            "by_transition": _self_opt_counter_rows(transition_counts),
+            "status": transition_status,
+            "data_available": transition_status == "observed",
+        },
+        "test_gates": {
+            "count": totals["test_gate_count"],
+            "by_gate": _self_opt_counter_rows(test_gate_counts),
+            "by_status": _self_opt_counter_rows(test_gate_status_counts),
+            "status": test_gate_status,
+            "data_available": test_gate_status == "observed",
+        },
+        "retries_rework": {
+            "retry_count": totals["retry_count"],
+            "rework_count": totals["rework_count"],
+            "reasons": _self_opt_counter_rows(retry_rework_reasons),
+            "status": "observed" if totals["retry_count"] or totals["rework_count"] else ("unknown" if record_count else "not_available"),
+            "data_available": bool(totals["retry_count"] or totals["rework_count"]),
+        },
+        "blocked_waiting_time": {
+            "seconds": round(float(totals["blocked_waiting_seconds"]), 3),
+            "signal_count": totals["blocked_waiting_signal_count"],
+            "status": blocked_status,
+            "data_available": blocked_status == "observed",
+        },
         "routing": {
             "models": _self_opt_counter_rows(models),
             "backends": _self_opt_counter_rows(backends),
@@ -2942,9 +3621,11 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
             "issues_touched": sorted(issue_refs),
             "prs_touched": sorted(pr_refs),
             "workflows_touched": sorted(workflow_refs),
+            "tasks_touched": sorted(task_refs),
             "issue_count": len(issue_refs),
             "pr_count": len(pr_refs),
             "workflow_count": len(workflow_refs),
+            "task_count": len(task_refs),
             "commit_count": totals["commit_count"],
             "attribution_rate": round(attribution_rate, 4),
         },
@@ -2952,12 +3633,14 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
             "failed_or_noisy_count": totals["failed_or_noisy_count"],
             "reasons": _self_opt_counter_rows(failure_reasons),
         },
+        "data_availability": data_availability,
+        "confidence": confidence,
         "estimation_basis": {
             "baseline_seconds_by_tool": SELF_OPTIMIZATION_BASELINE_SECONDS_BY_TOOL,
             "default_untraced_spent_seconds": 4.0,
             "cache_entry_saved_seconds": 10.0,
             "cache_entry_saved_tokens": 250,
-            "token_estimates": "Uses explicit local token fields when present; otherwise only compression/cache estimates are counted.",
+            "token_estimates": "Uses explicit local token fields when present; otherwise token usage is unknown/not_available and only compression/cache estimates are counted.",
         },
     }
 
@@ -2977,6 +3660,8 @@ def _self_opt_candidate(
     *,
     estimated_saved_seconds: float = 0.0,
     estimated_saved_tokens: int = 0,
+    confidence: str = "medium",
+    caveats: list[str] | None = None,
 ) -> dict[str, Any]:
     duplicate_key = _self_opt_recommendation_key(category, title)
     return {
@@ -2987,6 +3672,8 @@ def _self_opt_candidate(
         "rationale": rationale,
         "evidence": evidence,
         "recommended_action": action,
+        "confidence": confidence if confidence in SELF_OPTIMIZATION_CONFIDENCE_ORDER else "medium",
+        "caveats": caveats or [],
         "estimated_impact": {
             "saved_seconds": round(float(estimated_saved_seconds), 3),
             "saved_tokens": int(estimated_saved_tokens),
@@ -3039,7 +3726,111 @@ def _self_opt_suppress_duplicate_recommendations(
     return out
 
 
-def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+def _self_opt_github_issue_duplicate_ref(issue: dict[str, Any], redact_terms: list[str]) -> str:
+    number = issue.get("number")
+    if isinstance(number, int):
+        return f"#{number}"
+    if isinstance(number, str) and number.strip():
+        stripped = number.strip()
+        return stripped if stripped.startswith("#") else f"#{stripped}"
+    html_url = str(issue.get("html_url") or issue.get("url") or "")
+    match = re.search(r"/issues/(\d+)", html_url)
+    if match:
+        return f"#{match.group(1)}"
+    title = str(issue.get("title") or "existing GitHub issue")
+    return _self_opt_redact_string(title, redact_terms)[:120]
+
+
+def _self_opt_load_github_issue_metadata(
+    provided_metadata: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    path = _resolve_repo_path(str(SELF_OPTIMIZATION_GITHUB_ISSUES_FILE))
+    meta = {
+        "metadata_configured": bool(provided_metadata),
+        "provided_count": len(provided_metadata or []),
+        "local_index_path": str(SELF_OPTIMIZATION_GITHUB_ISSUES_FILE),
+        "local_index_exists": path.exists(),
+        "local_index_readable": False,
+        "local_index_count": 0,
+        "metadata_count": 0,
+        "network_lookup_used": False,
+        "status": "not_available",
+    }
+    rows = [row for row in (provided_metadata or []) if isinstance(row, dict)]
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("issues"), list):
+                local_rows = [row for row in payload["issues"] if isinstance(row, dict)]
+            elif isinstance(payload, list):
+                local_rows = [row for row in payload if isinstance(row, dict)]
+            else:
+                local_rows = []
+                meta["reason"] = "expected list or object with issues list"
+            rows.extend(local_rows)
+            meta["local_index_readable"] = True
+            meta["local_index_count"] = len(local_rows)
+        except (OSError, json.JSONDecodeError) as exc:
+            meta["reason"] = exc.__class__.__name__
+    meta["metadata_count"] = len(rows)
+    if meta["provided_count"] and meta["local_index_count"]:
+        meta["status"] = "provided_and_local_index"
+    elif meta["provided_count"]:
+        meta["status"] = "provided"
+    elif meta["local_index_count"]:
+        meta["status"] = "local_index"
+    elif meta["local_index_exists"] and not meta["local_index_readable"]:
+        meta["status"] = "unreadable"
+    return rows, meta
+
+
+def _self_opt_suppress_github_issue_duplicates(
+    candidates: list[dict[str, Any]],
+    github_issue_metadata: list[dict[str, Any]] | None,
+    redact_terms: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    if not github_issue_metadata:
+        return candidates
+    terms = redact_terms or []
+    issue_rows = [row for row in github_issue_metadata if isinstance(row, dict)]
+    out: list[dict[str, Any]] = []
+    for candidate in candidates:
+        copied = dict(candidate)
+        if copied.get("suppressed"):
+            out.append(copied)
+            continue
+        duplicate_key = str(copied.get("duplicate_key", ""))
+        title = str(copied.get("title", "")).lower()
+        matched_issue: dict[str, Any] | None = None
+        for issue in issue_rows:
+            issue_title = str(issue.get("title") or "")
+            issue_body = str(issue.get("body") or "")
+            haystack = f"{issue_title}\n{issue_body}".lower()
+            if duplicate_key and duplicate_key.lower() in haystack:
+                matched_issue = issue
+                break
+            if title and title in haystack:
+                matched_issue = issue
+                break
+        if matched_issue is not None:
+            copied["suppressed"] = True
+            copied["duplicate_of"] = _self_opt_github_issue_duplicate_ref(matched_issue, terms)
+            copied["suppression_source"] = "github_issue_metadata"
+            copied["github_issue_match"] = {
+                "issue": copied["duplicate_of"],
+                "state": _self_opt_redact_string(str(matched_issue.get("state") or "unknown"), terms),
+            }
+        out.append(copied)
+    return out
+
+
+def _self_opt_build_recommendations(
+    metrics: dict[str, Any],
+    sources: dict[str, Any],
+    limit: int,
+    github_issue_metadata: list[dict[str, Any]] | None = None,
+    redact_terms: list[str] | None = None,
+) -> list[dict[str, Any]]:
     totals = metrics.get("totals", {}) if isinstance(metrics.get("totals"), dict) else {}
     throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
     cache = metrics.get("cache", {}) if isinstance(metrics.get("cache"), dict) else {}
@@ -3056,6 +3847,7 @@ def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, 
                 {"failed_or_noisy_count": failed_or_noisy, "top_reasons": failures.get("reasons", [])[:3]},
                 "Create or update a focused optimization issue for the top repeated failure category before adding new workflow features.",
                 estimated_saved_seconds=float(totals.get("estimated_spent_seconds", 0) or 0) * 0.2,
+                confidence="high" if failed_or_noisy >= 2 else "medium",
             )
         )
     tool_call_count = int(totals.get("tool_call_count", 0) or 0)
@@ -3070,6 +3862,7 @@ def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, 
                 "Prefer fresh `test_impact_map`, symbol/dependency cache, and result handles before rerunning broad search/read workflows.",
                 estimated_saved_seconds=float(cache.get("estimated_saved_seconds", 0) or 0),
                 estimated_saved_tokens=int(cache.get("estimated_saved_tokens", 0) or 0),
+                confidence="medium",
             )
         )
     if int(totals.get("verbose_tool_call_count", 0) or 0) > 0 and int(compression.get("compressed_observation_count", 0) or 0) == 0:
@@ -3081,6 +3874,8 @@ def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, 
                 {"verbose_tool_call_count": totals.get("verbose_tool_call_count", 0)},
                 "Enable `compressed_observation=true` on supported verbose tools and keep raw artifacts behind repo-local resource links.",
                 estimated_saved_tokens=max(0, int(totals.get("tool_call_count", 0) or 0) * 120),
+                confidence="medium",
+                caveats=["Token impact is estimated unless raw/compressed token fields are recorded."],
             )
         )
     if int(totals.get("total_tokens", 0) or 0) == 0:
@@ -3091,6 +3886,8 @@ def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, 
                 "No explicit token usage was available in the selected window, so savings are only estimated.",
                 {"trace_span_count": totals.get("trace_span_count", 0), "total_tokens": 0},
                 "Populate local span attributes for prompt/completion/total tokens, model, backend, and cache status without storing prompts or raw traces.",
+                confidence="high",
+                caveats=["High confidence that token telemetry is absent; savings impact remains unknown until fields are recorded."],
             )
         )
     if float(throughput.get("attribution_rate", 0.0) or 0.0) < 0.75 and tool_call_count:
@@ -3101,6 +3898,7 @@ def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, 
                 "Low attribution makes it harder to connect MCP usage to issue/PR throughput.",
                 {"attribution_rate": throughput.get("attribution_rate", 0.0), "tool_call_count": tool_call_count},
                 "Include `issue #N`, `PR #N`, or workflow names in task memory and audit-safe arguments for software-team work.",
+                confidence="medium",
             )
         )
     trace_source = sources.get("traces", {}) if isinstance(sources.get("traces"), dict) else {}
@@ -3112,9 +3910,196 @@ def _self_opt_build_recommendations(metrics: dict[str, Any], sources: dict[str, 
                 "Trace spans were absent, so elapsed/spent time relies on conservative baseline estimates.",
                 {"trace_source_exists": False},
                 "Use `MCP_OTEL_TRACING_ENABLED=true` with the local JSONL exporter when measuring workflow throughput.",
+                confidence="high",
+                caveats=["High confidence that trace source was absent or disabled for this window."],
             )
         )
-    return _self_opt_suppress_duplicate_recommendations(candidates[: max(0, limit)])
+    suppressed = _self_opt_suppress_duplicate_recommendations(candidates[: max(0, limit)])
+    return _self_opt_suppress_github_issue_duplicates(suppressed, github_issue_metadata, redact_terms)
+
+
+def _self_opt_confidence_at_least(value: str, minimum: str = "high") -> bool:
+    return SELF_OPTIMIZATION_CONFIDENCE_ORDER.get(value, -1) >= SELF_OPTIMIZATION_CONFIDENCE_ORDER.get(minimum, 2)
+
+
+def _self_opt_issue_number_from_ref(value: str) -> str:
+    match = re.search(r"#(\d+)", value or "")
+    return match.group(1) if match else ""
+
+
+def _self_opt_github_token_from_env(token_env: str) -> str:
+    env_name = (token_env or "GITHUB_TOKEN").strip() or "GITHUB_TOKEN"
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name):
+        return ""
+    token = os.getenv(env_name, "")
+    if not token and env_name == "GITHUB_TOKEN":
+        token = os.getenv("GH_TOKEN", "")
+    return token.strip()
+
+
+def _self_opt_candidate_issue_body(candidate: dict[str, Any], report_id: str) -> str:
+    evidence = candidate.get("evidence", {}) if isinstance(candidate.get("evidence"), dict) else {}
+    impact = candidate.get("estimated_impact", {}) if isinstance(candidate.get("estimated_impact"), dict) else {}
+    return "\n".join(
+        [
+            "Generated by `self_optimization_report` from redacted local aggregate metrics.",
+            "",
+            f"Report: `{report_id}`",
+            f"Category: `{candidate.get('category', '')}`",
+            f"Duplicate key: `{candidate.get('duplicate_key', '')}`",
+            f"Confidence: `{candidate.get('confidence', 'medium')}`",
+            "",
+            "## Rationale",
+            str(candidate.get("rationale", "")),
+            "",
+            "## Recommended action",
+            str(candidate.get("recommended_action", "")),
+            "",
+            "## Estimated impact",
+            f"- Saved seconds: `{impact.get('saved_seconds', 0)}`",
+            f"- Saved tokens: `{impact.get('saved_tokens', 0)}`",
+            "",
+            "## Redacted evidence",
+            "```json",
+            json.dumps(evidence, indent=2, sort_keys=True, ensure_ascii=True, default=str),
+            "```",
+        ]
+    )
+
+
+def _self_opt_apply_github_issue_action(
+    action: dict[str, Any],
+    github_repository: str,
+    github_token_env: str,
+    report_id: str,
+) -> dict[str, Any]:
+    repo = github_repository.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        return {**action, "status": "blocked", "reason": "github_repository must be owner/repo"}
+    token = _self_opt_github_token_from_env(github_token_env)
+    if not token:
+        return {**action, "status": "blocked", "reason": "missing_github_token_env"}
+    candidate = action.get("candidate", {}) if isinstance(action.get("candidate"), dict) else {}
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "codebase-tooling-mcp-self-optimization",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if action.get("action") == "update":
+        issue_number = _self_opt_issue_number_from_ref(str(action.get("target_issue", "")))
+        if not issue_number:
+            return {**action, "status": "blocked", "reason": "missing_target_issue"}
+        url = f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments"
+        payload = {"body": _self_opt_candidate_issue_body(candidate, report_id)}
+        method = "POST"
+    else:
+        url = f"https://api.github.com/repos/{repo}/issues"
+        payload = {
+            "title": f"[self-optimization] {candidate.get('title', '')}"[:256],
+            "body": _self_opt_candidate_issue_body(candidate, report_id),
+            "labels": ["self-optimization"],
+        }
+        method = "POST"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+        headers=headers,
+        method=method,
+    )
+    try:
+        with _urlopen_with_host_certs(req, timeout=15) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return {**action, "status": "failed", "reason": f"github_http_{exc.code}"}
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {**action, "status": "failed", "reason": exc.__class__.__name__}
+    return {
+        **action,
+        "status": "applied",
+        "url": str(body.get("html_url") or body.get("url") or ""),
+    }
+
+
+def _self_opt_issue_update_gate(
+    candidates: list[dict[str, Any]],
+    mode: str,
+    github_repository: str,
+    github_token_env: str,
+    report_id: str,
+    limit: int = 3,
+) -> dict[str, Any]:
+    normalized_mode = (mode or "off").strip().lower()
+    if normalized_mode not in SELF_OPTIMIZATION_GITHUB_ISSUE_UPDATE_MODES:
+        raise ValueError("github_issue_update_mode must be one of: off, dry_run, apply")
+    gate: dict[str, Any] = {
+        "mode": normalized_mode,
+        "enabled": normalized_mode != "off",
+        "explicit_enablement_required": True,
+        "min_confidence": "high",
+        "network_used": False,
+        "planned_actions": [],
+        "blocked_actions": [],
+        "results": [],
+        "caveats": [],
+    }
+    if normalized_mode == "off":
+        gate["status"] = "disabled"
+        gate["caveats"].append("GitHub issue create/update is disabled by default; no network calls are made.")
+        return gate
+    for candidate in candidates[: max(0, limit)]:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_ref = {
+            "candidate_id": candidate.get("id", ""),
+            "title": candidate.get("title", ""),
+            "duplicate_key": candidate.get("duplicate_key", ""),
+            "confidence": candidate.get("confidence", "medium"),
+        }
+        if not _self_opt_confidence_at_least(str(candidate.get("confidence", "medium")), "high"):
+            gate["blocked_actions"].append({**candidate_ref, "reason": "confidence_below_high"})
+            continue
+        duplicate_of = str(candidate.get("duplicate_of", "") or "")
+        if candidate.get("suppressed") and not _self_opt_issue_number_from_ref(duplicate_of):
+            gate["blocked_actions"].append({**candidate_ref, "reason": "duplicate_suppressed_without_github_issue"})
+            continue
+        action_type = "update" if candidate.get("suppressed") and duplicate_of else "create"
+        action = {
+            **candidate_ref,
+            "action": action_type,
+            "target_issue": duplicate_of if action_type == "update" else "",
+            "status": "planned" if normalized_mode == "apply" else "dry_run",
+            "candidate": candidate,
+        }
+        gate["planned_actions"].append(action)
+    gate["eligible_count"] = len(gate["planned_actions"])
+    gate["blocked_count"] = len(gate["blocked_actions"])
+    if normalized_mode == "dry_run":
+        gate["status"] = "dry_run"
+        gate["caveats"].append("Dry-run mode plans high-confidence create/update actions without contacting GitHub.")
+        return gate
+    if not ALLOW_MUTATIONS:
+        gate["status"] = "blocked"
+        gate["blocked_actions"].extend({**action, "reason": "mutations_disabled"} for action in gate["planned_actions"])
+        gate["planned_actions"] = []
+        return gate
+    if not github_repository.strip():
+        gate["status"] = "blocked"
+        gate["blocked_actions"].extend({**action, "reason": "missing_github_repository"} for action in gate["planned_actions"])
+        gate["planned_actions"] = []
+        return gate
+    if not _self_opt_github_token_from_env(github_token_env):
+        gate["status"] = "blocked"
+        gate["blocked_actions"].extend({**action, "reason": "missing_github_token_env"} for action in gate["planned_actions"])
+        gate["planned_actions"] = []
+        return gate
+    gate["status"] = "applied"
+    for action in list(gate["planned_actions"]):
+        result = _self_opt_apply_github_issue_action(action, github_repository, github_token_env, report_id)
+        gate["results"].append(result)
+        gate["network_used"] = True
+    return gate
 
 
 def _self_opt_bottlenecks(metrics: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3145,6 +4130,7 @@ def _self_opt_bottlenecks(metrics: dict[str, Any]) -> list[dict[str, Any]]:
 def _self_opt_summary(metrics: dict[str, Any]) -> dict[str, Any]:
     totals = metrics.get("totals", {}) if isinstance(metrics.get("totals"), dict) else {}
     throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
+    confidence = metrics.get("confidence", {}) if isinstance(metrics.get("confidence"), dict) else {}
     return {
         "headline": (
             f"Observed {totals.get('tool_call_count', 0)} MCP/tool record(s), "
@@ -3156,6 +4142,8 @@ def _self_opt_summary(metrics: dict[str, Any]) -> dict[str, Any]:
         "estimated_saved_tokens": totals.get("estimated_saved_tokens", 0),
         "success_rate": totals.get("success_rate", 1.0),
         "attribution_rate": totals.get("attribution_rate", 0.0),
+        "confidence": confidence.get("level", "low"),
+        "caveats": confidence.get("caveats", []),
     }
 
 
@@ -3226,6 +4214,10 @@ def _self_optimization_report_impl(
     include_audit: bool = True,
     include_traces: bool = True,
     redact_terms: list[str] | None = None,
+    github_issue_metadata: list[dict[str, Any]] | None = None,
+    github_issue_update_mode: str = "off",
+    github_repository: str = "",
+    github_token_env: str = "GITHUB_TOKEN",
 ) -> dict[str, Any]:
     _ensure_repo_path_exists()
     if recommendation_limit < 0 or recommendation_limit > 50:
@@ -3233,8 +4225,15 @@ def _self_optimization_report_impl(
     start_dt, end_dt = _self_opt_parse_window(start_time, end_time, window_hours)
     redaction_terms = _self_opt_default_redact_terms(redact_terms)
     records: list[dict[str, Any]] = []
+    github_issue_rows, github_issue_source = _self_opt_load_github_issue_metadata(github_issue_metadata)
     sources: dict[str, Any] = {
-        "network": {"used": False, "policy": "repo-local/offline only; no GitHub/API/network calls are made"},
+        "network": {"used": False, "policy": "repo-local/offline by default; GitHub issue writes require explicit apply mode"},
+        "github_issues": github_issue_source,
+        "proxy_anonymizer_disclosure": {
+            "status": "not_available",
+            "required": False,
+            "policy": "#88 routing/disclosure/proxy data is optional redacted enrichment only; absence does not block the report.",
+        },
     }
 
     if include_audit:
@@ -3293,10 +4292,13 @@ def _self_optimization_report_impl(
             "window_hours": round((end_dt - start_dt).total_seconds() / 3600.0, 3),
         },
         "summary": _self_opt_summary(metrics),
+        "confidence": metrics.get("confidence", {}).get("level", "low") if isinstance(metrics.get("confidence"), dict) else "low",
+        "caveats": metrics.get("confidence", {}).get("caveats", []) if isinstance(metrics.get("confidence"), dict) else [],
         "metrics": metrics,
         "sources": sources,
         "bottlenecks": _self_opt_bottlenecks(metrics),
         "optimization_candidates": [],
+        "github_issue_gate": {},
         "usage_guidance": {
             "direct_tool": "self_optimization_report",
             "when_to_run": [
@@ -3305,7 +4307,7 @@ def _self_optimization_report_impl(
                 "before creating optimization issues for the software team",
             ],
             "recommended_call": "self_optimization_report(window_hours=168, export=true)",
-            "issue_creation_policy": "Use unsuppressed candidates as issue drafts only after checking project priorities; this tool does not create network issues.",
+            "issue_creation_policy": "GitHub issue create/update is off by default. Use github_issue_update_mode='dry_run' to inspect high-confidence actions or 'apply' with explicit repository/token configuration and mutation permission.",
         },
         "security": {
             "offline_capable": True,
@@ -3320,7 +4322,23 @@ def _self_optimization_report_impl(
         "exports": {},
         "resource_links": [],
     }
-    report["optimization_candidates"] = _self_opt_build_recommendations(metrics, report["sources"], recommendation_limit)
+    report["optimization_candidates"] = _self_opt_build_recommendations(
+        metrics,
+        report["sources"],
+        recommendation_limit,
+        github_issue_metadata=github_issue_rows,
+        redact_terms=redaction_terms,
+    )
+    issue_gate = _self_opt_issue_update_gate(
+        report["optimization_candidates"],
+        github_issue_update_mode,
+        github_repository,
+        github_token_env,
+        report_id,
+    )
+    report["github_issue_gate"] = issue_gate
+    sources["network"]["used"] = bool(issue_gate.get("network_used", False))
+    report["security"]["network_used"] = bool(issue_gate.get("network_used", False))
     report = _self_opt_redact_value(report, redaction_terms)
     if export:
         exports = _write_self_opt_report_exports(report)
@@ -4756,6 +5774,10 @@ def _tool_categories(tool_name: str, arguments: dict[str, Any] | None = None) ->
         mode = str(arguments.get("mode", "")).strip().lower()
         if mode in mode_categories:
             categories = list(mode_categories[mode])
+    if tool_name == "self_optimization_report" and arguments:
+        issue_mode = str(arguments.get("github_issue_update_mode", "off")).strip().lower()
+        if issue_mode == "apply":
+            categories = ["write", "network", "secret-sensitive"]
     return categories
 
 
@@ -18678,6 +19700,10 @@ def self_optimization_report(
     include_audit: bool = True,
     include_traces: bool = True,
     redact_terms: list[str] | None = None,
+    github_issue_metadata: list[dict[str, Any]] | None = None,
+    github_issue_update_mode: str = "off",
+    github_repository: str = "",
+    github_token_env: str = "GITHUB_TOKEN",
 ) -> dict[str, Any]:
     """Build a repo-local efficiency report for MCP usage, token savings, throughput, bottlenecks, and optimization candidates."""
     arguments = {
@@ -18690,11 +19716,18 @@ def self_optimization_report(
         "include_audit": include_audit,
         "include_traces": include_traces,
         "redact_terms": redact_terms or [],
+        "github_issue_metadata_count": len(github_issue_metadata or []),
+        "github_issue_update_mode": github_issue_update_mode,
+        "github_repository_configured": bool(github_repository),
+        "github_token_env": github_token_env,
     }
+    categories = _tool_categories("self_optimization_report", arguments)
     with _otel_span(
         "mcp.tool.self_optimization_report",
-        _otel_tool_attributes("self_optimization_report", arguments),
+        _otel_tool_attributes("self_optimization_report", arguments, categories),
     ) as span:
+        categories = _require_tool_security_gate("self_optimization_report", arguments)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         result = _self_optimization_report_impl(
             start_time=start_time,
             end_time=end_time,
@@ -18705,6 +19738,10 @@ def self_optimization_report(
             include_audit=include_audit,
             include_traces=include_traces,
             redact_terms=redact_terms,
+            github_issue_metadata=github_issue_metadata,
+            github_issue_update_mode=github_issue_update_mode,
+            github_repository=github_repository,
+            github_token_env=github_token_env,
         )
         _otel_set_result_attributes(span, result)
         return result
