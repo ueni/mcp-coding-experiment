@@ -152,6 +152,10 @@ The prompts are workflow starters, not bypasses: they route users toward existin
 
 Use cloud mode for quality/speed/audit/token savings. Use offline mode for privacy/availability with scripted agent emulation. See [Agent execution modes](./docs/execution-modes.md).
 
+### Explicit OpenAI-compatible agent API proxy
+
+An opt-in proxy can serve `POST /v1/chat/completions` for clients that deliberately configure this server as their OpenAI-compatible `base_url`. It is disabled by default and is not hidden MITM/TLS interception or credential capture. The first slice supports non-streaming responses, `stream: true` SSE chunks, local/offline routing, explicit online provider controls, request-local anonymization, irreversible secret redaction, fail-closed disclosure audit, disclosure summaries, and gated compact memory capture. See [Explicit Agent API Proxy](./docs/agent-api-proxy.md).
+
 ### Static test impact map workflow
 
 Use `test_impact_map` when you need a repeatable, TDAD-style view of which Python tests should cover a source change. In normal read mode it loads the repository-local artifact at `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json`, checks that it is still fresh, and returns `selected_tests`, `test_details`, `confidence`, `impacted_sources`, `coverage_gaps`, and `unmapped_changed_files` for explicit `changed_files`.

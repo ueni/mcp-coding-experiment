@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Agent execution modes](./execution-modes.md) - online/cloud-assisted and offline/onboard-only routing contracts layered onto workflow selection.
+- [Explicit Agent API Proxy](./agent-api-proxy.md) - opt-in OpenAI-compatible `/v1/chat/completions` proxy with routing, privacy audit, redaction/anonymization, streaming, and offline/no-network controls.
 - [Async workflow tasks](./workflow-tasks.md) - prototype MCP Tasks-style async handles for long-running repo workflows.
 - [Adaptive observation compression](./observation-compression.md) - opt-in deterministic summaries for verbose tool/report outputs.
 - [MCP roots diagnostics](./roots-diagnostics.md) - read-only advisory diagnostics for client roots vs `REPO_PATH`.
@@ -39,5 +40,6 @@ This index lists documentation ownership and status.
 - [Hash-pinned dependency locks](./dependency-locks.md) (`docs/dependency-locks.md`) - Status: `operational guidance`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Agent execution modes](./execution-modes.md) (`docs/execution-modes.md`) - Status: `operational guidance`
+- [Explicit Agent API Proxy](./agent-api-proxy.md) (`docs/agent-api-proxy.md`) - Status: `prototype`
 - Bootstrap instructions for external repositories live in `README.md` under `Bootstrap Another Repository`.
 - Generated reports under `.codebase-tooling-mcp/reports/`, including `TEST_IMPACT_MAP.json` for the static test-impact workflow - Status: `generated`
