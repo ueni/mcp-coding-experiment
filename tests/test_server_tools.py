@@ -2279,6 +2279,9 @@ class ServerToolsTest(ServerToolsTestBase):
         verify = self.server.artifact_provenance(artifact_path=json_artifact)
         self.assertTrue(verify["ok"])
         self.assertEqual(verify["checks"][0]["findings"], [])
+        self.assertEqual(verify["checks"][0]["attestation"]["status"], "unsigned")
+        self.assertEqual(verify["checks"][0]["attestation"]["backend"], "local-only")
+        self.assertFalse(verify["checks"][0]["attestation"]["network_access"])
 
     def test_artifact_provenance_flags_missing_stale_digest_and_schema_mismatch(self):
         out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
@@ -2308,6 +2311,109 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("digest_mismatch", findings)
         self.assertIn("artifact_schema_mismatch", findings)
         self.assertIn("provenance_stale", findings)
+
+    def _fixture_attested_governance_artifact(self, *, subject_digest_value=None):
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        json_artifact = out["exports"]["json"]
+        sidecar_path = self.repo_path / out["exports"]["provenance"][json_artifact]
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        self.server._attach_local_dsse_fixture_attestation(
+            sidecar,
+            subject_digest_value=subject_digest_value,
+        )
+        sidecar_path.write_text(
+            json.dumps(sidecar, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return json_artifact, sidecar_path
+
+    def test_artifact_provenance_verifies_local_dsse_fixture_attestation(self):
+        json_artifact, _sidecar_path = self._fixture_attested_governance_artifact()
+
+        verify = self.server.artifact_provenance(artifact_path=json_artifact)
+
+        self.assertTrue(verify["ok"])
+        check = verify["checks"][0]
+        self.assertEqual(check["findings"], [])
+        self.assertEqual(check["attestation"]["status"], "verified")
+        self.assertEqual(check["attestation"]["backend"], "local-dsse-fixture")
+        self.assertFalse(check["attestation"]["network_access"])
+        self.assertEqual(check["checks"]["attestation_status"], "verified")
+
+    def test_artifact_provenance_rejects_invalid_attestation_cases(self):
+        cases = [
+            ("tampered_artifact", "attestation_subject_digest_mismatch"),
+            ("tampered_sidecar", "attestation_sidecar_digest_mismatch"),
+            ("wrong_subject_digest", "attestation_subject_digest_mismatch"),
+            ("unsupported_backend", "attestation_backend_unsupported"),
+        ]
+        for case, expected_finding in cases:
+            with self.subTest(case=case):
+                if case == "wrong_subject_digest":
+                    json_artifact, sidecar_path = self._fixture_attested_governance_artifact(
+                        subject_digest_value="0" * 64,
+                    )
+                else:
+                    json_artifact, sidecar_path = self._fixture_attested_governance_artifact()
+                artifact_path = self.repo_path / json_artifact
+                if case == "tampered_artifact":
+                    artifact_path.write_text(
+                        artifact_path.read_text(encoding="utf-8") + "\n",
+                        encoding="utf-8",
+                    )
+                elif case == "tampered_sidecar":
+                    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                    sidecar["invocation"]["selected_inputs"]["tampered"] = True
+                    sidecar_path.write_text(
+                        json.dumps(sidecar, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                elif case == "unsupported_backend":
+                    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                    sidecar["signing"] = {
+                        "signed": True,
+                        "backend": "github-artifact-attestations",
+                        "subject_digest": sidecar["artifact"]["digest"],
+                        "signer_identity": "https://github.com/ueni/mcp-coding-experiment/.github/workflows/release.yml@refs/heads/main",
+                        "bundle_ref": "github://artifact-attestations/future",
+                        "envelope_ref": "",
+                        "verification": {"status": "unsupported"},
+                    }
+                    sidecar_path.write_text(
+                        json.dumps(sidecar, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+
+                verify = self.server.artifact_provenance(artifact_path=json_artifact)
+
+                self.assertFalse(verify["ok"])
+                findings = verify["checks"][0]["findings"]
+                self.assertIn(expected_finding, findings)
+                self.assertIn(
+                    verify["checks"][0]["attestation"]["status"],
+                    {"invalid", "unsupported"},
+                )
+
+    def test_artifact_provenance_unsigned_and_fixture_attestations_do_not_need_network(self):
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        json_artifact = out["exports"]["json"]
+        network_error = AssertionError("artifact_provenance must not use network access")
+        with patch("urllib.request.urlopen", side_effect=network_error), patch(
+            "socket.socket",
+            side_effect=network_error,
+        ):
+            unsigned = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertTrue(unsigned["ok"])
+        self.assertEqual(unsigned["checks"][0]["attestation"]["status"], "unsigned")
+
+        json_artifact, _sidecar_path = self._fixture_attested_governance_artifact()
+        with patch("urllib.request.urlopen", side_effect=network_error), patch(
+            "socket.socket",
+            side_effect=network_error,
+        ):
+            fixture = self.server.artifact_provenance(artifact_path=json_artifact)
+        self.assertTrue(fixture["ok"])
+        self.assertEqual(fixture["checks"][0]["attestation"]["status"], "verified")
 
     def test_state_snapshot_writes_provenance_and_redacts_selected_inputs(self):
         snap = self.server.state_snapshot(label="token=super-secret-value", include_build_dir=False)
