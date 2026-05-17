@@ -139,7 +139,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `repo_info` | `repo_path`, `repo_exists`, `is_git_repo`, `allow_mutations`, `transport` | `docker`, `current_branch`, `head`, `dirty`, limits |
 | `roots_diagnostics` | `schema`, `read_only`, `advisory_only`, `server_repo`, `fetch`, `roots`, `relationship`, `guidance` | safety metadata and redacted per-root relationship details |
 | `model_assisted_summary` | `schema`, `ok`, `status`, `read_only`, `advisory_only`, `purpose`, `policy`, `capability`, `request`, `audit` | execution mode, bounded context metadata, sampling response digest/summary, and guidance |
-| `runtime_state` | `schema`, `timestamp`, `transport`, `server`, `sse`, `ollama`, `docker` | process counts and dependency probe details |
+| `runtime_state` | `schema`, `timestamp`, `transport`, `server`, `sse`, `ollama`, `docker`, `dependency_locks` | process counts, dependency probe details, and per-lock section digest status |
 | `git_status` | `status`, `short` | `raw` |
 | `grep` | match rows: `path`, `line`, `column`, `match` | `lineText`, quick summaries, result handles, opt-in `compressed_observation` |
 | `find_paths` | array items as repository-relative paths | none |

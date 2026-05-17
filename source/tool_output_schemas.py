@@ -43,7 +43,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "repo_info": ("repo_path", "repo_exists", "is_git_repo", "allow_mutations", "transport"),
     "roots_diagnostics": ("schema", "read_only", "advisory_only", "server_repo", "fetch", "roots", "relationship", "guidance"),
     "model_assisted_summary": ("schema", "ok", "status", "read_only", "advisory_only", "purpose", "policy", "capability", "request", "audit"),
-    "runtime_state": ("schema", "timestamp", "transport", "server", "sse", "ollama", "docker"),
+    "runtime_state": ("schema", "timestamp", "transport", "server", "sse", "ollama", "docker", "dependency_locks"),
     "git_status": ("status", "short"),
     "grep": ("path", "line", "column", "match"),
     "find_paths": ("<array item: repository-relative path>",),
@@ -65,7 +65,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "repo_info": ("docker", "current_branch", "head", "dirty", "max_read_bytes", "max_output_chars"),
     "roots_diagnostics": ("safety", "roots.items", "relationship.per_root_relationships"),
     "model_assisted_summary": ("execution_mode", "execution_mode_source", "context", "sampling", "guidance"),
-    "runtime_state": ("server.python_server_processes", "ollama.tags_probe"),
+    "runtime_state": ("server.python_server_processes", "ollama.tags_probe", "dependency_locks.sections"),
     "git_status": ("raw",),
     "grep": ("lineText", "schema", "total_matches", "returned", "paths", "result_id", "count", "compressed_observation"),
     "find_paths": (),
@@ -242,7 +242,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "runtime_state": _object_schema(
-        ["schema", "timestamp", "transport", "server", "sse", "ollama", "docker"],
+        ["schema", "timestamp", "transport", "server", "sse", "ollama", "docker", "dependency_locks"],
         {
             "schema": {"type": "string", "const": "runtime_state.v1"},
             "timestamp": {"type": "string"},
@@ -251,6 +251,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "sse": {"type": "object"},
             "ollama": {"type": "object"},
             "docker": {"type": "object"},
+            "dependency_locks": {"type": "object"},
         },
     ),
     "git_status": _object_schema(

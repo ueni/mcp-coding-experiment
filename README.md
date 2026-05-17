@@ -238,6 +238,25 @@ and set `LOCAL_EMBED_BACKEND=sentence-transformers` plus `LOCAL_EMBED_MODEL` onl
 when that optional backend is required; for local non-Docker installs, add
 `source/requirements-embedding.txt` to the normal requirements install.
 
+### Hash-pinned dependency locks
+
+The default Docker build still installs from the normal requirements files. For
+reproducible MCP runtime builds, opt into the checked-in hash locks:
+
+```bash
+docker build \
+  --build-arg MCP_USE_LOCKED_DEPS=true \
+  -t codebase-tooling-mcp \
+  ./source
+```
+
+Locked builds validate `source/dependency-locks.json` and install with
+`pip install --require-hashes --only-binary=:all:`, failing closed when a
+requirements input, lock file, wheel hash, or binary wheel is stale or missing.
+Maintainers refresh/check locks with `scripts/dependency_lock.py`; see
+[Hash-pinned dependency locks](./docs/dependency-locks.md)
+for refresh, CI, offline wheelhouse, and optional embedding guidance.
+
 ## Docker image size and RAM monitoring
 
 Use [`scripts/monitor_runtime_resources.py`](./scripts/monitor_runtime_resources.py) to record a repeatable local baseline for the Docker image size and startup RAM usage after `/healthz` succeeds. Verifiers can opt in to `--continuous` monitoring to sample RAM/VRAM until the container exits or a configured timeout is reached, with peak RAM and explicit VRAM availability in the output. The CI devcontainer-image workflow also uploads `docker-resource-baseline.json` for verifier comparisons. See [Docker resource monitoring](./docs/resource-monitoring.md) for commands, output fields, and offline-bootstrap constraints.

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
+black==26.3.0
+isort==8.0.1
+mypy==1.18.2
+pyupgrade==3.21.2
+pytest==8.4.2
+ruff==0.15.5
