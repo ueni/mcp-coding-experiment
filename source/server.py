@@ -1709,7 +1709,17 @@ def _append_audit_event(
 
 
 _AGENT_PROXY_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|authorization|bearer|password|passwd|pwd|secret)\b\s*[:=]\s*([^\s'\";,]{6,}|['\"][^'\"]{6,}['\"])"
+    r"(?ix)"
+    r"\b(api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|authorization|bearer|password|passwd|pwd|secret)\b"
+    r"\s*[:=]\s*"
+    r"("
+    r"(?:bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{6,}"
+    r"|[^\s'\";,]{6,}"
+    r"|['\"][^'\"]{6,}['\"]"
+    r")"
+)
+_AGENT_PROXY_BEARER_TOKEN_RE = re.compile(
+    r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}(?=$|[\s'\";,.)}\]])"
 )
 _AGENT_PROXY_SECRET_TOKEN_RE = re.compile(
     r"(?i)(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
@@ -1862,6 +1872,9 @@ def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
     state["seen_text"] += "\n" + text[:10000]
     result = _AGENT_PROXY_SECRET_ASSIGNMENT_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), text
+    )
+    result = _AGENT_PROXY_BEARER_TOKEN_RE.sub(
+        lambda match: _agent_proxy_redact_secret_match(match, state), result
     )
     result = _AGENT_PROXY_SECRET_TOKEN_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), result
@@ -2311,7 +2324,7 @@ def _agent_proxy_record_online_request_audit(
     policy: dict[str, Any],
     mapping: dict[str, Any],
 ) -> None:
-    event = _agent_proxy_audit_base(trace_id, payload, route, policy, mapping)
+    event = _agent_proxy_audit_base(trace_id, anonymized_payload, route, policy, mapping)
     event.update(
         {
             "phase": "request",
@@ -2353,7 +2366,7 @@ def _agent_proxy_record_online_response_audit(
     success: bool = True,
     reason: str = "response received",
 ) -> None:
-    event = _agent_proxy_audit_base(trace_id, payload, route, policy, mapping)
+    event = _agent_proxy_audit_base(trace_id, anonymized_payload, route, policy, mapping)
     event.update(
         {
             "phase": "response",
@@ -2595,6 +2608,7 @@ def _agent_proxy_online_stream(
         url = _agent_proxy_provider_url()
         buffer = ""
         response_parts: list[str] = []
+        provider_response_parts: list[str] = []
         role_sent = False
         try:
             for chunk in _agent_proxy_http_stream_json(
@@ -2608,7 +2622,7 @@ def _agent_proxy_online_stream(
                         route,
                         policy,
                         mapping,
-                        {"stream_cancelled": True, "response_parts": response_parts},
+                        {"stream_cancelled": True, "response_parts": provider_response_parts},
                         memory={"captured": False, "reason": "client_disconnected"},
                         success=False,
                         reason="client disconnected",
@@ -2625,6 +2639,7 @@ def _agent_proxy_online_stream(
                         _agent_proxy_stream_chunk(payload, trace_id, {"role": str(delta["role"])})
                     )
                 if isinstance(delta.get("content"), str):
+                    provider_response_parts.append(delta["content"])
                     buffer += delta["content"]
                     emit, buffer = _agent_proxy_prepare_stream_flush(buffer, mapping, final=False)
                     if emit:
@@ -2650,8 +2665,10 @@ def _agent_proxy_online_stream(
                     yield _agent_proxy_sse_data(
                         _agent_proxy_stream_chunk(payload, trace_id, {"content": emit})
                     )
-            response_summary = {"response_digest_input": "".join(response_parts)}
-            memory = _agent_proxy_memory_capture(trace_id, payload, response_summary, route, policy)
+            response_summary = {"response_digest_input": "".join(provider_response_parts)}
+            memory = _agent_proxy_memory_capture(
+                trace_id, anonymized_payload, response_summary, route, policy
+            )
             _agent_proxy_record_online_response_audit(
                 trace_id,
                 payload,
@@ -2671,7 +2688,7 @@ def _agent_proxy_online_stream(
                 route,
                 policy,
                 mapping,
-                {"error": "provider stream failed", "response_parts": response_parts},
+                {"error": "provider stream failed", "response_parts": provider_response_parts},
                 memory={"captured": False, "reason": "provider_stream_failed"},
                 success=False,
                 reason="provider stream failed",
@@ -23891,7 +23908,7 @@ async def openai_chat_completions(request):
         return JSONResponse(error, status_code=status)
 
     safe_response = _agent_proxy_deanonymize_value(provider_response, mapping)
-    memory = _agent_proxy_memory_capture(trace_id, payload, safe_response, route, policy)
+    memory = _agent_proxy_memory_capture(trace_id, anonymized_payload, provider_response, route, policy)
     if isinstance(safe_response, dict):
         safe_response.setdefault("id", f"chatcmpl-proxy-{trace_id}")
         safe_response.setdefault("object", "chat.completion")

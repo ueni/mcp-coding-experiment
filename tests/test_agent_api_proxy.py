@@ -195,6 +195,55 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertGreaterEqual(summary["disclosure_categories"].get("email", 0), 1)
         self.assertGreaterEqual(summary["disclosure_categories"].get("opaque_redactions", 0), 1)
 
+    def test_online_non_streaming_redacts_full_bearer_authorization_before_forwarding(self):
+        self.enable_online()
+        self.server.MCP_AGENT_PROXY_MEMORY_CAPTURE_ENABLED = True
+        self.server.MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS = False
+        captured = {}
+        bearer_secret = "abcDEF1234567890suffix"
+        bearer_header = f"Authorization: Bearer {bearer_secret}"
+
+        def fake_post(url, payload, timeout):
+            captured["payload"] = payload
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        self.server._agent_proxy_http_post_json = fake_post
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(
+                    self.base_payload(
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"Call upstream with {bearer_header}",
+                            }
+                        ]
+                    )
+                )
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = json.dumps(captured["payload"], sort_keys=True)
+        memory_text = (
+            self.repo_path / ".codebase-tooling-mcp/memory/context_memory.json"
+        ).read_text(encoding="utf-8")
+        combined = "\n".join([forwarded, self.disclosure_text(), memory_text])
+        self.assertIn("__MCP_REDACTED_SECRET", forwarded)
+        self.assertNotIn(bearer_secret, combined)
+        self.assertNotIn(bearer_secret[-12:], combined)
+        self.assertNotIn(f"Bearer {bearer_secret}", combined)
+        summary = self.server._agent_proxy_disclosure_summary({})
+        self.assertGreaterEqual(summary["disclosure_categories"].get("opaque_redactions", 0), 1)
+
     def test_online_call_writes_auditor_evidence_packet_without_raw_sensitive_text(self):
         self.enable_online()
         self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = "NDA Project"
@@ -349,6 +398,45 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn("data: [DONE]", body)
         self.assertIn("Acme Corp", body)
         self.assertNotIn("__MCP_ANON_TERM", body)
+
+    def test_online_streaming_redacts_full_bearer_authorization_before_forwarding(self):
+        self.enable_online()
+        captured = {}
+        bearer_secret = "streamABCDEF1234567890suffix"
+        bearer_header = f"Authorization: Bearer {bearer_secret}"
+
+        def fake_stream(url, payload, timeout):
+            captured["payload"] = payload
+            yield {"choices": [{"index": 0, "delta": {"role": "assistant"}}]}
+            yield {"choices": [{"index": 0, "delta": {"content": "stream ok"}}]}
+            yield {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+        self.server._agent_proxy_http_stream_json = fake_stream
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(
+                    self.base_payload(
+                        stream=True,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"Stream with {bearer_header}",
+                            }
+                        ],
+                    )
+                )
+            )
+        )
+        body = asyncio.run(collect_stream_text(response))
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = json.dumps(captured["payload"], sort_keys=True)
+        combined = "\n".join([forwarded, self.disclosure_text(), body])
+        self.assertIn("__MCP_REDACTED_SECRET", forwarded)
+        self.assertNotIn(bearer_secret, combined)
+        self.assertNotIn(bearer_secret[-12:], combined)
+        self.assertNotIn(f"Bearer {bearer_secret}", combined)
+        self.assertIn("data: [DONE]", body)
 
     def test_strict_disclosure_audit_failure_blocks_online_call(self):
         self.enable_online()
