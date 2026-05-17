@@ -17,6 +17,8 @@ ARG VSCODE_PRELOAD_EXTENSIONS="Continue.continue ms-python.python ms-python.vsco
 ARG VSCODE_PRELOAD_EXTENSIONS_STRICT=false
 ARG INSTALL_SENTENCE_TRANSFORMERS=false
 ARG MCP_USE_LOCKED_DEPS=false
+ARG MCP_BUILD_OFFLINE=false
+ARG MCP_REFRESH_BUILD_DOWNLOAD_CACHE=false
 ARG RUNTIME_IMAGE_VERSION_COMPATIBILITY=0
 ARG RUNTIME_IMAGE_VERSION_FEATURE=0
 ARG RUNTIME_IMAGE_VERSION_BUGFIX=0
@@ -69,13 +71,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOST_CA_CERT_FILE= \
     MCP_APPLY_REPO_DEFAULTS=false \
-    MCP_LOCKED_DEPS_MODE=${MCP_USE_LOCKED_DEPS}
+    MCP_LOCKED_DEPS_MODE=${MCP_USE_LOCKED_DEPS} \
+    MCP_BUILD_OFFLINE=${MCP_BUILD_OFFLINE} \
+    MCP_REFRESH_BUILD_DOWNLOAD_CACHE=${MCP_REFRESH_BUILD_DOWNLOAD_CACHE}
+
+COPY build-download-cache.sh /usr/local/bin/build-download-cache.sh
 
 RUN --mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=codebase-tooling-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,id=codebase-tooling-build-downloads,target=/var/cache/buildkit/downloads,sharing=locked \
     set -eux; \
+    . /usr/local/bin/build-download-cache.sh; \
     rm -f /etc/apt/apt.conf.d/docker-clean; \
-    apt-get update; \
+    apt_install_args=(); \
+    if build_cache_bool "${MCP_BUILD_OFFLINE}"; then \
+        apt_install_args=(--no-download); \
+        find /var/lib/apt/lists -type f -name '*Packages*' -print -quit | grep -q . || { echo 'APT package lists are missing from the BuildKit cache while MCP_BUILD_OFFLINE=true.' >&2; exit 23; }; \
+    else \
+        apt-get update; \
+    fi; \
     packages=( \
         antiword \
         ca-certificates \
@@ -93,14 +107,19 @@ RUN --mount=type=cache,id=codebase-tooling-apt-cache,target=/var/cache/apt,shari
         vulkan-tools \
         zstd \
     ); \
-    apt-get install -y --no-install-recommends "${packages[@]}"; \
+    apt-get install -y --no-install-recommends "${apt_install_args[@]}" "${packages[@]}"; \
     install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && build_cache_download /var/cache/buildkit/downloads/docker-debian-gpg.asc https://download.docker.com/linux/debian/gpg 'Docker Debian repository signing key' \
+    && install -m 0644 /var/cache/buildkit/downloads/docker-debian-gpg.asc /etc/apt/keyrings/docker.asc \
     && . /etc/os-release \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
+    && if build_cache_bool "${MCP_BUILD_OFFLINE}"; then \
+         find /var/lib/apt/lists -type f -path '*download.docker.com*Packages*' -print -quit | grep -q . || { echo 'Docker APT package lists are missing from the BuildKit cache while MCP_BUILD_OFFLINE=true.' >&2; exit 23; }; \
+       else \
+         apt-get update; \
+       fi \
     && apt-get install -y --no-install-recommends \
+        "${apt_install_args[@]}" \
         docker-buildx-plugin \
         docker-ce-cli
 
@@ -111,49 +130,40 @@ RUN if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
       python -c 'exec("""\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\n\nmanifest = json.loads(Path(\"dependency-locks.json\").read_text(encoding=\"utf-8\"))\nif manifest.get(\"schema\") != \"codebase_tooling_mcp.dependency_locks.v1\":\n    raise SystemExit(\"dependency-locks.json has an unexpected schema\")\nnames = [\"runtime\", \"coding-tools\"]\nif os.environ.get(\"INSTALL_SENTENCE_TRANSFORMERS\") == \"true\":\n    names.append(\"embedding\")\nfor name in names:\n    section = manifest[\"sections\"][name]\n    input_path = Path(section[\"input\"]).name\n    lock_path = Path(section[\"lock\"]).name\n    for path, expected, label in (\n        (input_path, section[\"input_digest\"], \"input\"),\n        (lock_path, section[\"lock_digest\"], \"lock\"),\n    ):\n        actual = \"sha256:\" + hashlib.sha256(Path(path).read_bytes()).hexdigest()\n        if actual != expected:\n            raise SystemExit(\n                f\"stale dependency lock section={name} {label}={path}: \"\n                f\"expected {expected}, got {actual}; run scripts/dependency_lock.py refresh\"\n            )\n""")'; \
     fi
 RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
+    --mount=type=cache,id=codebase-tooling-pip-wheelhouse,target=/var/cache/buildkit/pip-wheelhouse,sharing=locked \
+    . /usr/local/bin/build-download-cache.sh; \
     if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
-      pip install --root-user-action=ignore --require-hashes --only-binary=:all: -r requirements.lock; \
+      build_cache_pip_install python runtime requirements.lock true; \
     else \
-      pip install --root-user-action=ignore -r requirements.txt; \
+      build_cache_pip_install python runtime requirements.txt false; \
     fi \
     && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
          if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
-           pip install --root-user-action=ignore --require-hashes --only-binary=:all: -r requirements-embedding.lock; \
+           build_cache_pip_install python embedding requirements-embedding.lock true; \
          else \
-           pip install --root-user-action=ignore -r requirements-embedding.txt; \
+           build_cache_pip_install python embedding requirements-embedding.txt false; \
          fi; \
        fi
 RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sharing=locked \
+    --mount=type=cache,id=codebase-tooling-pip-wheelhouse,target=/var/cache/buildkit/pip-wheelhouse,sharing=locked \
+    . /usr/local/bin/build-download-cache.sh; \
     python -m venv /opt/codebase-tooling/coding-venv \
     && if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
-         /opt/codebase-tooling/coding-venv/bin/pip install \
-           --root-user-action=ignore \
-           --require-hashes \
-           --only-binary=:all: \
-           -r requirements.lock; \
+         build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-runtime requirements.lock true; \
        else \
-         /opt/codebase-tooling/coding-venv/bin/pip install \
-           --root-user-action=ignore \
-           -r requirements.txt \
-           ; \
+         build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-runtime requirements.txt false; \
        fi \
     && if [ "${INSTALL_SENTENCE_TRANSFORMERS}" = "true" ]; then \
          if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
-           /opt/codebase-tooling/coding-venv/bin/pip install --root-user-action=ignore --require-hashes --only-binary=:all: -r requirements-embedding.lock; \
+           build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-embedding requirements-embedding.lock true; \
          else \
-           /opt/codebase-tooling/coding-venv/bin/pip install --root-user-action=ignore -r requirements-embedding.txt; \
+           build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-embedding requirements-embedding.txt false; \
          fi; \
        fi \
     && if [ "${MCP_USE_LOCKED_DEPS}" = "true" ]; then \
-         /opt/codebase-tooling/coding-venv/bin/pip install \
-           --root-user-action=ignore \
-           --require-hashes \
-           --only-binary=:all: \
-           -r requirements-coding-tools.lock; \
+         build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-tools requirements-coding-tools.lock true; \
        else \
-         /opt/codebase-tooling/coding-venv/bin/pip install \
-           --root-user-action=ignore \
-           -r requirements-coding-tools.txt; \
+         build_cache_pip_install /opt/codebase-tooling/coding-venv/bin/python coding-tools requirements-coding-tools.txt false; \
        fi \
     && for tool in black isort mypy pyupgrade pytest ruff; do \
          ln -sf "/opt/codebase-tooling/coding-venv/bin/${tool}" "/usr/local/bin/${tool}"; \
@@ -161,58 +171,67 @@ RUN --mount=type=cache,id=codebase-tooling-pip,target=/var/cache/buildkit/pip,sh
 
 RUN --mount=type=cache,id=codebase-tooling-ollama-binary,target=/var/cache/buildkit/ollama,sharing=locked \
     set -eux; \
-    curl_retry() { \
-      curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --http1.1 "$@"; \
-    }; \
+    . /usr/local/bin/build-download-cache.sh; \
     case "$(dpkg --print-architecture)" in \
       amd64) ollama_arch="amd64" ;; \
       arm64) ollama_arch="arm64" ;; \
       *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
+    ollama_version_label="${OLLAMA_VERSION:-latest}"; \
     ver_param="${OLLAMA_VERSION:+?version=${OLLAMA_VERSION}}"; \
     archive_ext=""; \
     download_url=""; \
-    if curl_retry --silent --head "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}" >/dev/null 2>&1; then \
-      archive_ext="tar.zst"; \
-      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}"; \
-    elif curl_retry --silent --head "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}" >/dev/null 2>&1; then \
-      archive_ext="tgz"; \
-      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}"; \
-    elif curl_retry --silent --head "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst" >/dev/null 2>&1; then \
-      echo "Requested Ollama version ${OLLAMA_VERSION} is unavailable from ollama.com/download; falling back to the latest tar.zst package." >&2; \
-      archive_ext="tar.zst"; \
-      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst"; \
+    for candidate_ext in tar.zst tgz; do \
+      candidate_archive="/var/cache/buildkit/ollama/ollama-${ollama_version_label}-linux-${ollama_arch}.${candidate_ext}"; \
+      if [ -f "${candidate_archive}" ] && ! build_cache_bool "${MCP_REFRESH_BUILD_DOWNLOAD_CACHE}"; then \
+        case "${candidate_ext}" in \
+          tar.zst) zstd -t "${candidate_archive}" || rm -f "${candidate_archive}" ;; \
+          tgz) tar -tzf "${candidate_archive}" >/dev/null || rm -f "${candidate_archive}" ;; \
+        esac; \
+        if [ -f "${candidate_archive}" ]; then \
+          archive_ext="${candidate_ext}"; \
+          ollama_archive="${candidate_archive}"; \
+          break; \
+        fi; \
+      fi; \
+    done; \
+    if [ -z "${archive_ext}" ]; then \
+      if build_cache_bool "${MCP_BUILD_OFFLINE}"; then \
+        echo "Ollama binary is missing from the BuildKit cache while MCP_BUILD_OFFLINE=true." >&2; \
+        exit 23; \
+      fi; \
+      if build_cache_url_exists "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}"; then \
+        archive_ext="tar.zst"; \
+        download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst${ver_param}"; \
+      elif build_cache_url_exists "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}"; then \
+        archive_ext="tgz"; \
+        download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz${ver_param}"; \
+      elif build_cache_url_exists "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst"; then \
+        echo "Requested Ollama version ${OLLAMA_VERSION} is unavailable from ollama.com/download; falling back to the latest tar.zst package." >&2; \
+        archive_ext="tar.zst"; \
+        download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst"; \
+      else \
+        echo "Requested Ollama version ${OLLAMA_VERSION} is unavailable from ollama.com/download; falling back to the latest tgz package." >&2; \
+        archive_ext="tgz"; \
+        download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz"; \
+      fi; \
+      ollama_archive="/var/cache/buildkit/ollama/ollama-${ollama_version_label}-linux-${ollama_arch}.${archive_ext}"; \
+      build_cache_download "${ollama_archive}" "${download_url}" "Ollama ${ollama_version_label} ${ollama_arch} binary"; \
+      case "${archive_ext}" in \
+        tar.zst) zstd -t "${ollama_archive}" ;; \
+        tgz) tar -tzf "${ollama_archive}" >/dev/null ;; \
+      esac; \
     else \
-      echo "Requested Ollama version ${OLLAMA_VERSION} is unavailable from ollama.com/download; falling back to the latest tgz package." >&2; \
-      archive_ext="tgz"; \
-      download_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz"; \
-    fi; \
-    ollama_version_label="${OLLAMA_VERSION:-latest}"; \
-    ollama_archive="/var/cache/buildkit/ollama/ollama-${ollama_version_label}-linux-${ollama_arch}.${archive_ext}"; \
-    if [ -f "${ollama_archive}" ]; then \
-      case "${archive_ext}" in \
-        tar.zst) zstd -t "${ollama_archive}" || rm -f "${ollama_archive}" ;; \
-        tgz) tar -tzf "${ollama_archive}" >/dev/null || rm -f "${ollama_archive}" ;; \
-      esac; \
-    fi; \
-    if [ ! -f "${ollama_archive}" ]; then \
-      tmp_archive="${ollama_archive}.tmp"; \
-      rm -f "${tmp_archive}"; \
-      curl_retry --silent --show-error "${download_url}" -o "${tmp_archive}"; \
-      case "${archive_ext}" in \
-        tar.zst) zstd -t "${tmp_archive}" ;; \
-        tgz) tar -tzf "${tmp_archive}" >/dev/null ;; \
-      esac; \
-      mv "${tmp_archive}" "${ollama_archive}"; \
+      echo "Using cached Ollama ${ollama_version_label} ${ollama_arch} binary: ${ollama_archive}"; \
     fi; \
     rm -rf /usr/local/lib/ollama; \
     case "${archive_ext}" in \
       tar.zst) zstd -dc "${ollama_archive}" | tar -xf - -C /usr/local ;; \
       tgz) tar -xzf "${ollama_archive}" -C /usr/local ;; \
     esac
-
 RUN --mount=type=cache,id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models,sharing=locked \
     set -eux; \
+    . /usr/local/bin/build-download-cache.sh; \
     mkdir -p /tmp/ollama-models; \
     if [ -z "$(echo "${OLLAMA_PRELOAD_MODELS}" | xargs)" ]; then \
       echo "Skipping Ollama model preload because OLLAMA_PRELOAD_MODELS is empty."; \
@@ -235,6 +254,12 @@ RUN --mount=type=cache,id=codebase-tooling-ollama-models,target=/var/cache/build
         if ollama show "$model" >/dev/null 2>&1; then \
           echo "Ollama model ${model} is already present in the BuildKit cache; skipping pull."; \
           continue; \
+        fi; \
+        if build_cache_bool "${MCP_BUILD_OFFLINE}"; then \
+          echo "Ollama model ${model} is missing from the BuildKit cache while MCP_BUILD_OFFLINE=true." >&2; \
+          kill "$pid" || true; \
+          wait "$pid" || true; \
+          exit 23; \
         fi; \
         pull_log="/tmp/ollama-pull-$(echo "$model" | tr -c 'A-Za-z0-9_.-' '_').log"; \
         echo "Pulling Ollama model ${model}"; \
@@ -267,40 +292,50 @@ RUN groupadd --gid "${APP_GID}" app \
 
 RUN --mount=type=cache,id=codebase-tooling-vscode-vsix,target=/var/cache/buildkit/vscode-vsix,sharing=locked \
     set -eux; \
+    . /usr/local/bin/build-download-cache.sh; \
     mkdir -p /opt/codebase-tooling/defaults/extensions /var/cache/buildkit/vscode-vsix; \
     if [ -z "$(echo "${VSCODE_PRELOAD_EXTENSIONS}" | xargs)" ]; then \
       echo "Skipping VS Code extension preload because VSCODE_PRELOAD_EXTENSIONS is empty."; \
     else \
-      for extension_id in ${VSCODE_PRELOAD_EXTENSIONS}; do \
+      for extension_ref in ${VSCODE_PRELOAD_EXTENSIONS}; do \
+        extension_version=""; \
+        extension_id="${extension_ref}"; \
+        if [[ "${extension_ref}" == *@* ]]; then \
+          extension_version="${extension_ref##*@}"; \
+          extension_id="${extension_ref%@*}"; \
+        fi; \
         publisher="${extension_id%%.*}"; \
         extension_name="${extension_id#*.}"; \
-        vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.vsix"; \
+        version_label="${extension_version:-latest}"; \
+        vsix_path="/var/cache/buildkit/vscode-vsix/${publisher}.${extension_name}.${version_label}.vsix"; \
         if [ -f "${vsix_path}" ] && ! python -c "import sys, zipfile; assert zipfile.is_zipfile(sys.argv[1]), 'cached file is not a zip archive'" "${vsix_path}"; then \
-          echo "Discarding corrupt cached VS Code extension ${extension_id}." >&2; \
+          echo "Discarding corrupt cached VS Code extension ${extension_ref}." >&2; \
           rm -f "${vsix_path}"; \
         fi; \
-        if [ ! -f "${vsix_path}" ]; then \
-          tmp_vsix="${vsix_path}.tmp"; \
-          rm -f "${tmp_vsix}"; \
-          if ! curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage" -o "${tmp_vsix}"; then \
-            if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
-            echo "Skipping VS Code extension ${extension_id}: download failed." >&2; \
-            rm -f "${tmp_vsix}"; \
+        if [ ! -f "${vsix_path}" ] || build_cache_bool "${MCP_REFRESH_BUILD_DOWNLOAD_CACHE}"; then \
+          if [ -n "${extension_version}" ]; then \
+            vsix_url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/${extension_version}/vspackage"; \
+          else \
+            vsix_url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${publisher}/vsextensions/${extension_name}/latest/vspackage"; \
+          fi; \
+          if ! build_cache_download "${vsix_path}" "${vsix_url}" "VS Code extension ${extension_ref}"; then \
+            if build_cache_bool "${MCP_BUILD_OFFLINE}" || [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+            echo "Skipping VS Code extension ${extension_ref}: download failed." >&2; \
+            rm -f "${vsix_path}"; \
             continue; \
           fi; \
-          if ! python -c "import sys, zipfile; assert zipfile.is_zipfile(sys.argv[1]), 'downloaded file is not a zip archive'" "${tmp_vsix}"; then \
-            if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
-            echo "Skipping VS Code extension ${extension_id}: marketplace payload was not a valid VSIX archive." >&2; \
-            rm -f "${tmp_vsix}"; \
+          if ! python -c "import sys, zipfile; assert zipfile.is_zipfile(sys.argv[1]), 'downloaded file is not a zip archive'" "${vsix_path}"; then \
+            if build_cache_bool "${MCP_BUILD_OFFLINE}" || [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+            echo "Skipping VS Code extension ${extension_ref}: marketplace payload was not a valid VSIX archive." >&2; \
+            rm -f "${vsix_path}"; \
             continue; \
           fi; \
-          mv "${tmp_vsix}" "${vsix_path}"; \
         else \
-          echo "Using cached VS Code extension ${extension_id}."; \
+          echo "Using cached VS Code extension ${extension_ref}: ${vsix_path}."; \
         fi; \
         if ! python -c "import json, shutil, sys, tempfile, zipfile; from pathlib import Path; vsix_path = Path(sys.argv[1]); extensions_root = Path(sys.argv[2]); tmp_dir = tempfile.mkdtemp(); tmp_path = Path(tmp_dir); assert zipfile.is_zipfile(vsix_path), 'downloaded file is not a zip archive'; zipfile.ZipFile(vsix_path).extractall(tmp_path); extension_dir = tmp_path / 'extension'; package = json.loads((extension_dir / 'package.json').read_text()); install_dir = extensions_root / (package['publisher'] + '.' + package['name'] + '-' + package['version']); shutil.rmtree(install_dir, ignore_errors=True); shutil.copytree(extension_dir, install_dir); shutil.rmtree(tmp_dir)" "${vsix_path}" /opt/codebase-tooling/defaults/extensions; then \
-          if [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
-          echo "Skipping VS Code extension ${extension_id}: cached VSIX archive could not be installed." >&2; \
+          if build_cache_bool "${MCP_BUILD_OFFLINE}" || [ "${VSCODE_PRELOAD_EXTENSIONS_STRICT}" = "true" ]; then exit 1; fi; \
+          echo "Skipping VS Code extension ${extension_ref}: cached VSIX archive could not be installed." >&2; \
           rm -f "${vsix_path}"; \
           continue; \
         fi; \
