@@ -129,7 +129,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -138,6 +138,8 @@ Public tools:
 `task_router` is the only public high-level router in the MCP v1 surface. Its documented modes are covered by `tool_annotations` because each mode can have distinct safety semantics: status/embed/rerank are read-only, inference/autocomplete modes are open-world network operations, and coding modes may involve writes, shell/process execution, package/network access, or sandbox lifecycle actions.
 
 `workspace_transaction` is a public schema-backed core tool with mode-specific annotation coverage because it exposes transaction lifecycle and direct file mutations, including destructive delete/restore/rollback modes.
+
+`model_assisted_summary` is a disabled-by-default MCP Sampling adapter for bounded summary/classification/workflow-selection use cases. It requires client-declared sampling support plus repository-relative redacted context, enforces path/byte/token budgets, records approval/denial digests and metadata instead of raw prompts, and treats generated text as advisory only.
 
 `policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
 
