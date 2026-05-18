@@ -71,17 +71,17 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "model_assisted_summary": ("execution_mode", "execution_mode_source", "context", "sampling", "guidance"),
     "runtime_state": ("server.python_server_processes", "ollama.tags_probe", "dependency_locks.sections"),
     "git_status": ("raw",),
-    "grep": ("lineText", "schema", "total_matches", "returned", "paths", "result_id", "count", "compressed_observation"),
+    "grep": ("lineText", "schema", "total_matches", "returned", "paths", "result_id", "count", "compressed_observation", "prompt_injection_signals", "_meta"),
     "find_paths": (),
-    "read_snippet": ("requested_start_line", "requested_end_line", "total_lines"),
-    "summarize_diff": ("files", "files_sorted_by_churn", "patch", "patch_unified"),
-    "risk_scoring": (),
+    "read_snippet": ("requested_start_line", "requested_end_line", "total_lines", "prompt_injection_signals", "_meta"),
+    "summarize_diff": ("files", "files_sorted_by_churn", "patch", "patch_unified", "prompt_injection_signals", "_meta"),
+    "risk_scoring": ("untrusted_content_signals",),
     "workspace_transaction": ("resource_links", "_meta"),
     "policy_simulator": (),
     "clarification_gate": ("audit", "inputs", "decision_reasons"),
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
     "dependency_security_report": ("inputs", "skipped", "warnings", "security", "provenance", "_meta"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "lineage", "provenance", "compressed_observation", "_meta"),
+    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "untrusted_content_signals", "lineage", "provenance", "compressed_observation", "_meta"),
     "self_optimization_report": ("sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "_meta"),
     "artifact_provenance": ("checks[].attestation",),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
@@ -103,6 +103,49 @@ def _object_schema(
         "additionalProperties": additional_properties,
     }
 
+
+PROMPT_INJECTION_SIGNAL_SCHEMA: dict[str, Any] = _object_schema(
+    ["schema", "detected", "non_blocking", "summary", "evidence", "redaction"],
+    {
+        "schema": {"type": "string", "const": "prompt_injection_signals.v1"},
+        "detected": {"type": "boolean"},
+        "non_blocking": {"type": "boolean"},
+        "policy": {"type": "string"},
+        "input": {"type": "object"},
+        "summary": {"type": "object"},
+        "evidence": {"type": "array", "items": {"type": "object"}},
+        "bounds": {"type": "object"},
+        "redaction": {"type": "object"},
+    },
+)
+
+PROMPT_INJECTION_SIGNAL_COUNTS_SCHEMA: dict[str, Any] = _object_schema(
+    ["schema", "detected", "total_signals", "category_counts", "severity", "non_blocking"],
+    {
+        "schema": {"type": "string", "const": "prompt_injection_signal_counts.v1"},
+        "detected": {"type": "boolean"},
+        "total_signals": {"type": "integer"},
+        "category_counts": {"type": "object"},
+        "severity": {"type": "string"},
+        "non_blocking": {"type": "boolean"},
+        "privacy": {"type": "object"},
+    },
+)
+
+UNTRUSTED_CONTENT_METADATA_SCHEMA: dict[str, Any] = _object_schema(
+    ["untrusted_content"],
+    {
+        "untrusted_content": _object_schema(
+            ["schema", "treat_as", "non_blocking_default", "prompt_injection_signals"],
+            {
+                "schema": {"type": "string", "const": "untrusted_content_metadata.v1"},
+                "treat_as": {"type": "string"},
+                "non_blocking_default": {"type": "boolean"},
+                "prompt_injection_signals": PROMPT_INJECTION_SIGNAL_SCHEMA,
+            },
+        )
+    },
+)
 
 COMPRESSED_OBSERVATION_SCHEMA: dict[str, Any] = _object_schema(
     ["schema", "summary", "preserved_signals", "omitted", "raw_reference", "rules", "provenance", "redaction"],
@@ -286,6 +329,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "count": {"type": "integer"},
                 "results": {"type": "array", "items": {"type": "object"}},
                 "compressed_observation": COMPRESSED_OBSERVATION_SCHEMA,
+                "prompt_injection_signals": PROMPT_INJECTION_SIGNAL_SCHEMA,
+                "_meta": UNTRUSTED_CONTENT_METADATA_SCHEMA,
             },
         ),
     },
@@ -300,6 +345,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "end_line": {"type": "integer"},
             "total_lines": {"type": "integer"},
             "content": {"type": "string"},
+            "prompt_injection_signals": PROMPT_INJECTION_SIGNAL_SCHEMA,
+            "_meta": UNTRUSTED_CONTENT_METADATA_SCHEMA,
         },
     ),
     "summarize_diff": _object_schema(
@@ -313,6 +360,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "files_sorted_by_churn": {"type": "array", "items": {"type": "object"}},
             "patch": {"type": "string"},
             "patch_unified": {"type": "integer"},
+            "prompt_injection_signals": PROMPT_INJECTION_SIGNAL_SCHEMA,
+            "_meta": UNTRUSTED_CONTENT_METADATA_SCHEMA,
         },
     ),
     "risk_scoring": _object_schema(
@@ -322,6 +371,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
             "reasons": {"type": "array", "items": {"type": "string"}},
             "summary": {"type": "object"},
+            "untrusted_content_signals": PROMPT_INJECTION_SIGNAL_COUNTS_SCHEMA,
         },
     ),
     "workspace_transaction": _object_schema(
@@ -410,6 +460,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "audit": {"type": "object"},
             "workflow_diagnostics": {"type": "object"},
             "governance_hooks": {"type": "object"},
+            "untrusted_content_signals": {"type": "object"},
             "snapshots": {"type": "object"},
             "security": {"type": "object"},
             "exports": {"type": "object"},

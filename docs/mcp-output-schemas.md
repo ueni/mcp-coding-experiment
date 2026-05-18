@@ -69,6 +69,12 @@ The selected-test contract is intentionally conservative: `selected_tests` lists
 
 Verbose tools and reports may expose an opt-in `compressed_observation` field using `compressed_observation.v1`. The field is disabled by default and must never be the only copy of raw data. It includes a deterministic `summary`, `preserved_signals`, `omitted` categories with reason codes, a `raw_reference`, rule metadata, provenance, and redaction metadata. See [Adaptive observation compression](./observation-compression.md) for client guidance and candidate expansion paths.
 
+### Untrusted content prompt-injection signals
+
+Selected text-bearing outputs expose advisory `prompt_injection_signals.v1` metadata, mirrored under `_meta.untrusted_content`, so clients can tell that returned repository, document, web, grep, or diff text must be treated as data rather than instructions. The current implementation covers `browse_web`, `read_document`, `grep`, `read_snippet`, and `summarize_diff` where practical. The metadata is deterministic, bounded, and non-blocking by default; it does not rewrite or hide the raw text users requested.
+
+Signal categories include instruction override, tool manipulation, credential/data exfiltration wording, system-prompt exposure, and suspicious role/markup remnants. Evidence is capped and redacted: secret-looking values, host paths, URLs, and emails are replaced before bounded excerpts and stable hashes are emitted. `risk_scoring` and `governance_report` expose aggregate `untrusted_content_signals` counts only, without repository contents, host paths, bearer tokens, secrets, or raw suspicious excerpts. See [Untrusted content prompt-injection signals](./untrusted-content-signals.md).
+
 ### Artifact resource links
 
 Artifact-producing tools expose generated outputs through a compact `artifact_resource_link.v1` contract in `resource_links` and mirror the same list under `_meta.artifact_resources` for clients that prefer metadata fields. Links use repository-relative `repo://file/{path}` URIs and never expose host absolute paths. Each link includes a title, URI/path when file-backed, MIME type, size when the file exists, created time, and safety metadata indicating redaction, repository-boundary enforcement, and no secret exposure.
@@ -145,17 +151,17 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `model_assisted_summary` | `schema`, `ok`, `status`, `read_only`, `advisory_only`, `purpose`, `policy`, `capability`, `request`, `audit` | execution mode, bounded context metadata, sampling response digest/summary, and guidance |
 | `runtime_state` | `schema`, `timestamp`, `transport`, `server`, `sse`, `ollama`, `docker`, `dependency_locks` | process counts, dependency probe details, and per-lock section digest status |
 | `git_status` | `status`, `short` | `raw` |
-| `grep` | match rows: `path`, `line`, `column`, `match` | `lineText`, quick summaries, result handles, opt-in `compressed_observation` |
+| `grep` | match rows: `path`, `line`, `column`, `match` | `lineText`, quick summaries, result handles, opt-in `compressed_observation`, `prompt_injection_signals`, `_meta` |
 | `find_paths` | array items as repository-relative paths | none |
-| `read_snippet` | `path`, `start_line`, `end_line`, `content` | requested line bounds and `total_lines` |
-| `summarize_diff` | `file_count`, `total_added`, `total_deleted`, `risk_flags` | file lists, sorted churn, patches |
-| `risk_scoring` | `risk_score`, `risk_level`, `reasons`, `summary` | none |
+| `read_snippet` | `path`, `start_line`, `end_line`, `content` | requested line bounds, `total_lines`, `prompt_injection_signals`, `_meta` |
+| `summarize_diff` | `file_count`, `total_added`, `total_deleted`, `risk_flags` | file lists, sorted churn, patches, `prompt_injection_signals`, `_meta` |
+| `risk_scoring` | `risk_score`, `risk_level`, `reasons`, `summary` | aggregate `untrusted_content_signals` |
 | `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals, `resource_links`, `_meta` |
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
 | `dependency_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `components`, `vulnerabilities`, `advisory`, `gate`, `exports`, `resource_links` | `inputs`, skipped/unresolved details, warnings, local provenance sidecars, and SBOM export metadata |
-| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
+| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, aggregate `untrusted_content_signals`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
 | `self_optimization_report` | `schema`, `report_id`, `generated_at`, `window`, `summary`, `metrics`, `optimization_candidates`, `security` | `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `_meta` |
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |
