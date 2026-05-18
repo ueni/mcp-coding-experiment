@@ -7639,7 +7639,7 @@
       "name": "workflow_lineage"
     },
     {
-      "digest": "sha256:f4ac82841bc5fd130979a9df411209478345b150942459d6512c756fb916745c",
+      "digest": "sha256:e199cb762da20e888e714e893250d30a2682801cf05dc33251583fab92795f85",
       "metadata": {
         "documentation": [
           {
@@ -7652,7 +7652,7 @@
           }
         ],
         "list_tools": {
-          "description": "Start or inspect a supported persisted async workflow task.",
+          "description": "Start, cancel, or inspect a supported persisted async workflow task.",
           "execution": null,
           "icons": null,
           "input_schema": {
@@ -7665,6 +7665,11 @@
               "base_ref": {
                 "default": "HEAD~1",
                 "title": "Base Ref",
+                "type": "string"
+              },
+              "cancel_reason": {
+                "default": "",
+                "title": "Cancel Reason",
                 "type": "string"
               },
               "control_profile": {
@@ -7765,6 +7770,22 @@
           ],
           "mode": "",
           "modes": [
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true,
+                "readOnlyHint": false
+              },
+              "categories": [
+                "write",
+                "shell/process"
+              ],
+              "mode": "cancel",
+              "mutation_capable": true,
+              "required_scope": "mcp:mutate",
+              "tool": "workflow_task"
+            },
             {
               "annotations": {
                 "destructiveHint": false,
@@ -8621,5 +8642,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:188b157dab566e90b6732a0664626f0ed21e6531bc6f8b51e2a67be6bca8b48c"
+  "whole_catalog_digest": "sha256:4086e45a5483b6513835bd904f45bb8b3734476ccac0600bab66025437f0be48"
 }
