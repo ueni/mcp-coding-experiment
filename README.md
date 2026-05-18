@@ -349,18 +349,38 @@ local Agent mode. Pass `--enable-vulkan-gpu` to add `/dev/dri`, set
 curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh -s -- --enable-vulkan-gpu
 ```
 
-The script finds the repository root by locating `.git` and creates only:
+The script is standalone-safe when piped through `sh`: it embeds the default Continue profiles and falls back to those embedded defaults when `source/defaults/continue` is not present locally. It finds the repository root by locating `.git` and creates:
 
 - `.devcontainer/devcontainer.json`
+- `.continue/models/*.yaml`, `.continue/model-routing.yaml`, and `.continue/mcpServers/codebase-tooling-mcp.yaml` for the selected local or OpenAI-compatible Continue profile
+- `/.codebase-tooling-mcp/`, `/.continue/`, `/.config/`, `/.devcontainer/`, `/.gitignore_codebase_tooling_mcp.touched` entries in `.gitignore` (one-time bootstrap)
+
+By default, non-interactive setup uses the bundled local Ollama profile. On an
+interactive first run, the setup script writes the selected Continue profile:
+bundled local Ollama, OpenAI-compatible endpoint, or no Continue model setup.
+For scripted OpenAI-compatible setup, pass `--continue-model-profile
+openai-compatible` and optional environment overrides:
+
+```bash
+CONTINUE_MODEL_ID=local-proxy-model \
+CONTINUE_MODEL_API_BASE=http://127.0.0.1:8787/v1 \
+curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh -s -- --continue-model-profile openai-compatible
+```
+
+To skip repository Continue model configuration durably, pass
+`--continue-model-profile none`. That path does not write `.continue` model or
+MCP profile files and the generated devcontainer sets
+`MCP_APPLY_CONTINUE_DEFAULTS=false`, so container startup will not recreate the
+bundled Continue defaults while `MCP_APPLY_REPO_DEFAULTS=true` can still apply
+non-Continue repository defaults.
 
 When the devcontainer starts, the image applies default repository files if they
-are missing:
+are missing and not disabled by profile selection:
 
-- `.continue/models/*.yaml` (router + specialist model defaults, repo-owned)
-- `.continue/model-routing.yaml` (routing map for router/specialists)
-- `.continue/mcpServers/codebase-tooling-mcp.yaml`
+- `.continue/models/*.yaml` (router + specialist model defaults, repo-owned, skipped when `MCP_APPLY_CONTINUE_DEFAULTS=false`)
+- `.continue/model-routing.yaml` (routing map for router/specialists, skipped when `MCP_APPLY_CONTINUE_DEFAULTS=false`)
+- `.continue/mcpServers/codebase-tooling-mcp.yaml` (skipped when `MCP_APPLY_CONTINUE_DEFAULTS=false`)
 - `.config/labs/*.json`
-- `/.codebase-tooling-mcp/`, `/.continue/`, `/.config/`, `/.devcontainer/`, `/.gitignore_codebase_tooling_mcp.touched` entries in `.gitignore` (one-time bootstrap)
 
 The image also ensures a default Codex MCP client entry exists at:
 
@@ -531,14 +551,14 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 
 ## Continue + Ollama Contract
 
-- The checked-in Continue model configs use `provider: ollama` with `apiBase: http://127.0.0.1:2345`.
+- The checked-in default Continue Ollama config uses `provider: ollama` with `apiBase: http://127.0.0.1:2345`. The repo also ships `.continue/models/coding-openai-compatible.yaml` as an OpenAI-compatible endpoint template for local proxies, hosted endpoints, or MITM inspection setups, plus `.continue/models/model-fallback.yaml` pointing at `http://localhost:8000/v1/model-fallback` for configuration assistance when no real model is configured yet.
 - The devcontainer publishes `127.0.0.1:2345:2345` so Continue can reach the bundled Ollama service even when its extension host runs outside the container. If Continue reports `ECONNREFUSED 127.0.0.1:2345`, rebuild/reopen the devcontainer and confirm `curl http://127.0.0.1:2345/api/tags` works from the same side where Continue is running.
 - This repo treats the native Ollama base as the contract for Continue's Ollama provider. Do not append `/v1` when configuring those model YAMLs.
 - `source/Dockerfile` installs Vulkan userspace (`libvulkan1`, `mesa-vulkan-drivers`, `vulkan-tools`), but the checked-in devcontainer keeps `OLLAMA_VULKAN=0` for stability. `source/entrypoint.sh` maps `/dev/dri` device groups onto `app` so Ollama can use Vulkan-capable Linux GPUs only when `/dev/dri` is explicitly passed through and `OLLAMA_VULKAN=1` is set.
 - The steady-state local development route is `qwen2.5-coder:1.5b` for `coding_infer`, Continue routing, and specialist task routes. The checked-in VS Code devcontainer preloads that model with `OLLAMA_PRELOAD_MODELS=qwen2.5-coder:1.5b`, so fresh containers have the Continue model available without runtime pulls.
 - Agent-mode tool calling may require a custom local model profile with verified tool support. The repository no longer ships a separate bundled Agent model profile.
 - Hardware note: the repository default context is `8192` to reduce runner pressure on laptop-class hosts. Raise the context to `16384` or `32768` only after confirming enough memory for the selected local model and client workload.
-- Existing host or repository `.continue` config may stay stale until refreshed. After pulling this change, rebuild/reopen the devcontainer and either keep `MCP_APPLY_REPO_DEFAULTS=true` or rerun `setup-repository.sh` / manually copy the `source/defaults/continue` files so the host-visible `.continue` config includes the compact default model profile and routing.
+- Existing host or repository `.continue` config may stay stale until refreshed. After pulling this change, rebuild/reopen the devcontainer and either keep `MCP_APPLY_REPO_DEFAULTS=true` with `MCP_APPLY_CONTINUE_DEFAULTS=true` or rerun `setup-repository.sh` / manually copy the `source/defaults/continue` files so the host-visible `.continue` config includes the compact default model profile and routing. On an interactive first run, `setup-repository.sh` asks whether Continue should adopt the bundled local Ollama profile, configure an OpenAI-compatible endpoint, or skip Continue model setup. For scripted setup, use `--continue-model-profile openai-compatible` plus `CONTINUE_MODEL_ID`, `CONTINUE_MODEL_API_BASE`, and optional `CONTINUE_MODEL_PROXY` / `CONTINUE_MODEL_CA_BUNDLE`; use `--continue-model-profile none` when the repository should not receive `.continue` model/MCP profile files, and the generated devcontainer keeps that choice durable with `MCP_APPLY_CONTINUE_DEFAULTS=false`. The fallback endpoint can also write `.continue/models/coding-openai-compatible.yaml` and `.continue/model-routing.yaml` through `POST /v1/model-fallback/configure` when `ALLOW_MUTATIONS=true` and the HTTP bearer token has `mcp:mutate`; when mutations are disabled, it returns a dry-run config payload to mutate-scoped callers.
 - `source/Dockerfile` preloads the model set declared by `OLLAMA_PRELOAD_MODELS` into the image; the default is `qwen2.5-coder:1.5b`. The build-time preload step stores models in the stable BuildKit cache mount `id=codebase-tooling-ollama-models,target=/var/cache/buildkit/ollama-models` and runs `ollama show` before `ollama pull`, so a persistent builder can skip already-cached models on later builds. On throwaway/remote builders, use `docker buildx` cache import/export (`--cache-to=...` and `--cache-from=...`) or the preload cache will still be empty on the next build. CI validation jobs may override the build arg to empty when they need a no-model image path.
 - Runtime `ollama pull` is disabled by default. Missing models are only downloaded when `OLLAMA_ALLOW_PULL=true` is explicitly set.
 - `task_router(mode="task")` and `task_router(mode="coding_infer")` accept `task="micro_coding"` to force the compact coder, and short coding prompts can auto-select it when no explicit model override is provided.
@@ -551,7 +571,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - Path traversal outside the mounted repository is blocked.
 - Read-only usage is the safest default: keep `ALLOW_MUTATIONS=false` unless changes are required.
 - HTTP mode requires authorization by default (`MCP_HTTP_AUTH_MODE=token` plus `MCP_HTTP_BEARER_TOKEN`). Stdio-only use is not affected.
-- Mutating categories (`write`, `git mutation`) require both `ALLOW_MUTATIONS=true` and an authorized HTTP session when called over HTTP.
+- Mutating categories (`write`, `git mutation`) require both `ALLOW_MUTATIONS=true` and an authorized HTTP session with `mcp:mutate` scope when called over HTTP.
 - Sensitive categories (`shell/process`, `network`, `secret-sensitive`) require an authorized HTTP session and are audited.
 - `task_router` carries per-mode security categories: read/status modes are read-only; inference/autocomplete modes include `network`; coding check/package/sandbox modes include `shell/process`, and package/sandbox/coding-infer modes include `write` where applicable.
 - Git commits still require Git user identity in repo config or environment.

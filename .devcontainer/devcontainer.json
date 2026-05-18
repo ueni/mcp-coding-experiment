@@ -24,6 +24,7 @@
     "DOCKER_HOST": "unix:///var/run/docker.sock",
     "DOCKER_CONFIG": "/home/app/.docker",
     "MCP_APPLY_REPO_DEFAULTS": "true",
+    "MCP_APPLY_CONTINUE_DEFAULTS": "true",
     "MCP_TRANSPORT": "http",
     "MCP_HTTP_BEARER_TOKEN": "${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "MCP_AGENT_EXECUTION_MODE": "online",

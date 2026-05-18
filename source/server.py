@@ -368,6 +368,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
+    "continue_model_fallback_configure": {"categories": ["write"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
     "docker_router": {"categories": ["shell/process"]},
@@ -1394,6 +1395,7 @@ def _http_path_is_protected_mcp(path: str) -> bool:
         or path.startswith("/mcp/")
         or path == "/v1/chat/completions"
         or path.startswith("/v1/agent-proxy/")
+        or path.startswith("/v1/model-fallback/")
     )
 
 
@@ -9096,7 +9098,12 @@ def _http_request_granted_scopes_for_tools() -> frozenset[str]:
     return scopes
 
 
-def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
+def _require_tool_security_gate(
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    enforce_mutation_permission: bool = True,
+) -> list[str]:
     categories = _tool_categories(tool_name, arguments)
     required_scope = _required_scope_for_categories(categories)
     granted_scopes = _http_request_granted_scopes_for_tools() if _inside_http_request() else None
@@ -9143,7 +9150,7 @@ def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None
             granted_scopes=granted,
         )
         raise HTTPInsufficientScopeError(tool_name, required_scope, granted)
-    if mutating and not ALLOW_MUTATIONS:
+    if enforce_mutation_permission and mutating and not ALLOW_MUTATIONS:
         _append_audit_event(
             tool_name,
             categories,
@@ -29605,6 +29612,218 @@ async def openai_chat_completions(request):
     return JSONResponse(safe_response)
 
 
+
+
+def _continue_model_yaml(
+    *,
+    name: str,
+    display_name: str,
+    provider: str,
+    model: str,
+    api_base: str,
+    roles: list[str] | None = None,
+    proxy: str = "",
+    ca_bundle_path: str = "",
+    timeout: int = 300000,
+) -> str:
+    role_items = roles or ["chat", "edit", "apply"]
+    lines = [
+        f"name: {name}",
+        "version: 0.0.1",
+        "schema: v1",
+        "models:",
+        f"  - name: {display_name}",
+        f"    provider: {provider}",
+        f"    model: {model}",
+        f"    apiBase: {api_base}",
+        "    roles:",
+    ]
+    lines.extend(f"      - {role}" for role in role_items)
+    lines.extend(["    requestOptions:", f"      timeout: {timeout}"])
+    if proxy:
+        lines.append(f"      proxy: {proxy}")
+    if ca_bundle_path:
+        lines.append(f"      caBundlePath: {ca_bundle_path}")
+    return "\n".join(lines) + "\n"
+
+
+def _continue_model_routing_yaml(model: str, model_file: str) -> str:
+    return f"""schema: v1
+router:
+  model: {model}
+  file: {model_file}
+routes:
+  coding:
+    model: {model}
+    file: {model_file}
+  coding_agent:
+    model: {model}
+    file: {model_file}
+  coding_micro:
+    model: qwen2.5-coder:1.5b
+    file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
+"""
+
+
+def _continue_model_fallback_status() -> dict[str, Any]:
+    continue_dir = REPO_PATH / ".continue"
+    routing_path = continue_dir / "model-routing.yaml"
+    models_dir = continue_dir / "models"
+    model_paths = sorted(models_dir.glob("*.yaml")) if models_dir.is_dir() else []
+    return {
+        "schema": "continue_model_fallback.status.v1",
+        "repo_path": str(REPO_PATH),
+        "allow_mutations": ALLOW_MUTATIONS,
+        "continue_dir_exists": continue_dir.is_dir(),
+        "routing_exists": routing_path.is_file(),
+        "model_profiles": [str(path.relative_to(REPO_PATH)) for path in model_paths],
+        "configure_endpoint": "/v1/model-fallback/configure",
+    }
+
+
+def _continue_model_fallback_content(status: dict[str, Any]) -> str:
+    if status.get("routing_exists") and status.get("model_profiles"):
+        configured = "Continue already has model routing and model profiles in this repository."
+    else:
+        configured = "No complete Continue model routing/profile configuration was detected."
+    mutation_note = (
+        "I can write the configuration through POST /v1/model-fallback/configure because ALLOW_MUTATIONS=true."
+        if ALLOW_MUTATIONS
+        else "I can draft the configuration, but writing is disabled until ALLOW_MUTATIONS=true."
+    )
+    return "\n".join(
+        [
+            "Model fallback is active.",
+            configured,
+            mutation_note,
+            "To configure an OpenAI-compatible model, send JSON to /v1/model-fallback/configure with:",
+            '{"provider":"openai","model":"<model-id>","apiBase":"http://host:port/v1","proxy":"http://127.0.0.1:8080"}',
+            "The endpoint writes .continue/models/coding-openai-compatible.yaml and .continue/model-routing.yaml inside REPO_PATH.",
+        ]
+    )
+
+
+def _continue_model_config_payload(payload: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
+    provider = str(payload.get("provider", "openai")).strip().lower()
+    model = str(payload.get("model", "")).strip()
+    api_base = str(payload.get("apiBase", payload.get("api_base", ""))).strip()
+    proxy = str(payload.get("proxy", "")).strip()
+    ca_bundle_path = str(payload.get("caBundlePath", payload.get("ca_bundle_path", ""))).strip()
+    if provider not in {"openai", "ollama"}:
+        return None, "provider must be one of: openai, ollama"
+    if not model:
+        return None, "model is required"
+    if not api_base:
+        return None, "apiBase is required"
+    if not urllib.parse.urlsplit(api_base).scheme:
+        return None, "apiBase must be an absolute URL"
+    if proxy and not urllib.parse.urlsplit(proxy).scheme:
+        return None, "proxy must be an absolute URL when provided"
+    return {
+        "provider": provider,
+        "model": model,
+        "api_base": api_base,
+        "proxy": proxy,
+        "ca_bundle_path": ca_bundle_path,
+    }, "ok"
+
+
+async def continue_model_fallback_chat_completions(request):
+    trace_id = uuid.uuid4().hex[:16]
+    try:
+        payload = await request.json()
+    except Exception:
+        error, status = _agent_proxy_error_payload(
+            "request body must be valid JSON",
+            code="invalid_json",
+            trace_id=trace_id,
+            status_code=400,
+        )
+        return JSONResponse(error, status_code=status)
+    valid, reason = _agent_proxy_validate_payload(payload)
+    if not valid:
+        error, status = _agent_proxy_error_payload(reason, trace_id=trace_id, status_code=400)
+        return JSONResponse(error, status_code=status)
+    status_payload = _continue_model_fallback_status()
+    content = _continue_model_fallback_content(status_payload)
+    route = {
+        "schema": "continue_model_fallback.routing.v1",
+        "requested_model": str(payload.get("model", "model-fallback")),
+        "backend": "model-fallback",
+        "provider": "local-configuration-assistant",
+        "reason": "continue_model_configuration_assistance",
+        "risk_class": "repo_bound_configuration",
+    }
+    policy = {"input_tokens_estimate": _agent_proxy_estimate_tokens(_agent_proxy_request_text_digest_input(payload))}
+    response_payload = _agent_proxy_openai_response(payload, content, trace_id, route, policy)
+    response_payload["model_fallback"] = status_payload
+    return JSONResponse(response_payload)
+
+
+async def continue_model_fallback_configure(request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+    config, reason = _continue_model_config_payload(payload)
+    if config is None:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    profile_rel = Path(".continue/models/coding-openai-compatible.yaml")
+    routing_rel = Path(".continue/model-routing.yaml")
+    profile_text = _continue_model_yaml(
+        name="coding-openai-compatible",
+        display_name="Coding - OpenAI Compatible Endpoint" if config["provider"] == "openai" else "Coding - Ollama Endpoint",
+        provider=config["provider"],
+        model=config["model"],
+        api_base=config["api_base"],
+        proxy=config["proxy"],
+        ca_bundle_path=config["ca_bundle_path"],
+    )
+    routing_text = _continue_model_routing_yaml(
+        config["model"], ".continue/models/coding-openai-compatible.yaml"
+    )
+    _require_tool_security_gate(
+        "continue_model_fallback_configure",
+        {"mode": "write", "files": [str(profile_rel), str(routing_rel)]},
+        enforce_mutation_permission=False,
+    )
+    if not ALLOW_MUTATIONS:
+        return JSONResponse(
+            {
+                "schema": "continue_model_fallback.configure.v1",
+                "status": "dry_run",
+                "reason": "mutations disabled; set ALLOW_MUTATIONS=true to write files",
+                "files": {
+                    str(profile_rel): profile_text,
+                    str(routing_rel): routing_text,
+                },
+            },
+            status_code=403,
+        )
+
+    profile_path = (REPO_PATH / profile_rel).resolve()
+    routing_path = (REPO_PATH / routing_rel).resolve()
+    profile_path.relative_to(REPO_PATH)
+    routing_path.relative_to(REPO_PATH)
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    routing_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(profile_text, encoding="utf-8")
+    routing_path.write_text(routing_text, encoding="utf-8")
+    return JSONResponse(
+        {
+            "schema": "continue_model_fallback.configure.v1",
+            "status": "written",
+            "files": [str(profile_rel), str(routing_rel)],
+            "model": config["model"],
+            "provider": config["provider"],
+            "apiBase": config["api_base"],
+        }
+    )
+
+
 async def mcp_server_manifest(_request):
     return JSONResponse(_mcp_server_manifest_payload())
 
@@ -29710,6 +29929,8 @@ starlette_app = Starlette(
         Route("/.well-known/mcp-server.json", mcp_server_manifest, methods=["GET"]),
         Route("/sse", sse_events, methods=["GET"]),
         Route("/v1/chat/completions", openai_chat_completions, methods=["POST"]),
+        Route("/v1/model-fallback/chat/completions", continue_model_fallback_chat_completions, methods=["POST"]),
+        Route("/v1/model-fallback/configure", continue_model_fallback_configure, methods=["POST"]),
         Route("/v1/agent-proxy/status", agent_proxy_status, methods=["GET"]),
         Route("/v1/agent-proxy/disclosures", agent_proxy_disclosures, methods=["GET"]),
         # FastMCP's streamable HTTP app serves MCP routes under `/mcp` internally.

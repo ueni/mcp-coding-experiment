@@ -20,17 +20,57 @@ NATIVE_OLLAMA_BASE = "http://127.0.0.1:2345"
 
 
 class ContinueOllamaContractConfigTest(unittest.TestCase):
-    def test_continue_model_configs_use_native_ollama_base(self):
-        model_paths = sorted((REPO_ROOT / ".continue" / "models").glob("*.yaml"))
-        model_paths += sorted(
-            (REPO_ROOT / "source" / "defaults" / "continue" / "models").glob("*.yaml")
-        )
-        self.assertGreater(len(model_paths), 0)
+    def test_continue_ollama_model_configs_use_native_ollama_base(self):
+        model_paths = [
+            REPO_ROOT / ".continue" / "models" / "coding-qwen2.5-coder-1.5b.yaml",
+            REPO_ROOT
+            / "source"
+            / "defaults"
+            / "continue"
+            / "models"
+            / "coding-qwen2.5-coder-1.5b.yaml",
+        ]
         for path in model_paths:
             text = path.read_text(encoding="utf-8")
             self.assertIn("provider: ollama", text, str(path))
             self.assertIn(f"apiBase: {NATIVE_OLLAMA_BASE}", text, str(path))
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
+
+    def test_continue_includes_openai_compatible_model_template(self):
+        for config_path in [
+            REPO_ROOT / ".continue" / "models" / "coding-openai-compatible.yaml",
+            REPO_ROOT
+            / "source"
+            / "defaults"
+            / "continue"
+            / "models"
+            / "coding-openai-compatible.yaml",
+        ]:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            model = config["models"][0]
+            self.assertEqual("openai", model["provider"], str(config_path))
+            self.assertEqual("gpt-4.1-mini", model["model"], str(config_path))
+            self.assertEqual("http://127.0.0.1:4000/v1", model["apiBase"], str(config_path))
+            self.assertEqual(300000, model["requestOptions"]["timeout"], str(config_path))
+
+    def test_continue_includes_model_fallback_template(self):
+        for config_path in [
+            REPO_ROOT / ".continue" / "models" / "model-fallback.yaml",
+            REPO_ROOT
+            / "source"
+            / "defaults"
+            / "continue"
+            / "models"
+            / "model-fallback.yaml",
+        ]:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            model = config["models"][0]
+            self.assertEqual("openai", model["provider"], str(config_path))
+            self.assertEqual("model-fallback", model["model"], str(config_path))
+            self.assertEqual(
+                "http://localhost:8000/v1/model-fallback", model["apiBase"], str(config_path)
+            )
+            self.assertIn("chat", model["roles"], str(config_path))
 
     def test_continue_model_contract_uses_compact_default_profile(self):
         expected_context = 8192
@@ -144,6 +184,11 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
+            routing = yaml.safe_load(
+                (repo_root / ".continue" / "model-routing.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
 
         self.assertEqual([8000, 2345], config["forwardPorts"])
         self.assertIn("127.0.0.1:8000:8000", config.get("runArgs", []))
@@ -159,11 +204,190 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual("8192", config["containerEnv"]["OLLAMA_CONTEXT_LENGTH"])
         self.assertEqual("8192", config["containerEnv"]["OLLAMA_TEXT_ALIAS_NUM_CTX"])
         self.assertEqual("qwen2.5-coder:1.5b", config["containerEnv"]["CODING_DEFAULT_MODEL"])
+        self.assertEqual("true", config["containerEnv"]["MCP_APPLY_REPO_DEFAULTS"])
+        self.assertEqual("true", config["containerEnv"]["MCP_APPLY_CONTINUE_DEFAULTS"])
         self.assertEqual(
             "http://127.0.0.1:2345/api/generate",
             config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
         )
         self.assertEqual("Bundled LLM", config["portsAttributes"]["2345"]["label"])
+        self.assertEqual("qwen2.5-coder:1.5b", routing["router"]["model"])
+
+    def test_setup_script_stdin_mode_embeds_continue_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / ".git").mkdir()
+            result = subprocess.run(
+                ["/bin/sh"],
+                cwd=repo_root,
+                input=(REPO_ROOT / "setup-repository.sh").read_text(encoding="utf-8"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr.strip() or result.stdout.strip(),
+            )
+
+            routing = yaml.safe_load(
+                (repo_root / ".continue" / "model-routing.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            qwen_config = yaml.safe_load(
+                (repo_root / ".continue" / "models" / "coding-qwen2.5-coder-1.5b.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            mcp_config = yaml.safe_load(
+                (repo_root / ".continue" / "mcpServers" / "codebase-tooling-mcp.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            openai_template_exists = (
+                repo_root / ".continue" / "models" / "coding-openai-compatible.yaml"
+            ).exists()
+            fallback_template_exists = (
+                repo_root / ".continue" / "models" / "model-fallback.yaml"
+            ).exists()
+
+        self.assertEqual("qwen2.5-coder:1.5b", routing["router"]["model"])
+        self.assertEqual("ollama", qwen_config["models"][0]["provider"])
+        self.assertEqual("http://127.0.0.1:2345", qwen_config["models"][0]["apiBase"])
+        self.assertEqual("codebase-tooling-mcp", mcp_config["mcpServers"][0]["name"])
+        self.assertTrue(openai_template_exists)
+        self.assertTrue(fallback_template_exists)
+
+    def test_setup_script_can_configure_openai_compatible_continue_model(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / ".git").mkdir()
+            env = os.environ.copy()
+            env.update(
+                {
+                    "CONTINUE_MODEL_ID": "local-proxy-model",
+                    "CONTINUE_MODEL_API_BASE": "http://127.0.0.1:8787/v1",
+                    "CONTINUE_MODEL_PROXY": "http://127.0.0.1:8080",
+                    "CONTINUE_MODEL_CA_BUNDLE": "/tmp/mitm-ca.pem",
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/sh",
+                    str(REPO_ROOT / "setup-repository.sh"),
+                    "--continue-model-profile",
+                    "openai-compatible",
+                ],
+                cwd=repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr.strip() or result.stdout.strip(),
+            )
+
+            model_config = yaml.safe_load(
+                (repo_root / ".continue" / "models" / "coding-openai-compatible.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            routing = yaml.safe_load(
+                (repo_root / ".continue" / "model-routing.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        model = model_config["models"][0]
+        self.assertEqual("openai", model["provider"])
+        self.assertEqual("local-proxy-model", model["model"])
+        self.assertEqual("http://127.0.0.1:8787/v1", model["apiBase"])
+        self.assertEqual("http://127.0.0.1:8080", model["requestOptions"]["proxy"])
+        self.assertEqual("/tmp/mitm-ca.pem", model["requestOptions"]["caBundlePath"])
+        self.assertEqual("local-proxy-model", routing["router"]["model"])
+        self.assertEqual(
+            ".continue/models/coding-openai-compatible.yaml", routing["router"]["file"]
+        )
+
+    def test_setup_script_none_profile_skips_continue_models_durably(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / ".git").mkdir()
+            result = subprocess.run(
+                [
+                    "/bin/sh",
+                    str(REPO_ROOT / "setup-repository.sh"),
+                    "--continue-model-profile",
+                    "none",
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr.strip() or result.stdout.strip(),
+            )
+
+            config = json.loads(
+                (repo_root / ".devcontainer" / "devcontainer.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertFalse((repo_root / ".continue").exists())
+            self.assertEqual("true", config["containerEnv"]["MCP_APPLY_REPO_DEFAULTS"])
+            self.assertEqual("false", config["containerEnv"]["MCP_APPLY_CONTINUE_DEFAULTS"])
+            self.assertNotIn(".continue/ Continue model", result.stderr)
+
+    def test_setup_script_invalid_continue_profile_fails_before_repo_mutation(self):
+        cases = [
+            (
+                "environment",
+                ["/bin/sh", str(REPO_ROOT / "setup-repository.sh")],
+                {"CONTINUE_MODEL_PROFILE": "not-a-profile"},
+            ),
+            (
+                "argument",
+                [
+                    "/bin/sh",
+                    str(REPO_ROOT / "setup-repository.sh"),
+                    "--continue-model-profile",
+                    "not-a-profile",
+                ],
+                {},
+            ),
+        ]
+        for label, command, env_update in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmpdir:
+                repo_root = Path(tmpdir)
+                (repo_root / ".git").mkdir()
+                env = os.environ.copy()
+                env.update(env_update)
+                result = subprocess.run(
+                    command,
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Unknown Continue model profile: not-a-profile", result.stderr)
+                self.assertFalse((repo_root / ".devcontainer").exists())
+                self.assertFalse((repo_root / ".continue").exists())
+                self.assertFalse((repo_root / ".gitignore").exists())
+                self.assertFalse(
+                    (repo_root / ".gitignore_codebase_tooling_mcp.touched").exists()
+                )
 
     def test_setup_script_can_force_vulkan_gpu_passthrough(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -256,6 +480,9 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("16384", combined)
         self.assertIn("verified tool-capable Agent model", combined)
         self.assertIn("preloads `qwen2.5-coder:1.5b`", combined)
+        self.assertIn("--continue-model-profile none", readme)
+        self.assertIn("MCP_APPLY_CONTINUE_DEFAULTS=false", readme)
+        self.assertIn("setup script writes the selected Continue profile", readme)
         self.assertIn("forgot to add '/v1'", troubleshooting)
         self.assertIn("provider: ollama", troubleshooting)
         self.assertIn("http://127.0.0.1:2345/api/tags", troubleshooting)
