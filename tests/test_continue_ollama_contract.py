@@ -53,6 +53,25 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertEqual("http://127.0.0.1:4000/v1", model["apiBase"], str(config_path))
             self.assertEqual(300000, model["requestOptions"]["timeout"], str(config_path))
 
+    def test_continue_includes_model_fallback_template(self):
+        for config_path in [
+            REPO_ROOT / ".continue" / "models" / "model-fallback.yaml",
+            REPO_ROOT
+            / "source"
+            / "defaults"
+            / "continue"
+            / "models"
+            / "model-fallback.yaml",
+        ]:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            model = config["models"][0]
+            self.assertEqual("openai", model["provider"], str(config_path))
+            self.assertEqual("model-fallback", model["model"], str(config_path))
+            self.assertEqual(
+                "http://localhost:8000/v1/model-fallback", model["apiBase"], str(config_path)
+            )
+            self.assertIn("chat", model["roles"], str(config_path))
+
     def test_continue_model_contract_uses_compact_default_profile(self):
         expected_context = 8192
 

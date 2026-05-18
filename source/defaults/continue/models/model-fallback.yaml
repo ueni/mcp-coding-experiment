@@ -1,0 +1,12 @@
+name: model-fallback
+version: 0.0.1
+schema: v1
+models:
+  - name: Model Fallback - Continue Setup Assistant
+    provider: openai
+    model: model-fallback
+    apiBase: http://localhost:8000/v1/model-fallback
+    roles:
+      - chat
+    requestOptions:
+      timeout: 300000
