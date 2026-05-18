@@ -9098,7 +9098,12 @@ def _http_request_granted_scopes_for_tools() -> frozenset[str]:
     return scopes
 
 
-def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None = None) -> list[str]:
+def _require_tool_security_gate(
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    enforce_mutation_permission: bool = True,
+) -> list[str]:
     categories = _tool_categories(tool_name, arguments)
     required_scope = _required_scope_for_categories(categories)
     granted_scopes = _http_request_granted_scopes_for_tools() if _inside_http_request() else None
@@ -9145,7 +9150,7 @@ def _require_tool_security_gate(tool_name: str, arguments: dict[str, Any] | None
             granted_scopes=granted,
         )
         raise HTTPInsufficientScopeError(tool_name, required_scope, granted)
-    if mutating and not ALLOW_MUTATIONS:
+    if enforce_mutation_permission and mutating and not ALLOW_MUTATIONS:
         _append_audit_event(
             tool_name,
             categories,
@@ -29780,6 +29785,11 @@ async def continue_model_fallback_configure(request):
     routing_text = _continue_model_routing_yaml(
         config["model"], ".continue/models/coding-openai-compatible.yaml"
     )
+    _require_tool_security_gate(
+        "continue_model_fallback_configure",
+        {"mode": "write", "files": [str(profile_rel), str(routing_rel)]},
+        enforce_mutation_permission=False,
+    )
     if not ALLOW_MUTATIONS:
         return JSONResponse(
             {
@@ -29793,10 +29803,6 @@ async def continue_model_fallback_configure(request):
             },
             status_code=403,
         )
-    _require_tool_security_gate(
-        "continue_model_fallback_configure",
-        {"mode": "write", "files": [str(profile_rel), str(routing_rel)]},
-    )
 
     profile_path = (REPO_PATH / profile_rel).resolve()
     routing_path = (REPO_PATH / routing_rel).resolve()

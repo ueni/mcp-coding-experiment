@@ -678,6 +678,59 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(self.server.MCP_SCOPE_MUTATE, raised.exception.required_scope)
         self.assertFalse((self.repo_path / ".continue/model-routing.yaml").exists())
 
+    def test_model_fallback_configure_requires_mutate_scope_before_dry_run(self):
+        self.server.ALLOW_MUTATIONS = False
+        auth_token = self.server._HTTP_REQUEST_AUTHORIZED.set(True)
+        scope_token = self.server._HTTP_REQUEST_GRANTED_SCOPES.set(
+            frozenset({self.server.MCP_SCOPE_READ})
+        )
+        try:
+            with self.assertRaises(self.server.HTTPInsufficientScopeError) as raised:
+                asyncio.run(
+                    self.server.continue_model_fallback_configure(
+                        FakeRequest(
+                            {
+                                "provider": "openai",
+                                "model": "fallback-target",
+                                "apiBase": "http://127.0.0.1:8787/v1",
+                            }
+                        )
+                    )
+                )
+        finally:
+            self.server._HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
+            self.server._HTTP_REQUEST_AUTHORIZED.reset(auth_token)
+
+        self.assertEqual(self.server.MCP_SCOPE_MUTATE, raised.exception.required_scope)
+        self.assertFalse((self.repo_path / ".continue/model-routing.yaml").exists())
+
+    def test_model_fallback_configure_allows_mutate_scope_in_http_context(self):
+        self.server.ALLOW_MUTATIONS = True
+        auth_token = self.server._HTTP_REQUEST_AUTHORIZED.set(True)
+        scope_token = self.server._HTTP_REQUEST_GRANTED_SCOPES.set(
+            frozenset({self.server.MCP_SCOPE_MUTATE})
+        )
+        try:
+            response = asyncio.run(
+                self.server.continue_model_fallback_configure(
+                    FakeRequest(
+                        {
+                            "provider": "openai",
+                            "model": "fallback-target",
+                            "apiBase": "http://127.0.0.1:8787/v1",
+                        }
+                    )
+                )
+            )
+        finally:
+            self.server._HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
+            self.server._HTTP_REQUEST_AUTHORIZED.reset(auth_token)
+        payload = self.response_json(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual("written", payload["status"])
+        self.assertTrue((self.repo_path / ".continue/model-routing.yaml").exists())
+
     def test_model_fallback_configure_dry_run_when_mutations_disabled(self):
         self.server.ALLOW_MUTATIONS = False
 
