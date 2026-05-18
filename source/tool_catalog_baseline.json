@@ -1313,7 +1313,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:1d324227aa85ed30ff319a38e21aee8965ae5a36cb12ca4e38aabff01c611f39",
+      "digest": "sha256:4b48e7fe4711ae31ec0790c9dfd1569afe03f5fb33f7c83f107a16243bf7b766",
       "metadata": {
         "documentation": [
           {
@@ -1471,6 +1471,9 @@
               "snapshots": {
                 "type": "object"
               },
+              "untrusted_content_signals": {
+                "type": "object"
+              },
               "window": {
                 "type": "object"
               },
@@ -1534,6 +1537,7 @@
             "security",
             "workflow_diagnostics",
             "tool_catalog_integrity",
+            "untrusted_content_signals",
             "lineage",
             "provenance",
             "compressed_observation",
@@ -1642,6 +1646,9 @@
               "snapshots": {
                 "type": "object"
               },
+              "untrusted_content_signals": {
+                "type": "object"
+              },
               "window": {
                 "type": "object"
               },
@@ -1690,7 +1697,7 @@
       "name": "governance_report"
     },
     {
-      "digest": "sha256:bad6ce0c739ff34169067c644237b5a819ca6f7ad84ee7419d3773d2c750bc64",
+      "digest": "sha256:0fe9f51d98eeb3cdc193d366b910d6c1bf92d8439df441e222b24baef759f9c1",
       "metadata": {
         "documentation": [
           {
@@ -1862,6 +1869,82 @@
                 "items": {
                   "additionalProperties": true,
                   "properties": {
+                    "_meta": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "untrusted_content": {
+                          "additionalProperties": true,
+                          "properties": {
+                            "non_blocking_default": {
+                              "type": "boolean"
+                            },
+                            "prompt_injection_signals": {
+                              "additionalProperties": true,
+                              "properties": {
+                                "bounds": {
+                                  "type": "object"
+                                },
+                                "detected": {
+                                  "type": "boolean"
+                                },
+                                "evidence": {
+                                  "items": {
+                                    "type": "object"
+                                  },
+                                  "type": "array"
+                                },
+                                "input": {
+                                  "type": "object"
+                                },
+                                "non_blocking": {
+                                  "type": "boolean"
+                                },
+                                "policy": {
+                                  "type": "string"
+                                },
+                                "redaction": {
+                                  "type": "object"
+                                },
+                                "schema": {
+                                  "const": "prompt_injection_signals.v1",
+                                  "type": "string"
+                                },
+                                "summary": {
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "schema",
+                                "detected",
+                                "non_blocking",
+                                "summary",
+                                "evidence",
+                                "redaction"
+                              ],
+                              "type": "object"
+                            },
+                            "schema": {
+                              "const": "untrusted_content_metadata.v1",
+                              "type": "string"
+                            },
+                            "treat_as": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "schema",
+                            "treat_as",
+                            "non_blocking_default",
+                            "prompt_injection_signals"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "untrusted_content"
+                      ],
+                      "type": "object"
+                    },
                     "column": {
                       "type": "integer"
                     },
@@ -1984,6 +2067,51 @@
                       },
                       "type": "array"
                     },
+                    "prompt_injection_signals": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "bounds": {
+                          "type": "object"
+                        },
+                        "detected": {
+                          "type": "boolean"
+                        },
+                        "evidence": {
+                          "items": {
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "input": {
+                          "type": "object"
+                        },
+                        "non_blocking": {
+                          "type": "boolean"
+                        },
+                        "policy": {
+                          "type": "string"
+                        },
+                        "redaction": {
+                          "type": "object"
+                        },
+                        "schema": {
+                          "const": "prompt_injection_signals.v1",
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "schema",
+                        "detected",
+                        "non_blocking",
+                        "summary",
+                        "evidence",
+                        "redaction"
+                      ],
+                      "type": "object"
+                    },
                     "result_id": {
                       "type": "string"
                     },
@@ -2014,6 +2142,82 @@
               "items": {
                 "additionalProperties": true,
                 "properties": {
+                  "_meta": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "untrusted_content": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "non_blocking_default": {
+                            "type": "boolean"
+                          },
+                          "prompt_injection_signals": {
+                            "additionalProperties": true,
+                            "properties": {
+                              "bounds": {
+                                "type": "object"
+                              },
+                              "detected": {
+                                "type": "boolean"
+                              },
+                              "evidence": {
+                                "items": {
+                                  "type": "object"
+                                },
+                                "type": "array"
+                              },
+                              "input": {
+                                "type": "object"
+                              },
+                              "non_blocking": {
+                                "type": "boolean"
+                              },
+                              "policy": {
+                                "type": "string"
+                              },
+                              "redaction": {
+                                "type": "object"
+                              },
+                              "schema": {
+                                "const": "prompt_injection_signals.v1",
+                                "type": "string"
+                              },
+                              "summary": {
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "schema",
+                              "detected",
+                              "non_blocking",
+                              "summary",
+                              "evidence",
+                              "redaction"
+                            ],
+                            "type": "object"
+                          },
+                          "schema": {
+                            "const": "untrusted_content_metadata.v1",
+                            "type": "string"
+                          },
+                          "treat_as": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "schema",
+                          "treat_as",
+                          "non_blocking_default",
+                          "prompt_injection_signals"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "untrusted_content"
+                    ],
+                    "type": "object"
+                  },
                   "column": {
                     "type": "integer"
                   },
@@ -2136,6 +2340,51 @@
                     },
                     "type": "array"
                   },
+                  "prompt_injection_signals": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "bounds": {
+                        "type": "object"
+                      },
+                      "detected": {
+                        "type": "boolean"
+                      },
+                      "evidence": {
+                        "items": {
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "input": {
+                        "type": "object"
+                      },
+                      "non_blocking": {
+                        "type": "boolean"
+                      },
+                      "policy": {
+                        "type": "string"
+                      },
+                      "redaction": {
+                        "type": "object"
+                      },
+                      "schema": {
+                        "const": "prompt_injection_signals.v1",
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "detected",
+                      "non_blocking",
+                      "summary",
+                      "evidence",
+                      "redaction"
+                    ],
+                    "type": "object"
+                  },
                   "result_id": {
                     "type": "string"
                   },
@@ -2208,12 +2457,90 @@
             "paths",
             "result_id",
             "count",
-            "compressed_observation"
+            "compressed_observation",
+            "prompt_injection_signals",
+            "_meta"
           ],
           "outputSchema": {
             "items": {
               "additionalProperties": true,
               "properties": {
+                "_meta": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "untrusted_content": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "non_blocking_default": {
+                          "type": "boolean"
+                        },
+                        "prompt_injection_signals": {
+                          "additionalProperties": true,
+                          "properties": {
+                            "bounds": {
+                              "type": "object"
+                            },
+                            "detected": {
+                              "type": "boolean"
+                            },
+                            "evidence": {
+                              "items": {
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "input": {
+                              "type": "object"
+                            },
+                            "non_blocking": {
+                              "type": "boolean"
+                            },
+                            "policy": {
+                              "type": "string"
+                            },
+                            "redaction": {
+                              "type": "object"
+                            },
+                            "schema": {
+                              "const": "prompt_injection_signals.v1",
+                              "type": "string"
+                            },
+                            "summary": {
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "schema",
+                            "detected",
+                            "non_blocking",
+                            "summary",
+                            "evidence",
+                            "redaction"
+                          ],
+                          "type": "object"
+                        },
+                        "schema": {
+                          "const": "untrusted_content_metadata.v1",
+                          "type": "string"
+                        },
+                        "treat_as": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema",
+                        "treat_as",
+                        "non_blocking_default",
+                        "prompt_injection_signals"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "untrusted_content"
+                  ],
+                  "type": "object"
+                },
                 "column": {
                   "type": "integer"
                 },
@@ -2335,6 +2662,51 @@
                     "type": "string"
                   },
                   "type": "array"
+                },
+                "prompt_injection_signals": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "bounds": {
+                      "type": "object"
+                    },
+                    "detected": {
+                      "type": "boolean"
+                    },
+                    "evidence": {
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "input": {
+                      "type": "object"
+                    },
+                    "non_blocking": {
+                      "type": "boolean"
+                    },
+                    "policy": {
+                      "type": "string"
+                    },
+                    "redaction": {
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "prompt_injection_signals.v1",
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "detected",
+                    "non_blocking",
+                    "summary",
+                    "evidence",
+                    "redaction"
+                  ],
+                  "type": "object"
                 },
                 "result_id": {
                   "type": "string"
@@ -3263,7 +3635,7 @@
       "name": "policy_simulator"
     },
     {
-      "digest": "sha256:03eb71ebc5bb6f3d37b910b714b8d747e1d900625f17d01ef9ac2517a9965115",
+      "digest": "sha256:7c1e9cbc2c87d459a3b9d678ad1d7d10399643c426e4728167bbc790541caaed",
       "metadata": {
         "documentation": [
           {
@@ -3328,6 +3700,82 @@
           "output_schema": {
             "additionalProperties": true,
             "properties": {
+              "_meta": {
+                "additionalProperties": true,
+                "properties": {
+                  "untrusted_content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "non_blocking_default": {
+                        "type": "boolean"
+                      },
+                      "prompt_injection_signals": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "bounds": {
+                            "type": "object"
+                          },
+                          "detected": {
+                            "type": "boolean"
+                          },
+                          "evidence": {
+                            "items": {
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "input": {
+                            "type": "object"
+                          },
+                          "non_blocking": {
+                            "type": "boolean"
+                          },
+                          "policy": {
+                            "type": "string"
+                          },
+                          "redaction": {
+                            "type": "object"
+                          },
+                          "schema": {
+                            "const": "prompt_injection_signals.v1",
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "schema",
+                          "detected",
+                          "non_blocking",
+                          "summary",
+                          "evidence",
+                          "redaction"
+                        ],
+                        "type": "object"
+                      },
+                      "schema": {
+                        "const": "untrusted_content_metadata.v1",
+                        "type": "string"
+                      },
+                      "treat_as": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "treat_as",
+                      "non_blocking_default",
+                      "prompt_injection_signals"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "untrusted_content"
+                ],
+                "type": "object"
+              },
               "content": {
                 "type": "string"
               },
@@ -3336,6 +3784,51 @@
               },
               "path": {
                 "type": "string"
+              },
+              "prompt_injection_signals": {
+                "additionalProperties": true,
+                "properties": {
+                  "bounds": {
+                    "type": "object"
+                  },
+                  "detected": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "input": {
+                    "type": "object"
+                  },
+                  "non_blocking": {
+                    "type": "boolean"
+                  },
+                  "policy": {
+                    "type": "string"
+                  },
+                  "redaction": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "prompt_injection_signals.v1",
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "detected",
+                  "non_blocking",
+                  "summary",
+                  "evidence",
+                  "redaction"
+                ],
+                "type": "object"
               },
               "requested_end_line": {
                 "type": "integer"
@@ -3400,11 +3893,89 @@
           "experimentalFields": [
             "requested_start_line",
             "requested_end_line",
-            "total_lines"
+            "total_lines",
+            "prompt_injection_signals",
+            "_meta"
           ],
           "outputSchema": {
             "additionalProperties": true,
             "properties": {
+              "_meta": {
+                "additionalProperties": true,
+                "properties": {
+                  "untrusted_content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "non_blocking_default": {
+                        "type": "boolean"
+                      },
+                      "prompt_injection_signals": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "bounds": {
+                            "type": "object"
+                          },
+                          "detected": {
+                            "type": "boolean"
+                          },
+                          "evidence": {
+                            "items": {
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "input": {
+                            "type": "object"
+                          },
+                          "non_blocking": {
+                            "type": "boolean"
+                          },
+                          "policy": {
+                            "type": "string"
+                          },
+                          "redaction": {
+                            "type": "object"
+                          },
+                          "schema": {
+                            "const": "prompt_injection_signals.v1",
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "schema",
+                          "detected",
+                          "non_blocking",
+                          "summary",
+                          "evidence",
+                          "redaction"
+                        ],
+                        "type": "object"
+                      },
+                      "schema": {
+                        "const": "untrusted_content_metadata.v1",
+                        "type": "string"
+                      },
+                      "treat_as": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "treat_as",
+                      "non_blocking_default",
+                      "prompt_injection_signals"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "untrusted_content"
+                ],
+                "type": "object"
+              },
               "content": {
                 "type": "string"
               },
@@ -3413,6 +3984,51 @@
               },
               "path": {
                 "type": "string"
+              },
+              "prompt_injection_signals": {
+                "additionalProperties": true,
+                "properties": {
+                  "bounds": {
+                    "type": "object"
+                  },
+                  "detected": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "input": {
+                    "type": "object"
+                  },
+                  "non_blocking": {
+                    "type": "boolean"
+                  },
+                  "policy": {
+                    "type": "string"
+                  },
+                  "redaction": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "prompt_injection_signals.v1",
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "detected",
+                  "non_blocking",
+                  "summary",
+                  "evidence",
+                  "redaction"
+                ],
+                "type": "object"
               },
               "requested_end_line": {
                 "type": "integer"
@@ -3889,7 +4505,7 @@
       "name": "repo_info"
     },
     {
-      "digest": "sha256:8f23af1aeca46487eb6bcda0aab00427e1abc860032a4200c1be11bd437b53c3",
+      "digest": "sha256:b28e0e1511723da075de569de2995337bc3dc203cc04184fa2d489016aeee6f5",
       "metadata": {
         "documentation": [
           {
@@ -3965,6 +4581,42 @@
               },
               "summary": {
                 "type": "object"
+              },
+              "untrusted_content_signals": {
+                "additionalProperties": true,
+                "properties": {
+                  "category_counts": {
+                    "type": "object"
+                  },
+                  "detected": {
+                    "type": "boolean"
+                  },
+                  "non_blocking": {
+                    "type": "boolean"
+                  },
+                  "privacy": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "prompt_injection_signal_counts.v1",
+                    "type": "string"
+                  },
+                  "severity": {
+                    "type": "string"
+                  },
+                  "total_signals": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "detected",
+                  "total_signals",
+                  "category_counts",
+                  "severity",
+                  "non_blocking"
+                ],
+                "type": "object"
               }
             },
             "required": [
@@ -4014,7 +4666,9 @@
             ],
             "type": "object"
           },
-          "experimentalFields": [],
+          "experimentalFields": [
+            "untrusted_content_signals"
+          ],
           "outputSchema": {
             "additionalProperties": true,
             "properties": {
@@ -4036,6 +4690,42 @@
                 "type": "integer"
               },
               "summary": {
+                "type": "object"
+              },
+              "untrusted_content_signals": {
+                "additionalProperties": true,
+                "properties": {
+                  "category_counts": {
+                    "type": "object"
+                  },
+                  "detected": {
+                    "type": "boolean"
+                  },
+                  "non_blocking": {
+                    "type": "boolean"
+                  },
+                  "privacy": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "prompt_injection_signal_counts.v1",
+                    "type": "string"
+                  },
+                  "severity": {
+                    "type": "string"
+                  },
+                  "total_signals": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "detected",
+                  "total_signals",
+                  "category_counts",
+                  "severity",
+                  "non_blocking"
+                ],
                 "type": "object"
               }
             },
@@ -4934,7 +5624,7 @@
       "name": "self_optimization_report"
     },
     {
-      "digest": "sha256:827579aadc522d75cef379ff28f15cabdeceffe2cba68ad28ef664da0896d537",
+      "digest": "sha256:ca2e457a27cc93891c55d1a7786d1efc453ebde047bcccd8368e2bff0e70b1ff",
       "metadata": {
         "documentation": [
           {
@@ -5006,6 +5696,82 @@
           "output_schema": {
             "additionalProperties": true,
             "properties": {
+              "_meta": {
+                "additionalProperties": true,
+                "properties": {
+                  "untrusted_content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "non_blocking_default": {
+                        "type": "boolean"
+                      },
+                      "prompt_injection_signals": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "bounds": {
+                            "type": "object"
+                          },
+                          "detected": {
+                            "type": "boolean"
+                          },
+                          "evidence": {
+                            "items": {
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "input": {
+                            "type": "object"
+                          },
+                          "non_blocking": {
+                            "type": "boolean"
+                          },
+                          "policy": {
+                            "type": "string"
+                          },
+                          "redaction": {
+                            "type": "object"
+                          },
+                          "schema": {
+                            "const": "prompt_injection_signals.v1",
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "schema",
+                          "detected",
+                          "non_blocking",
+                          "summary",
+                          "evidence",
+                          "redaction"
+                        ],
+                        "type": "object"
+                      },
+                      "schema": {
+                        "const": "untrusted_content_metadata.v1",
+                        "type": "string"
+                      },
+                      "treat_as": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "treat_as",
+                      "non_blocking_default",
+                      "prompt_injection_signals"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "untrusted_content"
+                ],
+                "type": "object"
+              },
               "file_count": {
                 "type": "integer"
               },
@@ -5026,6 +5792,51 @@
               },
               "patch_unified": {
                 "type": "integer"
+              },
+              "prompt_injection_signals": {
+                "additionalProperties": true,
+                "properties": {
+                  "bounds": {
+                    "type": "object"
+                  },
+                  "detected": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "input": {
+                    "type": "object"
+                  },
+                  "non_blocking": {
+                    "type": "boolean"
+                  },
+                  "policy": {
+                    "type": "string"
+                  },
+                  "redaction": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "prompt_injection_signals.v1",
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "detected",
+                  "non_blocking",
+                  "summary",
+                  "evidence",
+                  "redaction"
+                ],
+                "type": "object"
               },
               "risk_flags": {
                 "type": "object"
@@ -5088,11 +5899,89 @@
             "files",
             "files_sorted_by_churn",
             "patch",
-            "patch_unified"
+            "patch_unified",
+            "prompt_injection_signals",
+            "_meta"
           ],
           "outputSchema": {
             "additionalProperties": true,
             "properties": {
+              "_meta": {
+                "additionalProperties": true,
+                "properties": {
+                  "untrusted_content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "non_blocking_default": {
+                        "type": "boolean"
+                      },
+                      "prompt_injection_signals": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "bounds": {
+                            "type": "object"
+                          },
+                          "detected": {
+                            "type": "boolean"
+                          },
+                          "evidence": {
+                            "items": {
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "input": {
+                            "type": "object"
+                          },
+                          "non_blocking": {
+                            "type": "boolean"
+                          },
+                          "policy": {
+                            "type": "string"
+                          },
+                          "redaction": {
+                            "type": "object"
+                          },
+                          "schema": {
+                            "const": "prompt_injection_signals.v1",
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "schema",
+                          "detected",
+                          "non_blocking",
+                          "summary",
+                          "evidence",
+                          "redaction"
+                        ],
+                        "type": "object"
+                      },
+                      "schema": {
+                        "const": "untrusted_content_metadata.v1",
+                        "type": "string"
+                      },
+                      "treat_as": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "treat_as",
+                      "non_blocking_default",
+                      "prompt_injection_signals"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "untrusted_content"
+                ],
+                "type": "object"
+              },
               "file_count": {
                 "type": "integer"
               },
@@ -5113,6 +6002,51 @@
               },
               "patch_unified": {
                 "type": "integer"
+              },
+              "prompt_injection_signals": {
+                "additionalProperties": true,
+                "properties": {
+                  "bounds": {
+                    "type": "object"
+                  },
+                  "detected": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "input": {
+                    "type": "object"
+                  },
+                  "non_blocking": {
+                    "type": "boolean"
+                  },
+                  "policy": {
+                    "type": "string"
+                  },
+                  "redaction": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "prompt_injection_signals.v1",
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "detected",
+                  "non_blocking",
+                  "summary",
+                  "evidence",
+                  "redaction"
+                ],
+                "type": "object"
               },
               "risk_flags": {
                 "type": "object"
@@ -7708,5 +8642,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:5ed83d3afba4510ae233dc875b61d3cbd3fb0bb361010982fa52a6293455fc1c"
+  "whole_catalog_digest": "sha256:4086e45a5483b6513835bd904f45bb8b3734476ccac0600bab66025437f0be48"
 }
