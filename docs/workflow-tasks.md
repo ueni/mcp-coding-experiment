@@ -19,7 +19,28 @@ Initial supported workflows:
 - `vscode_task_run` - starts one approved VS Code task by label, with bounded
   retry metadata for transient failures.
 
-## Status polling
+## Progress, cancellation, and polling
+
+When a client supplies MCP `_meta.progressToken` on `workflow_task(action="start")`,
+the server emits best-effort `notifications/progress` updates for the persisted
+task lifecycle. Progress values are coarse, monotonic percentages, rate-limited
+for non-terminal updates, and terminal states force a final `100/100` update.
+Clients that do not support progress notifications continue to use persisted
+polling without behavior changes.
+
+Cancel a running task with:
+
+```text
+workflow_task(action="cancel", task_id="task-...", cancel_reason="optional redacted reason")
+```
+
+The cancel path records `cancel_requested` / `cancelled` audit metadata, redacts
+the reason before persistence, and best-effort terminates active
+`vscode_task_run` subprocesses. Protocol `notifications/cancelled` messages are
+also mapped back to the originating workflow task when the request id is still
+known. Cancellation is race-safe but best-effort: if the workflow already reached
+a terminal state, the status remains terminal and the cancel request is recorded
+as ignored.
 
 Call `task_status(task_id="task-...")` to read the latest status from:
 
@@ -29,7 +50,8 @@ Call `task_status(task_id="task-...")` to read the latest status from:
 
 Status records use `workflow_task.v1` and include:
 
-- `status`: `pending`, `running`, `succeeded`, `failed`, or `expired`
+- `status`: `pending`, `running`, `cancel_requested`, `succeeded`, `failed`,
+  `cancelled`, or `expired`
 - timestamps: `created_at`, `started_at`, `updated_at`, `finished_at`,
   `expires_at`, `retention_expires_at`
 - `progress`: coarse phase/percent fields for current clients
@@ -41,8 +63,10 @@ Status records use `workflow_task.v1` and include:
 - `artifact_references`: generated artifact resource links using
   `artifact_resource_link.v1`
 - `resource_links` / `_meta`: resource link for the task status artifact itself
+- `cancellation`: redacted best-effort cancellation metadata when cancellation
+  is requested or ignored
 - `audit_events`: redacted lifecycle events for start, completion, failure,
-  retry, and expiry
+  retry, cancellation, and expiry
 
 Secrets are not stored intentionally. Arguments, errors, and audit details pass
 through the MCP audit redactor before persistence. Status artifacts use
