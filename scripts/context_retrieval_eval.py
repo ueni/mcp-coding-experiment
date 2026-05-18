@@ -89,15 +89,28 @@ def load_fixture_set(path: str | Path = DEFAULT_FIXTURE_PATH) -> dict[str, Any]:
     for fixture in fixtures:
         if not isinstance(fixture, dict):
             raise ValueError("each fixture must be a JSON object")
-        for field in ("id", "task", "prompt", "gold_context_anchors"):
+        for field in (
+            "id",
+            "coverage",
+            "task",
+            "prompt",
+            "gold_context_anchors",
+            "expected_top_workflow_card",
+        ):
             if field not in fixture:
                 raise ValueError(f"fixture missing required field: {field}")
         if not str(fixture.get("id") or "").strip():
             raise ValueError("fixture id must not be empty")
+        if not str(fixture.get("coverage") or "").strip():
+            raise ValueError(f"fixture {fixture.get('id')} coverage must not be empty")
         if not str(fixture.get("task") or "").strip():
             raise ValueError(f"fixture {fixture.get('id')} task must not be empty")
         if not str(fixture.get("prompt") or "").strip():
             raise ValueError(f"fixture {fixture.get('id')} prompt must not be empty")
+        if not str(fixture.get("expected_top_workflow_card") or "").strip():
+            raise ValueError(
+                f"fixture {fixture.get('id')} expected_top_workflow_card must not be empty"
+            )
         anchors = fixture.get("gold_context_anchors")
         if not isinstance(anchors, list) or not anchors:
             raise ValueError(
