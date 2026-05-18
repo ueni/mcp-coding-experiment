@@ -29748,7 +29748,7 @@ async def continue_model_fallback_chat_completions(request):
         "reason": "continue_model_configuration_assistance",
         "risk_class": "repo_bound_configuration",
     }
-    policy = {"input_tokens_estimate": _agent_proxy_estimate_payload_tokens(payload)}
+    policy = {"input_tokens_estimate": _agent_proxy_estimate_tokens(_agent_proxy_request_text_digest_input(payload))}
     response_payload = _agent_proxy_openai_response(payload, content, trace_id, route, policy)
     response_payload["model_fallback"] = status_payload
     return JSONResponse(response_payload)

@@ -563,14 +563,10 @@ remove_retired_continue_model_default() {
   fi
 }
 
-apply_repo_defaults() {
-  local defaults_root="/opt/codebase-tooling/defaults"
-  if [[ "${MCP_APPLY_REPO_DEFAULTS:-false}" != "true" ]]; then
-    return
-  fi
-  if [[ ! -d /repo || ! -w /repo ]]; then
-    return
-  fi
+apply_continue_repo_defaults() {
+  local defaults_root="${1:-/opt/codebase-tooling/defaults}"
+  local model_name=""
+  local model_path=""
 
   mkdir -p /repo/.continue/mcpServers
   copy_continue_default_if_missing_or_stale \
@@ -595,6 +591,20 @@ apply_repo_defaults() {
     || grep -q 'model: qwen3.6-35b-a3b:iq1' /repo/.continue/model-routing.yaml; then
     echo "Continue model routing references retired bundled model profiles; refreshing /repo/.continue/model-routing.yaml." >&2
     cp "${defaults_root}/continue/model-routing.yaml" /repo/.continue/model-routing.yaml
+  fi
+}
+
+apply_repo_defaults() {
+  local defaults_root="/opt/codebase-tooling/defaults"
+  if [[ "${MCP_APPLY_REPO_DEFAULTS:-false}" != "true" ]]; then
+    return
+  fi
+  if [[ ! -d /repo || ! -w /repo ]]; then
+    return
+  fi
+
+  if is_truthy "${MCP_APPLY_CONTINUE_DEFAULTS:-true}"; then
+    apply_continue_repo_defaults "${defaults_root}"
   fi
 
   mkdir -p /home/app/.codex

@@ -204,6 +204,8 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual("8192", config["containerEnv"]["OLLAMA_CONTEXT_LENGTH"])
         self.assertEqual("8192", config["containerEnv"]["OLLAMA_TEXT_ALIAS_NUM_CTX"])
         self.assertEqual("qwen2.5-coder:1.5b", config["containerEnv"]["CODING_DEFAULT_MODEL"])
+        self.assertEqual("true", config["containerEnv"]["MCP_APPLY_REPO_DEFAULTS"])
+        self.assertEqual("true", config["containerEnv"]["MCP_APPLY_CONTINUE_DEFAULTS"])
         self.assertEqual(
             "http://127.0.0.1:2345/api/generate",
             config["containerEnv"]["LOCAL_INFER_ENDPOINT"],
@@ -264,6 +266,81 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual(
             ".continue/models/coding-openai-compatible.yaml", routing["router"]["file"]
         )
+
+    def test_setup_script_none_profile_skips_continue_models_durably(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / ".git").mkdir()
+            result = subprocess.run(
+                [
+                    "/bin/sh",
+                    str(REPO_ROOT / "setup-repository.sh"),
+                    "--continue-model-profile",
+                    "none",
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr.strip() or result.stdout.strip(),
+            )
+
+            config = json.loads(
+                (repo_root / ".devcontainer" / "devcontainer.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertFalse((repo_root / ".continue").exists())
+            self.assertEqual("true", config["containerEnv"]["MCP_APPLY_REPO_DEFAULTS"])
+            self.assertEqual("false", config["containerEnv"]["MCP_APPLY_CONTINUE_DEFAULTS"])
+            self.assertNotIn(".continue/ Continue model", result.stderr)
+
+    def test_setup_script_invalid_continue_profile_fails_before_repo_mutation(self):
+        cases = [
+            (
+                "environment",
+                ["/bin/sh", str(REPO_ROOT / "setup-repository.sh")],
+                {"CONTINUE_MODEL_PROFILE": "not-a-profile"},
+            ),
+            (
+                "argument",
+                [
+                    "/bin/sh",
+                    str(REPO_ROOT / "setup-repository.sh"),
+                    "--continue-model-profile",
+                    "not-a-profile",
+                ],
+                {},
+            ),
+        ]
+        for label, command, env_update in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmpdir:
+                repo_root = Path(tmpdir)
+                (repo_root / ".git").mkdir()
+                env = os.environ.copy()
+                env.update(env_update)
+                result = subprocess.run(
+                    command,
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Unknown Continue model profile: not-a-profile", result.stderr)
+                self.assertFalse((repo_root / ".devcontainer").exists())
+                self.assertFalse((repo_root / ".continue").exists())
+                self.assertFalse((repo_root / ".gitignore").exists())
+                self.assertFalse(
+                    (repo_root / ".gitignore_codebase_tooling_mcp.touched").exists()
+                )
 
     def test_setup_script_can_force_vulkan_gpu_passthrough(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -356,6 +433,9 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertIn("16384", combined)
         self.assertIn("verified tool-capable Agent model", combined)
         self.assertIn("preloads `qwen2.5-coder:1.5b`", combined)
+        self.assertIn("--continue-model-profile none", readme)
+        self.assertIn("MCP_APPLY_CONTINUE_DEFAULTS=false", readme)
+        self.assertIn("setup script writes the selected Continue profile", readme)
         self.assertIn("forgot to add '/v1'", troubleshooting)
         self.assertIn("provider: ollama", troubleshooting)
         self.assertIn("http://127.0.0.1:2345/api/tags", troubleshooting)

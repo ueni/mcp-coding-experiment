@@ -132,6 +132,7 @@ Checks:
 
 - Confirm the repository was opened with the generated `.devcontainer/devcontainer.json`.
 - Confirm the container environment includes `MCP_APPLY_REPO_DEFAULTS=true`.
+- If Continue defaults are expected, confirm `MCP_APPLY_CONTINUE_DEFAULTS` is unset or `true`; setup with `--continue-model-profile none` intentionally writes `MCP_APPLY_CONTINUE_DEFAULTS=false` so startup will not create `.continue` model or MCP profile files.
 - Rebuild or reopen the devcontainer so the image entrypoint runs again.
 
 ## Continue suggests adding `/v1` to `apiBase`

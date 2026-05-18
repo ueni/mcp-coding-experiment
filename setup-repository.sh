@@ -166,6 +166,24 @@ prompt_continue_model_profile() {
   fi
 }
 
+validate_continue_model_profile() {
+  prompt_continue_model_profile
+  case "$CONTINUE_MODEL_PROFILE" in
+    local|openai-compatible|none) ;;
+    *)
+      log "Unknown Continue model profile: $CONTINUE_MODEL_PROFILE"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+validate_continue_model_profile
+MCP_APPLY_CONTINUE_DEFAULTS=true
+if [ "$CONTINUE_MODEL_PROFILE" = "none" ]; then
+  MCP_APPLY_CONTINUE_DEFAULTS=false
+fi
+
 write_openai_compatible_continue_model() {
   profile_path=$1
   model_id=${CONTINUE_MODEL_ID:-}
@@ -252,7 +270,6 @@ EOF
 }
 
 configure_continue_models() {
-  prompt_continue_model_profile
   if [ "$CONTINUE_MODEL_PROFILE" = "none" ]; then
     return
   fi
@@ -305,6 +322,7 @@ ${DEVCONTAINER_RUNARGS_BLOCK}
     "DOCKER_HOST": "unix:///var/run/docker.sock",
     "DOCKER_CONFIG": "/home/app/.docker",
     "MCP_APPLY_REPO_DEFAULTS": "true",
+    "MCP_APPLY_CONTINUE_DEFAULTS": "${MCP_APPLY_CONTINUE_DEFAULTS}",
     "MCP_TRANSPORT": "http",
     "MCP_HTTP_BEARER_TOKEN": "\${localEnv:MCP_HTTP_BEARER_TOKEN}",
     "MCP_AGENT_EXECUTION_MODE": "online",
