@@ -79,3 +79,7 @@ When an agent is unsure which workflow to use, call:
 Use `execution_mode="offline"` when cloud models are unavailable or disabled. The offline profile constrains local-small-model decisions to structured JSON, confidence thresholds, and hard iteration limits while preserving the same inspect -> workflow selection -> context retrieval -> patch proposal -> controlled apply -> checks -> summary loop documented in [Agent execution modes](./execution-modes.md).
 
 Then call the `recommended_entrypoint` from the top match only after checking caveats. For high-risk mutation or release work, clarify scope and create/verify a rollback path before executing write-capable tools.
+
+## Regression coverage
+
+The checked-in [context retrieval regression suite](./context-retrieval-regression.md) exercises `task_router(mode="workflow_select")` against deterministic fixtures with gold workflow-card anchors. Run it after changing card text, `routing_terms`, or selector scoring to catch recall, precision, efficiency, or top-card regressions before review.
