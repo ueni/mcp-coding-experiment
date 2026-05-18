@@ -10557,10 +10557,13 @@ def _cancel_workflow_task(
             now = _now_iso()
             payload = dict(payload)
             payload["updated_at"] = now
+            payload["cancel_requested"] = True
+            payload["cancel_requested_at"] = payload.get("cancel_requested_at") or now
             payload["cancellation"] = _workflow_task_cancellation_payload(
                 payload,
                 reason=redacted_reason,
                 source=source,
+                requested_at=str(payload.get("cancel_requested_at") or now),
             )
             payload["cancellation"].update(
                 {

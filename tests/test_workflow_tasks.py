@@ -23,6 +23,77 @@ class WorkflowTaskTests(ServerToolsTestBase):
             time.sleep(0.05)
         self.fail(f"workflow task did not reach terminal state: {task_id}")
 
+    def _write_workflow_task_fixture(self, task_id: str, **overrides):
+        now = self.server._now_iso()
+        status = str(overrides.pop("status", "pending"))
+        workflow = str(overrides.pop("workflow", "vscode_task_run"))
+        payload = {
+            "schema": "workflow_task.v1",
+            "task_id": task_id,
+            "workflow": workflow,
+            "status": status,
+            "state": overrides.pop("state", status),
+            "started": True,
+            "ok": overrides.pop("ok", False),
+            "attempt": overrides.pop("attempt", 0),
+            "max_retries": overrides.pop("max_retries", 0),
+            "retries": overrides.pop("retries", []),
+            "created_at": now,
+            "started_at": overrides.pop("started_at", now if status != "pending" else ""),
+            "finished_at": overrides.pop(
+                "finished_at",
+                now if status in self.server._WORKFLOW_TASK_FINAL_STATUSES else "",
+            ),
+            "updated_at": now,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            "retention_expires_at": (
+                datetime.now(timezone.utc) + timedelta(days=7)
+            ).isoformat(),
+            "retry_of": "",
+            "cancel_requested": False,
+            "cancel_requested_at": "",
+            "cancelled_at": "",
+            "cancellation": {
+                "requested": False,
+                "requested_at": "",
+                "cancelled_at": "",
+                "reason": "",
+                "reason_redacted": True,
+                "best_effort": True,
+            },
+            "progress": overrides.pop("progress", 0.0),
+            "progress_detail": overrides.pop(
+                "progress_detail", {"phase": "queued", "percent": 0}
+            ),
+            "arguments": overrides.pop("arguments", {}),
+            "artifact_references": overrides.pop("artifact_references", []),
+            "audit_events": overrides.pop("audit_events", [{"event": "start", "at": now}]),
+            "security": {
+                "redacted": True,
+                "contains_secrets": False,
+                "repo_boundary_enforced": True,
+            },
+        }
+        payload.update(overrides)
+        return self.server._write_workflow_task_status(payload)
+
+    def _assert_persisted_cancellation_metadata_excludes(
+        self, task_id: str, *values: str
+    ):
+        status_path = (
+            self.repo_path / ".codebase-tooling-mcp" / "tasks" / f"{task_id}.json"
+        )
+        persisted = json.loads(status_path.read_text(encoding="utf-8"))
+        metadata = json.dumps(
+            {
+                "audit_events": persisted.get("audit_events", []),
+                "cancellation": persisted.get("cancellation", {}),
+            },
+            sort_keys=True,
+        )
+        for value in values:
+            self.assertNotIn(value, metadata)
+
     def test_workflow_task_starts_governance_report_and_persists_redacted_status(self):
         started = self.server.workflow_task(
             workflow="governance_report",
@@ -218,6 +289,176 @@ class WorkflowTaskTests(ServerToolsTestBase):
         self.assertEqual(fake_session.notifications[0]["progress_token"], "progress-token-1")
         self.assertEqual(fake_session.notifications[0]["related_request_id"], "request-1")
         self.assertNotIn(task_id, self.server._WORKFLOW_TASK_PROGRESS_BRIDGES)
+
+    def test_workflow_task_start_progress_token_emits_notifications_end_to_end(self):
+        class FakeSession:
+            def __init__(self):
+                self.notifications = []
+
+            async def send_progress_notification(
+                self,
+                progress_token,
+                progress,
+                total=None,
+                message=None,
+                related_request_id=None,
+            ):
+                self.notifications.append(
+                    {
+                        "progress_token": progress_token,
+                        "progress": progress,
+                        "total": total,
+                        "message": message,
+                        "related_request_id": related_request_id,
+                    }
+                )
+
+        class Meta:
+            progressToken = "progress-token-start"
+
+        def quick_vscode_task_run(**_kwargs):
+            return {
+                "schema": "vscode_task_run.v1",
+                "ok": True,
+                "timeout": False,
+                "stdout": "done",
+                "stderr": "",
+            }
+
+        fake_session = FakeSession()
+        request_context = type(
+            "RequestContext",
+            (),
+            {"meta": Meta(), "session": fake_session, "request_id": "request-start-1"},
+        )()
+        context = type(
+            "Context",
+            (),
+            {
+                "request_context": request_context,
+                "session": fake_session,
+                "request_id": "request-start-1",
+            },
+        )()
+        task_id = "task-progress-start"
+
+        try:
+            with (
+                patch.object(self.server.mcp, "get_context", return_value=context),
+                patch.object(self.server, "vscode_task_run", side_effect=quick_vscode_task_run),
+            ):
+                started = self.server.workflow_task(
+                    action="start",
+                    workflow="vscode_task_run",
+                    label="Docker: build",
+                    max_retries=0,
+                    task_id=task_id,
+                    restart=True,
+                )
+                final = self._wait_for_task_status(task_id)
+        finally:
+            self.server._workflow_task_cleanup_protocol_bridge(task_id)
+            self.server._workflow_task_cleanup_runtime(task_id)
+
+        self.assertEqual(started["task_id"], task_id)
+        self.assertEqual(final["status"], "succeeded")
+        self.assertTrue(fake_session.notifications)
+        self.assertEqual(
+            {item["progress_token"] for item in fake_session.notifications},
+            {"progress-token-start"},
+        )
+        self.assertEqual(fake_session.notifications[-1]["progress"], 100.0)
+        self.assertTrue(
+            any(
+                item["related_request_id"] == "request-start-1"
+                for item in fake_session.notifications
+            )
+        )
+
+    def test_workflow_task_cancel_unknown_task_raises_without_persisting_status(self):
+        with self.assertRaises(FileNotFoundError):
+            self.server.workflow_task(
+                action="cancel",
+                task_id="missing-task",
+                cancel_reason="missing task token=unknown-secret-value",
+            )
+
+        notification = self.server.mcp_types.CancelledNotification(
+            params=self.server.mcp_types.CancelledNotificationParams(
+                requestId="unknown-request-id",
+                reason="client cancelled token=unknown-secret-value",
+            )
+        )
+        asyncio.run(self.server._handle_workflow_task_cancelled_notification(notification))
+
+        status_path = self.repo_path / ".codebase-tooling-mcp" / "tasks" / "missing-task.json"
+        self.assertFalse(status_path.exists())
+
+    def test_workflow_task_cancel_finished_task_is_ignored_and_preserves_status(self):
+        task_id = "finished-cancel"
+        secret = "finished-secret-value"
+        result = {"schema": "vscode_task_run.v1", "ok": True, "sentinel": "keep"}
+        self._write_workflow_task_fixture(
+            task_id,
+            status="succeeded",
+            state="succeeded",
+            ok=True,
+            progress=1.0,
+            progress_detail={"phase": "complete", "percent": 100},
+            result=result,
+            audit_events=[{"event": "completed", "at": self.server._now_iso()}],
+        )
+
+        out = self.server.workflow_task(
+            action="cancel",
+            task_id=task_id,
+            cancel_reason=f"late cancel token={secret}",
+        )
+
+        self.assertEqual(out["status"], "succeeded")
+        self.assertEqual(out["state"], "succeeded")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["progress_detail"], {"phase": "complete", "percent": 100})
+        self.assertEqual(out["result"], result)
+        self.assertTrue(out["cancellation"]["requested"])
+        self.assertTrue(out["cancellation"]["ignored"])
+        self.assertEqual(out["cancellation"]["ignored_status"], "succeeded")
+        self.assertIn("cancel_ignored", [event["event"] for event in out["audit_events"]])
+        self.assertNotIn("cancelled", [event["event"] for event in out["audit_events"]])
+        self._assert_persisted_cancellation_metadata_excludes(task_id, secret)
+
+    def test_workflow_task_duplicate_cancel_is_idempotent_and_redacted(self):
+        task_id = "duplicate-cancel"
+        first_secret = "first-secret-value"
+        second_secret = "second-secret-value"
+        self._write_workflow_task_fixture(
+            task_id,
+            status="running",
+            state="running",
+            progress=0.25,
+            progress_detail={"phase": "running", "percent": 25},
+        )
+
+        first = self.server.workflow_task(
+            action="cancel",
+            task_id=task_id,
+            cancel_reason=f"stop token={first_secret}",
+        )
+        first_audit_events = first["audit_events"]
+        first_cancellation = first["cancellation"]
+        second = self.server.workflow_task(
+            action="cancel",
+            task_id=task_id,
+            cancel_reason=f"stop again token={second_secret}",
+        )
+
+        self.assertEqual(first["status"], "cancelled")
+        self.assertEqual(second["status"], "cancelled")
+        self.assertEqual(second["audit_events"], first_audit_events)
+        self.assertEqual(second["cancellation"], first_cancellation)
+        self._assert_persisted_cancellation_metadata_excludes(
+            task_id, first_secret, second_secret
+        )
 
     def test_workflow_task_cancel_action_marks_running_task_cancelled_and_pollable(self):
         def slow_vscode_task_run(**_kwargs):
