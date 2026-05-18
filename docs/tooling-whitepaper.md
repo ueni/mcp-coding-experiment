@@ -129,7 +129,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `dependency_security_report`, `governance_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `dependency_security_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -142,6 +142,8 @@ Public tools:
 `model_assisted_summary` is a disabled-by-default MCP Sampling adapter for bounded summary/classification/workflow-selection use cases. It requires client-declared sampling support plus repository-relative redacted context, enforces path/byte/token budgets, records approval/denial digests and metadata instead of raw prompts, and treats generated text as advisory only.
 
 `policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
+
+`self_optimization_report` is the direct public tool for the software team's self-optimization loop on this repository. It stays offline/repo-local while aggregating redacted audit events, local spans, task handles, cache metadata, and local Git refs into usage, savings, throughput, bottleneck, and duplicate-suppressed recommendation summaries.
 
 The following router families are internal orchestration helpers, not public MCP v1 tools. They remain implemented in the server for reuse, direct Python tests, and future composition, but MCP clients do not see them in `list_tools()` and their modes are not part of the v1 annotation coverage contract unless they are exposed through a public tool:
 
