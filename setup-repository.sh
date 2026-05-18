@@ -247,6 +247,110 @@ EOF
   fi
 }
 
+
+write_default_continue_mcp_server() {
+  target_path=$1
+  cat > "$target_path" <<'EOF'
+name: codebase-tooling-mcp
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: codebase-tooling-mcp
+    type: streamable-http
+    url: http://localhost:8000/mcp
+    requestOptions:
+      headers:
+        Authorization: "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}"
+      timeout: 300000
+EOF
+}
+
+write_default_continue_qwen_model() {
+  target_path=$1
+  cat > "$target_path" <<'EOF'
+name: coding-qwen2.5-coder-1.5b
+version: 0.0.1
+schema: v1
+models:
+  - name: Coding Micro - Qwen2.5 Coder 1.5B
+    provider: ollama
+    model: qwen2.5-coder:1.5b
+    apiBase: http://127.0.0.1:2345
+    roles:
+      - chat
+      - edit
+      - apply
+      - autocomplete
+EOF
+}
+
+write_default_continue_openai_template() {
+  target_path=$1
+  cat > "$target_path" <<'EOF'
+name: coding-openai-compatible
+version: 0.0.1
+schema: v1
+models:
+  - name: Coding - OpenAI Compatible Endpoint
+    provider: openai
+    model: gpt-4.1-mini
+    apiBase: http://127.0.0.1:4000/v1
+    roles:
+      - chat
+      - edit
+      - apply
+    requestOptions:
+      # Set this to a local MITM/proxy URL when request inspection is needed.
+      # proxy: http://127.0.0.1:8080
+      # caBundlePath: /path/to/mitm-ca.pem
+      timeout: 300000
+EOF
+}
+
+write_default_continue_model_fallback() {
+  target_path=$1
+  cat > "$target_path" <<'EOF'
+name: model-fallback
+version: 0.0.1
+schema: v1
+models:
+  - name: Model Fallback - Continue Setup Assistant
+    provider: openai
+    model: model-fallback
+    apiBase: http://localhost:8000/v1/model-fallback
+    roles:
+      - chat
+    requestOptions:
+      timeout: 300000
+EOF
+}
+
+write_default_continue_model_routing() {
+  write_continue_model_routing "$1" "qwen2.5-coder:1.5b" ".continue/models/coding-qwen2.5-coder-1.5b.yaml"
+}
+
+copy_or_write_continue_defaults() {
+  defaults_root=$1
+  if [ -f "$defaults_root/codebase-tooling-mcp.yaml" ]; then
+    cp "$defaults_root/codebase-tooling-mcp.yaml" .continue/mcpServers/codebase-tooling-mcp.yaml
+  else
+    write_default_continue_mcp_server .continue/mcpServers/codebase-tooling-mcp.yaml
+  fi
+
+  if [ -d "$defaults_root/models" ]; then
+    cp "$defaults_root/models"/*.yaml .continue/models/ 2>/dev/null || true
+  fi
+  if [ ! -f .continue/models/coding-qwen2.5-coder-1.5b.yaml ]; then
+    write_default_continue_qwen_model .continue/models/coding-qwen2.5-coder-1.5b.yaml
+  fi
+  if [ ! -f .continue/models/coding-openai-compatible.yaml ]; then
+    write_default_continue_openai_template .continue/models/coding-openai-compatible.yaml
+  fi
+  if [ ! -f .continue/models/model-fallback.yaml ]; then
+    write_default_continue_model_fallback .continue/models/model-fallback.yaml
+  fi
+}
+
 write_continue_model_routing() {
   routing_path=$1
   model_id=$2
@@ -284,12 +388,7 @@ configure_continue_models() {
 
   defaults_root="$(script_dir)/source/defaults/continue"
   mkdir -p .continue/models .continue/mcpServers
-  if [ -f "$defaults_root/codebase-tooling-mcp.yaml" ]; then
-    cp "$defaults_root/codebase-tooling-mcp.yaml" .continue/mcpServers/codebase-tooling-mcp.yaml
-  fi
-  if [ -d "$defaults_root/models" ]; then
-    cp "$defaults_root/models"/*.yaml .continue/models/ 2>/dev/null || true
-  fi
+  copy_or_write_continue_defaults "$defaults_root"
 
   case "$CONTINUE_MODEL_PROFILE" in
     openai-compatible)
@@ -299,6 +398,8 @@ configure_continue_models() {
     local)
       if [ -f "$defaults_root/model-routing.yaml" ]; then
         cp "$defaults_root/model-routing.yaml" .continue/model-routing.yaml
+      else
+        write_default_continue_model_routing .continue/model-routing.yaml
       fi
       ;;
   esac

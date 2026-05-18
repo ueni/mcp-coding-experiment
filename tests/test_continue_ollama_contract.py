@@ -213,6 +213,53 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual("Bundled LLM", config["portsAttributes"]["2345"]["label"])
         self.assertEqual("qwen2.5-coder:1.5b", routing["router"]["model"])
 
+    def test_setup_script_stdin_mode_embeds_continue_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / ".git").mkdir()
+            result = subprocess.run(
+                ["/bin/sh"],
+                cwd=repo_root,
+                input=(REPO_ROOT / "setup-repository.sh").read_text(encoding="utf-8"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr.strip() or result.stdout.strip(),
+            )
+
+            routing = yaml.safe_load(
+                (repo_root / ".continue" / "model-routing.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            qwen_config = yaml.safe_load(
+                (repo_root / ".continue" / "models" / "coding-qwen2.5-coder-1.5b.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            mcp_config = yaml.safe_load(
+                (repo_root / ".continue" / "mcpServers" / "codebase-tooling-mcp.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            openai_template_exists = (
+                repo_root / ".continue" / "models" / "coding-openai-compatible.yaml"
+            ).exists()
+            fallback_template_exists = (
+                repo_root / ".continue" / "models" / "model-fallback.yaml"
+            ).exists()
+
+        self.assertEqual("qwen2.5-coder:1.5b", routing["router"]["model"])
+        self.assertEqual("ollama", qwen_config["models"][0]["provider"])
+        self.assertEqual("http://127.0.0.1:2345", qwen_config["models"][0]["apiBase"])
+        self.assertEqual("codebase-tooling-mcp", mcp_config["mcpServers"][0]["name"])
+        self.assertTrue(openai_template_exists)
+        self.assertTrue(fallback_template_exists)
+
     def test_setup_script_can_configure_openai_compatible_continue_model(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)

@@ -349,7 +349,7 @@ local Agent mode. Pass `--enable-vulkan-gpu` to add `/dev/dri`, set
 curl -fsSL https://raw.githubusercontent.com/ueni/mcp-coding-experiment/main/setup-repository.sh | sh -s -- --enable-vulkan-gpu
 ```
 
-The script finds the repository root by locating `.git` and creates:
+The script is standalone-safe when piped through `sh`: it embeds the default Continue profiles and falls back to those embedded defaults when `source/defaults/continue` is not present locally. It finds the repository root by locating `.git` and creates:
 
 - `.devcontainer/devcontainer.json`
 - `.continue/models/*.yaml`, `.continue/model-routing.yaml`, and `.continue/mcpServers/codebase-tooling-mcp.yaml` for the selected local or OpenAI-compatible Continue profile

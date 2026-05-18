@@ -368,6 +368,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
+    "continue_model_fallback_configure": {"categories": ["write"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
     "command_runner": {"categories": ["shell/process"]},
     "docker_router": {"categories": ["shell/process"]},
@@ -29792,6 +29793,10 @@ async def continue_model_fallback_configure(request):
             },
             status_code=403,
         )
+    _require_tool_security_gate(
+        "continue_model_fallback_configure",
+        {"mode": "write", "files": [str(profile_rel), str(routing_rel)]},
+    )
 
     profile_path = (REPO_PATH / profile_rel).resolve()
     routing_path = (REPO_PATH / routing_rel).resolve()
