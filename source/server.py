@@ -35,6 +35,7 @@ import select
 import concurrent.futures
 import importlib.util
 import inspect
+import signal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Callable
@@ -108,6 +109,7 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
     return module
 
 
+from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field, RootModel
 from source.tool_output_schemas import (
@@ -251,6 +253,14 @@ ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
 WORKFLOW_TASKS_DIR = Path(".codebase-tooling-mcp/tasks")
 WORKFLOW_TASK_RETENTION_DAYS = max(1, int(os.getenv("MCP_WORKFLOW_TASK_RETENTION_DAYS", "7")))
 WORKFLOW_TASK_EXPIRY_HOURS = max(1, int(os.getenv("MCP_WORKFLOW_TASK_EXPIRY_HOURS", "24")))
+WORKFLOW_TASK_PROGRESS_MIN_INTERVAL_SECONDS = max(
+    0.05,
+    float(os.getenv("MCP_WORKFLOW_TASK_PROGRESS_MIN_INTERVAL_SECONDS", "0.25")),
+)
+WORKFLOW_TASK_CANCEL_GRACE_SECONDS = max(
+    0.1,
+    float(os.getenv("MCP_WORKFLOW_TASK_CANCEL_GRACE_SECONDS", "2.0")),
+)
 TOOL_ROUTER_STATS_FILE = Path(".codebase-tooling-mcp/memory/tool_router_stats.json")
 TOOL_BENCHMARK_REPORT_FILE = Path(".codebase-tooling-mcp/reports/TOOL_BENCHMARK.json")
 COST_BUDGET_FILE = Path(".codebase-tooling-mcp/memory/cost_budget.json")
@@ -308,6 +318,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
         "mode_categories": {
             "start": ["write", "shell/process"],
             "status": ["read-only"],
+            "cancel": ["write", "shell/process"],
         },
     },
     "task_status": {"categories": ["read-only"]},
@@ -9819,8 +9830,23 @@ def _artifact_meta(resource_links: list[dict[str, Any]]) -> dict[str, Any]:
 _WORKFLOW_TASK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 _WORKFLOW_TASK_LOCK = threading.Lock()
 _WORKFLOW_TASK_FUTURES: dict[str, concurrent.futures.Future[Any]] = {}
+_WORKFLOW_TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_WORKFLOW_TASK_PROCESSES: dict[str, subprocess.Popen[str]] = {}
+_WORKFLOW_TASK_PROGRESS_BRIDGES: dict[str, dict[str, Any]] = {}
+_WORKFLOW_TASK_REQUEST_TO_TASK_ID: dict[str, str] = {}
+_WORKFLOW_TASK_CURRENT_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "workflow_task_current_id",
+    default="",
+)
 _WORKFLOW_TASK_ALLOWED_WORKFLOWS = {"governance_report", "vscode_task_run"}
-_WORKFLOW_TASK_FINAL_STATUSES = {"succeeded", "failed", "expired"}
+_WORKFLOW_TASK_FINAL_STATUSES = {"succeeded", "failed", "expired", "cancelled"}
+
+
+class _WorkflowTaskCancelled(Exception):
+    def __init__(self, stdout: str = "", stderr: str = "") -> None:
+        super().__init__("workflow task cancellation requested")
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def _workflow_task_categories(workflow: str) -> list[str]:
@@ -9847,6 +9873,8 @@ def _workflow_task_result_is_transient(result: dict[str, Any]) -> bool:
         return True
     if result.get("ok") is True:
         return False
+    if result.get("cancelled") is True:
+        return False
     text = "\n".join(
         str(result.get(key, "")) for key in ("stderr", "stdout", "build_log_tail", "error")
     ).lower()
@@ -9862,6 +9890,460 @@ def _workflow_task_result_is_transient(result: dict[str, Any]) -> bool:
         "resource temporarily unavailable",
     )
     return any(marker in text for marker in markers)
+
+
+def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
+    try:
+        context = mcp.get_context()
+    except Exception:
+        return None
+    try:
+        request_context = getattr(context, "request_context", None)
+    except Exception:
+        return None
+    meta = getattr(request_context, "meta", None) if request_context is not None else None
+    progress_token = None
+    if isinstance(meta, dict):
+        progress_token = meta.get("progressToken") or meta.get("progress_token")
+    elif meta is not None:
+        progress_token = getattr(meta, "progressToken", None)
+        if progress_token is None:
+            progress_token = getattr(meta, "progress_token", None)
+    if not isinstance(progress_token, (str, int)) or str(progress_token) == "":
+        return None
+    session = getattr(context, "session", None)
+    if session is None and request_context is not None:
+        session = getattr(request_context, "session", None)
+    if session is None or not hasattr(session, "send_progress_notification"):
+        return None
+    request_id = getattr(context, "request_id", None)
+    if request_id is None and request_context is not None:
+        request_id = getattr(request_context, "request_id", None)
+    if request_id is None and request_context is not None:
+        request_id = getattr(request_context, "id", None)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    return {
+        "session": session,
+        "progress_token": progress_token,
+        "request_id": "" if request_id is None else str(request_id),
+        "loop": loop,
+        "last_progress": -1.0,
+        "last_sent_at": 0.0,
+    }
+
+
+def _workflow_task_register_protocol_bridge(task_id: str) -> None:
+    bridge = _workflow_task_context_progress_bridge()
+    if bridge is None:
+        return
+    with _WORKFLOW_TASK_LOCK:
+        _WORKFLOW_TASK_PROGRESS_BRIDGES[task_id] = bridge
+        request_id = str(bridge.get("request_id") or "")
+        if request_id:
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID[request_id] = task_id
+
+
+def _workflow_task_cleanup_protocol_bridge(task_id: str) -> None:
+    with _WORKFLOW_TASK_LOCK:
+        bridge = _WORKFLOW_TASK_PROGRESS_BRIDGES.pop(task_id, None)
+        request_id = str((bridge or {}).get("request_id") or "")
+        if request_id and _WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(request_id) == task_id:
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+
+
+def _workflow_task_cleanup_runtime(task_id: str) -> None:
+    with _WORKFLOW_TASK_LOCK:
+        _WORKFLOW_TASK_FUTURES.pop(task_id, None)
+        _WORKFLOW_TASK_CANCEL_EVENTS.pop(task_id, None)
+        _WORKFLOW_TASK_PROCESSES.pop(task_id, None)
+
+
+def _workflow_task_progress_percent(payload: dict[str, Any]) -> float:
+    detail = payload.get("progress_detail")
+    if isinstance(detail, dict):
+        percent = detail.get("percent")
+        if isinstance(percent, (int, float)):
+            return min(100.0, max(0.0, float(percent)))
+    progress = payload.get("progress")
+    if isinstance(progress, (int, float)):
+        value = float(progress)
+        if value <= 1.0:
+            value *= 100.0
+        return min(100.0, max(0.0, value))
+    return 0.0
+
+
+def _workflow_task_progress_message(payload: dict[str, Any]) -> str:
+    detail = payload.get("progress_detail")
+    if isinstance(detail, dict) and str(detail.get("phase") or "").strip():
+        return str(detail.get("phase") or "")
+    return str(payload.get("status") or payload.get("state") or "workflow task update")
+
+
+def _workflow_task_consume_future_exception(done: concurrent.futures.Future[Any]) -> None:
+    with contextlib.suppress(BaseException):
+        done.exception()
+
+
+def _workflow_task_await_or_schedule(awaitable: Any, loop: asyncio.AbstractEventLoop | None) -> None:
+    if not inspect.isawaitable(awaitable):
+        return
+    if loop is not None and loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(awaitable, loop)
+        future.add_done_callback(_workflow_task_consume_future_exception)
+        return
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(awaitable)
+        return
+    task = running_loop.create_task(awaitable)
+    task.add_done_callback(_workflow_task_consume_future_exception)
+
+
+def _workflow_task_send_progress_notification(
+    bridge: dict[str, Any],
+    progress: float,
+    total: float,
+    message: str,
+) -> None:
+    session = bridge.get("session")
+    sender = getattr(session, "send_progress_notification", None)
+    if sender is None:
+        return
+    kwargs = {
+        "progress_token": bridge.get("progress_token"),
+        "progress": progress,
+        "total": total,
+        "message": message,
+    }
+    request_id = str(bridge.get("request_id") or "")
+    if request_id:
+        kwargs["related_request_id"] = request_id
+    try:
+        result = sender(**kwargs)
+    except TypeError:
+        kwargs.pop("related_request_id", None)
+        result = sender(**kwargs)
+    _workflow_task_await_or_schedule(result, bridge.get("loop"))
+
+
+def _workflow_task_emit_progress(
+    task_id: str,
+    payload: dict[str, Any],
+    *,
+    force: bool = False,
+) -> None:
+    with _WORKFLOW_TASK_LOCK:
+        bridge = _WORKFLOW_TASK_PROGRESS_BRIDGES.get(task_id)
+    if bridge is None:
+        return
+    now = time.monotonic()
+    terminal = str(payload.get("status") or "") in _WORKFLOW_TASK_FINAL_STATUSES
+    progress = _workflow_task_progress_percent(payload)
+    last_progress = float(bridge.get("last_progress", -1.0))
+    if progress < last_progress:
+        progress = last_progress
+    last_sent_at = float(bridge.get("last_sent_at", 0.0))
+    if (
+        not force
+        and not terminal
+        and last_sent_at
+        and now - last_sent_at < WORKFLOW_TASK_PROGRESS_MIN_INTERVAL_SECONDS
+    ):
+        return
+    bridge["last_progress"] = progress
+    bridge["last_sent_at"] = now
+    _workflow_task_send_progress_notification(
+        bridge,
+        progress=progress,
+        total=100.0,
+        message=_workflow_task_progress_message(payload),
+    )
+    if terminal:
+        _workflow_task_cleanup_protocol_bridge(task_id)
+
+
+def _workflow_task_payload_cancel_requested(payload: dict[str, Any]) -> bool:
+    cancellation = payload.get("cancellation")
+    return bool(
+        payload.get("cancel_requested")
+        or str(payload.get("status") or "") in {"cancel_requested", "cancelled"}
+        or (isinstance(cancellation, dict) and cancellation.get("requested"))
+    )
+
+
+def _workflow_task_cancellation_payload(
+    payload: dict[str, Any],
+    *,
+    reason: str = "",
+    source: str = "workflow_task.cancel",
+    requested_at: str = "",
+    cancelled_at: str = "",
+    subprocess_terminated: bool | None = None,
+) -> dict[str, Any]:
+    existing = payload.get("cancellation")
+    cancellation = dict(existing) if isinstance(existing, dict) else {}
+    if requested_at:
+        cancellation["requested"] = True
+        cancellation["requested_at"] = cancellation.get("requested_at") or requested_at
+    if cancelled_at:
+        cancellation["cancelled_at"] = cancelled_at
+    if reason:
+        cancellation["reason"] = _redact_audit_reason(reason)
+    elif not cancellation.get("reason"):
+        cancellation["reason"] = "cancel requested"
+    cancellation["source"] = _redact_audit_reason(source)
+    cancellation["reason_redacted"] = True
+    cancellation["best_effort"] = True
+    if subprocess_terminated is not None:
+        cancellation["subprocess_terminated"] = subprocess_terminated
+    return cancellation
+
+
+def _workflow_task_mark_cancel_requested(
+    payload: dict[str, Any],
+    *,
+    reason: str = "",
+    source: str = "workflow_task.cancel",
+) -> dict[str, Any]:
+    now = _now_iso()
+    current_percent = _workflow_task_progress_percent(payload)
+    redacted_reason = _redact_audit_reason(reason or "cancel requested")
+    updated = dict(payload)
+    updated.update(
+        {
+            "cancel_requested": True,
+            "cancel_requested_at": updated.get("cancel_requested_at") or now,
+            "cancellation": _workflow_task_cancellation_payload(
+                updated,
+                reason=redacted_reason,
+                source=source,
+                requested_at=now,
+            ),
+            "updated_at": now,
+            "progress_detail": {
+                "phase": "cancel_requested",
+                "percent": min(99.0, current_percent),
+            },
+            "progress": min(0.99, max(float(updated.get("progress") or 0.0), current_percent / 100.0)),
+        }
+    )
+    if str(updated.get("status") or "") not in _WORKFLOW_TASK_FINAL_STATUSES:
+        updated["status"] = "cancel_requested"
+        updated["state"] = "cancel_requested"
+    updated["audit_events"] = [
+        *updated.get("audit_events", []),
+        {"event": "cancel_requested", "at": now, "reason": redacted_reason, "source": source},
+    ]
+    return updated
+
+
+def _workflow_task_mark_cancelled(
+    payload: dict[str, Any],
+    *,
+    reason: str = "",
+    source: str = "workflow_task.cancel",
+    subprocess_terminated: bool | None = None,
+) -> dict[str, Any]:
+    now = _now_iso()
+    redacted_reason = _redact_audit_reason(reason or "cancelled")
+    updated = dict(payload)
+    updated.update(
+        {
+            "status": "cancelled",
+            "state": "cancelled",
+            "ok": False,
+            "cancel_requested": True,
+            "cancel_requested_at": updated.get("cancel_requested_at") or now,
+            "cancelled_at": now,
+            "finished_at": updated.get("finished_at") or now,
+            "updated_at": now,
+            "progress": 1.0,
+            "progress_detail": {"phase": "cancelled", "percent": 100},
+            "cancellation": _workflow_task_cancellation_payload(
+                updated,
+                reason=redacted_reason,
+                source=source,
+                requested_at=updated.get("cancel_requested_at") or now,
+                cancelled_at=now,
+                subprocess_terminated=subprocess_terminated,
+            ),
+        }
+    )
+    updated["audit_events"] = [
+        *updated.get("audit_events", []),
+        {"event": "cancelled", "at": now, "reason": redacted_reason, "source": source},
+    ]
+    written = _write_workflow_task_status(updated)
+    _append_audit_event(
+        "workflow_task",
+        _workflow_task_categories(str(updated.get("workflow") or "")),
+        False,
+        {
+            "task_id": updated.get("task_id"),
+            "workflow": updated.get("workflow"),
+            "event": "cancelled",
+            "reason": redacted_reason,
+        },
+        "cancelled",
+    )
+    _otel_record_workflow_lifecycle(
+        str(updated.get("task_id") or ""),
+        str(updated.get("workflow") or ""),
+        "cancelled",
+        success=False,
+        status="cancelled",
+        artifact_refs=[
+            str(link.get("path"))
+            for link in updated.get("artifact_references", [])
+            if isinstance(link, dict) and isinstance(link.get("path"), str)
+        ],
+    )
+    _workflow_task_emit_progress(str(updated.get("task_id") or ""), written, force=True)
+    _workflow_task_cleanup_runtime(str(updated.get("task_id") or ""))
+    return written
+
+
+def _terminate_subprocess(proc: subprocess.Popen[str], grace_seconds: float | None = None) -> tuple[str, str, bool]:
+    if proc.poll() is not None:
+        stdout, stderr = proc.communicate()
+        return stdout or "", stderr or "", False
+    grace = WORKFLOW_TASK_CANCEL_GRACE_SECONDS if grace_seconds is None else grace_seconds
+    terminated = False
+    with contextlib.suppress(ProcessLookupError, OSError):
+        if os.name == "nt":  # pragma: no cover - Windows fallback
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+        terminated = True
+    try:
+        stdout, stderr = proc.communicate(timeout=grace)
+        return stdout or "", stderr or "", terminated
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            if os.name == "nt":  # pragma: no cover - Windows fallback
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            terminated = True
+        stdout, stderr = proc.communicate()
+        return stdout or "", stderr or "", terminated
+
+
+def _terminate_workflow_task_process(task_id: str) -> bool:
+    with _WORKFLOW_TASK_LOCK:
+        proc = _WORKFLOW_TASK_PROCESSES.get(task_id)
+    if proc is None or proc.poll() is not None:
+        return False
+    with contextlib.suppress(ProcessLookupError, OSError):
+        if os.name == "nt":  # pragma: no cover - Windows fallback
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+        return True
+    return False
+
+
+def _run_subprocess_with_workflow_cancellation(
+    command: list[str],
+    *,
+    cwd: str,
+    timeout_seconds: int,
+    task_id: str = "",
+) -> subprocess.CompletedProcess[str]:
+    cancel_event = None
+    if task_id:
+        with _WORKFLOW_TASK_LOCK:
+            cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.get(task_id)
+    if cancel_event is None:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
+    with _WORKFLOW_TASK_LOCK:
+        _WORKFLOW_TASK_PROCESSES[task_id] = proc
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            if cancel_event.is_set():
+                stdout, stderr, _terminated = _terminate_subprocess(proc)
+                raise _WorkflowTaskCancelled(stdout=stdout, stderr=stderr)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stdout, stderr, _terminated = _terminate_subprocess(proc)
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout_seconds,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            try:
+                stdout, stderr = proc.communicate(timeout=min(0.1, remaining))
+                return subprocess.CompletedProcess(
+                    command,
+                    proc.returncode,
+                    stdout or "",
+                    stderr or "",
+                )
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        with _WORKFLOW_TASK_LOCK:
+            if _WORKFLOW_TASK_PROCESSES.get(task_id) is proc:
+                _WORKFLOW_TASK_PROCESSES.pop(task_id, None)
+
+
+def _cancel_workflow_task_by_request_id(
+    request_id: str,
+    *,
+    reason: str = "",
+    source: str = "notifications/cancelled",
+) -> dict[str, Any]:
+    with _WORKFLOW_TASK_LOCK:
+        task_id = _WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(str(request_id))
+    if not task_id:
+        raise FileNotFoundError(f"workflow task request not found: {request_id}")
+    return _cancel_workflow_task(task_id, reason=reason, source=source)
+
+
+async def _handle_workflow_task_cancelled_notification(
+    notification: mcp_types.CancelledNotification,
+) -> None:
+    request_id = str(notification.params.requestId)
+    reason = str(notification.params.reason or "")
+    with contextlib.suppress(FileNotFoundError):
+        _cancel_workflow_task_by_request_id(
+            request_id,
+            reason=reason,
+            source="notifications/cancelled",
+        )
+
+
+def _install_workflow_task_cancelled_notification_bridge() -> None:
+    low_level_server = getattr(mcp, "_mcp_server", None)
+    handlers = getattr(low_level_server, "notification_handlers", None)
+    if isinstance(handlers, dict):
+        handlers[mcp_types.CancelledNotification] = _handle_workflow_task_cancelled_notification
+
+
+_install_workflow_task_cancelled_notification_bridge()
 
 
 def _workflow_tasks_dir() -> Path:
@@ -9964,6 +10446,7 @@ def _compact_vscode_task_result(result: dict[str, Any], artifact_links: list[dic
         "cwd": _redact_audit_value(result.get("cwd", "")),
         "exit_code": result.get("exit_code"),
         "timeout": bool(result.get("timeout", False)),
+        "cancelled": bool(result.get("cancelled", False)),
         "output_summary": {
             "stdout_chars": len(stdout),
             "stderr_chars": len(stderr),
@@ -10060,9 +10543,105 @@ def _workflow_task_status_payload(task_id: str) -> dict[str, Any]:
     return payload
 
 
+def _cancel_workflow_task(
+    task_id: str,
+    *,
+    reason: str = "",
+    source: str = "workflow_task.cancel",
+) -> dict[str, Any]:
+    payload = _expire_workflow_task_if_needed(_read_workflow_task_status(task_id))
+    status = str(payload.get("status") or "")
+    redacted_reason = _redact_audit_reason(reason or "cancel requested")
+    if status in _WORKFLOW_TASK_FINAL_STATUSES:
+        if status != "cancelled":
+            now = _now_iso()
+            payload = dict(payload)
+            payload["updated_at"] = now
+            payload["cancellation"] = _workflow_task_cancellation_payload(
+                payload,
+                reason=redacted_reason,
+                source=source,
+            )
+            payload["cancellation"].update(
+                {
+                    "ignored": True,
+                    "ignored_at": now,
+                    "ignored_status": status,
+                }
+            )
+            payload["audit_events"] = [
+                *payload.get("audit_events", []),
+                {"event": "cancel_ignored", "at": now, "status": status, "reason": redacted_reason},
+            ]
+            _write_workflow_task_status(payload)
+            _append_audit_event(
+                "workflow_task",
+                _workflow_task_categories(str(payload.get("workflow") or "")),
+                False,
+                {"task_id": task_id, "workflow": payload.get("workflow"), "event": "cancel_ignored"},
+                "already_finished",
+            )
+            _otel_record_workflow_lifecycle(
+                task_id,
+                str(payload.get("workflow") or ""),
+                "cancel_ignored",
+                success=False,
+                status=status,
+            )
+        return _workflow_task_status_payload(task_id)
+
+    with _WORKFLOW_TASK_LOCK:
+        cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.setdefault(task_id, threading.Event())
+        future = _WORKFLOW_TASK_FUTURES.get(task_id)
+    cancel_event.set()
+    future_cancelled = bool(future.cancel()) if future is not None else False
+    subprocess_terminated = _terminate_workflow_task_process(task_id)
+    payload = _workflow_task_mark_cancel_requested(
+        payload,
+        reason=redacted_reason,
+        source=source,
+    )
+    _write_workflow_task_status(payload)
+    _append_audit_event(
+        "workflow_task",
+        _workflow_task_categories(str(payload.get("workflow") or "")),
+        False,
+        {
+            "task_id": task_id,
+            "workflow": payload.get("workflow"),
+            "event": "cancel_requested",
+            "reason": redacted_reason,
+        },
+        "cancel_requested",
+    )
+    _otel_record_workflow_lifecycle(
+        task_id,
+        str(payload.get("workflow") or ""),
+        "cancel_requested",
+        success=False,
+        status="cancel_requested",
+    )
+    _workflow_task_emit_progress(task_id, payload, force=True)
+    if future_cancelled or future is None or future.done():
+        latest_payload = _read_workflow_task_status(task_id)
+        if str(latest_payload.get("status") or "") not in _WORKFLOW_TASK_FINAL_STATUSES:
+            _workflow_task_mark_cancelled(
+                latest_payload,
+                reason=redacted_reason,
+                source=source,
+                subprocess_terminated=subprocess_terminated,
+            )
+    return _workflow_task_status_payload(task_id)
+
+
 def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> None:
     started_at = _now_iso()
     payload = _read_workflow_task_status(task_id)
+    with _WORKFLOW_TASK_LOCK:
+        cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.get(task_id)
+    if _workflow_task_payload_cancel_requested(payload) or (cancel_event is not None and cancel_event.is_set()):
+        _workflow_task_mark_cancelled(payload, reason="cancel requested before start")
+        return
     payload.update(
         {
             "status": "running",
@@ -10078,6 +10657,7 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
         }
     )
     _write_workflow_task_status(payload)
+    _workflow_task_emit_progress(task_id, payload)
     _append_audit_event(
         "workflow_task",
         ["read-only", "async"],
@@ -10095,6 +10675,23 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             if isinstance(result.get("resource_links"), list)
             else []
         )
+        latest_payload = _read_workflow_task_status(task_id)
+        with _WORKFLOW_TASK_LOCK:
+            cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.get(task_id)
+        if _workflow_task_payload_cancel_requested(latest_payload) or (cancel_event is not None and cancel_event.is_set()):
+            latest_payload.update(
+                {
+                    "result": {
+                        "schema": result.get("schema"),
+                        "report_id": result.get("report_id"),
+                        "generated_at": result.get("generated_at"),
+                        "exports": exports,
+                    },
+                    "artifact_references": resource_links,
+                }
+            )
+            _workflow_task_mark_cancelled(latest_payload, reason="cancel requested before completion")
+            return
         payload.update(
             {
                 "status": "succeeded",
@@ -10118,6 +10715,8 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             }
         )
         _write_workflow_task_status(payload)
+        _workflow_task_emit_progress(task_id, payload, force=True)
+        _workflow_task_cleanup_runtime(task_id)
         _append_audit_event(
             "workflow_task",
             ["read-only", "async"],
@@ -10156,6 +10755,8 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             }
         )
         _write_workflow_task_status(payload)
+        _workflow_task_emit_progress(task_id, payload, force=True)
+        _workflow_task_cleanup_runtime(task_id)
         _append_audit_event(
             "workflow_task",
             ["read-only", "async"],
@@ -10181,6 +10782,11 @@ def _run_governance_report_task(task_id: str, args: dict[str, Any]) -> None:
 def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
     started_at = _now_iso()
     payload = _read_workflow_task_status(task_id)
+    with _WORKFLOW_TASK_LOCK:
+        cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.get(task_id)
+    if _workflow_task_payload_cancel_requested(payload) or (cancel_event is not None and cancel_event.is_set()):
+        _workflow_task_mark_cancelled(payload, reason="cancel requested before start")
+        return
     payload.update(
         {
             "status": "running",
@@ -10196,6 +10802,7 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
         }
     )
     _write_workflow_task_status(payload)
+    _workflow_task_emit_progress(task_id, payload)
     _append_audit_event(
         "workflow_task",
         _workflow_task_categories("vscode_task_run"),
@@ -10210,6 +10817,17 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
     result: dict[str, Any] = {}
     ok = False
     while attempt <= max(0, max_retries):
+        with _WORKFLOW_TASK_LOCK:
+            cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.get(task_id)
+        if cancel_event is not None and cancel_event.is_set():
+            result = {
+                "schema": "vscode_task_run.v1",
+                "ok": False,
+                "timeout": False,
+                "cancelled": True,
+                "stderr": "workflow task cancellation requested",
+            }
+            break
         attempt += 1
         try:
             result = vscode_task_run(**args)
@@ -10222,6 +10840,12 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
                 "error": {"type": type(exc).__name__, "message": _redact_audit_reason(str(exc))},
             }
         ok = bool(result.get("ok", False))
+        with _WORKFLOW_TASK_LOCK:
+            cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.get(task_id)
+        if bool(result.get("cancelled")) or (cancel_event is not None and cancel_event.is_set()):
+            result["cancelled"] = True
+            ok = False
+            break
         transient = _workflow_task_result_is_transient(result)
         if ok or attempt > max(0, max_retries) or not transient:
             break
@@ -10248,47 +10872,80 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
         )
     ]
     finished_at = _now_iso()
-    state = "succeeded" if ok else "failed"
+    with _WORKFLOW_TASK_LOCK:
+        cancel_event = _WORKFLOW_TASK_CANCEL_EVENTS.get(task_id)
+    cancelled = bool(result.get("cancelled")) or (cancel_event is not None and cancel_event.is_set())
+    state = "cancelled" if cancelled else "succeeded" if ok else "failed"
     payload.update(
         {
             "status": state,
             "state": state,
-            "ok": ok,
+            "ok": ok and not cancelled,
             "attempt": attempt,
             "retries": retries,
             "finished_at": finished_at,
             "updated_at": finished_at,
             "progress": 1.0,
-            "progress_detail": {"phase": "complete" if ok else "failed", "percent": 100},
+            "progress_detail": {
+                "phase": "cancelled" if cancelled else "complete" if ok else "failed",
+                "percent": 100,
+            },
             "result": _compact_vscode_task_result(result, artifact_links),
             "artifact_references": artifact_links,
             "audit_events": [
                 *payload.get("audit_events", []),
-                {"event": "completed" if ok else "failed", "at": finished_at},
+                {"event": "cancelled" if cancelled else "completed" if ok else "failed", "at": finished_at},
             ],
         }
     )
+    if cancelled:
+        payload = _workflow_task_mark_cancel_requested(
+            payload,
+            reason="cancel requested before completion",
+            source="workflow_task.cancel",
+        )
+        payload["status"] = "cancelled"
+        payload["state"] = "cancelled"
+        payload["ok"] = False
+        payload["progress"] = 1.0
+        payload["progress_detail"] = {"phase": "cancelled", "percent": 100}
+        payload["cancelled_at"] = finished_at
+        payload["finished_at"] = finished_at
+        payload["cancellation"] = _workflow_task_cancellation_payload(
+            payload,
+            reason="cancel requested before completion",
+            source="workflow_task.cancel",
+            requested_at=payload.get("cancel_requested_at") or finished_at,
+            cancelled_at=finished_at,
+            subprocess_terminated=bool(result.get("cancelled")),
+        )
     _write_workflow_task_status(payload)
+    _workflow_task_emit_progress(task_id, payload, force=True)
+    _workflow_task_cleanup_runtime(task_id)
     _append_audit_event(
         "workflow_task",
         _workflow_task_categories("vscode_task_run"),
-        ok,
-        {"task_id": task_id, "workflow": "vscode_task_run", "event": "completed" if ok else "failed"},
-        "completed" if ok else "failed",
+        ok and not cancelled,
+        {"task_id": task_id, "workflow": "vscode_task_run", "event": "cancelled" if cancelled else "completed" if ok else "failed"},
+        "cancelled" if cancelled else "completed" if ok else "failed",
     )
     _otel_record_workflow_lifecycle(
         task_id,
         "vscode_task_run",
-        "completed" if ok else "failed",
-        success=ok,
-        status="succeeded" if ok else "failed",
+        "cancelled" if cancelled else "completed" if ok else "failed",
+        success=ok and not cancelled,
+        status="cancelled" if cancelled else "succeeded" if ok else "failed",
         artifact_refs=[str(link.get("path")) for link in artifact_links if isinstance(link.get("path"), str)],
     )
 
 
 def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
-    with _otel_correlation_context(task_id):
-        _run_vscode_task_inner(task_id, args, max_retries=max_retries)
+    token = _WORKFLOW_TASK_CURRENT_ID.set(task_id)
+    try:
+        with _otel_correlation_context(task_id):
+            _run_vscode_task_inner(task_id, args, max_retries=max_retries)
+    finally:
+        _WORKFLOW_TASK_CURRENT_ID.reset(token)
 
 
 def _start_workflow_task(
@@ -10315,7 +10972,13 @@ def _start_workflow_task(
     task_id = _workflow_task_stable_id(workflow, id_args, task_id)
     status_path = _workflow_task_path(task_id)
     if status_path.exists() and not restart:
-        return _workflow_task_status_payload(task_id)
+        payload = _workflow_task_status_payload(task_id)
+        _workflow_task_register_protocol_bridge(task_id)
+        _workflow_task_emit_progress(task_id, payload, force=True)
+        return payload
+    if restart:
+        _workflow_task_cleanup_runtime(task_id)
+        _workflow_task_cleanup_protocol_bridge(task_id)
     created_at = _now_iso()
     expires_at = (
         datetime.now(timezone.utc) + timedelta(hours=max(1, WORKFLOW_TASK_EXPIRY_HOURS))
@@ -10341,6 +11004,17 @@ def _start_workflow_task(
         "expires_at": expires_at,
         "retention_expires_at": retention_expires_at,
         "retry_of": retry_of,
+        "cancel_requested": False,
+        "cancel_requested_at": "",
+        "cancelled_at": "",
+        "cancellation": {
+            "requested": False,
+            "requested_at": "",
+            "cancelled_at": "",
+            "reason": "",
+            "reason_redacted": True,
+            "best_effort": True,
+        },
         "progress": 0.0,
         "progress_detail": {"phase": "queued", "percent": 0},
         "arguments": _redact_audit_value(args),
@@ -10357,6 +11031,10 @@ def _start_workflow_task(
             {"event": "retry", "at": created_at, "retry_of": retry_of}
         )
     _write_workflow_task_status(payload)
+    _workflow_task_register_protocol_bridge(task_id)
+    _workflow_task_emit_progress(task_id, payload, force=True)
+    with _WORKFLOW_TASK_LOCK:
+        _WORKFLOW_TASK_CANCEL_EVENTS[task_id] = threading.Event()
     runner = _run_vscode_task if workflow == "vscode_task_run" else _run_governance_report_task
     if workflow == "vscode_task_run":
         future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args, max(0, min(3, max_retries)))
@@ -15077,15 +15755,35 @@ def vscode_task_run(
     workdir = _resolve_repo_path(task_cwd)
     rel_cwd = str(workdir.relative_to(REPO_PATH))
 
+    workflow_task_id = _WORKFLOW_TASK_CURRENT_ID.get("")
     try:
-        proc = subprocess.run(
+        proc = _run_subprocess_with_workflow_cancellation(
             command,
             cwd=str(workdir),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
+            task_id=workflow_task_id,
         )
+    except _WorkflowTaskCancelled as exc:
+        cancel_stdout = exc.stdout or ""
+        cancel_stderr = exc.stderr or ""
+        build_log_tail = _summarize_build_log(cancel_stdout, cancel_stderr)
+        proposals = _build_log_proposals(cancel_stdout, cancel_stderr)
+        return {
+            "schema": "vscode_task_run.v1",
+            "ok": False,
+            "label": label,
+            "tasks_path": str(tasks_file.relative_to(REPO_PATH)),
+            "control_profile": control_profile,
+            "command": command,
+            "cwd": rel_cwd,
+            "exit_code": None,
+            "timeout": False,
+            "cancelled": True,
+            "stdout": _trim_text(cancel_stdout, max_chars=out_cap),
+            "stderr": _trim_text(cancel_stderr, max_chars=out_cap),
+            "build_log_tail": _trim_text(build_log_tail, max_chars=out_cap),
+            "proposals": proposals,
+        }
     except subprocess.TimeoutExpired as exc:
         timeout_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
         timeout_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
@@ -23829,8 +24527,9 @@ def workflow_task(
     head_ref: str = "HEAD",
     export: bool = True,
     retry_of: str = "",
+    cancel_reason: str = "",
 ) -> dict[str, Any]:
-    """Start or inspect a supported persisted async workflow task."""
+    """Start, cancel, or inspect a supported persisted async workflow task."""
     action = str(action or "start").strip().lower() or "start"
     workflow = str(workflow or "vscode_task_run").strip()
     trace_task_id = task_id.strip()
@@ -23849,8 +24548,16 @@ def workflow_task(
     )
     with _otel_span("mcp.tool.workflow_task", attrs, correlation_id=trace_task_id) as span:
         _require_git_repo()
-        if action not in {"start", "status"}:
-            raise ValueError("action must be one of: start, status")
+        if action not in {"start", "status", "cancel"}:
+            raise ValueError("action must be one of: start, status, cancel")
+        if action == "cancel":
+            _require_mutations()
+            if not task_id:
+                raise ValueError("task_id is required for cancel")
+            result = _cancel_workflow_task(task_id, reason=cancel_reason)
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.workflow.task_id", task_id)
+            return result
         if action == "status":
             if not task_id:
                 raise ValueError("task_id is required for status")
