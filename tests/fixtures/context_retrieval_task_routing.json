@@ -1,0 +1,71 @@
+{
+  "schema": "context_retrieval_fixture_set.v1",
+  "name": "task-routing-workflow-card-contextbench-smoke",
+  "target": "task_router(mode='workflow_select')",
+  "description": "Offline deterministic ContextBench-style fixtures for task-router workflow-card retrieval.",
+  "default_top_k": 3,
+  "thresholds": {
+    "min_mean_recall": 0.8,
+    "min_mean_efficiency": 0.55,
+    "min_top_workflow_card_accuracy": 0.8
+  },
+  "fixtures": [
+    {
+      "id": "review-security-triage",
+      "coverage": "review",
+      "task": "review",
+      "prompt": "Review this auth change for leaked tokens, credential handling, and security vulnerabilities before approval.",
+      "execution_mode": "auto",
+      "gold_context_anchors": [
+        {"type": "workflow_card", "id": "security-triage"}
+      ],
+      "expected_top_workflow_card": "security-triage"
+    },
+    {
+      "id": "release-readiness-before-merge",
+      "coverage": "release-readiness",
+      "task": "release-readiness",
+      "prompt": "We are ready to ship version 1.2; check release readiness, changelog, CI gate, merge blockers, and rollback notes.",
+      "execution_mode": "auto",
+      "gold_context_anchors": [
+        {"type": "workflow_card", "id": "release-readiness"},
+        {"type": "workflow_card", "id": "snapshot-before-refactor"}
+      ],
+      "expected_top_workflow_card": "release-readiness"
+    },
+    {
+      "id": "test-impact-for-changed-python",
+      "coverage": "test-impact",
+      "task": "test-impact",
+      "prompt": "Changed src/router.py and tests/test_router.py; choose the smallest pytest coverage and impact verification gate.",
+      "execution_mode": "auto",
+      "gold_context_anchors": [
+        {"type": "workflow_card", "id": "test-impact"}
+      ],
+      "expected_top_workflow_card": "test-impact"
+    },
+    {
+      "id": "devcontainer-healthz-port",
+      "coverage": "devcontainer-health",
+      "task": "devcontainer-health",
+      "prompt": "VS Code devcontainer MCP healthz on port 8000 is failing; diagnose container connectivity and service readiness.",
+      "execution_mode": "auto",
+      "gold_context_anchors": [
+        {"type": "workflow_card", "id": "devcontainer-health"},
+        {"type": "workflow_card", "id": "workflow-diagnostics"}
+      ],
+      "expected_top_workflow_card": "devcontainer-health"
+    },
+    {
+      "id": "snapshot-before-risky-refactor",
+      "coverage": "rollback-snapshot-routing",
+      "task": "rollback-snapshot-routing",
+      "prompt": "Before a broad risky refactor and rename migration, make sure there is a snapshot and rollback path.",
+      "execution_mode": "auto",
+      "gold_context_anchors": [
+        {"type": "workflow_card", "id": "snapshot-before-refactor"}
+      ],
+      "expected_top_workflow_card": "snapshot-before-refactor"
+    }
+  ]
+}
