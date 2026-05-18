@@ -116,6 +116,13 @@ from source.tool_output_schemas import (
     all_tool_output_contracts,
     tool_output_contract,
 )
+from source.tool_catalog_integrity import (
+    BASELINE_FILE as TOOL_CATALOG_BASELINE_FILE,
+    BASELINE_PUBLIC_PATH as TOOL_CATALOG_BASELINE_PUBLIC_PATH,
+    build_tool_catalog_baseline,
+    integrity_report,
+    load_baseline as load_tool_catalog_baseline,
+)
 from source.version_metadata import (
     mcp_coding_experiment_version,
     runtime_image_version,
@@ -302,6 +309,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "tool_annotations": {"categories": ["read-only"]},
     "tool_output_contracts": {"categories": ["read-only"]},
+    "tool_catalog_integrity": {"categories": ["read-only", "governance"]},
     "policy_insights": {"categories": ["read-only", "governance"]},
     "workflow_task": {
         "categories": ["write", "shell/process"],
@@ -14214,6 +14222,99 @@ def tool_output_contracts(tool_name: str = "") -> dict[str, Any]:
     return all_tool_output_contracts()
 
 
+def _mcp_list_tools_payload() -> list[dict[str, Any]]:
+    """Return live FastMCP list_tools metadata from sync tool/report contexts."""
+
+    async def collect() -> list[dict[str, Any]]:
+        tools = await mcp.list_tools()
+        payloads: list[dict[str, Any]] = []
+        for tool in tools:
+            try:
+                raw = tool.model_dump(mode="json", by_alias=True)
+            except TypeError:
+                raw = tool.model_dump(by_alias=True)
+            payloads.append(json.loads(json.dumps(raw, sort_keys=True, ensure_ascii=True, default=str)))
+        return payloads
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(collect())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(collect())).result()
+
+
+def _current_tool_catalog_baseline() -> dict[str, Any]:
+    return build_tool_catalog_baseline(
+        _mcp_list_tools_payload(),
+        _tool_annotation_manifest(),
+        all_tool_output_contracts(),
+    )
+
+
+def _tool_catalog_integrity_impl(include_tools: bool = False) -> dict[str, Any]:
+    current = _current_tool_catalog_baseline()
+    try:
+        baseline = load_tool_catalog_baseline(TOOL_CATALOG_BASELINE_FILE)
+        baseline_error = ""
+    except FileNotFoundError:
+        baseline = None
+        baseline_error = "missing"
+    except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        baseline = None
+        baseline_error = f"{type(exc).__name__}: {exc}"
+    return integrity_report(
+        baseline=baseline,
+        current=current,
+        baseline_error=baseline_error,
+        include_tools=include_tools,
+    )
+
+
+def _tool_catalog_integrity_summary() -> dict[str, Any]:
+    try:
+        report = _tool_catalog_integrity_impl(include_tools=False)
+    except Exception as exc:  # pragma: no cover - defensive report hardening
+        return {
+            "schema": "tool_catalog_integrity_summary.v1",
+            "ok": False,
+            "status": "unavailable",
+            "error": type(exc).__name__,
+            "baseline_path": TOOL_CATALOG_BASELINE_PUBLIC_PATH,
+            "contains_secrets": False,
+            "contains_repository_contents": False,
+        }
+    drift = report.get("drift", {}) if isinstance(report.get("drift"), dict) else {}
+    lint = report.get("lint", {}) if isinstance(report.get("lint"), dict) else {}
+    baseline = report.get("baseline", {}) if isinstance(report.get("baseline"), dict) else {}
+    current = report.get("current", {}) if isinstance(report.get("current"), dict) else {}
+    return {
+        "schema": "tool_catalog_integrity_summary.v1",
+        "ok": bool(report.get("ok")),
+        "status": str(report.get("status", "")),
+        "baseline_path": TOOL_CATALOG_BASELINE_PUBLIC_PATH,
+        "baseline_digest": str(baseline.get("whole_catalog_digest", "")),
+        "current_digest": str(current.get("whole_catalog_digest", "")),
+        "tool_count": int(current.get("tool_count", 0) or 0),
+        "drift": drift.get("summary", {"added": 0, "removed": 0, "changed": 0}),
+        "lint": {
+            "advisory_only": True,
+            "status": str(lint.get("status", "")),
+            "finding_count": int(lint.get("finding_count", 0) or 0),
+            "by_type": lint.get("by_type", {}),
+        },
+        "contains_secrets": False,
+        "contains_repository_contents": False,
+    }
+
+
+@mcp.tool()
+def tool_catalog_integrity(include_tools: bool = False) -> dict[str, Any]:
+    """Compare the live public MCP tool catalog with the checked-in digest baseline."""
+    return _tool_catalog_integrity_impl(include_tools=include_tools)
+
+
 @mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Read-only capability probe: repo/git/docker state, branch/head, and server limits."""
@@ -23745,6 +23846,7 @@ def _governance_report_impl(
         "governance_hooks": _governance_result_store_summary(),
         "untrusted_content_signals": untrusted_content_summary,
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
+        "tool_catalog_integrity": _tool_catalog_integrity_summary(),
         "snapshots": _governance_snapshot_references(),
         "security": {
             "redaction": "audit events, untrusted-content signal counts, and report summaries are redacted/aggregate-only",
