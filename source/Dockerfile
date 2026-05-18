@@ -351,7 +351,7 @@ COPY --chown=app:app defaults/ /opt/codebase-tooling/defaults/
 
 # Keep high-churn app files in the last layers to speed iterative rebuilds.
 COPY --chown=app:app server.py ./
-COPY --chown=app:app tool_output_schemas.py version_metadata.py ./source/
+COPY --chown=app:app tool_output_schemas.py tool_catalog_integrity.py tool_catalog_baseline.json version_metadata.py ./source/
 COPY --chown=app:app entrypoint.sh ./
 RUN chmod 0755 /app/entrypoint.sh
 RUN ln -sf /usr/local/bin/python3 /usr/bin/python3

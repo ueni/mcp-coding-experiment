@@ -140,7 +140,7 @@ def test_dockerfile_copies_runtime_source_package_helpers() -> None:
     dockerfile = Path("source/Dockerfile").read_text()
 
     assert "COPY --chown=app:app server.py ./" in dockerfile
-    assert "tool_output_schemas.py version_metadata.py ./source/" in dockerfile
+    assert "tool_output_schemas.py tool_catalog_integrity.py tool_catalog_baseline.json version_metadata.py ./source/" in dockerfile
 
 
 def test_dockerfile_deduplicates_preloaded_ollama_models() -> None:
