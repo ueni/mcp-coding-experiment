@@ -1,0 +1,14 @@
+diff --git a/source/auth.py b/source/auth.py
+index 91cd4b1..2f4e5a9 100644
+--- a/source/auth.py
++++ b/source/auth.py
+@@ -1,9 +1,9 @@
+-def is_admin(actor):
++def has_admin_role(actor):
+     return "admin" in actor.roles
+ def delete_project(actor, project, db):
+-    if not is_admin(actor):
++    if not has_admin_role(actor):
+         raise PermissionError("admin role required")
+     db.delete(project)
+     return {"deleted": project.id}

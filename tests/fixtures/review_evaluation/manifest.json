@@ -1,0 +1,14 @@
+{
+  "schema": "review_signal_noise_manifest.v1",
+  "description": "Offline CR-Bench-style fixture pack for code-review signal/noise evaluation.",
+  "thresholds": {
+    "min_precision": 1.0,
+    "min_recall": 1.0,
+    "max_spurious_findings": 0
+  },
+  "fixtures": [
+    "true_positive_missing_auth/fixture.json",
+    "false_positive_safe_refactor/fixture.json",
+    "no_blocker_docs_only/fixture.json"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "review_signal_noise_fixture.v1",
+  "id": "no-blocker-docs-only",
+  "description": "Reviewer should report no blockers for a documentation-only typo fix.",
+  "diff_path": "diff.patch",
+  "review_output_path": "review_output.json",
+  "expected_findings": [],
+  "should_not_flag": [
+    {
+      "id": "docs-only-no-blocker",
+      "title": "Documentation typo fix should not be treated as a release blocker",
+      "path": "docs/usage.md",
+      "line": 4,
+      "line_tolerance": 3,
+      "match_terms": ["blocker", "docs"],
+      "evidence_paths": ["diff.patch"]
+    }
+  ]
+}
