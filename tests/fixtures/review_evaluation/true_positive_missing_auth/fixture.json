@@ -1,0 +1,19 @@
+{
+  "schema": "review_signal_noise_fixture.v1",
+  "id": "true-positive-missing-auth",
+  "description": "Reviewer should report a real blocker when an authorization guard is removed from a destructive action.",
+  "diff_path": "diff.patch",
+  "review_output_path": "review_output.json",
+  "expected_findings": [
+    {
+      "id": "authz-delete-user",
+      "title": "Missing authorization guard on delete_user",
+      "path": "source/auth.py",
+      "line": 12,
+      "line_tolerance": 4,
+      "match_terms": ["authorization", "delete_user"],
+      "evidence_paths": ["diff.patch"]
+    }
+  ],
+  "should_not_flag": []
+}

@@ -24,6 +24,7 @@ SPDX-License-Identifier: MIT
 - [Hash-pinned dependency locks](./dependency-locks.md) - checked-in pip hash locks, refresh/check tooling, and opt-in Docker locked installs.
 - [Build download cache verification](./build-download-cache.md) - stable BuildKit cache IDs, offline/no-network gates, and cache audit tooling for Docker builds.
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) - deterministic advisory metadata for instruction-like text in tool outputs with aggregate governance/risk counts.
+- [Review signal/noise evaluator](./review-signal-noise-evaluator.md) - offline CR-Bench-style fixture scoring for review true positives, misses, and spurious findings.
 
 This index lists documentation ownership and status.
 
@@ -50,6 +51,7 @@ This index lists documentation ownership and status.
 - [Self-optimization efficiency report](./self-optimization-report.md) (`docs/self-optimization-report.md`) - Status: `prototype`
 - [Build download cache verification](./build-download-cache.md) (`docs/build-download-cache.md`) - Status: `operational verification`
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
+- [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Agent execution modes](./execution-modes.md) (`docs/execution-modes.md`) - Status: `operational guidance`
 - [Explicit Agent API Proxy](./agent-api-proxy.md) (`docs/agent-api-proxy.md`) - Status: `prototype`

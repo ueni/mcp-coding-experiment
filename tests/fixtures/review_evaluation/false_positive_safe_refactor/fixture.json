@@ -1,0 +1,19 @@
+{
+  "schema": "review_signal_noise_fixture.v1",
+  "id": "false-positive-safe-refactor",
+  "description": "Reviewer should stay quiet when an authorization helper is renamed but the guard remains equivalent.",
+  "diff_path": "diff.patch",
+  "review_output_path": "review_output.json",
+  "expected_findings": [],
+  "should_not_flag": [
+    {
+      "id": "safe-auth-helper-rename",
+      "title": "Preserved admin authorization helper rename is not a blocker",
+      "path": "source/auth.py",
+      "line": 9,
+      "line_tolerance": 5,
+      "match_terms": ["authorization", "admin"],
+      "evidence_paths": ["diff.patch"]
+    }
+  ]
+}

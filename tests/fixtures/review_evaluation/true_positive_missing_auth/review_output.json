@@ -1,0 +1,14 @@
+{
+  "schema": "review_output_findings.v1",
+  "findings": [
+    {
+      "id": "authz-delete-user",
+      "severity": "blocker",
+      "title": "Missing authorization check in delete_user",
+      "message": "delete_user now calls db.delete after removing the authorization guard; destructive user deletion can bypass tenant admin checks.",
+      "path": "source/auth.py",
+      "line": 12,
+      "evidence_paths": ["diff.patch"]
+    }
+  ]
+}

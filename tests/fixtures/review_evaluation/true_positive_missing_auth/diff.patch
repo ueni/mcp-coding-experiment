@@ -1,0 +1,12 @@
+diff --git a/source/auth.py b/source/auth.py
+index 86f4a10..b4e9d63 100644
+--- a/source/auth.py
++++ b/source/auth.py
+@@ -7,7 +7,5 @@ def can_delete_user(actor, target):
+     return actor.is_admin and actor.tenant_id == target.tenant_id
+ def delete_user(actor, target, db):
+-    if not can_delete_user(actor, target):
+-        raise PermissionError("delete_user requires tenant admin")
++    # Refactor moved the check to the caller.
+     db.delete(target)
+     return {"deleted": target.id}
