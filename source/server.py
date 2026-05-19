@@ -29665,11 +29665,92 @@ routes:
 """
 
 
+def _continue_load_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.is_file() or yaml is None:
+        return {}
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _continue_model_profile_summary(path: Path) -> dict[str, str]:
+    rel_path = str(path.relative_to(REPO_PATH))
+    profile = _continue_load_yaml_mapping(path)
+    models = profile.get("models") if isinstance(profile, dict) else None
+    first_model = (
+        models[0]
+        if isinstance(models, list) and models and isinstance(models[0], dict)
+        else {}
+    )
+    model = str(first_model.get("model", "") or "").strip()
+    display_name = str(
+        first_model.get("name", profile.get("name", "")) or ""
+    ).strip()
+    provider = str(first_model.get("provider", "") or "").strip().lower()
+    api_base = str(
+        first_model.get("apiBase", first_model.get("api_base", "")) or ""
+    ).strip()
+    return {
+        "file": rel_path,
+        "name": display_name,
+        "provider": provider,
+        "model": model,
+        "apiBase": api_base,
+    }
+
+
+def _continue_is_fallback_profile(profile: dict[str, str]) -> bool:
+    return (
+        profile.get("model") == "model-fallback"
+        or profile.get("file") == ".continue/models/model-fallback.yaml"
+        or "fallback" in profile.get("name", "").lower()
+    )
+
+
+def _continue_detected_default(
+    routing: dict[str, Any], profiles: list[dict[str, str]]
+) -> dict[str, str]:
+    by_file = {profile.get("file", ""): profile for profile in profiles}
+    by_model = {
+        profile.get("model", ""): profile
+        for profile in profiles
+        if profile.get("model")
+    }
+    router = routing.get("router") if isinstance(routing.get("router"), dict) else {}
+    route_model = str(router.get("model", "") or "").strip()
+    route_file = str(router.get("file", "") or "").strip()
+    for candidate in [by_file.get(route_file), by_model.get(route_model)]:
+        if candidate and not _continue_is_fallback_profile(candidate):
+            return {**candidate, "source": "model-routing.yaml"}
+    for profile in profiles:
+        if profile.get("provider") == "ollama" and not _continue_is_fallback_profile(
+            profile
+        ):
+            return {**profile, "source": "local Ollama profile"}
+    for profile in profiles:
+        if not _continue_is_fallback_profile(profile):
+            return {**profile, "source": "model profile"}
+    return {}
+
+
 def _continue_model_fallback_status() -> dict[str, Any]:
     continue_dir = REPO_PATH / ".continue"
     routing_path = continue_dir / "model-routing.yaml"
     models_dir = continue_dir / "models"
     model_paths = sorted(models_dir.glob("*.yaml")) if models_dir.is_dir() else []
+    routing = _continue_load_yaml_mapping(routing_path)
+    router = routing.get("router") if isinstance(routing.get("router"), dict) else {}
+    profiles = [_continue_model_profile_summary(path) for path in model_paths]
+    local_profiles = [
+        profile
+        for profile in profiles
+        if profile.get("provider") == "ollama" and not _continue_is_fallback_profile(
+            profile
+        )
+    ]
+    detected_default = _continue_detected_default(routing, profiles)
     return {
         "schema": "continue_model_fallback.status.v1",
         "repo_path": str(REPO_PATH),
@@ -29677,30 +29758,145 @@ def _continue_model_fallback_status() -> dict[str, Any]:
         "continue_dir_exists": continue_dir.is_dir(),
         "routing_exists": routing_path.is_file(),
         "model_profiles": [str(path.relative_to(REPO_PATH)) for path in model_paths],
+        "routing": {
+            "model": str(router.get("model", "") or ""),
+            "file": str(router.get("file", "") or ""),
+        },
+        "profiles": profiles,
+        "local_profiles": local_profiles,
+        "detected_default": detected_default,
         "configure_endpoint": "/v1/model-fallback/configure",
     }
 
 
-def _continue_model_fallback_content(status: dict[str, Any]) -> str:
-    if status.get("routing_exists") and status.get("model_profiles"):
-        configured = "Continue already has model routing and model profiles in this repository."
-    else:
-        configured = "No complete Continue model routing/profile configuration was detected."
-    mutation_note = (
-        "I can write the configuration through POST /v1/model-fallback/configure because ALLOW_MUTATIONS=true."
-        if ALLOW_MUTATIONS
-        else "I can draft the configuration, but writing is disabled until ALLOW_MUTATIONS=true."
+def _continue_model_fallback_user_text(payload: dict[str, Any]) -> str:
+    messages = payload.get("messages", [])
+    if not isinstance(messages, list):
+        return ""
+    parts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+    return "\n".join(parts).lower()
+
+
+def _continue_model_fallback_content(
+    status: dict[str, Any], payload: dict[str, Any]
+) -> str:
+    detected_default = (
+        status.get("detected_default")
+        if isinstance(status.get("detected_default"), dict)
+        else {}
     )
+    user_text = _continue_model_fallback_user_text(payload)
+    messages = payload.get("messages", [])
+    user_request_count = (
+        sum(
+            1
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        )
+        if isinstance(messages, list)
+        else 0
+    )
+    if detected_default:
+        default_label = " ".join(
+            part
+            for part in [
+                str(detected_default.get("provider", "")).capitalize(),
+                str(detected_default.get("model", "")),
+            ]
+            if part
+        ).strip()
+        found = (
+            f"I found {detected_default.get('source', 'a Continue profile')} for "
+            f"{default_label}, so I'll use that by default. You can change it later."
+        )
+        configure_hint = (
+            f"When the token is ready, I can configure {detected_default.get('model')} "
+            f"from {detected_default.get('file')}."
+        )
+    else:
+        found = (
+            "I did not find a real coding model profile yet, so I need the model "
+            "details before Continue can code."
+        )
+        configure_hint = (
+            'For a local OpenAI-compatible endpoint, use provider "openai", model, '
+            "and apiBase."
+        )
+    mutation_note = (
+        "I can write the config with /v1/model-fallback/configure."
+        if ALLOW_MUTATIONS
+        else "Mutations are off, so I can only show copy/paste config until ALLOW_MUTATIONS=true."
+    )
+    token_handled = any(
+        marker in user_text
+        for marker in ["skip", "mcp_http_bearer_token", "bearer", "token"]
+    )
+    if user_request_count >= 5:
+        next_step = (
+            "I won't ask more setup questions. Set the MCP_HTTP_BEARER_TOKEN secret, "
+            "then use the detected default or send model details to /v1/model-fallback/configure."
+        )
+    elif not token_handled:
+        next_step = (
+            "First, paste the MCP token for Continue's MCP_HTTP_BEARER_TOKEN "
+            "secret, or type skip."
+        )
+    elif detected_default:
+        next_step = (
+            f"Next, reply use default to keep {detected_default.get('model')}, "
+            "or send a different model and endpoint."
+        )
+    else:
+        next_step = "Next, send the provider, model, and apiBase you want Continue to use."
     return "\n".join(
         [
-            "Model fallback is active.",
-            configured,
+            "I can set up Continue. I am not the real coding model yet.",
+            found,
+            next_step,
+            configure_hint,
             mutation_note,
-            "To configure an OpenAI-compatible model, send JSON to /v1/model-fallback/configure with:",
-            '{"provider":"openai","model":"<model-id>","apiBase":"http://host:port/v1","proxy":"http://127.0.0.1:8080"}',
-            "The endpoint writes .continue/models/coding-openai-compatible.yaml and .continue/model-routing.yaml inside REPO_PATH.",
         ]
     )
+
+
+def _continue_model_fallback_stream(
+    payload: dict[str, Any],
+    content: str,
+    trace_id: str,
+    route: dict[str, Any],
+    policy: dict[str, Any],
+    status_payload: dict[str, Any],
+    request: Any,
+):
+    async def _stream():
+        yield _agent_proxy_sse_data(
+            {
+                **_agent_proxy_stream_chunk(payload, trace_id, {"role": "assistant"}),
+                "agent_proxy": _agent_proxy_metadata(trace_id, route, policy),
+                "model_fallback": status_payload,
+            }
+        )
+        for part in content.split(" "):
+            if await request.is_disconnected():
+                return
+            yield _agent_proxy_sse_data(
+                _agent_proxy_stream_chunk(payload, trace_id, {"content": part + " "})
+            )
+            await asyncio.sleep(0)
+        yield _agent_proxy_sse_data(_agent_proxy_stream_chunk(payload, trace_id, {}, "stop"))
+        yield _agent_proxy_sse_data("[DONE]")
+
+    return _stream()
 
 
 def _continue_model_config_payload(payload: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
@@ -29745,7 +29941,7 @@ async def continue_model_fallback_chat_completions(request):
         error, status = _agent_proxy_error_payload(reason, trace_id=trace_id, status_code=400)
         return JSONResponse(error, status_code=status)
     status_payload = _continue_model_fallback_status()
-    content = _continue_model_fallback_content(status_payload)
+    content = _continue_model_fallback_content(status_payload, payload)
     route = {
         "schema": "continue_model_fallback.routing.v1",
         "requested_model": str(payload.get("model", "model-fallback")),
@@ -29755,6 +29951,14 @@ async def continue_model_fallback_chat_completions(request):
         "risk_class": "repo_bound_configuration",
     }
     policy = {"input_tokens_estimate": _agent_proxy_estimate_tokens(_agent_proxy_request_text_digest_input(payload))}
+    if bool(payload.get("stream", False)):
+        return StreamingResponse(
+            _continue_model_fallback_stream(
+                payload, content, trace_id, route, policy, status_payload, request
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     response_payload = _agent_proxy_openai_response(payload, content, trace_id, route, policy)
     response_payload["model_fallback"] = status_payload
     return JSONResponse(response_payload)

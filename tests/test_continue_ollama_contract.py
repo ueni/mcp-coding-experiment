@@ -70,6 +70,11 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertEqual(
                 "http://localhost:8000/v1/model-fallback", model["apiBase"], str(config_path)
             )
+            self.assertEqual(
+                "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}",
+                model["requestOptions"]["headers"]["Authorization"],
+                str(config_path),
+            )
             self.assertIn("chat", model["roles"], str(config_path))
 
     def test_continue_model_contract_uses_compact_default_profile(self):
