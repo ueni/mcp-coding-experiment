@@ -34,6 +34,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "risk_scoring",
                 "workspace_transaction",
                 "policy_simulator",
+                "workflow_policy_plan",
                 "clarification_gate",
                 "release_readiness",
                 "tool_catalog_integrity",
@@ -94,6 +95,15 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "risk_scoring": self.server.risk_scoring(),
             "workspace_transaction": self.server.workspace_transaction(mode="begin", label="schema-contract"),
             "policy_simulator": self.server.policy_simulator(base_ref="HEAD", head_ref="HEAD"),
+            "workflow_policy_plan": self.server.workflow_policy_plan(
+                intent="Inspect repository status before summarizing",
+                execution_mode="offline-onboard-only",
+                allowed_targets=["."],
+                planned_steps=[
+                    {"tool": "repo_info", "mode": "read", "args": {}},
+                    {"tool": "git_status", "mode": "read", "args": {}},
+                ],
+            ),
             "clarification_gate": self.server.clarification_gate(
                 intent="prepare a safe release",
                 target="HEAD",

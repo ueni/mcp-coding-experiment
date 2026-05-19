@@ -38,7 +38,7 @@ import inspect
 import signal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Callable
+from typing import Annotated, Any, Callable, Iterable
 
 try:
     import tomllib
@@ -361,6 +361,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
         },
     },
     "policy_simulator": {"categories": ["read-only"]},
+    "workflow_policy_plan": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
     "dependency_security_report": {"categories": ["read-only"]},
@@ -6777,9 +6778,10 @@ def _governance_result_store_summary() -> dict[str, Any]:
     rows = payload.get("results", {})
     if not isinstance(rows, dict):
         rows = {}
-    wanted = {"policy_simulator", "release_readiness", "required_tool_chain"}
+    wanted = {"policy_simulator", "workflow_policy_plan", "release_readiness", "required_tool_chain"}
     out: dict[str, Any] = {
         "policy_simulator": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
+        "workflow_policy_plan": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "release_readiness": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "required_tool_chain": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
     }
@@ -6799,7 +6801,7 @@ def _governance_result_store_summary() -> dict[str, Any]:
         if not latest or created_at >= str(latest.get("created_at", "")):
             details: dict[str, Any] = {}
             if isinstance(value, dict):
-                for key in ("schema", "ok", "blocking_policies", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
+                for key in ("schema", "ok", "decision", "plan_id", "blocking_policies", "required_preconditions", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
                     if key in value:
                         details[key] = _redact_audit_value(value[key])
             bucket["latest"] = {"result_id": str(rid), "created_at": created_at, "ok": ok, "details": details}
@@ -25604,6 +25606,7 @@ def _governance_report_impl(
             _build_workflow_diagnostics(events, limit=50)
         ),
         "governance_hooks": _governance_result_store_summary(),
+        "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),
@@ -26540,6 +26543,13 @@ def release_readiness(
         governance_check["warning_reason"] = "optional governance report missing or stale"
     result["checks"]["governance_report"] = governance_check
 
+    preflight_check = _latest_workflow_policy_plan_from_result_store()
+    preflight_check["ok"] = preflight_check.get("ok", True) if preflight_check.get("present") else True
+    if preflight_check.get("present") and preflight_check.get("decision") != "allow":
+        preflight_check["warning"] = True
+        preflight_check["warning_reason"] = "latest workflow policy preflight did not allow the declared sequence"
+    result["checks"]["workflow_policy_plan"] = preflight_check
+
     result["finished_at"] = _now_iso()
     if summary_mode == "quick":
         quick_result = {
@@ -26582,6 +26592,9 @@ def release_readiness(
                         "status",
                         "missing_fields",
                         "question_count",
+                        "decision",
+                        "plan_id",
+                        "result_id",
                     }
                 }
                 for name, data in result["checks"].items()
@@ -27088,6 +27101,495 @@ def workspace_transaction(
         if isinstance(result.get("_meta"), dict):
             out["_meta"] = result["_meta"]
     return out
+
+
+WORKFLOW_POLICY_PLAN_SCHEMA = "workflow_policy_plan.v1"
+WORKFLOW_POLICY_PLAN_DECISIONS = {"allow", "deny", "needs_approval", "needs_clarification"}
+_WORKFLOW_POLICY_SENSITIVE_CLASSIFICATIONS = {
+    "confidential",
+    "credential",
+    "credentials",
+    "internal",
+    "private",
+    "restricted",
+    "secret",
+    "secrets",
+    "sensitive",
+}
+_WORKFLOW_POLICY_READ_TOOLS = {
+    "repo_info",
+    "roots_diagnostics",
+    "runtime_state",
+    "git_status",
+    "grep",
+    "find_paths",
+    "read_snippet",
+    "summarize_diff",
+    "risk_scoring",
+    "policy_simulator",
+    "clarification_gate",
+    "tool_catalog_integrity",
+    "dependency_security_report",
+    "governance_report",
+    "artifact_provenance",
+    "workflow_diagnostics",
+    "workflow_lineage",
+    "interaction_invariant_audit",
+    "test_impact_map",
+}
+_WORKFLOW_POLICY_RELEASE_TOOLS = {
+    "release_readiness",
+    "quality_router",
+    "required_tool_chain",
+    "workflow_task",
+}
+_WORKFLOW_POLICY_SNAPSHOT_TOOLS = {"state_snapshot", "workspace_transaction"}
+_WORKFLOW_POLICY_TEST_TOOLS = {"self_test", "impact_tests", "change_impact_gate", "release_readiness", "quality_router"}
+_WORKFLOW_POLICY_SCOPE_ARG_KEYS = {
+    "path",
+    "paths",
+    "file",
+    "files",
+    "target",
+    "targets",
+    "directory",
+    "directories",
+    "repo_path",
+    "workspace",
+}
+
+
+def _workflow_policy_redact_string(value: str, *, max_chars: int = 160) -> str:
+    redacted = _redact_audit_string(value.replace("\x00", " "))
+    redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute-path>", redacted)
+    redacted = re.sub(r"https?://[^\s)]+", "<redacted:url>", redacted)
+    redacted = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "<redacted:email>", redacted)
+    if len(redacted) > max_chars:
+        redacted = redacted[:max_chars] + "...[truncated]"
+    return redacted
+
+
+def _workflow_policy_normalize_target(value: Any) -> str:
+    if value is None:
+        return ""
+    raw = str(value).replace("\x00", " ").strip()
+    if not raw:
+        return ""
+    raw = raw.replace("\\", "/")
+    if raw.startswith("/") or re.match(r"^[A-Za-z]:/", raw):
+        return "<redacted:absolute-path>"
+    while raw.startswith("./"):
+        raw = raw[2:]
+    raw = raw.strip("/") or "."
+    return _workflow_policy_redact_string(raw, max_chars=120)
+
+
+def _workflow_policy_iter_values(value: Any) -> Iterable[Any]:
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _workflow_policy_iter_values(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _workflow_policy_iter_values(item)
+    else:
+        yield value
+
+
+def _workflow_policy_extract_targets(step: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for key in ("target", "targets", "scope", "scopes"):
+        if key in step:
+            values.extend(_workflow_policy_iter_values(step.get(key)))
+    args = step.get("args") or step.get("arguments") or step.get("normalized_args") or {}
+    if isinstance(args, dict):
+        for key, value in args.items():
+            if str(key).lower() in _WORKFLOW_POLICY_SCOPE_ARG_KEYS:
+                values.extend(_workflow_policy_iter_values(value))
+    targets = []
+    for value in values:
+        target = _workflow_policy_normalize_target(value)
+        if target and target not in targets:
+            targets.append(target)
+    return targets
+
+
+def _workflow_policy_arg_shape(value: Any, depth: int = 0) -> Any:
+    if depth > 3:
+        return "<nested>"
+    if isinstance(value, dict):
+        return {str(key): _workflow_policy_arg_shape(item, depth + 1) for key, item in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(value, list):
+        if not value:
+            return []
+        return [f"<{type(value[0]).__name__}>"]
+    if value is None:
+        return None
+    return f"<{type(value).__name__}>"
+
+
+def _workflow_policy_step_mode(step: dict[str, Any]) -> str:
+    for key in ("mode", "subcommand", "command", "operation"):
+        value = step.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    args = step.get("args") or step.get("arguments") or {}
+    if isinstance(args, dict):
+        for key in ("mode", "subcommand", "command", "operation"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _workflow_policy_step_categories(tool: str, mode: str) -> set[str]:
+    metadata = TOOL_SECURITY_METADATA.get(tool, {})
+    categories = set(str(item) for item in metadata.get("categories", []) if item)
+    mode_categories = metadata.get("mode_categories", {})
+    if isinstance(mode_categories, dict) and mode:
+        for key, cats in mode_categories.items():
+            if str(key).lower() == mode.lower() and isinstance(cats, list):
+                return set(str(item) for item in cats if item)
+    return categories
+
+
+def _workflow_policy_step_flags(step: dict[str, Any], categories: set[str]) -> dict[str, bool]:
+    mutates = any(cat in MUTATION_TOOL_CATEGORIES or cat == "destructive" for cat in categories)
+    network = "network" in categories
+    if "mutates" in step:
+        mutates = bool(step.get("mutates"))
+    if "mutation" in step:
+        mutates = mutates or bool(step.get("mutation"))
+    if "network" in step:
+        network = bool(step.get("network"))
+    if "network_access" in step:
+        network = network or str(step.get("network_access", "")).lower() not in {"", "none", "false", "0"}
+    return {"mutates": mutates, "network": network, "read_only": not mutates and not network}
+
+
+def _workflow_policy_normalize_step(step: Any, index: int) -> dict[str, Any]:
+    raw = step if isinstance(step, dict) else {"tool": str(step)}
+    tool = str(raw.get("tool") or raw.get("name") or "").strip()
+    mode = _workflow_policy_step_mode(raw)
+    categories = _workflow_policy_step_categories(tool, mode)
+    flags = _workflow_policy_step_flags(raw, categories)
+    args = raw.get("args") if "args" in raw else raw.get("arguments", raw.get("normalized_args", {}))
+    targets = _workflow_policy_extract_targets(raw)
+    expected_artifacts = []
+    for item in _workflow_policy_iter_values(raw.get("expected_artifacts", [])):
+        if item is not None:
+            expected_artifacts.append(_workflow_policy_redact_string(str(item), max_chars=80))
+    depends_on = []
+    for item in _workflow_policy_iter_values(raw.get("depends_on", raw.get("dependencies", []))):
+        if item is not None:
+            depends_on.append(_workflow_policy_redact_string(str(item), max_chars=80))
+    return {
+        "index": index,
+        "tool": tool,
+        "mode": _workflow_policy_redact_string(mode, max_chars=80),
+        "args_shape": _workflow_policy_arg_shape(args),
+        "risk_category": _workflow_policy_redact_string(str(raw.get("risk_category", raw.get("risk", ""))), max_chars=80),
+        "categories": sorted(categories),
+        "mutates": flags["mutates"],
+        "network": flags["network"],
+        "read_only": flags["read_only"],
+        "targets": targets,
+        "expected_artifacts": expected_artifacts[:20],
+        "depends_on": depends_on[:20],
+    }
+
+
+def _workflow_policy_scope_allowed(target: str, allowed_targets: list[str]) -> bool:
+    if not allowed_targets:
+        return True
+    if target == "<redacted:absolute-path>":
+        return False
+    normalized = _workflow_policy_normalize_target(target)
+    for allowed in allowed_targets:
+        if allowed in {"", "."}:
+            return True
+        allowed_norm = _workflow_policy_normalize_target(allowed)
+        if normalized == allowed_norm or normalized.startswith(allowed_norm.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _workflow_policy_has_snapshot_gate(steps: list[dict[str, Any]], before_index: int | None = None) -> bool:
+    candidates = steps if before_index is None else [s for s in steps if int(s.get("index", 0)) < before_index]
+    for step in candidates:
+        tool = str(step.get("tool", ""))
+        mode = str(step.get("mode", "")).lower()
+        artifacts = " ".join(str(item).lower() for item in step.get("expected_artifacts", []))
+        if tool in _WORKFLOW_POLICY_SNAPSHOT_TOOLS and (tool == "state_snapshot" or mode == "snapshot"):
+            return True
+        if "snapshot" in artifacts or "rollback" in artifacts:
+            return True
+    return False
+
+
+def _workflow_policy_has_test_gate(steps: list[dict[str, Any]], before_index: int | None = None) -> bool:
+    candidates = steps if before_index is None else [s for s in steps if int(s.get("index", 0)) < before_index]
+    for step in candidates:
+        tool = str(step.get("tool", ""))
+        mode = str(step.get("mode", "")).lower()
+        artifacts = " ".join(str(item).lower() for item in step.get("expected_artifacts", []))
+        if tool in _WORKFLOW_POLICY_TEST_TOOLS:
+            if tool != "quality_router" or mode in {"self_test", "change_impact", "release_readiness"}:
+                return True
+        if any(term in artifacts for term in ("test", "validation", "readiness")):
+            return True
+    return False
+
+
+def _workflow_policy_is_release_step(step: dict[str, Any]) -> bool:
+    tool = str(step.get("tool", ""))
+    mode = str(step.get("mode", "")).lower()
+    risk = str(step.get("risk_category", "")).lower()
+    artifact_text = " ".join(str(item).lower() for item in step.get("expected_artifacts", []))
+    if tool == "release_readiness":
+        return True
+    if tool in _WORKFLOW_POLICY_RELEASE_TOOLS and "release" in mode:
+        return True
+    return "release" in risk or "release" in artifact_text
+
+
+def _workflow_policy_looks_like_sensitive_read(step: dict[str, Any]) -> bool:
+    blob = json.dumps(step, sort_keys=True, ensure_ascii=True).lower()
+    return any(term in blob for term in ("secret", "credential", "token", ".env", "config", "private"))
+
+
+def _workflow_policy_finding(
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    step_index: int | None = None,
+    policy: str = "workflow_policy",
+    required_precondition: str = "",
+) -> dict[str, Any]:
+    finding: dict[str, Any] = {
+        "code": code,
+        "severity": severity,
+        "policy": policy,
+        "message": _workflow_policy_redact_string(message, max_chars=240),
+    }
+    if step_index is not None:
+        finding["step_index"] = step_index
+    if required_precondition:
+        finding["required_precondition"] = required_precondition
+    return finding
+
+
+def _workflow_policy_safe_next_actions(decision: str, findings: list[dict[str, Any]]) -> list[str]:
+    codes = {str(item.get("code", "")) for item in findings}
+    actions: list[str] = []
+    if "missing_intent" in codes or "missing_steps" in codes:
+        actions.append("Clarify the user intent, execution mode, allowed scope, and planned MCP steps before execution.")
+    if "shadow_tool" in codes:
+        actions.append("Replace unregistered/shadow tools with catalogued MCP tools or complete a separate tool-registration review.")
+    if "scope_creep" in codes:
+        actions.append("Narrow planned targets to the declared allowed scope or request explicit scope expansion.")
+    if "data_read_to_network" in codes:
+        actions.append("Remove the network-capable step, use a redacted aggregate artifact, or obtain explicit data-handling approval.")
+    if "missing_snapshot_gate" in codes:
+        actions.append("Add a state_snapshot/workspace_transaction snapshot before mutation or release-sensitive steps.")
+    if "missing_test_gate" in codes:
+        actions.append("Run or include the required test/change-impact/release-readiness gate before release-sensitive steps.")
+    if "mutation_needs_approval" in codes or "network_needs_approval" in codes:
+        actions.append("Ask for explicit approval for the mutation/network-capable portion of the sequence.")
+    if not actions and decision == "allow":
+        actions.append("Proceed with the declared sequence; re-run preflight if intent, scope, tools, or order changes.")
+    if not actions:
+        actions.append("Revise the planned sequence and run workflow_policy_plan again before executing tools.")
+    return actions[:8]
+
+
+def _workflow_policy_plan_id(payload: dict[str, Any]) -> str:
+    stable = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return "workflow-plan-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+
+
+def _workflow_policy_plan_payload(
+    *,
+    intent: str,
+    execution_mode: str,
+    allowed_targets: list[str],
+    data_classification: str,
+    planned_steps: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_intent = _workflow_policy_redact_string(intent, max_chars=240)
+    normalized_execution_mode = _workflow_policy_redact_string(execution_mode or "auto", max_chars=80)
+    normalized_data_classification = _workflow_policy_redact_string(data_classification or "unspecified", max_chars=80).lower()
+    normalized_allowed_targets = [_workflow_policy_normalize_target(item) for item in allowed_targets]
+    normalized_steps = [_workflow_policy_normalize_step(step, idx) for idx, step in enumerate(planned_steps)]
+
+    findings: list[dict[str, Any]] = []
+    required_preconditions: list[dict[str, Any]] = []
+    blocking_policies: list[str] = []
+
+    if not normalized_intent:
+        findings.append(_workflow_policy_finding(code="missing_intent", severity="clarification", message="declared intent is required"))
+    if not normalized_steps:
+        findings.append(_workflow_policy_finding(code="missing_steps", severity="clarification", message="planned_steps must contain at least one MCP tool step"))
+    if normalized_execution_mode not in {"auto", "online", "offline", "online-cloud-assisted", "offline-onboard-only", "local", "read-only", "mutation"}:
+        findings.append(_workflow_policy_finding(code="unknown_execution_mode", severity="clarification", message="execution_mode is not one of the documented execution profiles"))
+
+    prior_read_step: dict[str, Any] | None = None
+    prior_sensitive_read = False
+    for step in normalized_steps:
+        tool = str(step.get("tool", ""))
+        step_index = int(step.get("index", 0))
+        if not tool:
+            findings.append(_workflow_policy_finding(code="missing_tool", severity="clarification", step_index=step_index, message="step is missing a tool name"))
+            continue
+        if tool not in TOOL_SECURITY_METADATA:
+            findings.append(_workflow_policy_finding(code="shadow_tool", severity="block", step_index=step_index, policy="shadow_tool", message=f"unregistered MCP tool in declared sequence: {tool}"))
+            blocking_policies.append("shadow_tool")
+
+        for target in step.get("targets", []):
+            if not _workflow_policy_scope_allowed(str(target), normalized_allowed_targets):
+                findings.append(_workflow_policy_finding(code="scope_creep", severity="block", step_index=step_index, policy="scope", message=f"planned target exceeds allowed scope: {target}"))
+                blocking_policies.append("scope")
+
+        if bool(step.get("read_only")) or tool in _WORKFLOW_POLICY_READ_TOOLS:
+            prior_read_step = step
+            prior_sensitive_read = prior_sensitive_read or _workflow_policy_looks_like_sensitive_read(step)
+
+        if bool(step.get("network")):
+            if prior_read_step is not None:
+                severity = "block" if normalized_data_classification in _WORKFLOW_POLICY_SENSITIVE_CLASSIFICATIONS or prior_sensitive_read else "approval"
+                findings.append(_workflow_policy_finding(code="data_read_to_network", severity=severity, step_index=step_index, policy="dataflow", message="network-capable step follows repository/config read steps in the planned sequence"))
+                if severity == "block":
+                    blocking_policies.append("dataflow")
+            else:
+                findings.append(_workflow_policy_finding(code="network_needs_approval", severity="approval", step_index=step_index, policy="network", message="network-capable step requires explicit approval in the declared workflow"))
+
+        if bool(step.get("mutates")) and not _workflow_policy_has_snapshot_gate(normalized_steps, before_index=step_index):
+            findings.append(_workflow_policy_finding(code="mutation_needs_approval", severity="approval", step_index=step_index, policy="mutation", message="mutation-capable step has no earlier snapshot/rollback gate", required_precondition="snapshot_or_rollback"))
+            required_preconditions.append({"code": "snapshot_or_rollback", "step_index": step_index, "reason": "mutation step requires rollback evidence"})
+
+        if _workflow_policy_is_release_step(step):
+            if not _workflow_policy_has_snapshot_gate(normalized_steps, before_index=step_index):
+                findings.append(_workflow_policy_finding(code="missing_snapshot_gate", severity="approval", step_index=step_index, policy="release_gate", message="release-sensitive step is missing an earlier snapshot/rollback gate", required_precondition="snapshot_or_rollback"))
+                required_preconditions.append({"code": "snapshot_or_rollback", "step_index": step_index, "reason": "release workflow requires rollback evidence"})
+            if not _workflow_policy_has_test_gate(normalized_steps, before_index=step_index):
+                findings.append(_workflow_policy_finding(code="missing_test_gate", severity="approval", step_index=step_index, policy="release_gate", message="release-sensitive step is missing an earlier test/change-impact/readiness gate", required_precondition="test_or_change_impact_gate"))
+                required_preconditions.append({"code": "test_or_change_impact_gate", "step_index": step_index, "reason": "release workflow requires validation evidence"})
+
+    # Stable de-duplication while preserving first occurrence details.
+    deduped_findings: list[dict[str, Any]] = []
+    seen_finding_keys: set[tuple[str, int | None, str]] = set()
+    for finding in findings:
+        key = (str(finding.get("code", "")), finding.get("step_index") if isinstance(finding.get("step_index"), int) else None, str(finding.get("required_precondition", "")))
+        if key in seen_finding_keys:
+            continue
+        seen_finding_keys.add(key)
+        deduped_findings.append(finding)
+    findings = deduped_findings
+
+    deduped_preconditions: list[dict[str, Any]] = []
+    seen_preconditions: set[tuple[str, int]] = set()
+    for item in required_preconditions:
+        key = (str(item.get("code", "")), int(item.get("step_index", -1)))
+        if key in seen_preconditions:
+            continue
+        seen_preconditions.add(key)
+        deduped_preconditions.append(item)
+    required_preconditions = deduped_preconditions
+
+    blocking_policies = sorted(set(blocking_policies))
+    if blocking_policies:
+        decision = "deny"
+    elif any(item.get("severity") == "clarification" for item in findings):
+        decision = "needs_clarification"
+    elif any(item.get("severity") == "approval" for item in findings):
+        decision = "needs_approval"
+    else:
+        decision = "allow"
+
+    plan_basis = {
+        "schema": WORKFLOW_POLICY_PLAN_SCHEMA,
+        "intent_digest": hashlib.sha256(normalized_intent.encode("utf-8")).hexdigest()[:16],
+        "execution_mode": normalized_execution_mode,
+        "allowed_targets": normalized_allowed_targets,
+        "data_classification": normalized_data_classification,
+        "steps": normalized_steps,
+    }
+    result: dict[str, Any] = {
+        "schema": WORKFLOW_POLICY_PLAN_SCHEMA,
+        "read_only": True,
+        "executed_plan": False,
+        "decision": decision,
+        "ok": decision == "allow",
+        "plan_id": _workflow_policy_plan_id(plan_basis),
+        "intent": normalized_intent,
+        "execution_mode": normalized_execution_mode,
+        "allowed_targets": normalized_allowed_targets,
+        "data_classification": normalized_data_classification,
+        "step_count": len(normalized_steps),
+        "steps": normalized_steps,
+        "blocking_policies": blocking_policies,
+        "required_preconditions": required_preconditions,
+        "findings": findings,
+        "safe_next_actions": _workflow_policy_safe_next_actions(decision, findings),
+        "security": {
+            "redacted": True,
+            "persists_artifacts_by_default": False,
+            "contains_raw_prompts": False,
+            "contains_file_contents": False,
+            "contains_host_absolute_paths": False,
+            "external_services_called": False,
+        },
+    }
+    return result
+
+
+def _latest_workflow_policy_plan_from_result_store() -> dict[str, Any]:
+    payload = _result_store_load()
+    rows = payload.get("results", {})
+    if not isinstance(rows, dict):
+        return {"present": False, "required": False}
+    latest: dict[str, Any] | None = None
+    for rid, row in rows.items():
+        if not isinstance(row, dict) or row.get("tool") != "workflow_policy_plan":
+            continue
+        value = row.get("value")
+        if not isinstance(value, dict) or value.get("schema") != WORKFLOW_POLICY_PLAN_SCHEMA:
+            continue
+        created_at = str(row.get("created_at", ""))
+        entry = {
+            "present": True,
+            "required": False,
+            "result_id": str(rid),
+            "created_at": created_at,
+            "schema": str(value.get("schema", "")),
+            "decision": str(value.get("decision", "")),
+            "ok": bool(value.get("ok", False)),
+            "plan_id": str(value.get("plan_id", "")),
+            "blocking_policies": _redact_audit_value(value.get("blocking_policies", [])),
+            "required_preconditions": _redact_audit_value(value.get("required_preconditions", [])),
+            "finding_codes": [str(item.get("code", "")) for item in value.get("findings", [])[:20] if isinstance(item, dict)],
+        }
+        if latest is None or created_at >= str(latest.get("created_at", "")):
+            latest = entry
+    return latest or {"present": False, "required": False}
+
+
+@mcp.tool()
+def workflow_policy_plan(
+    intent: str,
+    planned_steps: list[dict[str, Any]],
+    execution_mode: str = "auto",
+    allowed_targets: list[str] | None = None,
+    data_classification: str = "unspecified",
+) -> dict[str, Any]:
+    """Preflight a declared MCP tool sequence against workflow-level policy without executing it."""
+    return _workflow_policy_plan_payload(
+        intent=intent,
+        execution_mode=execution_mode,
+        allowed_targets=allowed_targets or [],
+        data_classification=data_classification,
+        planned_steps=planned_steps or [],
+    )
 
 
 @mcp.tool()
