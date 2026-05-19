@@ -70,12 +70,12 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertEqual(
                 "http://localhost:8000/v1/model-fallback", model["apiBase"], str(config_path)
             )
+            self.assertIn("chat", model["roles"], str(config_path))
             self.assertEqual(
                 "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}",
                 model["requestOptions"]["headers"]["Authorization"],
                 str(config_path),
             )
-            self.assertIn("chat", model["roles"], str(config_path))
 
     def test_continue_model_contract_uses_compact_default_profile(self):
         expected_context = 8192
@@ -254,6 +254,11 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             openai_template_exists = (
                 repo_root / ".continue" / "models" / "coding-openai-compatible.yaml"
             ).exists()
+            fallback_config = yaml.safe_load(
+                (repo_root / ".continue" / "models" / "model-fallback.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
             fallback_template_exists = (
                 repo_root / ".continue" / "models" / "model-fallback.yaml"
             ).exists()
@@ -262,6 +267,10 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertEqual("ollama", qwen_config["models"][0]["provider"])
         self.assertEqual("http://127.0.0.1:2345", qwen_config["models"][0]["apiBase"])
         self.assertEqual("codebase-tooling-mcp", mcp_config["mcpServers"][0]["name"])
+        self.assertEqual(
+            "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}",
+            fallback_config["models"][0]["requestOptions"]["headers"]["Authorization"],
+        )
         self.assertTrue(openai_template_exists)
         self.assertTrue(fallback_template_exists)
 

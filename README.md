@@ -127,6 +127,18 @@ The endpoint is intentionally unauthenticated so clients can run a preflight bef
 
 The manifest is non-final SEP discovery work (`mcp-server-manifest.provisional.v1`), so clients should treat field names as provisional and prefer defensive parsing. It must not contain repository contents, bearer tokens, local absolute paths, environment values, host user data, or secrets. The protected MCP endpoint remains `/mcp`; the discovery manifest does not weaken bearer-token enforcement for MCP calls.
 
+### MCP Registry server.json readiness
+
+This repository also checks in `server.json` for official MCP Registry release metadata. It is distinct from the runtime discovery manifest above: `server.json` describes the publishable package identity and install surface, not one running server instance.
+
+Initial registry identity is `io.github.ueni/codebase-tooling-mcp` with an OCI/GHCR package channel at `ghcr.io/ueni/codebase-tooling-mcp:<version>`. Publication is not automatic. Use the local dry-run gate before changing release metadata or publishing:
+
+```bash
+python3 scripts/registry_readiness.py validate --compact
+```
+
+See [MCP Registry server.json readiness](./docs/mcp-registry-readiness.md) for the selected package channel, Docker ownership marker, version expectations, and maintainer-gated `mcp-publisher` OIDC publishing path.
+
 ## VS Code MCP Onboarding
 
 For a complete VS Code MCP path from fresh clone/devcontainer to a verified tool call, see [VS Code MCP Onboarding](./docs/vscode-mcp-onboarding.md). The workspace task **MCP: Workspace Health Check** validates `/healthz`, `/mcp`, forwarded ports `8000`/`2345`, Ollama status, mutation mode, and HTTP bearer-token state without committing secrets.
@@ -592,6 +604,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 - `tool_annotations`
 - `tool_output_contracts`
 - `tool_catalog_integrity` for checked-in public tool-catalog digest drift checks
+- `scripts/tool_contract_fuzzer.py` for deterministic read-only behavioral fuzzing of public tool contracts
 - `policy_insights` for read-only maintainer policy/tool-gate regression summaries
 - `workflow_task` and `task_status` for the prototype persisted async task wrapper
 - Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`
@@ -602,13 +615,13 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 
 `workflow_lineage()` is a read-only verifier for deterministic lineage manifests emitted by `governance_report(export=true)`. It recomputes the redacted plan inputs for the recorded governance-report execution and compares artifact digests without duplicating tracing/attestation backends. See [Workflow lineage manifests](./docs/workflow-lineage.md).
 
-`self_optimization_report()` is the direct software-team efficiency report for this repository. Run `self_optimization_report(window_hours=168, export=true)` after issue/PR batches or noisy MCP runs to summarize local usage, savings, task/state/test-gate/retry/blocked-time metrics, throughput, bottlenecks, confidence/caveats, and duplicate-suppressed optimization candidates without exposing raw traces or secrets. GitHub issue create/update remains off unless explicitly gated with high-confidence candidates. See [Self-optimization efficiency report](./docs/self-optimization-report.md).
+`self_optimization_report()` is the direct software-team efficiency report for this repository. Run `self_optimization_report(window_hours=168, export=true)` after issue/PR batches or noisy MCP runs to summarize local usage, savings, task/state/test-gate/retry/blocked-time metrics, throughput, bottlenecks, confidence/caveats, and duplicate-suppressed optimization candidates without exposing raw traces or secrets. GitHub issue create/update remains off unless explicitly gated with high-confidence candidates. See [Self-optimization efficiency report](./docs/self-optimization-report.md). The offline E2E MCP workflow benchmark runner writes a sibling summary report that can feed the same optimization loop; see [E2E MCP workflow benchmarks](./docs/e2e-mcp-workflow-benchmarks.md).
 
 `roots_diagnostics()` is a read-only advisory setup diagnostic that feature-detects MCP client roots support and compares available `file://` roots with `REPO_PATH`. It returns redacted relationship metadata (`exact_match`, overlaps, multiple roots, no overlap, unsupported, unavailable, or error) without exposing absolute client paths outside the repository and without changing `_resolve_repo_path` enforcement. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
 
 `model_assisted_summary()` is a disabled-by-default MCP Sampling adapter for bounded advisory summaries/classifications. It returns explicit `disabled`/`unsupported`/`denied` statuses unless server config, client-declared sampling capability, allowed purpose, and redacted budgeted context all permit a client-mediated request.
 
-`tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. `tool_catalog_integrity()` hashes the public `mcp.list_tools()` metadata plus annotations, output contracts, categories, and documentation references against `source/tool_catalog_baseline.json`; see [Tool catalog integrity baseline](./docs/tool-catalog-integrity.md). Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
+`tool_annotations()` returns machine-checkable read-only/destructive/idempotent/open-world hints for the public tools and covered public modes such as `task_router`, `test_impact_map(refresh=true)`, `workflow_task(start)`, and `workspace_transaction`. The schema-backed core tools publish checked-in output contracts for clients that validate `structuredContent`; `tool_output_contracts()` returns those contracts and the shared error envelope. `tool_catalog_integrity()` hashes the public `mcp.list_tools()` metadata plus annotations, output contracts, categories, and documentation references against `source/tool_catalog_baseline.json`; see [Tool catalog integrity baseline](./docs/tool-catalog-integrity.md). `scripts/tool_contract_fuzzer.py` complements that static baseline with dynamic, deterministic read-only calls that validate runtime outputs, error envelopes, and redaction invariants; see [MCP tool contract behavioral fuzzing](./docs/tool-contract-fuzzing.md). Leaf implementations remain in `source/server.py` as direct call targets for router orchestration and for internal tests.
 
 `policy_insights()` reports the versioned maintainer-owned policy insight bank from `source/policy_insights.json` without exposing raw trigger arguments or secret-like fixture values. The bank captures deterministic tool/router gate regressions for mutation denial, release/readiness read-only behavior, and sensitive-output redaction; see [Policy insight regression bank](./docs/policy-insights.md).
 
@@ -630,3 +643,4 @@ See [MCP Fun Labs](./docs/labs.md) for command examples and expected outputs.
 - [MCP Output Schemas](./docs/mcp-output-schemas.md)
 - [Policy insight regression bank](./docs/policy-insights.md)
 - [Self-optimization efficiency report](./docs/self-optimization-report.md)
+- [E2E MCP workflow benchmarks](./docs/e2e-mcp-workflow-benchmarks.md)

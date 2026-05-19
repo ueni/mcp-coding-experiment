@@ -254,6 +254,9 @@ SELF_OPTIMIZATION_RECOMMENDATION_INDEX_FILE = Path(
 SELF_OPTIMIZATION_GITHUB_ISSUES_FILE = Path(
     ".codebase-tooling-mcp/reports/SELF_OPTIMIZATION_GITHUB_ISSUES.json"
 )
+PATCH_SURVIVORSHIP_PR_METADATA_FILE = Path(
+    ".codebase-tooling-mcp/reports/PATCH_SURVIVORSHIP_PR_METADATA.json"
+)
 STATE_SNAPSHOT_DIR = Path(".codebase-tooling-mcp/snapshots")
 EXECUTION_REPLAY_DIR = Path(".codebase-tooling-mcp/replays")
 ARTIFACT_INDEX_FILE = Path(".codebase-tooling-mcp/index/artifact_memory.json")
@@ -3837,6 +3840,50 @@ SELF_OPTIMIZATION_REWORK_TERMS = {
     "retest",
     "rework",
 }
+PATCH_SURVIVORSHIP_REPORT_SCHEMA = "patch_survivorship_report.v1"
+PATCH_SURVIVORSHIP_RETAINED_AFTER_COMMITS = 3
+PATCH_SURVIVORSHIP_STATES = (
+    "proposed",
+    "applied",
+    "committed",
+    "rewritten",
+    "reverted",
+    "retained_after_n_commits",
+)
+PATCH_SURVIVORSHIP_DIFF_KEYS = {
+    "diff",
+    "diff_text",
+    "generated_diff",
+    "generated_diffs",
+    "patch",
+    "patch_text",
+    "patch_unified",
+    "patches",
+    "unified_diff",
+}
+PATCH_SURVIVORSHIP_APPLY_TOOLS = {
+    "apply_unified_diff",
+    "edit_transaction",
+    "replace_in_files",
+    "write_file",
+    "workspace_transaction",
+}
+PATCH_SURVIVORSHIP_APPLY_MODES = {"apply", "apply_diff", "write", "replace", "move", "delete"}
+PATCH_SURVIVORSHIP_ROLLBACK_TOOLS = {"git_restore", "state_restore", "workspace_transaction"}
+PATCH_SURVIVORSHIP_ROLLBACK_MODES = {"rollback", "restore"}
+PATCH_SURVIVORSHIP_REVIEW_PUSHBACK_LABELS = {
+    "blocked",
+    "changes-requested",
+    "changes_requested",
+    "needs-info",
+    "needs_info",
+    "rejected",
+    "request-changes",
+    "request_changes",
+    "requested-changes",
+    "requested_changes",
+}
+PATCH_SURVIVORSHIP_REVIEW_POSITIVE_LABELS = {"approved", "tested"}
 SELF_OPTIMIZATION_CONFIDENCE_ORDER = {"low": 0, "medium": 1, "high": 2}
 SELF_OPTIMIZATION_GITHUB_ISSUE_UPDATE_MODES = {"off", "dry_run", "apply"}
 
@@ -4568,6 +4615,497 @@ def _self_opt_record_context(value: Any, success: bool | None = None) -> dict[st
         "blocked_waiting_signal_count": waiting_signals,
         "has_explicit_duration": _self_opt_has_numeric_signal(value, {"duration_ms", "elapsed_ms", "elapsed_seconds", "spent_seconds"}),
         "has_explicit_tokens": _self_opt_has_numeric_signal(value, {"token", "tokens"}),
+    }
+
+
+
+def _patch_survivorship_state(raw: Any) -> str:
+    text = str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "proposal": "proposed",
+        "patch_proposed": "proposed",
+        "apply": "applied",
+        "patch_applied": "applied",
+        "commit": "committed",
+        "merged": "committed",
+        "patch_committed": "committed",
+        "rewrite": "rewritten",
+        "changed": "rewritten",
+        "modified": "rewritten",
+        "patch_rewritten": "rewritten",
+        "revert": "reverted",
+        "rollback": "reverted",
+        "restored": "reverted",
+        "patch_reverted": "reverted",
+        "retained": "retained_after_n_commits",
+        "retained_after_commits": "retained_after_n_commits",
+        "survived": "retained_after_n_commits",
+        "survived_after_commits": "retained_after_n_commits",
+    }
+    normalized = aliases.get(text, text)
+    return normalized if normalized in PATCH_SURVIVORSHIP_STATES else ""
+
+
+def _patch_survivorship_payloads(value: Any, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 5:
+        return []
+    rows: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        structured_keys = {
+            "patch_survivorship",
+            "patch_survivorship_event",
+            "patch_survivorship_events",
+            "patch_lifecycle",
+            "patch_lifecycle_events",
+            "patch_metadata",
+        }
+        for key, item in value.items():
+            key_norm = str(key).lower().replace("-", "_")
+            if key_norm in structured_keys:
+                if isinstance(item, dict):
+                    rows.append(item)
+                elif isinstance(item, list):
+                    rows.extend(row for row in item[:100] if isinstance(row, dict))
+            rows.extend(_patch_survivorship_payloads(item, depth + 1))
+        if any(
+            str(key).lower().replace("-", "_") in {"patch_id", "change_id", "diff_id", "proposal_id", "patch_digest"}
+            for key in value
+        ) and (
+            _patch_survivorship_state(value.get("state") or value.get("status") or value.get("event"))
+            or _patch_survivorship_find_diff(value)[0]
+        ):
+            rows.append(value)
+    elif isinstance(value, list):
+        for item in value[:100]:
+            rows.extend(_patch_survivorship_payloads(item, depth + 1))
+    return rows
+
+
+def _patch_survivorship_find_diff(value: Any, depth: int = 0) -> tuple[str, str]:
+    if depth > 5:
+        return "", ""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_norm = str(key).lower().replace("-", "_")
+            if key_norm in PATCH_SURVIVORSHIP_DIFF_KEYS:
+                if isinstance(item, str) and item.strip():
+                    return item, key_norm
+                if isinstance(item, list):
+                    pieces = [part for part in item[:20] if isinstance(part, str) and part.strip()]
+                    if pieces:
+                        return "\n".join(pieces), key_norm
+        for item in value.values():
+            found, source_key = _patch_survivorship_find_diff(item, depth + 1)
+            if found:
+                return found, source_key
+    elif isinstance(value, list):
+        for item in value[:100]:
+            found, source_key = _patch_survivorship_find_diff(item, depth + 1)
+            if found:
+                return found, source_key
+    return "", ""
+
+
+def _patch_survivorship_diff_metrics(diff_text: str) -> dict[str, Any]:
+    if not diff_text:
+        return {}
+    lines = diff_text.splitlines()
+    added = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
+    deleted = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
+    hunks = sum(1 for line in lines if line.startswith("@@"))
+    return {
+        "digest": f"sha256:{hashlib.sha256(diff_text.encode('utf-8')).hexdigest()}",
+        "line_count": len(lines),
+        "hunk_count": hunks,
+        "added_lines": added,
+        "deleted_lines": deleted,
+    }
+
+
+def _patch_survivorship_safe_hash(value: Any) -> str:
+    safe = _self_opt_redact_value(value, [])
+    if isinstance(safe, dict):
+        safe = {str(k): v for k, v in safe.items() if str(k).lower().replace("-", "_") not in PATCH_SURVIVORSHIP_DIFF_KEYS}
+    text = json.dumps(safe, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _patch_survivorship_patch_id(payload: dict[str, Any], source: str) -> str:
+    for key in ("patch_id", "change_id", "diff_id", "proposal_id", "patch_digest"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return _self_opt_redact_string(raw.strip(), [])[:120]
+    diff_text, _source_key = _patch_survivorship_find_diff(payload)
+    if diff_text:
+        return f"diff:{hashlib.sha256(diff_text.encode('utf-8')).hexdigest()[:16]}"
+    return f"{source}:{_patch_survivorship_safe_hash(payload)[:16]}"
+
+
+def _patch_survivorship_workflow(payload: dict[str, Any], inherited_tool: str) -> str:
+    workflow = _self_opt_workflow_from_payload(inherited_tool, payload)
+    if workflow:
+        return _self_opt_redact_string(workflow, [])[:120]
+    for key in ("workflow", "workflow_name", "mode", "task"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return _self_opt_redact_string(raw.strip(), [])[:120]
+    return SELF_OPTIMIZATION_NO_ATTRIBUTION
+
+
+def _patch_survivorship_execution_mode(payload: dict[str, Any]) -> str:
+    modes: set[str] = set()
+    _self_opt_collect_routing(payload, set(), set(), modes)
+    for key in ("execution_mode", "agent_execution_mode", "mcp.agent.execution_mode"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            modes.add(raw.strip())
+    return _self_opt_redact_string(sorted(modes)[0], [])[:120] if modes else SELF_OPTIMIZATION_NO_ATTRIBUTION
+
+
+def _patch_survivorship_state_set(payload: dict[str, Any], tool: str) -> set[str]:
+    states: set[str] = set()
+    for key in ("state", "status", "event", "phase", "outcome"):
+        state = _patch_survivorship_state(payload.get(key))
+        if state:
+            states.add(state)
+    raw_states = payload.get("states") or payload.get("lifecycle_states")
+    if isinstance(raw_states, list):
+        for item in raw_states[:20]:
+            state = _patch_survivorship_state(item)
+            if state:
+                states.add(state)
+    retained_after = payload.get("retained_after_commits") or payload.get("retained_after_n_commits")
+    if isinstance(retained_after, (int, float)) and not isinstance(retained_after, bool):
+        if int(retained_after) >= PATCH_SURVIVORSHIP_RETAINED_AFTER_COMMITS:
+            states.add("retained_after_n_commits")
+    mode = str(payload.get("mode") or payload.get("operation") or "").strip().lower().replace("-", "_")
+    if tool in PATCH_SURVIVORSHIP_APPLY_TOOLS or mode in PATCH_SURVIVORSHIP_APPLY_MODES:
+        states.add("applied")
+    if tool in PATCH_SURVIVORSHIP_ROLLBACK_TOOLS and mode in PATCH_SURVIVORSHIP_ROLLBACK_MODES:
+        states.add("reverted")
+    if mode in PATCH_SURVIVORSHIP_ROLLBACK_MODES:
+        states.add("reverted")
+    diff_text, _source_key = _patch_survivorship_find_diff(payload)
+    if diff_text and not states:
+        states.add("proposed")
+    return states
+
+
+def _patch_survivorship_pushback(payload: dict[str, Any], redact_terms: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    explicit = payload.get("human_pushback") or payload.get("review_decisions") or payload.get("review_labels")
+    if isinstance(explicit, dict):
+        explicit = [explicit]
+    if isinstance(explicit, list):
+        for item in explicit[:20]:
+            if isinstance(item, dict):
+                label = str(item.get("label") or item.get("state") or item.get("status") or item.get("decision") or "").strip()
+                if label:
+                    rows.append(
+                        {
+                            "source": "structured_local_metadata",
+                            "label": _self_opt_redact_string(label, redact_terms)[:80],
+                            "category": "pushback" if label.lower().replace(" ", "_") in PATCH_SURVIVORSHIP_REVIEW_PUSHBACK_LABELS else "review_signal",
+                        }
+                    )
+            elif isinstance(item, str) and item.strip():
+                label = item.strip()
+                rows.append(
+                    {
+                        "source": "structured_local_metadata",
+                        "label": _self_opt_redact_string(label, redact_terms)[:80],
+                        "category": "pushback" if label.lower().replace(" ", "_") in PATCH_SURVIVORSHIP_REVIEW_PUSHBACK_LABELS else "review_signal",
+                    }
+                )
+    labels = payload.get("labels")
+    if isinstance(labels, list):
+        for label_raw in labels[:30]:
+            label = str(label_raw or "").strip()
+            label_norm = label.lower().replace(" ", "_")
+            if label_norm in PATCH_SURVIVORSHIP_REVIEW_PUSHBACK_LABELS or label_norm in PATCH_SURVIVORSHIP_REVIEW_POSITIVE_LABELS:
+                rows.append(
+                    {
+                        "source": "structured_local_label",
+                        "label": _self_opt_redact_string(label, redact_terms)[:80],
+                        "category": "pushback" if label_norm in PATCH_SURVIVORSHIP_REVIEW_PUSHBACK_LABELS else "positive_review",
+                    }
+                )
+    return rows
+
+
+def _patch_survivorship_artifact_refs(payload: dict[str, Any], redact_terms: list[str], keys: set[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, item in payload.items():
+        key_norm = str(key).lower().replace("-", "_")
+        if key_norm not in keys:
+            continue
+        values = item if isinstance(item, list) else [item]
+        for value in values[:20]:
+            if isinstance(value, dict):
+                rows.append(
+                    {
+                        "name": _self_opt_redact_string(str(value.get("name") or value.get("tool") or value.get("schema") or key_norm), redact_terms)[:120],
+                        "status": _self_opt_redact_string(str(value.get("status") or value.get("state") or value.get("ok") or "unknown"), redact_terms)[:80],
+                        "schema": _self_opt_redact_string(str(value.get("schema") or ""), redact_terms)[:120],
+                    }
+                )
+            elif isinstance(value, str) and value.strip():
+                rows.append({"name": _self_opt_redact_string(value.strip(), redact_terms)[:120], "status": "referenced", "schema": ""})
+    return rows
+
+
+def _patch_survivorship_record_from_payload(source: str, payload: dict[str, Any], redact_terms: list[str], inherited_tool: str = "") -> dict[str, Any] | None:
+    tool = str(payload.get("tool") or payload.get("tool_name") or inherited_tool or "unknown").strip() or "unknown"
+    states = _patch_survivorship_state_set(payload, tool)
+    diff_text, diff_source_key = _patch_survivorship_find_diff(payload)
+    if not states and not diff_text:
+        return None
+    diff_metrics = _patch_survivorship_diff_metrics(diff_text)
+    patch_id = _patch_survivorship_patch_id(payload, source)
+    test_gates = _self_opt_extract_test_gates(payload)
+    security_artifacts = _patch_survivorship_artifact_refs(
+        payload,
+        redact_terms,
+        {"security_artifact", "security_artifacts", "security", "dependency_security", "risk_scoring"},
+    )
+    governance_artifacts = _patch_survivorship_artifact_refs(
+        payload,
+        redact_terms,
+        {"governance_artifact", "governance_artifacts", "governance_report", "policy_simulator", "release_readiness", "workflow_lineage", "artifact_provenance"},
+    )
+    return {
+        "source": source,
+        "patch_id": patch_id,
+        "states": sorted(states),
+        "timestamp": _self_opt_first_timestamp(payload),
+        "tool": _self_opt_redact_string(tool, redact_terms)[:120],
+        "workflow": _patch_survivorship_workflow(payload, tool),
+        "execution_mode": _patch_survivorship_execution_mode(payload),
+        "issue_refs": _self_opt_extract_refs(_self_opt_redact_value(payload, redact_terms))["issues"],
+        "pr_refs": _self_opt_extract_refs(_self_opt_redact_value(payload, redact_terms))["prs"],
+        "diff": {
+            **diff_metrics,
+            "source_key": diff_source_key,
+            "raw_diff_persisted": False,
+        }
+        if diff_metrics
+        else {"raw_diff_persisted": False},
+        "human_pushback": _patch_survivorship_pushback(payload, redact_terms),
+        "correlations": {
+            "test_gates": test_gates[:10],
+            "security_artifacts": security_artifacts[:10],
+            "governance_artifacts": governance_artifacts[:10],
+        },
+    }
+
+
+def _patch_survivorship_load_local_metadata() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    path = _resolve_repo_path(str(PATCH_SURVIVORSHIP_PR_METADATA_FILE))
+    meta = {
+        "path": str(PATCH_SURVIVORSHIP_PR_METADATA_FILE),
+        "exists": path.exists(),
+        "readable": False,
+        "record_count": 0,
+        "status": "not_available",
+    }
+    if not path.exists():
+        meta["readable"] = True
+        return [], meta
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        meta["reason"] = exc.__class__.__name__
+        meta["status"] = "unreadable"
+        return [], meta
+    if isinstance(payload, dict) and isinstance(payload.get("patches"), list):
+        rows = [row for row in payload["patches"] if isinstance(row, dict)]
+    elif isinstance(payload, dict) and isinstance(payload.get("events"), list):
+        rows = [row for row in payload["events"] if isinstance(row, dict)]
+    elif isinstance(payload, list):
+        rows = [row for row in payload if isinstance(row, dict)]
+    elif isinstance(payload, dict):
+        rows = [payload]
+    else:
+        rows = []
+        meta["reason"] = "expected object or list"
+    meta["readable"] = True
+    meta["record_count"] = len(rows)
+    meta["status"] = "local_index" if rows else "empty"
+    return rows[:500], meta
+
+
+def _patch_survivorship_bucket(counter: dict[str, dict[str, Any]], name: str, record: dict[str, Any]) -> None:
+    row = counter.setdefault(
+        name or SELF_OPTIMIZATION_NO_ATTRIBUTION,
+        {
+            "name": name or SELF_OPTIMIZATION_NO_ATTRIBUTION,
+            "patch_count": 0,
+            "event_count": 0,
+            "states": {state: 0 for state in PATCH_SURVIVORSHIP_STATES},
+            "_patch_ids": set(),
+        },
+    )
+    row["event_count"] += 1
+    if isinstance(row.get("_patch_ids"), set):
+        row["_patch_ids"].add(str(record.get("patch_id") or "unknown"))
+        row["patch_count"] = len(row["_patch_ids"])
+    states = row["states"] if isinstance(row.get("states"), dict) else {}
+    for state in record.get("states", []):
+        states[state] = int(states.get(state, 0) or 0) + 1
+
+
+def _patch_survivorship_bucket_rows(counter: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for row in counter.values():
+        copied = dict(row)
+        copied.pop("_patch_ids", None)
+        copied["states"] = dict(sorted((copied.get("states") or {}).items()))
+        rows.append(copied)
+    return sorted(rows, key=lambda item: (-int(item.get("patch_count", 0)), str(item.get("name", ""))))
+
+
+def _patch_survivorship_report_from_sources(
+    raw_sources: list[dict[str, Any]],
+    redact_terms: list[str],
+    local_metadata: list[dict[str, Any]] | None = None,
+    local_metadata_source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    seen_event_keys: set[tuple[str, str, tuple[str, ...], str]] = set()
+    for source_row in raw_sources:
+        source = str(source_row.get("source") or "unknown")
+        payload = source_row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        inherited_tool = str(payload.get("tool_name") or payload.get("tool") or "")
+        candidates = _patch_survivorship_payloads(payload) or [payload]
+        for candidate in candidates[:100]:
+            if not isinstance(candidate, dict):
+                continue
+            record = _patch_survivorship_record_from_payload(source, candidate, redact_terms, inherited_tool)
+            if record:
+                key = (
+                    str(record.get("source", "")),
+                    str(record.get("patch_id", "")),
+                    tuple(record.get("states", []) if isinstance(record.get("states"), list) else []),
+                    str(record.get("timestamp", "")),
+                )
+                if key not in seen_event_keys:
+                    seen_event_keys.add(key)
+                    events.append(record)
+    for row in local_metadata or []:
+        record = _patch_survivorship_record_from_payload("local_pr_metadata", row, redact_terms)
+        if record:
+            key = (
+                str(record.get("source", "")),
+                str(record.get("patch_id", "")),
+                tuple(record.get("states", []) if isinstance(record.get("states"), list) else []),
+                str(record.get("timestamp", "")),
+            )
+            if key not in seen_event_keys:
+                seen_event_keys.add(key)
+                events.append(record)
+
+    patches: dict[str, dict[str, Any]] = {}
+    by_workflow: dict[str, dict[str, Any]] = {}
+    by_tool: dict[str, dict[str, Any]] = {}
+    by_execution_mode: dict[str, dict[str, Any]] = {}
+    state_counts = {state: 0 for state in PATCH_SURVIVORSHIP_STATES}
+    source_counts: dict[str, int] = {}
+    for event in events:
+        patch_id = str(event.get("patch_id") or "unknown")
+        source_counts[str(event.get("source") or "unknown")] = source_counts.get(str(event.get("source") or "unknown"), 0) + 1
+        patch = patches.setdefault(
+            patch_id,
+            {
+                "patch_id": patch_id,
+                "states": [],
+                "current_state": "",
+                "sources": [],
+                "workflow": event.get("workflow", SELF_OPTIMIZATION_NO_ATTRIBUTION),
+                "tool": event.get("tool", "unknown"),
+                "execution_mode": event.get("execution_mode", SELF_OPTIMIZATION_NO_ATTRIBUTION),
+                "issue_refs": [],
+                "pr_refs": [],
+                "diff": {"raw_diff_persisted": False},
+                "signals": {
+                    "human_pushback_count": 0,
+                    "test_gate_count": 0,
+                    "security_artifact_count": 0,
+                    "governance_artifact_count": 0,
+                },
+            },
+        )
+        for state in event.get("states", []):
+            if state not in patch["states"]:
+                patch["states"].append(state)
+            state_counts[state] = state_counts.get(state, 0) + 1
+        patch["current_state"] = sorted(patch["states"], key=lambda state: PATCH_SURVIVORSHIP_STATES.index(state))[-1] if patch["states"] else "unknown"
+        source = str(event.get("source") or "unknown")
+        if source not in patch["sources"]:
+            patch["sources"].append(source)
+        for key in ("issue_refs", "pr_refs"):
+            values = patch[key]
+            for ref in event.get(key, []) if isinstance(event.get(key), list) else []:
+                if ref not in values:
+                    values.append(ref)
+        diff = event.get("diff", {}) if isinstance(event.get("diff"), dict) else {}
+        if diff.get("digest") and not patch["diff"].get("digest"):
+            patch["diff"] = diff
+        correlations = event.get("correlations", {}) if isinstance(event.get("correlations"), dict) else {}
+        pushback = event.get("human_pushback", []) if isinstance(event.get("human_pushback"), list) else []
+        patch["signals"]["human_pushback_count"] += len([row for row in pushback if isinstance(row, dict) and row.get("category") == "pushback"])
+        patch["signals"]["test_gate_count"] += len(correlations.get("test_gates", []) if isinstance(correlations.get("test_gates"), list) else [])
+        patch["signals"]["security_artifact_count"] += len(correlations.get("security_artifacts", []) if isinstance(correlations.get("security_artifacts"), list) else [])
+        patch["signals"]["governance_artifact_count"] += len(correlations.get("governance_artifacts", []) if isinstance(correlations.get("governance_artifacts"), list) else [])
+        patch["correlations"] = correlations
+        if pushback:
+            existing = patch.setdefault("human_pushback", [])
+            existing.extend(pushback[:10])
+        _patch_survivorship_bucket(by_workflow, str(event.get("workflow") or SELF_OPTIMIZATION_NO_ATTRIBUTION), event)
+        _patch_survivorship_bucket(by_tool, str(event.get("tool") or "unknown"), event)
+        _patch_survivorship_bucket(by_execution_mode, str(event.get("execution_mode") or SELF_OPTIMIZATION_NO_ATTRIBUTION), event)
+
+    patch_rows = sorted(patches.values(), key=lambda item: str(item.get("patch_id", "")))[:100]
+    retained = sum(1 for patch in patch_rows if "retained_after_n_commits" in patch.get("states", []))
+    reverted = sum(1 for patch in patch_rows if "reverted" in patch.get("states", []))
+    rewritten = sum(1 for patch in patch_rows if "rewritten" in patch.get("states", []))
+    return {
+        "schema": PATCH_SURVIVORSHIP_REPORT_SCHEMA,
+        "status": "observed" if patch_rows else "not_available",
+        "summary": {
+            "patch_count": len(patch_rows),
+            "event_count": len(events),
+            "state_counts": state_counts,
+            "retained_after_n_commits_threshold": PATCH_SURVIVORSHIP_RETAINED_AFTER_COMMITS,
+            "retained_patch_count": retained,
+            "rewritten_patch_count": rewritten,
+            "reverted_patch_count": reverted,
+            "human_pushback_patch_count": sum(1 for patch in patch_rows if int(patch.get("signals", {}).get("human_pushback_count", 0) or 0) > 0),
+        },
+        "aggregations": {
+            "by_workflow": _patch_survivorship_bucket_rows(by_workflow),
+            "by_tool": _patch_survivorship_bucket_rows(by_tool),
+            "by_execution_mode": _patch_survivorship_bucket_rows(by_execution_mode),
+            "by_source": _self_opt_counter_rows(source_counts),
+        },
+        "patches": patch_rows,
+        "sources": {
+            "local_pr_metadata": local_metadata_source or {},
+            "structured_human_pushback_policy": "Only structured local fields such as labels/review_decisions/human_pushback are aggregated; private conversations or free-form chat transcripts are not scraped.",
+        },
+        "privacy": {
+            "redacted": True,
+            "raw_prompts_persisted": False,
+            "raw_patch_text_persisted": False,
+            "raw_private_conversations_scraped": False,
+            "patch_identity": "explicit patch_id or SHA-256 digest of diff/metadata; raw diffs are not emitted",
+        },
+        "correlations": {
+            "test_gates_available": any(int(patch.get("signals", {}).get("test_gate_count", 0) or 0) > 0 for patch in patch_rows),
+            "security_artifacts_available": any(int(patch.get("signals", {}).get("security_artifact_count", 0) or 0) > 0 for patch in patch_rows),
+            "governance_artifacts_available": any(int(patch.get("signals", {}).get("governance_artifact_count", 0) or 0) > 0 for patch in patch_rows),
+        },
     }
 
 
@@ -5870,10 +6408,13 @@ def _self_optimization_report_impl(
     start_dt, end_dt = _self_opt_parse_window(start_time, end_time, window_hours)
     redaction_terms = _self_opt_default_redact_terms(redact_terms)
     records: list[dict[str, Any]] = []
+    patch_survivorship_sources: list[dict[str, Any]] = []
     github_issue_rows, github_issue_source = _self_opt_load_github_issue_metadata(github_issue_metadata)
+    patch_metadata_rows, patch_metadata_source = _patch_survivorship_load_local_metadata()
     sources: dict[str, Any] = {
         "network": {"used": False, "policy": "repo-local/offline by default; GitHub issue writes require explicit apply mode"},
         "github_issues": github_issue_source,
+        "patch_survivorship_pr_metadata": patch_metadata_source,
         "proxy_anonymizer_disclosure": {
             "status": "not_available",
             "required": False,
@@ -5884,6 +6425,7 @@ def _self_optimization_report_impl(
     if include_audit:
         audit_events, audit_meta = _load_audit_events(start_dt, end_dt)
         records.extend(_self_opt_normalize_audit_event(event, redaction_terms) for event in audit_events)
+        patch_survivorship_sources.extend({"source": "audit", "payload": event} for event in audit_events)
         sources["audit"] = _self_opt_public_source_meta(audit_meta)
     else:
         sources["audit"] = {"enabled": False}
@@ -5891,6 +6433,7 @@ def _self_optimization_report_impl(
     if include_traces:
         span_rows, span_meta = _self_opt_load_jsonl_records(MCP_OTEL_SPANS_FILE, start_dt, end_dt)
         records.extend(_self_opt_normalize_span(span, redaction_terms) for span in span_rows)
+        patch_survivorship_sources.extend({"source": "trace", "payload": span} for span in span_rows)
         sources["traces"] = _self_opt_public_source_meta(span_meta)
     else:
         sources["traces"] = {"enabled": False}
@@ -5937,6 +6480,7 @@ def _self_optimization_report_impl(
             "window_hours": round((end_dt - start_dt).total_seconds() / 3600.0, 3),
         },
         "summary": _self_opt_summary(metrics),
+        "patch_survivorship": {},
         "confidence": metrics.get("confidence", {}).get("level", "low") if isinstance(metrics.get("confidence"), dict) else "low",
         "caveats": metrics.get("confidence", {}).get("caveats", []) if isinstance(metrics.get("confidence"), dict) else [],
         "metrics": metrics,
@@ -5961,12 +6505,19 @@ def _self_optimization_report_impl(
             "redaction_applied": True,
             "raw_traces_exposed": False,
             "raw_prompts_exposed": False,
+            "raw_patch_text_exposed": False,
             "records_secrets": False,
             "sensitive_names_redacted": True,
         },
         "exports": {},
         "resource_links": [],
     }
+    report["patch_survivorship"] = _patch_survivorship_report_from_sources(
+        patch_survivorship_sources,
+        redaction_terms,
+        local_metadata=patch_metadata_rows,
+        local_metadata_source=patch_metadata_source,
+    )
     report["optimization_candidates"] = _self_opt_build_recommendations(
         metrics,
         report["sources"],
@@ -29675,8 +30226,19 @@ def _continue_load_yaml_mapping(path: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _continue_model_profile_summary(path: Path) -> dict[str, str]:
-    rel_path = str(path.relative_to(REPO_PATH))
+def _continue_relative_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_PATH))
+    except ValueError:
+        return str(path)
+
+
+def _continue_default_root() -> Path:
+    return Path(__file__).resolve().parent / "defaults" / "continue"
+
+
+def _continue_model_profile_summary(path: Path, source: str = "repo") -> dict[str, str]:
+    rel_path = _continue_relative_path(path)
     profile = _continue_load_yaml_mapping(path)
     models = profile.get("models") if isinstance(profile, dict) else None
     first_model = (
@@ -29698,6 +30260,7 @@ def _continue_model_profile_summary(path: Path) -> dict[str, str]:
         "provider": provider,
         "model": model,
         "apiBase": api_base,
+        "source": source,
     }
 
 
@@ -29735,14 +30298,47 @@ def _continue_detected_default(
     return {}
 
 
+def _continue_mcp_server_summary(path: Path, source: str = "repo") -> dict[str, Any]:
+    config = _continue_load_yaml_mapping(path)
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    first_server = (
+        servers[0]
+        if isinstance(servers, list) and servers and isinstance(servers[0], dict)
+        else {}
+    )
+    request_options = first_server.get("requestOptions") if isinstance(first_server, dict) else {}
+    headers = request_options.get("headers") if isinstance(request_options, dict) else {}
+    authorization = str(headers.get("Authorization", "") or "").strip()
+    return {
+        "file": _continue_relative_path(path),
+        "source": source,
+        "name": str(first_server.get("name", config.get("name", "")) or "").strip(),
+        "type": str(first_server.get("type", "") or "").strip(),
+        "url": str(first_server.get("url", "") or "").strip(),
+        "authorization_header_configured": bool(authorization),
+        "uses_mcp_http_bearer_token_secret": "MCP_HTTP_BEARER_TOKEN" in authorization,
+    }
+
+
 def _continue_model_fallback_status() -> dict[str, Any]:
     continue_dir = REPO_PATH / ".continue"
     routing_path = continue_dir / "model-routing.yaml"
     models_dir = continue_dir / "models"
+    default_root = _continue_default_root()
+    default_models_dir = default_root / "models"
     model_paths = sorted(models_dir.glob("*.yaml")) if models_dir.is_dir() else []
+    default_model_paths = (
+        sorted(default_models_dir.glob("*.yaml")) if default_models_dir.is_dir() else []
+    )
     routing = _continue_load_yaml_mapping(routing_path)
-    router = routing.get("router") if isinstance(routing.get("router"), dict) else {}
-    profiles = [_continue_model_profile_summary(path) for path in model_paths]
+    default_routing = _continue_load_yaml_mapping(default_root / "model-routing.yaml")
+    active_routing = routing if routing else default_routing
+    router = active_routing.get("router") if isinstance(active_routing.get("router"), dict) else {}
+    profiles = [_continue_model_profile_summary(path, "repo") for path in model_paths]
+    default_profiles = [
+        _continue_model_profile_summary(path, "bundled_default")
+        for path in default_model_paths
+    ]
     local_profiles = [
         profile
         for profile in profiles
@@ -29751,19 +30347,39 @@ def _continue_model_fallback_status() -> dict[str, Any]:
         )
     ]
     detected_default = _continue_detected_default(routing, profiles)
+    if not detected_default:
+        detected_default = _continue_detected_default(default_routing, default_profiles)
+        if detected_default:
+            detected_default = {
+                **detected_default,
+                "source": f"bundled Continue default ({detected_default.get('source', 'model profile')})",
+            }
+    repo_mcp_paths = sorted((continue_dir / "mcpServers").glob("*.yaml")) if (continue_dir / "mcpServers").is_dir() else []
+    default_mcp_paths = [default_root / "codebase-tooling-mcp.yaml"]
+    mcp_servers = [
+        _continue_mcp_server_summary(path, "repo") for path in repo_mcp_paths
+    ] + [
+        _continue_mcp_server_summary(path, "bundled_default")
+        for path in default_mcp_paths
+        if path.is_file()
+    ]
     return {
         "schema": "continue_model_fallback.status.v1",
         "repo_path": str(REPO_PATH),
         "allow_mutations": ALLOW_MUTATIONS,
         "continue_dir_exists": continue_dir.is_dir(),
         "routing_exists": routing_path.is_file(),
-        "model_profiles": [str(path.relative_to(REPO_PATH)) for path in model_paths],
+        "model_profiles": [_continue_relative_path(path) for path in model_paths],
+        "default_model_profiles": [_continue_relative_path(path) for path in default_model_paths],
         "routing": {
             "model": str(router.get("model", "") or ""),
             "file": str(router.get("file", "") or ""),
+            "source": "repo" if routing else "bundled_default" if default_routing else "missing",
         },
         "profiles": profiles,
+        "default_profiles": default_profiles,
         "local_profiles": local_profiles,
+        "mcp_servers": mcp_servers,
         "detected_default": detected_default,
         "configure_endpoint": "/v1/model-fallback/configure",
     }

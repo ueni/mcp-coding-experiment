@@ -1,0 +1,9 @@
+diff --git a/docs/usage.md b/docs/usage.md
+index f7d3b38..2d14780 100644
+--- a/docs/usage.md
++++ b/docs/usage.md
+@@ -1,5 +1,5 @@
+ # Usage
+-Run the review worfklow before release.
++Run the review workflow before release.
+ This page documents the normal read-only review path.

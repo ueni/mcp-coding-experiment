@@ -652,6 +652,18 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn("/v1/model-fallback/configure", content)
         self.assertIn("not the real coding model", content)
         self.assertEqual("continue_model_fallback.status.v1", payload["model_fallback"]["schema"])
+        self.assertTrue(payload["model_fallback"]["default_profiles"])
+        self.assertTrue(payload["model_fallback"]["mcp_servers"])
+        self.assertTrue(
+            any(
+                server.get("uses_mcp_http_bearer_token_secret")
+                for server in payload["model_fallback"]["mcp_servers"]
+            )
+        )
+        self.assertEqual(
+            "bundled_default",
+            payload["model_fallback"]["routing"]["source"],
+        )
         self.assertTrue(self.server._http_path_is_protected_mcp("/v1/model-fallback/configure"))
 
     def test_model_fallback_uses_detected_continue_default_and_stays_setup_wizard(self):
@@ -741,11 +753,28 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             )
         )
         stream_text = asyncio.run(collect_stream_text(response))
+        data_lines = [
+            line.removeprefix("data: ")
+            for line in stream_text.splitlines()
+            if line.startswith("data: ")
+        ]
+        chunks = [json.loads(line) for line in data_lines if line != "[DONE]"]
+        content = "".join(
+            choice.get("delta", {}).get("content", "")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
 
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.media_type, "text/event-stream")
-        self.assertIn('"role": "assistant"', stream_text)
-        self.assertIn("MCP_HTTP_BEARER_TOKEN", stream_text)
-        self.assertIn("[DONE]", stream_text)
+        self.assertEqual("[DONE]", data_lines[-1])
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertTrue(all(chunk["object"] == "chat.completion.chunk" for chunk in chunks))
+        self.assertEqual({"role": "assistant"}, chunks[0]["choices"][0]["delta"])
+        self.assertEqual("stop", chunks[-1]["choices"][0]["finish_reason"])
+        self.assertIn("I can set up Continue", content)
+        self.assertIn("MCP_HTTP_BEARER_TOKEN", content)
+        self.assertIn("not the real coding model", content)
 
     def test_model_fallback_configure_requires_mutate_scope_in_http_context(self):
         self.server.ALLOW_MUTATIONS = True
