@@ -1,0 +1,75 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ueni/codebase-tooling-mcp",
+  "title": "codebase-tooling-mcp",
+  "description": "Repository engineering MCP server for one mounted Git worktree.",
+  "repository": {
+    "url": "https://github.com/ueni/mcp-coding-experiment",
+    "source": "github"
+  },
+  "version": "0.0.0-local-build",
+  "packages": [
+    {
+      "registryType": "oci",
+      "registryBaseUrl": "https://ghcr.io",
+      "identifier": "ghcr.io/ueni/codebase-tooling-mcp:0.0.0-local-build",
+      "version": "0.0.0-local-build",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--mount",
+          "description": "Mount the target repository into the container at /repo.",
+          "value": "type=bind,src={repository_path},dst=/repo",
+          "isRequired": true,
+          "variables": {
+            "repository_path": {
+              "description": "Host path of the Git repository to expose to codebase-tooling-mcp.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "--workdir",
+          "description": "Use the mounted repository as the container working directory.",
+          "value": "/repo"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT",
+          "description": "Use stdio for registry-managed local package launch.",
+          "value": "stdio"
+        },
+        {
+          "name": "REPO_PATH",
+          "description": "Container path for the mounted repository.",
+          "value": "/repo"
+        },
+        {
+          "name": "ALLOW_MUTATIONS",
+          "description": "Set true only after reviewing sandbox and rollback guidance.",
+          "default": "false",
+          "choices": [
+            "false",
+            "true"
+          ]
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "io.github.ueni.registryReadiness": {
+        "channel": "ghcr-oci",
+        "validation": "python3 scripts/registry_readiness.py validate --compact",
+        "publication": "maintainer-gated OIDC only; no ordinary CI publication"
+      }
+    }
+  }
+}
