@@ -38,6 +38,8 @@ It reads available local evidence only:
 - local `git log` metadata for issue/PR throughput when `include_git=true`;
 - optional caller-supplied `github_issue_metadata` or a local `.codebase-tooling-mcp/reports/SELF_OPTIMIZATION_GITHUB_ISSUES.json` issue index for de-duplicating candidates against already-open GitHub issues without a network lookup.
 
+Sibling E2E workflow benchmark summaries from `.codebase-tooling-mcp/reports/E2E_MCP_WORKFLOW_BENCHMARKS.json` can be used alongside this report to correlate benchmark pass/fail, tool-call volume, estimated token volume, retries/rework, safety-gate coverage, snapshot/rollback usage, and test-gate status with local usage metrics.
+
 Use `start_time`/`end_time` for exact ISO-8601 windows, or `window_hours` for a recent rolling window.
 
 ## Output

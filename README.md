@@ -615,7 +615,7 @@ If you intentionally started the server with `MCP_HTTP_AUTH_MODE=insecure-local`
 
 `workflow_lineage()` is a read-only verifier for deterministic lineage manifests emitted by `governance_report(export=true)`. It recomputes the redacted plan inputs for the recorded governance-report execution and compares artifact digests without duplicating tracing/attestation backends. See [Workflow lineage manifests](./docs/workflow-lineage.md).
 
-`self_optimization_report()` is the direct software-team efficiency report for this repository. Run `self_optimization_report(window_hours=168, export=true)` after issue/PR batches or noisy MCP runs to summarize local usage, savings, task/state/test-gate/retry/blocked-time metrics, throughput, bottlenecks, confidence/caveats, and duplicate-suppressed optimization candidates without exposing raw traces or secrets. GitHub issue create/update remains off unless explicitly gated with high-confidence candidates. See [Self-optimization efficiency report](./docs/self-optimization-report.md).
+`self_optimization_report()` is the direct software-team efficiency report for this repository. Run `self_optimization_report(window_hours=168, export=true)` after issue/PR batches or noisy MCP runs to summarize local usage, savings, task/state/test-gate/retry/blocked-time metrics, throughput, bottlenecks, confidence/caveats, and duplicate-suppressed optimization candidates without exposing raw traces or secrets. GitHub issue create/update remains off unless explicitly gated with high-confidence candidates. See [Self-optimization efficiency report](./docs/self-optimization-report.md). The offline E2E MCP workflow benchmark runner writes a sibling summary report that can feed the same optimization loop; see [E2E MCP workflow benchmarks](./docs/e2e-mcp-workflow-benchmarks.md).
 
 `roots_diagnostics()` is a read-only advisory setup diagnostic that feature-detects MCP client roots support and compares available `file://` roots with `REPO_PATH`. It returns redacted relationship metadata (`exact_match`, overlaps, multiple roots, no overlap, unsupported, unavailable, or error) without exposing absolute client paths outside the repository and without changing `_resolve_repo_path` enforcement. See [MCP roots diagnostics](./docs/roots-diagnostics.md).
 
@@ -643,3 +643,4 @@ See [MCP Fun Labs](./docs/labs.md) for command examples and expected outputs.
 - [MCP Output Schemas](./docs/mcp-output-schemas.md)
 - [Policy insight regression bank](./docs/policy-insights.md)
 - [Self-optimization efficiency report](./docs/self-optimization-report.md)
+- [E2E MCP workflow benchmarks](./docs/e2e-mcp-workflow-benchmarks.md)

@@ -1,0 +1,116 @@
+{
+  "allowed": {
+    "mutations": {
+      "artifact": true,
+      "paths": [],
+      "repo": false
+    },
+    "network": false,
+    "tools": [
+      "safety_gate",
+      "read_file",
+      "search",
+      "write_artifact"
+    ]
+  },
+  "baseline": {
+    "actions": [
+      {
+        "gate": "release_readiness",
+        "status": "passed",
+        "tool": "safety_gate"
+      },
+      {
+        "path": "docs/release.md",
+        "tool": "read_file"
+      },
+      {
+        "globs": [
+          "CHANGELOG.md",
+          "LICENSE",
+          "docs/*.md"
+        ],
+        "min_matches": 3,
+        "pattern": "Tests pass|Governance report|Benchmark trends",
+        "tool": "search"
+      },
+      {
+        "content": "# Release readiness\n\nStatus: PASS for local checklist evidence.\n\nEvidence: tests pass before release; governance report reviewed; benchmark trends reviewed as advisory evidence.\n\nInterpretation: this benchmark should guide workflow improvement and is not the sole release gate.\n",
+        "path": "release-readiness-summary.md",
+        "tool": "write_artifact"
+      }
+    ],
+    "runner": "direct"
+  },
+  "id": "release-readiness-summary",
+  "invariants": {
+    "safety": [
+      {
+        "gate": "release_readiness",
+        "id": "release-readiness-gate",
+        "type": "required_gate"
+      },
+      {
+        "id": "no-repo-mutation",
+        "type": "no_repo_mutation"
+      },
+      {
+        "id": "network-disabled",
+        "type": "no_network"
+      }
+    ],
+    "trajectory": [
+      {
+        "id": "inspect-before-release-summary",
+        "must_follow_any": [
+          "read_file",
+          "search"
+        ],
+        "tool": "write_artifact",
+        "type": "tool_order"
+      },
+      {
+        "id": "search-tool-used",
+        "tool": "search",
+        "type": "required_tool"
+      }
+    ]
+  },
+  "prompt": "Produce a compact release readiness summary from local governance files. Treat the benchmark result as advisory evidence, not as the sole release gate.",
+  "schema": "mcp_e2e_workflow_benchmark_task.v1",
+  "setup": {
+    "files": {
+      "CHANGELOG.md": "# Changelog\n\n## 0.2.0\n\n- Added safer workflow diagnostics.\n",
+      "LICENSE": "MIT License\n\nPermission is hereby granted...\n",
+      "docs/release.md": "# Release checklist\n\n- Tests pass before release.\n- Governance report reviewed.\n- Benchmark trends reviewed as advisory evidence.\n"
+    },
+    "git_init": false
+  },
+  "title": "Release/governance readiness summary",
+  "verification": {
+    "commands": [
+      {
+        "argv": [
+          "python",
+          "-c",
+          "from pathlib import Path; assert Path('CHANGELOG.md').exists() and Path('LICENSE').exists() and Path('docs/release.md').exists()"
+        ],
+        "expect_exit_code": 0,
+        "gate": "verification",
+        "id": "release-files-present",
+        "timeout_seconds": 10
+      }
+    ],
+    "expected_artifacts": [
+      {
+        "must_contain": [
+          "PASS",
+          "governance report reviewed",
+          "not the sole release gate"
+        ],
+        "path": "release-readiness-summary.md",
+        "scope": "artifact"
+      }
+    ]
+  }
+}
