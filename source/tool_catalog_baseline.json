@@ -19,7 +19,7 @@
     "contains_secrets": false,
     "public_metadata_only": true
   },
-  "tool_count": 29,
+  "tool_count": 30,
   "tools": [
     {
       "digest": "sha256:dfaa3c9983cb8279b2f3e5494e332605321a2b3ddd3064bbcfd26f29967957c4",
@@ -7639,6 +7639,347 @@
       "name": "workflow_lineage"
     },
     {
+      "digest": "sha256:5ce78e4e71ee2ee2ea9b43b2e7f872e6a6bd0c681ff0ea6df4a92dede0635651",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Preflight a declared MCP tool sequence against workflow-level policy without executing it.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "allowed_targets": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Allowed Targets"
+              },
+              "data_classification": {
+                "default": "unspecified",
+                "title": "Data Classification",
+                "type": "string"
+              },
+              "execution_mode": {
+                "default": "auto",
+                "title": "Execution Mode",
+                "type": "string"
+              },
+              "intent": {
+                "title": "Intent",
+                "type": "string"
+              },
+              "planned_steps": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Planned Steps",
+                "type": "array"
+              }
+            },
+            "required": [
+              "intent",
+              "planned_steps"
+            ],
+            "title": "workflow_policy_planArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "workflow_policy_plan",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "allowed_targets": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "blocking_policies": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "data_classification": {
+                "type": "string"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "needs_approval",
+                  "needs_clarification"
+                ],
+                "type": "string"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "execution_mode": {
+                "type": "string"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "plan_id": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "required_preconditions": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_policy_plan.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "step_count": {
+                "type": "integer"
+              },
+              "steps": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "decision",
+              "ok",
+              "plan_id",
+              "blocking_policies",
+              "required_preconditions",
+              "findings",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "intent",
+            "execution_mode",
+            "allowed_targets",
+            "data_classification",
+            "step_count",
+            "steps",
+            "security"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "allowed_targets": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "blocking_policies": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "data_classification": {
+                "type": "string"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "needs_approval",
+                  "needs_clarification"
+                ],
+                "type": "string"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "execution_mode": {
+                "type": "string"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "plan_id": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "required_preconditions": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_policy_plan.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "step_count": {
+                "type": "integer"
+              },
+              "steps": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "decision",
+              "ok",
+              "plan_id",
+              "blocking_policies",
+              "required_preconditions",
+              "findings",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "executed_plan",
+            "decision",
+            "ok",
+            "plan_id",
+            "blocking_policies",
+            "required_preconditions",
+            "findings",
+            "safe_next_actions"
+          ],
+          "tool": "workflow_policy_plan"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "workflow_policy_plan"
+        }
+      },
+      "name": "workflow_policy_plan"
+    },
+    {
       "digest": "sha256:e199cb762da20e888e714e893250d30a2682801cf05dc33251583fab92795f85",
       "metadata": {
         "documentation": [
@@ -8642,5 +8983,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:4086e45a5483b6513835bd904f45bb8b3734476ccac0600bab66025437f0be48"
+  "whole_catalog_digest": "sha256:d196ed9891eae7c5c8242fd32c7c7b5f2ae29413d3d654676d62b24ab48da624"
 }

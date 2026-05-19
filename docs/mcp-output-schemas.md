@@ -20,6 +20,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `risk_scoring`
 - `workspace_transaction`
 - `policy_simulator`
+- `workflow_policy_plan`
 - `clarification_gate`
 - `release_readiness`
 - `tool_catalog_integrity`
@@ -161,6 +162,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `risk_scoring` | `risk_score`, `risk_level`, `reasons`, `summary` | aggregate `untrusted_content_signals` |
 | `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals, `resource_links`, `_meta` |
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
+| `workflow_policy_plan` | `schema`, `read_only`, `executed_plan`, `decision`, `ok`, `plan_id`, `blocking_policies`, `required_preconditions`, `findings`, `safe_next_actions` | redacted intent, execution mode, allowed targets, data classification, step count, normalized steps, security metadata |
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
 | `tool_catalog_integrity` | `schema`, `ok`, `status`, `baseline`, `current`, `drift`, `lint`, `security` | `read_only`, per-tool digest lists, bounded metadata diffs, advisory lint finding details |
@@ -177,4 +179,4 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 
 [`docs/fixtures/mcp-structured-grep-response.json`](./fixtures/mcp-structured-grep-response.json) demonstrates an IDE-style client consuming a structured `grep` quick response while still displaying the fallback text content.
 
-For uncertainty-aware workflow gating, see [Clarification Gate](./clarification-gate.md). `clarification_gate` returns both structured MCP output and an elicitation adapter/fallback checklist for clients that need missing non-sensitive fields before mutation, release, or security workflows. For multi-turn task-constraint drift before mutation/readiness summaries, see [Interaction invariant audit](./interaction-invariant-audit.md).
+For sequence-level pre-execution governance, see [Workflow policy plan preflight](./workflow-policy-plan.md). `workflow_policy_plan` returns a deterministic, redacted `workflow_policy_plan.v1` decision for intent-declared MCP tool sequences without executing tools. For uncertainty-aware workflow gating, see [Clarification Gate](./clarification-gate.md). `clarification_gate` returns both structured MCP output and an elicitation adapter/fallback checklist for clients that need missing non-sensitive fields before mutation, release, or security workflows. For multi-turn task-constraint drift before mutation/readiness summaries, see [Interaction invariant audit](./interaction-invariant-audit.md).

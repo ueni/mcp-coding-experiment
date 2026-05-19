@@ -12,7 +12,8 @@ The first-slice report schema is `governance_report.v1`. It includes:
 
 - audit counts for sensitive tool calls, blocked attempts, mutation-gate failures, HTTP authorization denials, tool categories, and failure reasons;
 - hash-chain digest metadata over redacted audit events (`sha256`, no raw secrets);
-- local governance hook summaries from stored `policy_simulator`, `release_readiness`, and `required_tool_chain` results when available;
+- local governance hook summaries from stored `policy_simulator`, `workflow_policy_plan`, `release_readiness`, and `required_tool_chain` results when available;
+- latest stored `workflow_policy_plan` decision/plan ID as optional pre-execution workflow-policy evidence when available;
 - latest exported `dependency_security_report` status, vulnerability count, advisory freshness, and report path when available;
 - compact `tool_catalog_integrity` status, baseline/current digests, drift counts, and advisory lint counts without embedding the full catalog;
 - snapshot/rollback references from the state snapshot index when available;
@@ -65,7 +66,7 @@ Example call:
 
 The lineage manifest deliberately stores only safe identity inputs: repository-relative paths, redacted audit metadata/digests, git refs/commits, schema versions, deterministic node IDs, and observed artifact digests. It must not store raw prompts, transcript snippets, bearer tokens, secrets, absolute host paths, or file contents. Model-authored or otherwise non-deterministic outputs are represented as observed/non-deterministic nodes rather than replay promises.
 
-`release_readiness(summary_mode="quick")` surfaces non-blocking `governance_report` and `dependency_security` checks showing whether recent governance/dependency evidence exists and whether dependency advisory data was clean, vulnerable, stale, skipped, network-disabled, or scanner-unavailable. Missing reports or disabled advisory lookup are informational by default and do not fail release readiness unless dependency-security blocking is explicitly enabled.
+`release_readiness(summary_mode="quick")` surfaces non-blocking `governance_report`, `workflow_policy_plan`, and `dependency_security` checks showing whether recent governance/workflow-policy/dependency evidence exists and whether dependency advisory data was clean, vulnerable, stale, skipped, network-disabled, or scanner-unavailable. Missing reports or disabled advisory lookup are informational by default and do not fail release readiness unless dependency-security blocking is explicitly enabled.
 
 Security boundaries:
 

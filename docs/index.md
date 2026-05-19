@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) - checked-in public MCP tool-catalog digests, drift diffs, and advisory metadata lint for rug-pull detection.
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) - deterministic read-only ToolFuzz-style runtime checks for public tool contracts, error paths, and redaction invariants.
 - [Workflow lineage manifests](./workflow-lineage.md) - deterministic redacted plan identity, lineage graph, artifact digests, and read-only drift verification for replayable MCP executions.
+- [Workflow policy plan preflight](./workflow-policy-plan.md) - deterministic read-only preflight for intent-declared MCP tool sequences before execution.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
@@ -46,6 +47,7 @@ This index lists documentation ownership and status.
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) (`docs/tool-catalog-integrity.md`) - Status: `prototype`
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) (`docs/tool-contract-fuzzing.md`) - Status: `prototype`
 - [Workflow lineage manifests](./workflow-lineage.md) (`docs/workflow-lineage.md`) - Status: `prototype`
+- [Workflow policy plan preflight](./workflow-policy-plan.md) (`docs/workflow-policy-plan.md`) - Status: `prototype`
 - [Policy insight regression bank](./policy-insights.md) (`docs/policy-insights.md`) - Status: `canonical`
 - [Adaptive observation compression](./observation-compression.md) (`docs/observation-compression.md`) - Status: `prototype`
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`
