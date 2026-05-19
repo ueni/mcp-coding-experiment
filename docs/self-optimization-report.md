@@ -36,7 +36,8 @@ It reads available local evidence only:
 - persisted async task handles under `.codebase-tooling-mcp/tasks/`;
 - local cache metadata under `.codebase-tooling-mcp/cache/`;
 - local `git log` metadata for issue/PR throughput when `include_git=true`;
-- optional caller-supplied `github_issue_metadata` or a local `.codebase-tooling-mcp/reports/SELF_OPTIMIZATION_GITHUB_ISSUES.json` issue index for de-duplicating candidates against already-open GitHub issues without a network lookup.
+- optional caller-supplied `github_issue_metadata` or a local `.codebase-tooling-mcp/reports/SELF_OPTIMIZATION_GITHUB_ISSUES.json` issue index for de-duplicating candidates against already-open GitHub issues without a network lookup;
+- optional structured local patch-survivorship metadata from `.codebase-tooling-mcp/reports/PATCH_SURVIVORSHIP_PR_METADATA.json` plus audit/span fields named `patch_survivorship`, `patch_lifecycle`, or `patch_metadata`.
 
 Sibling E2E workflow benchmark summaries from `.codebase-tooling-mcp/reports/E2E_MCP_WORKFLOW_BENCHMARKS.json` can be used alongside this report to correlate benchmark pass/fail, tool-call volume, estimated token volume, retries/rework, safety-gate coverage, snapshot/rollback usage, and test-gate status with local usage metrics.
 
@@ -54,7 +55,10 @@ The tool returns `self_optimization_report.v1` with:
 - compressed-observation counts and estimated token savings from omitted signals;
 - failed/noisy run counts and bottleneck summaries;
 - issue/PR/workflow/task throughput attribution from local refs such as `issue #90`, `PR #12`, or persisted task IDs;
-- duplicate-suppressed optimization candidates with stable `duplicate_key` values.
+- duplicate-suppressed optimization candidates with stable `duplicate_key` values;
+- compact `patch_survivorship` data using schema `patch_survivorship_report.v1`.
+
+The patch-survivorship extension aggregates proposed, applied, committed, rewritten, reverted, and `retained_after_n_commits` states by workflow, tool, and execution mode. It keeps only patch IDs or SHA-256 digests plus aggregate diff metrics (line/hunk/add/delete counts), structured local human-pushback labels/review decisions, and available correlations to test gates, security/risk artifacts, and governance artifacts. It does not persist raw prompts, full private patches, or private conversation text.
 
 When evidence is absent, the report uses explicit `unknown` / `not_available` statuses in `metrics.data_availability`, lowers `confidence`, and adds caveats instead of inventing token usage, transition timing, test-gate coverage, or blocked-time savings.
 
@@ -62,7 +66,7 @@ When evidence is absent, the report uses explicit `unknown` / `not_available` st
 
 ## Privacy and redaction
 
-The report does not expose raw traces, raw prompts, file contents, bearer tokens, or absolute host paths. It passes strings through the MCP audit redactor and additionally redacts configured sensitive project/company/person terms.
+The report does not expose raw traces, raw prompts, full patch text, file contents, bearer tokens, or absolute host paths. It passes strings through the MCP audit redactor and additionally redacts configured sensitive project/company/person terms.
 
 Optional extra terms can be supplied per run:
 
