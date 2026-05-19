@@ -5157,7 +5157,7 @@
       "name": "runtime_state"
     },
     {
-      "digest": "sha256:c5488db54fb1d4bfa7d4db29907b026268cbc18a6f8e15b8f9f9c7fb28cb20e2",
+      "digest": "sha256:b8fd65a658150d88d36ce0ae2012eca44b1583128e5e95953bf82c44c4720a6d",
       "metadata": {
         "documentation": [
           {
@@ -5307,6 +5307,9 @@
                 },
                 "type": "array"
               },
+              "patch_survivorship": {
+                "type": "object"
+              },
               "report_id": {
                 "type": "string"
               },
@@ -5453,6 +5456,7 @@
             "confidence",
             "caveats",
             "github_issue_gate",
+            "patch_survivorship",
             "_meta"
           ],
           "outputSchema": {
@@ -5493,6 +5497,9 @@
                   "type": "object"
                 },
                 "type": "array"
+              },
+              "patch_survivorship": {
+                "type": "object"
               },
               "report_id": {
                 "type": "string"
@@ -8983,5 +8990,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:d196ed9891eae7c5c8242fd32c7c7b5f2ae29413d3d654676d62b24ab48da624"
+  "whole_catalog_digest": "sha256:059f49e600e2ccf651b61ef50cc63647f4d3b5b996c7104891cb6fb38ae2b666"
 }
