@@ -19,7 +19,7 @@
     "contains_secrets": false,
     "public_metadata_only": true
   },
-  "tool_count": 29,
+  "tool_count": 30,
   "tools": [
     {
       "digest": "sha256:dfaa3c9983cb8279b2f3e5494e332605321a2b3ddd3064bbcfd26f29967957c4",
@@ -3384,6 +3384,377 @@
         }
       },
       "name": "model_assisted_summary"
+    },
+    {
+      "digest": "sha256:7fba51a3ab994cf6bbb84677b51fa5ef989a5b68cd58bac3090c383a13afa163",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Read-only final checkpoint before a planned workspace/git mutation.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "argument_summary": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Argument Summary"
+              },
+              "context_metadata": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Context Metadata"
+              },
+              "declared_intent": {
+                "default": "",
+                "title": "Declared Intent",
+                "type": "string"
+              },
+              "expected_diff_shape": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Expected Diff Shape"
+              },
+              "impact_gate": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Impact Gate"
+              },
+              "invariant_audit_summary": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Invariant Audit Summary"
+              },
+              "mode": {
+                "default": "",
+                "title": "Mode",
+                "type": "string"
+              },
+              "planned_tool": {
+                "title": "Planned Tool",
+                "type": "string"
+              },
+              "rollback_snapshot_id": {
+                "default": "",
+                "title": "Rollback Snapshot Id",
+                "type": "string"
+              },
+              "selected_tests": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Selected Tests"
+              },
+              "target_files": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Target Files"
+              }
+            },
+            "required": [
+              "planned_tool"
+            ],
+            "title": "mutation_step_guardArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "mutation_step_guard",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "decision": {
+                "enum": [
+                  "allow",
+                  "needs_clarification",
+                  "needs_snapshot",
+                  "needs_fresh_context",
+                  "needs_tests",
+                  "needs_human_approval",
+                  "deny"
+                ],
+                "type": "string"
+              },
+              "decision_flags": {
+                "type": "object"
+              },
+              "decisive_deviation_risk": {
+                "type": "object"
+              },
+              "input_summary": {
+                "type": "object"
+              },
+              "missing_preconditions": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "ok_to_mutate": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "mutation_step_guard.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "targeted_reflection_checklist": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "ok_to_mutate",
+              "decision",
+              "decision_flags",
+              "decisive_deviation_risk",
+              "missing_preconditions",
+              "targeted_reflection_checklist",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "input_summary",
+            "security"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "decision": {
+                "enum": [
+                  "allow",
+                  "needs_clarification",
+                  "needs_snapshot",
+                  "needs_fresh_context",
+                  "needs_tests",
+                  "needs_human_approval",
+                  "deny"
+                ],
+                "type": "string"
+              },
+              "decision_flags": {
+                "type": "object"
+              },
+              "decisive_deviation_risk": {
+                "type": "object"
+              },
+              "input_summary": {
+                "type": "object"
+              },
+              "missing_preconditions": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "ok_to_mutate": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "mutation_step_guard.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "targeted_reflection_checklist": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "ok_to_mutate",
+              "decision",
+              "decision_flags",
+              "decisive_deviation_risk",
+              "missing_preconditions",
+              "targeted_reflection_checklist",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "ok_to_mutate",
+            "decision",
+            "decision_flags",
+            "decisive_deviation_risk",
+            "missing_preconditions",
+            "targeted_reflection_checklist",
+            "safe_next_actions"
+          ],
+          "tool": "mutation_step_guard"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "mutation_step_guard"
+        }
+      },
+      "name": "mutation_step_guard"
     },
     {
       "digest": "sha256:3f6cd6b499d0e504f385076aa7e9d8d427e77d6e19f8785953f1c492da565cce",

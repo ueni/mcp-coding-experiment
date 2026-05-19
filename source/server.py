@@ -370,6 +370,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "workflow_diagnostics": {"categories": ["read-only"]},
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
+    "mutation_step_guard": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "continue_model_fallback_configure": {"categories": ["write"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
@@ -1157,7 +1158,7 @@ WORKFLOW_CARDS: tuple[dict[str, Any], ...] = (
         "mutation_mode": "snapshot is read-only metadata plus git state capture; later edits require ALLOW_MUTATIONS=true and explicit intent",
         "outputs": ["snapshot id", "restore instruction", "scope caveats", "clarification questions when scope is unclear"],
         "do_not_use_when": ["The task is purely read-only review", "The change is a trivial single-line edit with normal git rollback sufficient and documented"],
-        "recommended_entrypoint": "workspace_transaction(mode='snapshot') before mutation workflow",
+        "recommended_entrypoint": "workspace_transaction(mode='snapshot'), then mutation_step_guard before broad/high-risk mutation workflow",
         "routing_terms": ["snapshot", "rollback", "refactor", "rewrite", "rename", "delete", "migration", "risky", "large"],
     },
     {
@@ -6576,6 +6577,7 @@ def _self_optimization_report_impl(
 WORKFLOW_FAILURE_CATEGORIES = {
     "auth_policy_denial",
     "mutation_disabled",
+    "mutating_decisive_deviation",
     "path_scope_violation",
     "missing_snapshot_rollback",
     "failed_readiness_test_gate",
@@ -6601,6 +6603,8 @@ def _workflow_failure_category(step: dict[str, Any]) -> str:
     blob = _diagnostic_text_blob(tool, category, reason, flags, outputs, step.get("redacted_args", {}))
     if any(term in blob for term in ("mutations disabled", "mutation disabled", "allow_mutations=false")):
         return "mutation_disabled"
+    if any(term in blob for term in ("mutation_step_guard", "mutating_decisive_deviation", "decisive deviation", "ok_to_mutate=false", "intent drift before mutation", "scope drift before mutation")):
+        return "mutating_decisive_deviation"
     if any(term in blob for term in ("not authorized", "unauthorized", "bearer token", "auth", "policy denied", "policy denial", "blocking_policies")):
         return "auth_policy_denial"
     if any(term in blob for term in ("outside repo", "outside repository", "repo boundary", "path boundary", "path/scope", "not under repo", "scope violation")):
@@ -6663,6 +6667,10 @@ def _workflow_safe_next_actions(category: str) -> list[str]:
         "mutation_disabled": [
             "Keep analysis read-only or restart with ALLOW_MUTATIONS=true only after explicit operator approval.",
             "Prefer planning/diff preview tools before enabling mutation-capable tools.",
+        ],
+        "mutating_decisive_deviation": [
+            "Stop the planned mutation and rerun mutation_step_guard with fresh context, target files, tests, and rollback evidence.",
+            "Use clarification_gate or interaction_invariant_audit to reconcile intent/scope drift before retrying.",
         ],
         "path_scope_violation": [
             "Retry with repository-relative paths under REPO_PATH.",
@@ -11636,9 +11644,6 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
                 ],
             }
         )
-        _write_workflow_task_status(payload)
-        _workflow_task_emit_progress(task_id, payload, force=True)
-        _workflow_task_cleanup_runtime(task_id)
         _append_audit_event(
             "workflow_task",
             ["read-only", "async"],
@@ -11658,6 +11663,9 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             status="succeeded",
             artifact_refs=[str(link.get("path")) for link in resource_links if isinstance(link.get("path"), str)],
         )
+        _write_workflow_task_status(payload)
+        _workflow_task_emit_progress(task_id, payload, force=True)
+        _workflow_task_cleanup_runtime(task_id)
     except Exception as exc:  # pragma: no cover - defensive background failure path
         finished_at = _now_iso()
         payload.update(
@@ -11841,24 +11849,25 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
             cancelled_at=finished_at,
             subprocess_terminated=bool(result.get("cancelled")),
         )
-    _write_workflow_task_status(payload)
-    _workflow_task_emit_progress(task_id, payload, force=True)
-    _workflow_task_cleanup_runtime(task_id)
+    terminal_event = "cancelled" if cancelled else "completed" if ok else "failed"
     _append_audit_event(
         "workflow_task",
         _workflow_task_categories("vscode_task_run"),
         ok and not cancelled,
-        {"task_id": task_id, "workflow": "vscode_task_run", "event": "cancelled" if cancelled else "completed" if ok else "failed"},
-        "cancelled" if cancelled else "completed" if ok else "failed",
+        {"task_id": task_id, "workflow": "vscode_task_run", "event": terminal_event},
+        terminal_event,
     )
     _otel_record_workflow_lifecycle(
         task_id,
         "vscode_task_run",
-        "cancelled" if cancelled else "completed" if ok else "failed",
+        terminal_event,
         success=ok and not cancelled,
         status="cancelled" if cancelled else "succeeded" if ok else "failed",
         artifact_refs=[str(link.get("path")) for link in artifact_links if isinstance(link.get("path"), str)],
     )
+    _write_workflow_task_status(payload)
+    _workflow_task_emit_progress(task_id, payload, force=True)
+    _workflow_task_cleanup_runtime(task_id)
 
 
 def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
@@ -24775,6 +24784,498 @@ def clarification_gate(
         rollback_plan=rollback_plan,
         user_response_action=user_response_action,
     )
+
+
+MUTATION_STEP_GUARD_MUTATING_MODES = {
+    "apply",
+    "apply_diff",
+    "commit",
+    "delete",
+    "move",
+    "replace",
+    "restore",
+    "rollback",
+    "write",
+}
+MUTATION_STEP_GUARD_DESTRUCTIVE_MODES = {"delete", "restore", "rollback"}
+MUTATION_STEP_GUARD_READ_ONLY_GIT_TOOLS = {
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+}
+MUTATION_STEP_GUARD_MUTATING_TOOL_HINTS = {
+    "apply_unified_diff",
+    "delete_path",
+    "move_path",
+    "replace_in_files",
+    "write_file",
+}
+MUTATION_STEP_GUARD_HUMAN_APPROVAL_TOOLS = {
+    "git_push",
+    "git_pull",
+    "git_reset",
+    "git_clean",
+    "state_restore",
+}
+MUTATION_STEP_GUARD_SECRET_PARTS = {
+    ".env",
+    ".ssh",
+    "credentials",
+    "credential",
+    "secret",
+    "secrets",
+    "tokens",
+    "token",
+}
+
+
+def _mutation_guard_redacted_text(value: Any, max_chars: int = 240) -> str:
+    return _trim_text(_redact_audit_string(str(value)), max_chars=max_chars)
+
+
+def _mutation_guard_object(value: dict[str, Any] | str | None) -> dict[str, Any]:
+    if isinstance(value, dict):
+        redacted = _redact_audit_value(value)
+        return redacted if isinstance(redacted, dict) else {"value": redacted}
+    if value in (None, ""):
+        return {}
+    return {"summary": _mutation_guard_redacted_text(value)}
+
+
+def _mutation_guard_list(values: list[str] | None) -> list[str]:
+    return [str(item).strip() for item in values or [] if str(item).strip()]
+
+
+def _mutation_guard_collect_targets(
+    target_files: list[str] | None,
+    argument_summary: dict[str, Any] | str | None,
+) -> list[str]:
+    targets = _mutation_guard_list(target_files)
+    if isinstance(argument_summary, dict):
+        for key in (
+            "path",
+            "source_path",
+            "destination",
+            "target",
+            "file",
+            "files",
+            "paths",
+            "target_files",
+            "changed_files",
+        ):
+            value = argument_summary.get(key)
+            if isinstance(value, str):
+                targets.append(value)
+            elif isinstance(value, list):
+                targets.extend(str(item) for item in value if str(item).strip())
+    return list(dict.fromkeys(targets))[:50]
+
+
+def _mutation_guard_normalize_target(raw_path: str) -> dict[str, Any]:
+    raw = str(raw_path or "").strip()
+    redacted_raw = _mutation_guard_redacted_text(raw, max_chars=160)
+    if not raw:
+        return {
+            "path": "",
+            "input": redacted_raw,
+            "status": "missing",
+            "broad": True,
+            "high_risk": False,
+            "outside_repo": False,
+            "secret_like": False,
+        }
+    display = raw
+    if raw.startswith("repo://file/"):
+        display = urllib.parse.unquote(raw.removeprefix("repo://file/")).lstrip("/")
+    outside_repo = False
+    if os.path.isabs(display):
+        try:
+            rel = str(Path(display).resolve().relative_to(REPO_PATH)).replace("\\", "/")
+        except ValueError:
+            outside_repo = True
+            rel = "<outside_repo>"
+    else:
+        norm = os.path.normpath(display).replace("\\", "/")
+        if norm in {".."} or norm.startswith("../"):
+            outside_repo = True
+            rel = "<outside_repo>"
+        else:
+            rel = "." if norm in {"", "."} else norm
+    path_for_checks = display.replace("\\", "/").lower()
+    parts = [part.lower() for part in Path(rel).parts]
+    broad = rel in {".", ""} or any(token in path_for_checks for token in ("*", "**"))
+    if rel != "<outside_repo>":
+        last = parts[-1] if parts else rel
+        if len(parts) == 1 and "." not in last and last not in {"readme", "license"}:
+            broad = True
+    secret_like = any(part in MUTATION_STEP_GUARD_SECRET_PARTS for part in parts)
+    secret_like = secret_like or any(token in path_for_checks for token in ("private_key", "api_key", "authorization"))
+    high_risk = outside_repo or secret_like or rel.startswith(".git/") or rel == ".git"
+    return {
+        "path": rel,
+        "input": redacted_raw,
+        "status": "outside_repo" if outside_repo else "ok",
+        "broad": broad,
+        "high_risk": high_risk,
+        "outside_repo": outside_repo,
+        "secret_like": secret_like,
+    }
+
+
+def _mutation_guard_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "fresh", "passed", "ok", "ready"}:
+            return True
+        if normalized in {"false", "no", "stale", "failed", "missing", "invalid"}:
+            return False
+    return None
+
+
+def _mutation_guard_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mutation_guard_diff_summary(
+    expected_diff_shape: dict[str, Any] | str | None,
+    targets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    data = _mutation_guard_object(expected_diff_shape)
+    text = json.dumps(data, sort_keys=True, ensure_ascii=True).lower() if data else ""
+    file_count = _mutation_guard_int(
+        data.get("file_count")
+        or data.get("changed_file_count")
+        or data.get("files_changed")
+        or data.get("files")
+    )
+    additions = _mutation_guard_int(data.get("line_additions") or data.get("additions") or data.get("added_lines"))
+    deletions = _mutation_guard_int(data.get("line_deletions") or data.get("deletions") or data.get("deleted_lines"))
+    if file_count is None and targets:
+        file_count = len({row.get("path") for row in targets if row.get("path")})
+    destructive = any(term in text for term in ("delete", "remove", "destructive"))
+    total_lines = (additions or 0) + (deletions or 0)
+    high_churn = bool((file_count or 0) > 10 or total_lines > 300)
+    docs_only_flag = _mutation_guard_bool(data.get("docs_only"))
+    target_paths = [str(row.get("path", "")) for row in targets]
+    docs_only_targets = bool(target_paths) and all(
+        path.startswith("docs/")
+        or path.lower().endswith((".md", ".rst", ".txt"))
+        or path in {"README.md", "AGENTS.md"}
+        for path in target_paths
+    )
+    docs_only = docs_only_flag if docs_only_flag is not None else docs_only_targets
+    return {
+        "present": bool(data),
+        "summary": data,
+        "file_count": file_count or 0,
+        "line_additions": additions or 0,
+        "line_deletions": deletions or 0,
+        "destructive": destructive,
+        "high_churn": high_churn,
+        "docs_only": bool(docs_only),
+    }
+
+
+def _mutation_guard_context_status(context_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    ctx = context_metadata if isinstance(context_metadata, dict) else {}
+    if not ctx:
+        return {"fresh": False, "status": "missing", "reasons": ["missing_context_metadata"]}
+    reasons: list[str] = []
+    base_head = str(ctx.get("base_head") or ctx.get("planned_head") or "").strip()
+    current_head = str(ctx.get("current_head") or ctx.get("workspace_head") or "").strip()
+    if base_head and current_head and base_head != current_head:
+        reasons.append("context_head_mismatch")
+    age_seconds = _mutation_guard_int(ctx.get("context_age_seconds") or ctx.get("age_seconds"))
+    max_age_seconds = _mutation_guard_int(ctx.get("max_context_age_seconds")) or 900
+    if age_seconds is not None and age_seconds > max_age_seconds:
+        reasons.append("context_age_exceeds_limit")
+    explicit_fresh = _mutation_guard_bool(ctx.get("fresh") if "fresh" in ctx else ctx.get("context_fresh"))
+    status = str(ctx.get("status") or ctx.get("freshness") or "").strip().lower()
+    if status in {"stale", "expired", "invalid"}:
+        reasons.append(f"context_status:{status}")
+    if explicit_fresh is False:
+        reasons.append("context_marked_stale")
+    if reasons:
+        return {"fresh": False, "status": "stale", "reasons": list(dict.fromkeys(reasons))}
+    if explicit_fresh is True or status in {"fresh", "current", "ready"} or age_seconds is not None:
+        return {"fresh": True, "status": "fresh", "reasons": []}
+    return {"fresh": False, "status": "unknown", "reasons": ["context_freshness_unknown"]}
+
+
+def _mutation_guard_tests_status(
+    *,
+    selected_tests: list[str] | None,
+    impact_gate: dict[str, Any] | str | None,
+    context_metadata: dict[str, Any] | None,
+    diff_summary: dict[str, Any],
+) -> dict[str, Any]:
+    gate = _mutation_guard_object(impact_gate)
+    tests = _mutation_guard_list(selected_tests)
+    gate_tests = gate.get("selected_tests") if isinstance(gate.get("selected_tests"), list) else []
+    tests.extend(str(item) for item in gate_tests if str(item).strip())
+    tests = list(dict.fromkeys(tests))[:50]
+    if diff_summary.get("docs_only"):
+        return {"ok": True, "status": "not_required_docs_only", "selected_tests": tests, "reasons": []}
+    reasons: list[str] = []
+    status = str(gate.get("status") or gate.get("artifact_status") or gate.get("gate_status") or "").strip().lower()
+    gate_ok = _mutation_guard_bool(gate.get("ok"))
+    if status in {"stale", "absent", "invalid", "failed", "missing", "unmapped"}:
+        reasons.append(f"impact_gate_status:{status}")
+    if gate_ok is False:
+        reasons.append("impact_gate_not_ok")
+    if gate.get("fallback_used") is True:
+        reasons.append("impact_gate_fallback_used")
+    if gate.get("unmapped_changed_files"):
+        reasons.append("unmapped_changed_files")
+    ctx = context_metadata if isinstance(context_metadata, dict) else {}
+    tests_age = _mutation_guard_int(ctx.get("tests_age_seconds"))
+    max_tests_age = _mutation_guard_int(ctx.get("max_tests_age_seconds")) or 3600
+    if tests_age is not None and tests_age > max_tests_age:
+        reasons.append("tests_age_exceeds_limit")
+    if _mutation_guard_bool(ctx.get("tests_fresh")) is False:
+        reasons.append("tests_marked_stale")
+    if not tests and gate_ok is not True and status not in {"fresh", "passed", "ready"}:
+        reasons.append("missing_selected_tests_or_impact_gate")
+    return {
+        "ok": not reasons,
+        "status": "fresh" if not reasons else "missing_or_stale",
+        "selected_tests": tests,
+        "impact_gate": gate,
+        "reasons": list(dict.fromkeys(reasons)),
+    }
+
+
+def _mutation_guard_invariant_status(
+    invariant_audit_summary: dict[str, Any] | str | None,
+) -> dict[str, Any]:
+    audit = _mutation_guard_object(invariant_audit_summary)
+    if not audit:
+        return {"ok": False, "status": "missing", "smells": [], "reasons": ["missing_invariant_audit_summary"]}
+    ok = _mutation_guard_bool(audit.get("ok_to_continue"))
+    smells = audit.get("suspected_smells") if isinstance(audit.get("suspected_smells"), list) else []
+    categories = [str(item.get("category", "")) for item in smells if isinstance(item, dict)]
+    if ok is False or categories:
+        return {
+            "ok": False,
+            "status": "needs_reconciliation",
+            "smells": categories[:10],
+            "reasons": ["invariant_audit_not_clear", *categories[:5]],
+        }
+    if ok is True:
+        return {"ok": True, "status": "clear", "smells": [], "reasons": []}
+    return {"ok": False, "status": "unknown", "smells": [], "reasons": ["invariant_audit_status_unknown"]}
+
+
+def _mutation_guard_is_mutating(planned_tool: str, mode: str, categories: list[str]) -> bool:
+    tool = planned_tool.strip().lower()
+    normalized_mode = mode.strip().lower()
+    if bool(MUTATION_TOOL_CATEGORIES.intersection(categories)):
+        return True
+    if tool == "workspace_transaction":
+        return normalized_mode in MUTATION_STEP_GUARD_MUTATING_MODES
+    if tool.startswith("git_") and tool not in MUTATION_STEP_GUARD_READ_ONLY_GIT_TOOLS:
+        return True
+    if tool in MUTATION_STEP_GUARD_MUTATING_TOOL_HINTS:
+        return True
+    return False
+
+
+def _mutation_guard_choose_decision(flags: dict[str, bool]) -> str:
+    for decision in (
+        "deny",
+        "needs_clarification",
+        "needs_fresh_context",
+        "needs_snapshot",
+        "needs_tests",
+        "needs_human_approval",
+    ):
+        if flags.get(decision):
+            return decision
+    return "allow"
+
+
+@mcp.tool()
+def mutation_step_guard(
+    planned_tool: str,
+    mode: str = "",
+    argument_summary: dict[str, Any] | str | None = None,
+    declared_intent: str = "",
+    target_files: list[str] | None = None,
+    expected_diff_shape: dict[str, Any] | str | None = None,
+    rollback_snapshot_id: str = "",
+    selected_tests: list[str] | None = None,
+    impact_gate: dict[str, Any] | str | None = None,
+    invariant_audit_summary: dict[str, Any] | str | None = None,
+    context_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read-only final checkpoint before a planned workspace/git mutation."""
+    normalized_tool = planned_tool.strip().lower()
+    normalized_mode = mode.strip().lower()
+    arguments = _mutation_guard_object(argument_summary)
+    categories = _tool_categories(normalized_tool, {"mode": normalized_mode})
+    target_rows = [
+        _mutation_guard_normalize_target(path)
+        for path in _mutation_guard_collect_targets(target_files, argument_summary)
+    ]
+    diff_summary = _mutation_guard_diff_summary(expected_diff_shape, target_rows)
+    context_status = _mutation_guard_context_status(context_metadata)
+    tests_status = _mutation_guard_tests_status(
+        selected_tests=selected_tests,
+        impact_gate=impact_gate,
+        context_metadata=context_metadata,
+        diff_summary=diff_summary,
+    )
+    invariant_status = _mutation_guard_invariant_status(invariant_audit_summary)
+    is_mutating = _mutation_guard_is_mutating(normalized_tool, normalized_mode, categories)
+    destructive_mode = normalized_mode in MUTATION_STEP_GUARD_DESTRUCTIVE_MODES or "destructive" in categories
+    git_mutation = normalized_tool.startswith("git_") and normalized_tool not in MUTATION_STEP_GUARD_READ_ONLY_GIT_TOOLS
+    broad_targets = [row["path"] for row in target_rows if row.get("broad")]
+    high_risk_targets = [row["path"] for row in target_rows if row.get("high_risk")]
+    outside_targets = [row["path"] for row in target_rows if row.get("outside_repo")]
+    secret_targets = [row["path"] for row in target_rows if row.get("secret_like")]
+    snapshot_present = bool(rollback_snapshot_id.strip())
+    high_risk_mutation = bool(
+        destructive_mode
+        or git_mutation
+        or broad_targets
+        or high_risk_targets
+        or diff_summary["destructive"]
+        or diff_summary["high_churn"]
+        or normalized_tool in MUTATION_STEP_GUARD_HUMAN_APPROVAL_TOOLS
+    )
+
+    missing: list[dict[str, Any]] = []
+
+    def add_missing(field: str, reason: str) -> None:
+        missing.append({"field": field, "reason": reason})
+
+    deny_reasons: list[str] = []
+    if outside_targets:
+        deny_reasons.append("target_outside_repo")
+    if secret_targets:
+        deny_reasons.append("secret_or_credential_path")
+    if destructive_mode and any(path in {".", "", "<outside_repo>"} for path in broad_targets + outside_targets):
+        deny_reasons.append("destructive_broad_target")
+    if not normalized_tool:
+        add_missing("planned_tool", "planned mutating tool is required")
+    if not is_mutating:
+        add_missing("planned_tool", "planned tool/mode is not recognized as mutation-capable")
+    if not declared_intent.strip():
+        add_missing("declared_intent", "declared intent is required to detect scope drift")
+    if not target_rows:
+        add_missing("target_files", "target files or argument path summary are required")
+    if not diff_summary["present"]:
+        add_missing("expected_diff_shape", "expected diff shape is required before mutation")
+    if not invariant_status["ok"]:
+        for reason in invariant_status["reasons"]:
+            add_missing("invariant_audit_summary", str(reason))
+    if not context_status["fresh"]:
+        for reason in context_status["reasons"]:
+            add_missing("context_metadata", str(reason))
+    if high_risk_mutation and not snapshot_present:
+        add_missing("rollback_snapshot_id", "snapshot or rollback reference required for high-risk mutation")
+    if not tests_status["ok"]:
+        for reason in tests_status["reasons"]:
+            add_missing("selected_tests_or_impact_gate", str(reason))
+
+    risk_reasons = []
+    if high_risk_mutation:
+        risk_reasons.append("high_risk_mutation_shape")
+    if broad_targets:
+        risk_reasons.append("broad_target_scope")
+    if diff_summary["high_churn"]:
+        risk_reasons.append("large_expected_diff")
+    if not invariant_status["ok"]:
+        risk_reasons.append("invariant_audit_not_clear")
+    if not context_status["fresh"]:
+        risk_reasons.append("context_not_fresh")
+    if not tests_status["ok"]:
+        risk_reasons.append("tests_missing_or_stale")
+    if deny_reasons:
+        risk_reasons.extend(deny_reasons)
+    risk_score = min(100, 10 + 20 * len(risk_reasons) + (20 if high_risk_mutation else 0))
+    risk_level = "high" if risk_score >= 70 or deny_reasons else "medium" if risk_score >= 40 else "low"
+
+    flags = {
+        "allow": False,
+        "needs_clarification": bool(
+            not normalized_tool
+            or not is_mutating
+            or not declared_intent.strip()
+            or not target_rows
+            or not diff_summary["present"]
+            or not invariant_status["ok"]
+        ),
+        "needs_snapshot": bool(high_risk_mutation and not snapshot_present and not deny_reasons),
+        "needs_fresh_context": bool(not context_status["fresh"] and not deny_reasons),
+        "needs_tests": bool(not tests_status["ok"] and not deny_reasons),
+        "needs_human_approval": bool(high_risk_mutation and snapshot_present and tests_status["ok"] and context_status["fresh"] and not deny_reasons),
+        "deny": bool(deny_reasons),
+    }
+    decision = _mutation_guard_choose_decision(flags)
+    if decision == "allow":
+        flags["allow"] = True
+    ok_to_mutate = bool(flags["allow"])
+
+    checklist = [
+        "Confirm the declared intent still matches the requested mutation and no newer instruction narrowed scope.",
+        "Confirm every target path is repository-relative and limited to the expected files.",
+        "Confirm the expected diff shape matches the planned tool arguments before executing the mutation.",
+        "Confirm rollback/snapshot evidence is present for destructive, git, broad, or high-churn changes.",
+        "Confirm selected tests or impact-gate evidence are fresh for the current workspace context.",
+    ]
+    safe_actions = {
+        "allow": ["Proceed with the planned mutation exactly as summarized; rerun this guard if arguments or context change."],
+        "needs_clarification": ["Use clarification_gate or interaction_invariant_audit to reconcile missing intent, target, diff, or scope evidence."],
+        "needs_fresh_context": ["Refresh repository/context metadata and rerun mutation_step_guard before mutating."],
+        "needs_snapshot": ["Create or record a rollback snapshot/reference, then rerun mutation_step_guard."],
+        "needs_tests": ["Run test_impact_map/change_impact_gate or select focused tests for the changed files, then rerun mutation_step_guard."],
+        "needs_human_approval": ["Ask for explicit human approval or narrow the mutation scope before executing the high-risk step."],
+        "deny": ["Do not execute the planned mutation; narrow targets to repository-safe non-secret paths and re-plan."],
+    }
+    return {
+        "schema": "mutation_step_guard.v1",
+        "read_only": True,
+        "ok_to_mutate": ok_to_mutate,
+        "decision": decision,
+        "decision_flags": flags,
+        "decisive_deviation_risk": {
+            "level": risk_level,
+            "score": risk_score,
+            "reasons": list(dict.fromkeys(risk_reasons)),
+        },
+        "missing_preconditions": missing,
+        "targeted_reflection_checklist": checklist,
+        "safe_next_actions": safe_actions[decision],
+        "input_summary": {
+            "planned_tool": normalized_tool,
+            "mode": normalized_mode,
+            "categories": categories,
+            "mutation_capable": is_mutating,
+            "argument_summary": arguments,
+            "declared_intent_present": bool(declared_intent.strip()),
+            "target_files": target_rows,
+            "expected_diff_shape": diff_summary,
+            "rollback_snapshot_id_present": snapshot_present,
+            "tests": tests_status,
+            "invariant_audit": invariant_status,
+            "context": context_status,
+        },
+        "security": {
+            "records_inputs": False,
+            "executes_mutation": False,
+            "repo_boundary_checked": True,
+            "secrets_redacted": True,
+        },
+    }
 
 
 INTERACTION_INVARIANT_SMELL_GUIDANCE: dict[str, str] = {

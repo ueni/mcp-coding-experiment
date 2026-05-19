@@ -142,6 +142,8 @@ Public tools:
 
 `model_assisted_summary` is a disabled-by-default MCP Sampling adapter for bounded summary/classification/workflow-selection use cases. It requires client-declared sampling support plus repository-relative redacted context, enforces path/byte/token budgets, records approval/denial digests and metadata instead of raw prompts, and treats generated text as advisory only.
 
+`mutation_step_guard` is a read-only final checkpoint before planned workspace/git mutations. It takes declared intent, target files, expected diff shape, rollback/snapshot evidence, tests or impact-gate status, invariant-audit status, and freshness metadata, then returns `allow`, a concrete missing-precondition decision, `needs_human_approval`, or `deny` without executing the mutation.
+
 `policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
 
 `tool_catalog_integrity` is a read-only rug-pull drift guard for the public MCP catalog. It hashes live `mcp.list_tools()` metadata plus `tool_annotations`, checked-in output contracts, security categories/mode categories, and public documentation references against `source/tool_catalog_baseline.json`, then reports compact added/removed/changed metadata diffs and advisory metadata-lint findings without embedding repository contents, host paths, tokens, or runtime secrets.
