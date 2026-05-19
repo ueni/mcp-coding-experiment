@@ -56,4 +56,4 @@ Diagnostic output shape:
 }
 ```
 
-Recognized failure categories include `auth_policy_denial`, `mutation_disabled`, `path_scope_violation`, `missing_snapshot_rollback`, `failed_readiness_test_gate`, and `malformed_tool_output`. `governance_report` includes a compact `workflow_diagnostics` summary when audit failures are present.
+Recognized failure categories include `auth_policy_denial`, `mutation_disabled`, `mutating_decisive_deviation`, `path_scope_violation`, `missing_snapshot_rollback`, `failed_readiness_test_gate`, and `malformed_tool_output`. `mutating_decisive_deviation` covers blocked final checkpoint evidence from `mutation_step_guard`, `ok_to_mutate=false`, stale context/tests, or intent/scope drift immediately before a planned mutation. `governance_report` includes a compact `workflow_diagnostics` summary when audit failures are present.

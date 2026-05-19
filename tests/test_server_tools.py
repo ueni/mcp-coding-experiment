@@ -525,6 +525,102 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("contradicted_prior_response", categories)
         self.assertFalse(out["ok_to_continue"])
 
+    def test_mutation_step_guard_allows_safe_low_risk_write(self):
+        out = self.server.mutation_step_guard(
+            planned_tool="workspace_transaction",
+            mode="write",
+            argument_summary={"path": "src/sample.py"},
+            declared_intent="Update one implementation file with a focused fix.",
+            target_files=["src/sample.py"],
+            expected_diff_shape={"file_count": 1, "line_additions": 4, "line_deletions": 1},
+            selected_tests=["tests/test_server_tools.py"],
+            invariant_audit_summary={"ok_to_continue": True, "suspected_smells": []},
+            context_metadata={"fresh": True, "tests_fresh": True},
+        )
+
+        self.assertEqual(out["schema"], "mutation_step_guard.v1")
+        self.assertTrue(out["read_only"])
+        self.assertEqual(out["decision"], "allow")
+        self.assertTrue(out["ok_to_mutate"])
+        self.assertFalse(out["missing_preconditions"])
+        self.assertTrue(out["security"]["executes_mutation"] is False)
+
+    def test_mutation_step_guard_blocks_stale_context_missing_snapshot_and_tests(self):
+        out = self.server.mutation_step_guard(
+            planned_tool="workspace_transaction",
+            mode="delete",
+            argument_summary={"path": "src/sample.py"},
+            declared_intent="Remove obsolete sample file.",
+            target_files=["src/sample.py"],
+            expected_diff_shape={"file_count": 1, "line_deletions": 20},
+            invariant_audit_summary={"ok_to_continue": True, "suspected_smells": []},
+            context_metadata={"fresh": False, "tests_fresh": False, "context_age_seconds": 9999},
+        )
+
+        self.assertFalse(out["ok_to_mutate"])
+        self.assertEqual(out["decision"], "needs_fresh_context")
+        self.assertTrue(out["decision_flags"]["needs_snapshot"])
+        self.assertTrue(out["decision_flags"]["needs_tests"])
+        fields = {item["field"] for item in out["missing_preconditions"]}
+        self.assertIn("rollback_snapshot_id", fields)
+        self.assertIn("selected_tests_or_impact_gate", fields)
+        self.assertIn("context_metadata", fields)
+
+    def test_mutation_step_guard_denies_outside_repo_or_secret_paths(self):
+        out = self.server.mutation_step_guard(
+            planned_tool="workspace_transaction",
+            mode="write",
+            argument_summary={"path": "../.ssh/id_rsa", "authorization": "Bearer secret-value"},
+            declared_intent="Touch a risky file.",
+            target_files=["../.ssh/id_rsa"],
+            expected_diff_shape={"file_count": 1, "line_additions": 1},
+            selected_tests=["tests/test_server_tools.py"],
+            invariant_audit_summary={"ok_to_continue": True, "suspected_smells": []},
+            context_metadata={"fresh": True, "tests_fresh": True},
+        )
+
+        self.assertEqual(out["decision"], "deny")
+        self.assertFalse(out["ok_to_mutate"])
+        self.assertIn("target_outside_repo", out["decisive_deviation_risk"]["reasons"])
+        encoded = self.server.json.dumps(out, sort_keys=True)
+        self.assertIn("<redacted>", encoded)
+        self.assertNotIn("secret-value", encoded)
+
+    def test_mutation_step_guard_requests_human_approval_for_broad_high_risk_scope(self):
+        out = self.server.mutation_step_guard(
+            planned_tool="git_push",
+            mode="push",
+            argument_summary={"path": "src/*"},
+            declared_intent="Publish the prepared branch.",
+            target_files=["src/*"],
+            expected_diff_shape={"file_count": 12, "line_additions": 200, "line_deletions": 120},
+            rollback_snapshot_id="snapshot-123",
+            selected_tests=["tests/test_server_tools.py"],
+            invariant_audit_summary={"ok_to_continue": True, "suspected_smells": []},
+            context_metadata={"fresh": True, "tests_fresh": True},
+        )
+
+        self.assertEqual(out["decision"], "needs_human_approval")
+        self.assertFalse(out["ok_to_mutate"])
+        self.assertIn("broad_target_scope", out["decisive_deviation_risk"]["reasons"])
+
+    def test_workflow_diagnostics_classifies_mutating_decisive_deviation(self):
+        out = self.server.workflow_diagnostics(
+            trajectory=[
+                {
+                    "step_id": "guard-1",
+                    "tool": "mutation_step_guard",
+                    "success": False,
+                    "error": "mutating_decisive_deviation: ok_to_mutate=false for stale tests",
+                }
+            ]
+        )
+
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_category"], "mutating_decisive_deviation")
+        self.assertIn("mutating_decisive_deviation", out["failure_categories"])
+        self.assertTrue(any("mutation_step_guard" in action for action in out["safe_next_actions"]))
+
     def test_release_readiness_consumes_clarification_gate_and_audit_summary(self):
         out = self.server.release_readiness(
             base_ref="HEAD",

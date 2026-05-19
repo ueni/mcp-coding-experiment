@@ -44,6 +44,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workflow_diagnostics",
                 "workflow_lineage",
                 "interaction_invariant_audit",
+                "mutation_step_guard",
             ),
         )
         contracts = all_tool_output_contracts()
@@ -121,6 +122,17 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "interaction_invariant_audit": self.server.interaction_invariant_audit(
                 task_summary="Read-only audit before mutation; run tests before readiness.",
                 recent_notes=["No mutation happened yet."],
+            ),
+            "mutation_step_guard": self.server.mutation_step_guard(
+                planned_tool="workspace_transaction",
+                mode="write",
+                argument_summary={"path": "src/schema_contract.py"},
+                declared_intent="Update schema contract fixture.",
+                target_files=["src/schema_contract.py"],
+                expected_diff_shape={"file_count": 1, "line_additions": 1, "line_deletions": 0},
+                selected_tests=["tests/test_tool_output_schemas.py"],
+                invariant_audit_summary={"ok_to_continue": True, "suspected_smells": []},
+                context_metadata={"fresh": True, "tests_fresh": True},
             ),
         }
 

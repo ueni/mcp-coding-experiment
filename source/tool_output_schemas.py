@@ -40,6 +40,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "workflow_diagnostics",
     "workflow_lineage",
     "interaction_invariant_audit",
+    "mutation_step_guard",
 )
 
 STABLE_FIELDS: dict[str, tuple[str, ...]] = {
@@ -65,6 +66,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
     "workflow_lineage": ("schema", "read_only", "manifest_path", "plan_id", "status", "ok", "checks", "conditions"),
     "interaction_invariant_audit": ("schema", "read_only", "advisory_only", "ok_to_continue", "confidence", "extracted_invariants", "suspected_smells", "safe_next_actions", "linked_gates"),
+    "mutation_step_guard": ("schema", "read_only", "ok_to_mutate", "decision", "decision_flags", "decisive_deviation_risk", "missing_preconditions", "targeted_reflection_checklist", "safe_next_actions"),
 }
 
 EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -90,6 +92,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories"),
     "workflow_lineage": ("mode", "security"),
     "interaction_invariant_audit": ("security", "redactions_applied", "input_summary"),
+    "mutation_step_guard": ("input_summary", "security"),
 }
 
 
@@ -577,6 +580,22 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "redactions_applied": {"type": "array", "items": {"type": "string"}},
             "security": {"type": "object"},
             "input_summary": {"type": "object"},
+        },
+    ),
+    "mutation_step_guard": _object_schema(
+        ["schema", "read_only", "ok_to_mutate", "decision", "decision_flags", "decisive_deviation_risk", "missing_preconditions", "targeted_reflection_checklist", "safe_next_actions"],
+        {
+            "schema": {"type": "string", "const": "mutation_step_guard.v1"},
+            "read_only": {"type": "boolean", "const": True},
+            "ok_to_mutate": {"type": "boolean"},
+            "decision": {"type": "string", "enum": ["allow", "needs_clarification", "needs_snapshot", "needs_fresh_context", "needs_tests", "needs_human_approval", "deny"]},
+            "decision_flags": {"type": "object"},
+            "decisive_deviation_risk": {"type": "object"},
+            "missing_preconditions": {"type": "array", "items": {"type": "object"}},
+            "targeted_reflection_checklist": {"type": "array", "items": {"type": "string"}},
+            "safe_next_actions": {"type": "array", "items": {"type": "string"}},
+            "input_summary": {"type": "object"},
+            "security": {"type": "object"},
         },
     ),
 }

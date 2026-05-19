@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
+- [Mutation step guard](./mutation-step-guard.md) - read-only final checkpoint before workspace/git mutation steps.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Context retrieval regression suite](./context-retrieval-regression.md) - offline ContextBench-style fixtures and metrics for task-router workflow-card retrieval.
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) - offline Terminal-Bench-style task fixtures, direct baseline runner, agent hooks, and trajectory/safety metrics for complete MCP workflows.
@@ -59,6 +60,7 @@ This index lists documentation ownership and status.
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
+- [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`
 - [Context retrieval regression suite](./context-retrieval-regression.md) (`docs/context-retrieval-regression.md`) - Status: `prototype`
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) (`docs/e2e-mcp-workflow-benchmarks.md`) - Status: `prototype`
 - [Agent execution modes](./execution-modes.md) (`docs/execution-modes.md`) - Status: `operational guidance`
