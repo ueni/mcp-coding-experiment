@@ -647,23 +647,107 @@ class AgentAPIProxyTest(ServerToolsTestBase):
 
         self.assertEqual(response.status_code, 200)
         content = payload["choices"][0]["message"]["content"]
-        self.assertIn("Model fallback is active", content)
-        self.assertIn("Continue setup fallback assistant", content)
+        self.assertIn("I can set up Continue", content)
         self.assertIn("MCP_HTTP_BEARER_TOKEN", content)
-        self.assertIn("local Ollama", content)
-        self.assertIn("OpenAI-compatible endpoint", content)
         self.assertIn("/v1/model-fallback/configure", content)
+        self.assertIn("not the real coding model", content)
         self.assertEqual("continue_model_fallback.status.v1", payload["model_fallback"]["schema"])
+        self.assertTrue(payload["model_fallback"]["default_profiles"])
+        self.assertTrue(payload["model_fallback"]["mcp_servers"])
+        self.assertTrue(
+            any(
+                server.get("uses_mcp_http_bearer_token_secret")
+                for server in payload["model_fallback"]["mcp_servers"]
+            )
+        )
+        self.assertEqual(
+            "bundled_default",
+            payload["model_fallback"]["routing"]["source"],
+        )
         self.assertTrue(self.server._http_path_is_protected_mcp("/v1/model-fallback/configure"))
 
-    def test_model_fallback_chat_streams_openai_compatible_sse(self):
+    def test_model_fallback_uses_detected_continue_default_and_stays_setup_wizard(self):
+        self.write_repo_text(
+            ".continue/model-routing.yaml",
+            "schema: v1\n"
+            "router:\n"
+            "  model: qwen2.5-coder:1.5b\n"
+            "  file: .continue/models/coding-qwen2.5-coder-1.5b.yaml\n",
+        )
+        self.write_repo_text(
+            ".continue/models/coding-qwen2.5-coder-1.5b.yaml",
+            "name: coding-qwen2.5-coder-1.5b\n"
+            "version: 0.0.1\n"
+            "schema: v1\n"
+            "models:\n"
+            "  - name: Coding Micro - Qwen2.5 Coder 1.5B\n"
+            "    provider: ollama\n"
+            "    model: qwen2.5-coder:1.5b\n"
+            "    apiBase: http://127.0.0.1:2345\n"
+            "    roles:\n"
+            "      - chat\n",
+        )
         response = asyncio.run(
             self.server.continue_model_fallback_chat_completions(
                 FakeRequest(
                     {
                         "model": "model-fallback",
-                        "messages": [{"role": "user", "content": "setup"}],
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "Write a Python sort function",
+                            }
+                        ],
+                    }
+                )
+            )
+        )
+        payload = self.response_json(response)
+        content = payload["choices"][0]["message"]["content"]
+
+        self.assertIn("qwen2.5-coder:1.5b", content)
+        self.assertIn("I'll use that by default", content)
+        self.assertIn("First, paste the MCP token", content)
+        self.assertNotIn("def ", content)
+        self.assertEqual(1, content.count("First,"))
+        self.assertLessEqual(content.count("?"), 1)
+        self.assertEqual(
+            "qwen2.5-coder:1.5b",
+            payload["model_fallback"]["detected_default"]["model"],
+        )
+        self.assertEqual(1, len(payload["model_fallback"]["local_profiles"]))
+
+    def test_model_fallback_stops_asking_after_five_user_requests(self):
+        response = asyncio.run(
+            self.server.continue_model_fallback_chat_completions(
+                FakeRequest(
+                    {
+                        "model": "model-fallback",
+                        "messages": [
+                            {"role": "user", "content": "one"},
+                            {"role": "user", "content": "two"},
+                            {"role": "user", "content": "three"},
+                            {"role": "user", "content": "four"},
+                            {"role": "user", "content": "five"},
+                        ],
+                    }
+                )
+            )
+        )
+        content = self.response_json(response)["choices"][0]["message"]["content"]
+
+        self.assertIn("I won't ask more setup questions", content)
+        self.assertNotIn("First, paste", content)
+        self.assertNotIn("Next, send", content)
+
+    def test_model_fallback_chat_streams_for_continue_ui(self):
+        response = asyncio.run(
+            self.server.continue_model_fallback_chat_completions(
+                FakeRequest(
+                    {
+                        "model": "model-fallback",
                         "stream": True,
+                        "messages": [{"role": "user", "content": "setup"}],
                     }
                 )
             )
@@ -682,15 +766,15 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual("text/event-stream", response.media_type)
+        self.assertEqual(response.media_type, "text/event-stream")
         self.assertEqual("[DONE]", data_lines[-1])
         self.assertGreaterEqual(len(chunks), 3)
         self.assertTrue(all(chunk["object"] == "chat.completion.chunk" for chunk in chunks))
         self.assertEqual({"role": "assistant"}, chunks[0]["choices"][0]["delta"])
         self.assertEqual("stop", chunks[-1]["choices"][0]["finish_reason"])
-        self.assertIn("Model fallback is active", content)
+        self.assertIn("I can set up Continue", content)
         self.assertIn("MCP_HTTP_BEARER_TOKEN", content)
-        self.assertIn("OpenAI-compatible endpoint", content)
+        self.assertIn("not the real coding model", content)
 
     def test_model_fallback_configure_requires_mutate_scope_in_http_context(self):
         self.server.ALLOW_MUTATIONS = True
