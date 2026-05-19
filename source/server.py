@@ -29693,14 +29693,47 @@ def _continue_model_fallback_content(status: dict[str, Any]) -> str:
     )
     return "\n".join(
         [
-            "Model fallback is active.",
+            "Model fallback is active. I am the Continue setup fallback assistant, not your real coding model.",
             configured,
+            "This local endpoint is protected. Continue must send Authorization: Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}; if that secret is unresolved, set MCP_HTTP_BEARER_TOKEN before opening VS Code or the devcontainer.",
             mutation_note,
-            "To configure an OpenAI-compatible model, send JSON to /v1/model-fallback/configure with:",
+            "Next steps:",
+            "1. For the bundled local Ollama path, keep the devcontainer running, confirm port 2345 is forwarded, and use the qwen2.5-coder:1.5b Continue profile.",
+            "2. For an OpenAI-compatible endpoint, send JSON to /v1/model-fallback/configure with:",
             '{"provider":"openai","model":"<model-id>","apiBase":"http://host:port/v1","proxy":"http://127.0.0.1:8080"}',
-            "The endpoint writes .continue/models/coding-openai-compatible.yaml and .continue/model-routing.yaml inside REPO_PATH.",
+            "3. The configure endpoint writes .continue/models/coding-openai-compatible.yaml and .continue/model-routing.yaml inside REPO_PATH.",
         ]
     )
+
+
+def _continue_model_fallback_chat_stream(
+    payload: dict[str, Any],
+    content: str,
+    trace_id: str,
+    route: dict[str, Any],
+    policy: dict[str, Any],
+    status_payload: dict[str, Any],
+    request: Any,
+):
+    async def _stream():
+        first_chunk = _agent_proxy_stream_chunk(payload, trace_id, {"role": "assistant"})
+        first_chunk["agent_proxy"] = _agent_proxy_metadata(trace_id, route, policy)
+        first_chunk["model_fallback"] = status_payload
+        yield _agent_proxy_sse_data(first_chunk)
+
+        is_disconnected = getattr(request, "is_disconnected", None)
+        if callable(is_disconnected) and await is_disconnected():
+            return
+
+        yield _agent_proxy_sse_data(
+            _agent_proxy_stream_chunk(payload, trace_id, {"content": content})
+        )
+        yield _agent_proxy_sse_data(
+            _agent_proxy_stream_chunk(payload, trace_id, {}, "stop")
+        )
+        yield _agent_proxy_sse_data("[DONE]")
+
+    return _stream()
 
 
 def _continue_model_config_payload(payload: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
@@ -29755,6 +29788,14 @@ async def continue_model_fallback_chat_completions(request):
         "risk_class": "repo_bound_configuration",
     }
     policy = {"input_tokens_estimate": _agent_proxy_estimate_tokens(_agent_proxy_request_text_digest_input(payload))}
+    if bool(payload.get("stream", False)):
+        return StreamingResponse(
+            _continue_model_fallback_chat_stream(
+                payload, content, trace_id, route, policy, status_payload, request
+            ),
+            media_type="text/event-stream",
+        )
+
     response_payload = _agent_proxy_openai_response(payload, content, trace_id, route, policy)
     response_payload["model_fallback"] = status_payload
     return JSONResponse(response_payload)
