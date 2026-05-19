@@ -127,6 +127,18 @@ The endpoint is intentionally unauthenticated so clients can run a preflight bef
 
 The manifest is non-final SEP discovery work (`mcp-server-manifest.provisional.v1`), so clients should treat field names as provisional and prefer defensive parsing. It must not contain repository contents, bearer tokens, local absolute paths, environment values, host user data, or secrets. The protected MCP endpoint remains `/mcp`; the discovery manifest does not weaken bearer-token enforcement for MCP calls.
 
+### MCP Registry server.json readiness
+
+This repository also checks in `server.json` for official MCP Registry release metadata. It is distinct from the runtime discovery manifest above: `server.json` describes the publishable package identity and install surface, not one running server instance.
+
+Initial registry identity is `io.github.ueni/codebase-tooling-mcp` with an OCI/GHCR package channel at `ghcr.io/ueni/codebase-tooling-mcp:<version>`. Publication is not automatic. Use the local dry-run gate before changing release metadata or publishing:
+
+```bash
+python3 scripts/registry_readiness.py validate --compact
+```
+
+See [MCP Registry server.json readiness](./docs/mcp-registry-readiness.md) for the selected package channel, Docker ownership marker, version expectations, and maintainer-gated `mcp-publisher` OIDC publishing path.
+
 ## VS Code MCP Onboarding
 
 For a complete VS Code MCP path from fresh clone/devcontainer to a verified tool call, see [VS Code MCP Onboarding](./docs/vscode-mcp-onboarding.md). The workspace task **MCP: Workspace Health Check** validates `/healthz`, `/mcp`, forwarded ports `8000`/`2345`, Ollama status, mutation mode, and HTTP bearer-token state without committing secrets.

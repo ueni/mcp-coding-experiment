@@ -55,6 +55,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check MCP Registry server.json readiness
+        run: python3 scripts/registry_readiness.py validate --compact
+
       - name: Check dependency locks
         run: python3 scripts/dependency_lock.py check --compact
 

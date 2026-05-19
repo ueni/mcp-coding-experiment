@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 
 # Documentation Index
 
+- [MCP Registry server.json readiness](./mcp-registry-readiness.md) - checked-in official-registry metadata, OCI ownership marker, local dry-run validation, and maintainer-gated publishing path.
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting plus first-slice `workflow_lineage.v1` manifests for MCP policy and tool-gate decisions.
 - [Dependency security report](./dependency-security.md) - read-only dependency inventory, SBOM export, and vulnerability-gate evidence with offline/caller-provided advisory sources.
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) - checked-in public MCP tool-catalog digests, drift diffs, and advisory metadata lint for rug-pull detection.
@@ -47,6 +48,7 @@ This index lists documentation ownership and status.
 - [Policy insight regression bank](./policy-insights.md) (`docs/policy-insights.md`) - Status: `canonical`
 - [Adaptive observation compression](./observation-compression.md) (`docs/observation-compression.md`) - Status: `prototype`
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`
+- [MCP Registry server.json readiness](./mcp-registry-readiness.md) (`docs/mcp-registry-readiness.md`) - Status: `release readiness`
 - [MCP roots diagnostics](./roots-diagnostics.md) (`docs/roots-diagnostics.md`) - Status: `operational guidance`
 - [MCP sampling safety adapter](./sampling-safety.md) (`docs/sampling-safety.md`) - Status: `prototype`
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) (`docs/opentelemetry-tracing.md`) - Status: `prototype`
