@@ -182,6 +182,98 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         self.assertGreater(report["metrics"]["blocked_waiting_time"]["seconds"], 0)
         self.assertEqual(report["metrics"]["data_availability"]["test_gates"]["status"], "observed")
 
+    def test_patch_survivorship_aggregates_redacted_lifecycle_states(self):
+        raw_patch = "diff --git a/app.py b/app.py\n@@ -1 +1 @@\n-secret private patch line\n+safe aggregate only\n"
+        rows = []
+        for idx, (patch_id, state, tool, workflow, mode) in enumerate(
+            [
+                ("patch-proposed", "proposed", "task_router", "offline_patch_flow", "offline-onboard-only"),
+                ("patch-applied", "applied", "apply_unified_diff", "mutation_apply", "offline-onboard-only"),
+                ("patch-committed", "committed", "git", "git_commit", "online-cloud-assisted"),
+                ("patch-rewritten", "rewritten", "review_router", "review_rework", "online-cloud-assisted"),
+                ("patch-reverted", "reverted", "workspace_transaction", "rollback", "offline-onboard-only"),
+                ("patch-retained", "retained_after_n_commits", "git", "retention_check", "online-cloud-assisted"),
+            ]
+        ):
+            lifecycle = {
+                "patch_id": patch_id,
+                "state": state,
+                "workflow": workflow,
+                "tool": tool,
+                "execution_mode": mode,
+                "patch_text": raw_patch,
+                "issue": "issue #118",
+                "pr": "PR #222",
+            }
+            if state == "retained_after_n_commits":
+                lifecycle["retained_after_commits"] = 3
+                lifecycle["test_gates"] = [{"name": "pytest focused", "status": "passed"}]
+                lifecycle["security_artifacts"] = [{"name": "risk_scoring", "status": "low", "schema": "risk_scoring.v1"}]
+                lifecycle["governance_artifacts"] = [{"name": "governance_report", "status": "present", "schema": "governance_report.v1"}]
+            if state == "rewritten":
+                lifecycle["human_pushback"] = [{"label": "changes-requested", "body": "private reviewer wording must not be stored"}]
+                lifecycle["conversation"] = "free-form private conversation should not be scraped"
+            rows.append(
+                {
+                    "timestamp": f"2026-05-10T10:{idx:02d}:00+00:00",
+                    "tool_name": tool,
+                    "categories": ["read-only"],
+                    "success": True,
+                    "reason": "",
+                    "arguments": {"patch_survivorship": lifecycle},
+                }
+            )
+        self._write_jsonl(".codebase-tooling-mcp/audit/security_events.jsonl", rows)
+        local_metadata = self.repo_path / ".codebase-tooling-mcp" / "reports" / "PATCH_SURVIVORSHIP_PR_METADATA.json"
+        local_metadata.parent.mkdir(parents=True, exist_ok=True)
+        local_metadata.write_text(
+            json.dumps(
+                {
+                    "patches": [
+                        {
+                            "patch_id": "patch-rewritten",
+                            "state": "rewritten",
+                            "workflow": "review_rework",
+                            "tool": "review_router",
+                            "execution_mode": "online-cloud-assisted",
+                            "review_labels": ["changes-requested"],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = self.server.self_optimization_report(
+            start_time="2026-05-10T00:00:00+00:00",
+            end_time="2026-05-11T00:00:00+00:00",
+            export=False,
+            include_git=False,
+            include_traces=False,
+        )
+
+        survivorship = report["patch_survivorship"]
+        self.assertEqual(survivorship["schema"], "patch_survivorship_report.v1")
+        self.assertEqual(survivorship["status"], "observed")
+        state_counts = survivorship["summary"]["state_counts"]
+        for state in ["proposed", "applied", "committed", "rewritten", "reverted", "retained_after_n_commits"]:
+            self.assertGreaterEqual(state_counts[state], 1)
+        self.assertTrue(any(row["name"] == "review_rework" for row in survivorship["aggregations"]["by_workflow"]))
+        self.assertTrue(any(row["name"] == "apply_unified_diff" for row in survivorship["aggregations"]["by_tool"]))
+        self.assertTrue(any(row["name"] == "online-cloud-assisted" for row in survivorship["aggregations"]["by_execution_mode"]))
+        self.assertGreaterEqual(survivorship["summary"]["human_pushback_patch_count"], 1)
+        self.assertTrue(survivorship["correlations"]["test_gates_available"])
+        self.assertTrue(survivorship["correlations"]["security_artifacts_available"])
+        self.assertTrue(survivorship["correlations"]["governance_artifacts_available"])
+        self.assertFalse(report["security"]["raw_patch_text_exposed"])
+        self.assertEqual(survivorship["sources"]["local_pr_metadata"]["status"], "local_index")
+
+        encoded = json.dumps(survivorship, sort_keys=True)
+        self.assertNotIn("secret private patch line", encoded)
+        self.assertNotIn("private reviewer wording", encoded)
+        self.assertFalse(survivorship["privacy"]["raw_patch_text_persisted"])
+        self.assertFalse(survivorship["privacy"]["raw_private_conversations_scraped"])
+
     def test_redacts_secrets_and_sensitive_names(self):
         self._write_jsonl(
             ".codebase-tooling-mcp/audit/security_events.jsonl",
