@@ -1155,7 +1155,7 @@ WORKFLOW_CARDS: tuple[dict[str, Any], ...] = (
         "mutation_mode": "snapshot is read-only metadata plus git state capture; later edits require ALLOW_MUTATIONS=true and explicit intent",
         "outputs": ["snapshot id", "restore instruction", "scope caveats", "clarification questions when scope is unclear"],
         "do_not_use_when": ["The task is purely read-only review", "The change is a trivial single-line edit with normal git rollback sufficient and documented"],
-        "recommended_entrypoint": "workspace_transaction(mode='snapshot') before mutation workflow",
+        "recommended_entrypoint": "workspace_transaction(mode='snapshot'), then mutation_step_guard before broad/high-risk mutation workflow",
         "routing_terms": ["snapshot", "rollback", "refactor", "rewrite", "rename", "delete", "migration", "risky", "large"],
     },
     {

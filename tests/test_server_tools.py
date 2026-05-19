@@ -68,6 +68,9 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("snapshot-before-refactor", ids)
         self.assertTrue(any("release" in caveat.lower() for caveat in out["caveats"]))
         self.assertTrue(any("snapshot" in caveat.lower() or "rollback" in caveat.lower() for caveat in out["caveats"]))
+        snapshot = next(match for match in out["matches"] if match["id"] == "snapshot-before-refactor")
+        self.assertIn("mutation_step_guard", snapshot["recommended_entrypoint"])
+        self.assertIn("before", snapshot["recommended_entrypoint"].lower())
         for match in out["matches"]:
             self.assertEqual(match["schema"], "workflow_card.v1")
             for field in ("intent", "prerequisites", "risk", "mutation_mode", "outputs", "do_not_use_when"):
