@@ -11093,9 +11093,6 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
                 ],
             }
         )
-        _write_workflow_task_status(payload)
-        _workflow_task_emit_progress(task_id, payload, force=True)
-        _workflow_task_cleanup_runtime(task_id)
         _append_audit_event(
             "workflow_task",
             ["read-only", "async"],
@@ -11115,6 +11112,9 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             status="succeeded",
             artifact_refs=[str(link.get("path")) for link in resource_links if isinstance(link.get("path"), str)],
         )
+        _write_workflow_task_status(payload)
+        _workflow_task_emit_progress(task_id, payload, force=True)
+        _workflow_task_cleanup_runtime(task_id)
     except Exception as exc:  # pragma: no cover - defensive background failure path
         finished_at = _now_iso()
         payload.update(
@@ -11298,24 +11298,25 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
             cancelled_at=finished_at,
             subprocess_terminated=bool(result.get("cancelled")),
         )
-    _write_workflow_task_status(payload)
-    _workflow_task_emit_progress(task_id, payload, force=True)
-    _workflow_task_cleanup_runtime(task_id)
+    terminal_event = "cancelled" if cancelled else "completed" if ok else "failed"
     _append_audit_event(
         "workflow_task",
         _workflow_task_categories("vscode_task_run"),
         ok and not cancelled,
-        {"task_id": task_id, "workflow": "vscode_task_run", "event": "cancelled" if cancelled else "completed" if ok else "failed"},
-        "cancelled" if cancelled else "completed" if ok else "failed",
+        {"task_id": task_id, "workflow": "vscode_task_run", "event": terminal_event},
+        terminal_event,
     )
     _otel_record_workflow_lifecycle(
         task_id,
         "vscode_task_run",
-        "cancelled" if cancelled else "completed" if ok else "failed",
+        terminal_event,
         success=ok and not cancelled,
         status="cancelled" if cancelled else "succeeded" if ok else "failed",
         artifact_refs=[str(link.get("path")) for link in artifact_links if isinstance(link.get("path"), str)],
     )
+    _write_workflow_task_status(payload)
+    _workflow_task_emit_progress(task_id, payload, force=True)
+    _workflow_task_cleanup_runtime(task_id)
 
 
 def _run_vscode_task(task_id: str, args: dict[str, Any], max_retries: int = 0) -> None:
