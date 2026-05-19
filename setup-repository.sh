@@ -321,6 +321,8 @@ models:
     roles:
       - chat
     requestOptions:
+      headers:
+        Authorization: "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}"
       timeout: 300000
 EOF
 }

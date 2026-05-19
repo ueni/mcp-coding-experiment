@@ -648,9 +648,49 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(response.status_code, 200)
         content = payload["choices"][0]["message"]["content"]
         self.assertIn("Model fallback is active", content)
+        self.assertIn("Continue setup fallback assistant", content)
+        self.assertIn("MCP_HTTP_BEARER_TOKEN", content)
+        self.assertIn("local Ollama", content)
+        self.assertIn("OpenAI-compatible endpoint", content)
         self.assertIn("/v1/model-fallback/configure", content)
         self.assertEqual("continue_model_fallback.status.v1", payload["model_fallback"]["schema"])
         self.assertTrue(self.server._http_path_is_protected_mcp("/v1/model-fallback/configure"))
+
+    def test_model_fallback_chat_streams_openai_compatible_sse(self):
+        response = asyncio.run(
+            self.server.continue_model_fallback_chat_completions(
+                FakeRequest(
+                    {
+                        "model": "model-fallback",
+                        "messages": [{"role": "user", "content": "setup"}],
+                        "stream": True,
+                    }
+                )
+            )
+        )
+        stream_text = asyncio.run(collect_stream_text(response))
+        data_lines = [
+            line.removeprefix("data: ")
+            for line in stream_text.splitlines()
+            if line.startswith("data: ")
+        ]
+        chunks = [json.loads(line) for line in data_lines if line != "[DONE]"]
+        content = "".join(
+            choice.get("delta", {}).get("content", "")
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual("text/event-stream", response.media_type)
+        self.assertEqual("[DONE]", data_lines[-1])
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertTrue(all(chunk["object"] == "chat.completion.chunk" for chunk in chunks))
+        self.assertEqual({"role": "assistant"}, chunks[0]["choices"][0]["delta"])
+        self.assertEqual("stop", chunks[-1]["choices"][0]["finish_reason"])
+        self.assertIn("Model fallback is active", content)
+        self.assertIn("MCP_HTTP_BEARER_TOKEN", content)
+        self.assertIn("OpenAI-compatible endpoint", content)
 
     def test_model_fallback_configure_requires_mutate_scope_in_http_context(self):
         self.server.ALLOW_MUTATIONS = True
