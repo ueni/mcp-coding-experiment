@@ -49,12 +49,17 @@ build_cache_download() {
     rm -f "${cache_path}" "${tmp_path}"
   fi
 
-  curl --fail --location --retry "${retries}" --retry-all-errors --retry-delay "${retry_delay}" \
+  if curl --fail --location --retry "${retries}" --retry-all-errors --retry-delay "${retry_delay}" \
     --retry-max-time "${retry_max_time}" --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
     --continue-at - --http1.1 \
     "${download_url}" \
-    -o "${tmp_path}"
-  mv "${tmp_path}" "${cache_path}"
+    -o "${tmp_path}"; then
+    mv "${tmp_path}" "${cache_path}"
+  else
+    local curl_status=$?
+    echo "build-download-cache: failed to download ${label}; preserved partial at ${tmp_path}" >&2
+    return "${curl_status}"
+  fi
 }
 
 build_cache_url_exists() {
