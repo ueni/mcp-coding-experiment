@@ -18,7 +18,7 @@ The report schema is `mcp_threat_model_report.v1`. It includes:
 - MCP components and trust boundaries for host/client, client/LLM, client/server, server/repository, and server/external integrations;
 - STRIDE categories mapped to deterministic DREAD-like fields (`damage`, `reproducibility`, `exploitability`, `affected_users`, `discoverability`);
 - required controls, covered controls, and uncovered controls per modeled threat;
-- optional local poisoned-tool fixture analysis;
+- optional local poisoned-tool fixture analysis, including temporal catalog transitions where an initial benign `tools/list` is followed by `notifications/tools/list_changed` and a mutated repeated `tools/list`;
 - optional baseline comparison that fails only for newly introduced high-severity uncovered fixture findings;
 - JSON and Markdown exports under `.codebase-tooling-mcp/reports/` when `export=true`.
 
@@ -34,7 +34,9 @@ mcp_threat_model_report(
 )
 ```
 
-Fixtures model tool metadata only. They must not contain real credentials, private URLs, production prompts, or raw logs. The checked-in fixture set covers hidden instruction poisoning, cross-tool manipulation/exfiltration wording, ambiguous client parameter visibility, and read-only annotation mismatch.
+Fixtures model tool metadata only. They must not contain real credentials, private URLs, production prompts, or raw logs. The checked-in fixture set covers hidden instruction poisoning, cross-tool manipulation/exfiltration wording, ambiguous client parameter visibility, read-only annotation mismatch, and post-handshake tool-catalog mutation via `notifications/tools/list_changed` plus a repeated `tools/list`.
+
+DREAD vectors are fixed, deterministic test fixtures for regression tracking; changing a score, rule ID, or known high-uncovered finding ID requires updating the frozen tests and baseline fixture in the same change.
 
 The baseline uses `mcp_threat_model_baseline.v1` and records known high-severity uncovered findings by stable fixture finding ID:
 

@@ -40,9 +40,31 @@ class McpThreatModelReportTests(ServerToolsTestBase):
         self.assertIn("ambiguous-parameter-visibility", rule_ids)
         self.assertIn("annotation-category-mismatch", rule_ids)
         self.assertIn("client-transparency-control-gap", rule_ids)
+        self.assertIn("temporal-tool-catalog-mutation", rule_ids)
         self.assertEqual(report["fixtures"]["tool_count"], 4)
+        self.assertEqual(report["fixtures"]["transition_count"], 1)
         self.assertEqual(report["baseline"]["newly_introduced_high_uncovered_finding_ids"], [])
         self.assertFalse(report["security"]["network_access"])
+
+        threat_dread_scores = {row["id"]: row["dread"]["score"] for row in report["threats"]}
+        self.assertEqual(
+            threat_dread_scores,
+            {
+                "tool_metadata_poisoning": 39,
+                "ambiguous_parameter_visibility": 28,
+                "cross_boundary_secret_exfiltration": 36,
+                "unauthorized_repository_mutation": 31,
+                "audit_repudiation": 24,
+            },
+        )
+        transition = next(
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "temporal-tool-catalog-mutation"
+        )
+        self.assertEqual(transition["dread"]["score"], 38)
+        self.assertTrue(transition["evidence"]["observed_notifications_tools_list_changed"])
+        self.assertTrue(transition["evidence"]["observed_repeated_tools_list"])
 
     def test_high_uncovered_fixture_regression_is_deterministic(self):
         fixture_path = self._copy_fixture("mcp_poisoned_tools.json")

@@ -9,7 +9,8 @@
     "hidden_instruction_poison",
     "cross_tool_poison",
     "ambiguous_parameter_visibility",
-    "client_transparency_control_gap"
+    "client_transparency_control_gap",
+    "post_handshake_tools_list_changed_poison"
   ],
   "required_fixture_rule_ids": {
     "hidden_instruction_poison": ["poisoned-tool-metadata"],
@@ -18,6 +19,7 @@
       "ambiguous-parameter-visibility",
       "annotation-category-mismatch"
     ],
-    "client_transparency_control_gap": ["client-transparency-control-gap"]
+    "client_transparency_control_gap": ["client-transparency-control-gap"],
+    "post_handshake_tools_list_changed_poison": ["temporal-tool-catalog-mutation"]
   }
 }

@@ -8928,9 +8928,11 @@ def _mcp_threat_model_controls() -> dict[str, dict[str, Any]]:
     }
 
 
-def _mcp_threat_model_load_fixture(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _mcp_threat_model_load_fixture(
+    path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     if not path.strip():
-        return [], {"path": "", "loaded": False, "tool_count": 0, "digest": ""}
+        return [], [], {"path": "", "loaded": False, "tool_count": 0, "transition_count": 0, "digest": ""}
     fixture_path = _resolve_repo_path(path)
     try:
         payload = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -8942,8 +8944,13 @@ def _mcp_threat_model_load_fixture(path: str) -> tuple[list[dict[str, Any]], dic
     if not isinstance(raw_tools, list):
         raise ValueError("fixture_path tools must be a list")
     tools = [item for item in raw_tools if isinstance(item, dict)]
-    digest = "sha256:" + hashlib.sha256(json.dumps(tools, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
-    return tools, {"path": str(fixture_path.relative_to(REPO_PATH)), "loaded": True, "tool_count": len(tools), "digest": digest, "schema": str(payload.get("schema", ""))}
+    raw_transitions = payload.get("tool_catalog_transitions", payload.get("catalog_transitions", []))
+    if not isinstance(raw_transitions, list):
+        raise ValueError("fixture_path tool_catalog_transitions must be a list")
+    transitions = [item for item in raw_transitions if isinstance(item, dict)]
+    digest_payload = {"tools": tools, "tool_catalog_transitions": transitions}
+    digest = "sha256:" + hashlib.sha256(json.dumps(digest_payload, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
+    return tools, transitions, {"path": str(fixture_path.relative_to(REPO_PATH)), "loaded": True, "tool_count": len(tools), "transition_count": len(transitions), "digest": digest, "schema": str(payload.get("schema", ""))}
 
 
 def _mcp_threat_model_load_baseline(path: str) -> dict[str, Any]:
@@ -8962,18 +8969,106 @@ def _mcp_threat_model_load_baseline(path: str) -> dict[str, Any]:
     return payload
 
 
-def _mcp_threat_model_fixture_findings(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _mcp_threat_model_tool_identity(tool: dict[str, Any], fallback: str) -> str:
+    return str(tool.get("id") or tool.get("name") or fallback)[:120]
+
+
+def _mcp_threat_model_tool_name(tool: dict[str, Any], fallback: str) -> str:
+    return str(tool.get("name") or tool.get("id") or fallback)[:120]
+
+
+def _mcp_threat_model_tool_signal_counts(
+    tool: dict[str, Any],
+    *,
+    fixture_id: str,
+) -> dict[str, Any]:
+    name = _mcp_threat_model_tool_name(tool, fixture_id)
+    description = str(tool.get("description") or tool.get("tool_description") or "")
+    input_schema = tool.get("input_schema", {}) if isinstance(tool.get("input_schema"), dict) else {}
+    annotations = tool.get("annotations", {}) if isinstance(tool.get("annotations"), dict) else {}
+    text = "\n".join([name, description, json.dumps(input_schema, sort_keys=True, default=str), json.dumps(annotations, sort_keys=True, default=str)])
+    signals = _prompt_injection_signals_for_text(text, tool_name="mcp_threat_model_report", input_scope=f"fixture:{fixture_id}")
+    return _prompt_injection_signal_counts(signals)
+
+
+def _mcp_threat_model_catalog_transition_findings(
+    transitions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for index, transition in enumerate(transitions):
+        transition_id = str(transition.get("id") or f"catalog_transition_{index}")[:120]
+        before_tools_raw = transition.get("initial_tools", transition.get("before_tools", []))
+        after_tools_raw = transition.get("mutated_tools", transition.get("after_tools", []))
+        if not isinstance(before_tools_raw, list) or not isinstance(after_tools_raw, list):
+            continue
+        before_tools = [item for item in before_tools_raw if isinstance(item, dict)]
+        after_tools = [item for item in after_tools_raw if isinstance(item, dict)]
+        before_by_identity = {
+            _mcp_threat_model_tool_identity(tool, f"before_{tool_index}"): tool
+            for tool_index, tool in enumerate(before_tools)
+        }
+        poisoned_mutations: list[dict[str, Any]] = []
+        for tool_index, after_tool in enumerate(after_tools):
+            identity = _mcp_threat_model_tool_identity(after_tool, f"after_{tool_index}")
+            before_tool = before_by_identity.get(identity)
+            before_counts = (
+                _mcp_threat_model_tool_signal_counts(before_tool, fixture_id=f"{transition_id}:before:{identity}")
+                if before_tool is not None
+                else {"detected": False, "severity": "none", "total": 0}
+            )
+            after_counts = _mcp_threat_model_tool_signal_counts(after_tool, fixture_id=f"{transition_id}:after:{identity}")
+            if bool(after_counts.get("detected")) and not bool(before_counts.get("detected")):
+                poisoned_mutations.append(
+                    {
+                        "identity": identity,
+                        "tool_name": _mcp_threat_model_tool_name(after_tool, identity),
+                        "mutation": "added" if before_tool is None else "changed",
+                        "before_signals": before_counts,
+                        "after_signals": after_counts,
+                    }
+                )
+        if not poisoned_mutations:
+            continue
+        events = [str(item) for item in transition.get("event_sequence", [])] if isinstance(transition.get("event_sequence"), list) else []
+        dread = {"damage": 8, "reproducibility": 8, "exploitability": 7, "affected_users": 7, "discoverability": 8}
+        score, severity = _mcp_threat_model_severity(dread)
+        findings.append(
+            {
+                "id": f"fixture:{transition_id}:temporal-tool-catalog-mutation",
+                "rule_id": "temporal-tool-catalog-mutation",
+                "threat_id": "tool_metadata_poisoning",
+                "fixture_id": transition_id,
+                "tool_name": ",".join(sorted({str(item.get("tool_name", "")) for item in poisoned_mutations if str(item.get("tool_name", ""))}))[:120],
+                "severity": severity,
+                "dread": {"score": score, **dread},
+                "stride": ["Tampering", "Elevation of privilege", "Information disclosure"],
+                "message": "Fixture models a benign initial tools/list followed by a poisoned post-handshake tool-catalog mutation.",
+                "uncovered_controls": [],
+                "covered_by": ["tool_catalog_integrity", "untrusted_content_signals"],
+                "evidence": {
+                    "event_sequence": events,
+                    "observed_notifications_tools_list_changed": "notifications/tools/list_changed" in events,
+                    "observed_repeated_tools_list": events.count("tools/list") >= 2,
+                    "mutated_tool_count": len(poisoned_mutations),
+                    "mutations": poisoned_mutations,
+                },
+            }
+        )
+    return findings
+
+
+def _mcp_threat_model_fixture_findings(
+    tools: list[dict[str, Any]],
+    transitions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for index, tool in enumerate(tools):
-        fixture_id = str(tool.get("id") or tool.get("name") or f"fixture_{index}")[:120]
-        name = str(tool.get("name") or fixture_id)[:120]
-        description = str(tool.get("description") or tool.get("tool_description") or "")
+        fixture_id = _mcp_threat_model_tool_identity(tool, f"fixture_{index}")
+        name = _mcp_threat_model_tool_name(tool, fixture_id)
         input_schema = tool.get("input_schema", {}) if isinstance(tool.get("input_schema"), dict) else {}
         annotations = tool.get("annotations", {}) if isinstance(tool.get("annotations"), dict) else {}
         categories = [str(item) for item in tool.get("categories", [])] if isinstance(tool.get("categories"), list) else []
-        text = "\n".join([name, description, json.dumps(input_schema, sort_keys=True, default=str), json.dumps(annotations, sort_keys=True, default=str)])
-        signals = _prompt_injection_signals_for_text(text, tool_name="mcp_threat_model_report", input_scope=f"fixture:{fixture_id}")
-        counts = _prompt_injection_signal_counts(signals)
+        counts = _mcp_threat_model_tool_signal_counts(tool, fixture_id=fixture_id)
         signal_severity = str(counts.get("severity", "none"))
         if counts.get("detected"):
             dread = {"damage": 8, "reproducibility": 8, "exploitability": 7, "affected_users": 7, "discoverability": 8}
@@ -9056,6 +9151,7 @@ def _mcp_threat_model_fixture_findings(tools: list[dict[str, Any]]) -> list[dict
                     "evidence": {"categories": categories, "annotations": {"readOnlyHint": read_only_hint}},
                 }
             )
+    findings.extend(_mcp_threat_model_catalog_transition_findings(transitions))
     order = {"high": 0, "medium": 1, "low": 2, "info": 3, "none": 4}
     findings.sort(key=lambda row: (order.get(str(row.get("severity")), 9), str(row.get("fixture_id", "")), str(row.get("rule_id", ""))))
     return findings
@@ -9129,7 +9225,7 @@ def _mcp_threat_model_report_impl(
     export: bool = False,
 ) -> dict[str, Any]:
     _require_git_repo()
-    fixtures, fixture_meta = _mcp_threat_model_load_fixture(fixture_path)
+    fixtures, transitions, fixture_meta = _mcp_threat_model_load_fixture(fixture_path)
     baseline = _mcp_threat_model_load_baseline(baseline_path)
     controls = _mcp_threat_model_controls()
     generated_at = _now_iso()
@@ -9160,7 +9256,7 @@ def _mcp_threat_model_report_impl(
                 "evidence": {control: controls.get(control, {}).get("evidence", {}) for control in required},
             }
         )
-    findings = _mcp_threat_model_fixture_findings(fixtures)
+    findings = _mcp_threat_model_fixture_findings(fixtures, transitions)
     high_uncovered = [finding for finding in findings if finding.get("severity") == "high" and finding.get("uncovered_controls")]
     high_uncovered_ids = sorted(str(finding.get("id", "")) for finding in high_uncovered if str(finding.get("id", "")))
     allowed_high_uncovered = int(baseline.get("allowed_high_uncovered_finding_count", 0) or 0) if baseline.get("loaded") else 0
