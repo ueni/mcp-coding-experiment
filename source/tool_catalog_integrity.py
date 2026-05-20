@@ -1060,6 +1060,24 @@ def integrity_report(
         drift = _compare_surface_catalogs(baseline, current)
         status = drift["status"]
         baseline_summary = catalog_digest_summary(baseline)
+    mismatch_findings = [
+        finding
+        for finding in lint.get("findings", [])
+        if isinstance(finding, dict)
+        and finding.get("type") in {"public_discovery_mismatch", "public_docs_mismatch"}
+    ]
+    mismatch_by_type: dict[str, int] = {}
+    for finding in mismatch_findings:
+        finding_type = str(finding.get("type", "unknown"))
+        mismatch_by_type[finding_type] = mismatch_by_type.get(finding_type, 0) + 1
+    drift["public_discovery_docs_mismatch"] = {
+        "status": "clean" if not mismatch_findings else "advisory_findings",
+        "ok": not mismatch_findings,
+        "advisory_only": True,
+        "finding_count": len(mismatch_findings),
+        "by_type": dict(sorted(mismatch_by_type.items())),
+        "findings": mismatch_findings,
+    }
     report = {
         "schema": REPORT_SCHEMA,
         "ok": bool(drift.get("ok")) and lint.get("status") in {"clean", "advisory_findings"},
