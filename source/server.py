@@ -559,6 +559,9 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
 
 
 MCP_AGENT_PROXY_ENABLED = _env_flag("MCP_AGENT_PROXY_ENABLED", False)
+MCP_AGENT_PROXY_CONFIG_FILE = Path(
+    os.getenv("MCP_AGENT_PROXY_CONFIG_FILE", ".codebase-tooling-mcp/agent-proxy.yaml")
+)
 MCP_AGENT_PROXY_ALLOW_ONLINE = _env_flag("MCP_AGENT_PROXY_ALLOW_ONLINE", False)
 MCP_AGENT_PROXY_NO_NETWORK = _env_flag("MCP_AGENT_PROXY_NO_NETWORK", False)
 MCP_AGENT_PROXY_PROVIDER_NAME = os.getenv(
@@ -577,6 +580,9 @@ MCP_AGENT_PROXY_PROVIDER_AUTH_HEADER = os.getenv(
 MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW = os.getenv(
     "MCP_AGENT_PROXY_MODEL_ALLOWLIST", ""
 ).strip()
+MCP_AGENT_PROXY_DEFAULT_MODEL = os.getenv(
+    "MCP_AGENT_PROXY_DEFAULT_MODEL", "model-fallback"
+).strip() or "model-fallback"
 MCP_AGENT_PROXY_LOCAL_MODELS_RAW = os.getenv(
     "MCP_AGENT_PROXY_LOCAL_MODELS", "local-*,qwen*,llama*,codellama*,mistral*,phi*"
 ).strip()
@@ -2135,10 +2141,137 @@ _AGENT_PROXY_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
 )
 _AGENT_PROXY_PLACEHOLDER_RE = re.compile(r"__MCP_(?:ANON|REDACTED)_[A-Z_]+_\d{4}__")
+_AGENT_PROXY_CONFIG_ENV_KEYS = {
+    "enabled": "MCP_AGENT_PROXY_ENABLED",
+    "allow_online": "MCP_AGENT_PROXY_ALLOW_ONLINE",
+    "no_network": "MCP_AGENT_PROXY_NO_NETWORK",
+    "provider_name": "MCP_AGENT_PROXY_PROVIDER_NAME",
+    "provider_base_url": "MCP_AGENT_PROXY_PROVIDER_BASE_URL",
+    "provider_chat_completions_url": "MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL",
+    "model_allowlist": "MCP_AGENT_PROXY_MODEL_ALLOWLIST",
+    "default_model": "MCP_AGENT_PROXY_DEFAULT_MODEL",
+    "local_models": "MCP_AGENT_PROXY_LOCAL_MODELS",
+    "prefer_local": "MCP_AGENT_PROXY_PREFER_LOCAL",
+}
 
 
 def _agent_proxy_list(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _agent_proxy_env_present(name: str) -> bool:
+    return name in os.environ
+
+
+def _agent_proxy_yaml_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _agent_proxy_yaml_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _agent_proxy_yaml_list(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return _agent_proxy_list(value)
+    return list(default)
+
+
+def _agent_proxy_config_path() -> Path:
+    path = MCP_AGENT_PROXY_CONFIG_FILE
+    resolved = path.resolve() if path.is_absolute() else _resolve_repo_path(str(path))
+    resolved.relative_to(REPO_PATH)
+    return resolved
+
+
+def _agent_proxy_load_runtime_config() -> dict[str, Any]:
+    config_path = _agent_proxy_config_path()
+    loaded = _continue_load_yaml_mapping(config_path)
+    agent_proxy = loaded.get("agent_proxy") if isinstance(loaded, dict) else None
+    config = agent_proxy if isinstance(agent_proxy, dict) else loaded
+    return dict(config) if isinstance(config, dict) else {}
+
+
+def _agent_proxy_effective_config() -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "enabled": MCP_AGENT_PROXY_ENABLED,
+        "allow_online": MCP_AGENT_PROXY_ALLOW_ONLINE,
+        "no_network": MCP_AGENT_PROXY_NO_NETWORK,
+        "provider_name": MCP_AGENT_PROXY_PROVIDER_NAME,
+        "provider_base_url": MCP_AGENT_PROXY_PROVIDER_BASE_URL,
+        "provider_chat_completions_url": MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL,
+        "model_allowlist": _agent_proxy_list(MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW),
+        "default_model": MCP_AGENT_PROXY_DEFAULT_MODEL,
+        "local_models": _agent_proxy_list(MCP_AGENT_PROXY_LOCAL_MODELS_RAW),
+        "prefer_local": MCP_AGENT_PROXY_PREFER_LOCAL,
+        "config_file": str(MCP_AGENT_PROXY_CONFIG_FILE),
+        "config_exists": False,
+    }
+    config["config_exists"] = _agent_proxy_config_path().is_file()
+    runtime_config = _agent_proxy_load_runtime_config()
+    if runtime_config:
+        for key in ["enabled", "allow_online", "no_network", "prefer_local"]:
+            if not _agent_proxy_env_present(_AGENT_PROXY_CONFIG_ENV_KEYS[key]):
+                config[key] = _agent_proxy_yaml_bool(
+                    runtime_config.get(key), bool(config[key])
+                )
+        for key in [
+            "provider_name",
+            "provider_base_url",
+            "provider_chat_completions_url",
+            "default_model",
+        ]:
+            if not _agent_proxy_env_present(_AGENT_PROXY_CONFIG_ENV_KEYS[key]):
+                config[key] = _agent_proxy_yaml_str(
+                    runtime_config.get(key), str(config[key])
+                )
+        for key in ["model_allowlist", "local_models"]:
+            if not _agent_proxy_env_present(_AGENT_PROXY_CONFIG_ENV_KEYS[key]):
+                config[key] = _agent_proxy_yaml_list(
+                    runtime_config.get(key), list(config[key])
+                )
+
+    if _agent_proxy_env_present("MCP_AGENT_PROXY_ENABLED"):
+        config["enabled"] = _env_flag("MCP_AGENT_PROXY_ENABLED", bool(config["enabled"]))
+    if _agent_proxy_env_present("MCP_AGENT_PROXY_ALLOW_ONLINE"):
+        config["allow_online"] = _env_flag(
+            "MCP_AGENT_PROXY_ALLOW_ONLINE", bool(config["allow_online"])
+        )
+    if _agent_proxy_env_present("MCP_AGENT_PROXY_NO_NETWORK"):
+        config["no_network"] = _env_flag(
+            "MCP_AGENT_PROXY_NO_NETWORK", bool(config["no_network"])
+        )
+    if _agent_proxy_env_present("MCP_AGENT_PROXY_PREFER_LOCAL"):
+        config["prefer_local"] = _env_flag(
+            "MCP_AGENT_PROXY_PREFER_LOCAL", bool(config["prefer_local"])
+        )
+    for env_name, key in [
+        ("MCP_AGENT_PROXY_PROVIDER_NAME", "provider_name"),
+        ("MCP_AGENT_PROXY_PROVIDER_BASE_URL", "provider_base_url"),
+        ("MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL", "provider_chat_completions_url"),
+        ("MCP_AGENT_PROXY_DEFAULT_MODEL", "default_model"),
+    ]:
+        if _agent_proxy_env_present(env_name):
+            config[key] = os.getenv(env_name, "").strip()
+    if _agent_proxy_env_present("MCP_AGENT_PROXY_MODEL_ALLOWLIST"):
+        config["model_allowlist"] = _agent_proxy_list(
+            os.getenv("MCP_AGENT_PROXY_MODEL_ALLOWLIST", "")
+        )
+    if _agent_proxy_env_present("MCP_AGENT_PROXY_LOCAL_MODELS"):
+        config["local_models"] = _agent_proxy_list(
+            os.getenv("MCP_AGENT_PROXY_LOCAL_MODELS", "")
+        )
+    if not config["default_model"]:
+        config["default_model"] = "model-fallback"
+    return config
 
 
 def _agent_proxy_model_matches(model: str, patterns: list[str]) -> bool:
@@ -2154,10 +2287,12 @@ def _agent_proxy_execution_mode_offline() -> bool:
     return selected == "offline"
 
 
-def _agent_proxy_provider_url() -> str:
-    if MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL:
-        return MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL
-    base = MCP_AGENT_PROXY_PROVIDER_BASE_URL.rstrip("/")
+def _agent_proxy_provider_url(config: dict[str, Any] | None = None) -> str:
+    effective = config or _agent_proxy_effective_config()
+    chat_url = str(effective.get("provider_chat_completions_url", "") or "").strip()
+    if chat_url:
+        return chat_url
+    base = str(effective.get("provider_base_url", "") or "").strip().rstrip("/")
     if not base:
         return ""
     if base.endswith("/v1"):
@@ -2392,30 +2527,38 @@ def _agent_proxy_validate_payload(payload: Any) -> tuple[bool, str]:
 
 
 def _agent_proxy_route(payload: dict[str, Any]) -> dict[str, Any]:
-    model = str(payload.get("model", "")).strip()
-    local_models = _agent_proxy_list(MCP_AGENT_PROXY_LOCAL_MODELS_RAW)
-    allowlist = _agent_proxy_list(MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW)
-    provider_url = _agent_proxy_provider_url()
-    offline = MCP_AGENT_PROXY_NO_NETWORK or _agent_proxy_execution_mode_offline()
+    config = _agent_proxy_effective_config()
+    model = str(payload.get("model", "")).strip() or str(
+        config.get("default_model", "model-fallback")
+    )
+    local_models = list(config.get("local_models", []))
+    allowlist = list(config.get("model_allowlist", []))
+    provider_url = _agent_proxy_provider_url(config)
+    allow_online = bool(config.get("allow_online"))
+    offline = bool(config.get("no_network")) or _agent_proxy_execution_mode_offline()
     local_match = _agent_proxy_model_matches(model, local_models)
-    prefer_local = MCP_AGENT_PROXY_PREFER_LOCAL and (local_match or not MCP_AGENT_PROXY_ALLOW_ONLINE)
+    prefer_local = bool(config.get("prefer_local")) and (local_match or not allow_online)
     route = {
         "schema": "mcp_agent_proxy.routing_decision.v1",
         "requested_model": model,
+        "default_model": str(config.get("default_model", "model-fallback")),
         "backend": "local" if prefer_local or offline else "online",
-        "provider": "local-micro" if prefer_local or offline else MCP_AGENT_PROXY_PROVIDER_NAME,
+        "provider": "local-micro"
+        if prefer_local or offline
+        else str(config.get("provider_name", "openai-compatible")),
         "reason": "local_preferred" if prefer_local else "online_allowed",
         "risk_class": "local_only" if prefer_local or offline else "online_disclosure",
-        "allow_online": MCP_AGENT_PROXY_ALLOW_ONLINE,
+        "allow_online": allow_online,
         "offline_no_network": offline,
         "model_allowlist_configured": bool(allowlist),
         "provider_configured": bool(provider_url),
+        "config_source": "yaml" if config.get("config_exists") else "environment",
         "fallback": "explicit failure" if offline else "local fallback on denied online route",
     }
     if offline:
         route.update({"backend": "local", "provider": "local-micro", "reason": "offline_no_network"})
     elif not prefer_local:
-        if not MCP_AGENT_PROXY_ALLOW_ONLINE:
+        if not allow_online:
             route.update({"backend": "local", "provider": "local-micro", "reason": "online_disabled"})
         elif not provider_url:
             route.update({"backend": "blocked", "reason": "provider_url_not_configured"})
@@ -2492,7 +2635,7 @@ def _agent_proxy_context_boundary(payload: dict[str, Any]) -> dict[str, Any]:
 def _agent_proxy_policy_decision(route: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
     online_allowed = bool(
         route.get("backend") == "online"
-        and MCP_AGENT_PROXY_ALLOW_ONLINE
+        and route.get("allow_online")
         and not route.get("offline_no_network")
     )
     return {
@@ -2637,8 +2780,9 @@ def _agent_proxy_audit_base(
         "policy": {
             "version": MCP_AGENT_PROXY_POLICY_VERSION,
             "limits": policy,
-            "allow_online": MCP_AGENT_PROXY_ALLOW_ONLINE,
-            "online_allowed": route.get("backend") == "online" and MCP_AGENT_PROXY_ALLOW_ONLINE,
+            "allow_online": bool(route.get("allow_online")),
+            "online_allowed": route.get("backend") == "online"
+            and bool(route.get("allow_online")),
             "offline_no_network": route.get("offline_no_network"),
             "model_allowlist_configured": route.get("model_allowlist_configured"),
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
@@ -31789,9 +31933,10 @@ _prune_public_mcp_surface()
 
 
 def _agent_proxy_status_payload() -> dict[str, Any]:
+    config = _agent_proxy_effective_config()
     return {
         "schema": "mcp_agent_proxy.status.v1",
-        "enabled": MCP_AGENT_PROXY_ENABLED,
+        "enabled": bool(config.get("enabled")),
         "endpoint": "/v1/chat/completions",
         "policy_version": MCP_AGENT_PROXY_POLICY_VERSION,
         "anonymization_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
@@ -31801,12 +31946,17 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         "hidden_mitm_tls_interception": False,
         "credential_capture": False,
         "routing_controls": {
-            "allow_online": MCP_AGENT_PROXY_ALLOW_ONLINE,
-            "no_network": MCP_AGENT_PROXY_NO_NETWORK or _agent_proxy_execution_mode_offline(),
-            "prefer_local": MCP_AGENT_PROXY_PREFER_LOCAL,
-            "local_models": _agent_proxy_list(MCP_AGENT_PROXY_LOCAL_MODELS_RAW),
-            "model_allowlist": _agent_proxy_list(MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW),
-            "provider_configured": bool(_agent_proxy_provider_url()),
+            "config_file": str(config.get("config_file", MCP_AGENT_PROXY_CONFIG_FILE)),
+            "config_exists": bool(config.get("config_exists")),
+            "config_source": "yaml" if config.get("config_exists") else "environment",
+            "allow_online": bool(config.get("allow_online")),
+            "no_network": bool(config.get("no_network"))
+            or _agent_proxy_execution_mode_offline(),
+            "prefer_local": bool(config.get("prefer_local")),
+            "local_models": list(config.get("local_models", [])),
+            "model_allowlist": list(config.get("model_allowlist", [])),
+            "default_model": str(config.get("default_model", "model-fallback")),
+            "provider_configured": bool(_agent_proxy_provider_url(config)),
             "timeout_seconds": MCP_AGENT_PROXY_TIMEOUT_SECONDS,
             "max_input_tokens": MCP_AGENT_PROXY_MAX_INPUT_TOKENS,
             "max_output_tokens": MCP_AGENT_PROXY_MAX_OUTPUT_TOKENS,
@@ -31843,7 +31993,8 @@ async def agent_proxy_disclosures(request):
 
 async def openai_chat_completions(request):
     trace_id = uuid.uuid4().hex[:16]
-    if not MCP_AGENT_PROXY_ENABLED:
+    config = _agent_proxy_effective_config()
+    if not bool(config.get("enabled")):
         _append_audit_event(
             "agent_proxy_request",
             ["network"],
@@ -32064,6 +32215,37 @@ routes:
     model: qwen2.5-coder:1.5b
     file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
 """
+
+
+def _agent_proxy_runtime_config_payload(config: dict[str, str]) -> dict[str, Any]:
+    model = config["model"] or "model-fallback"
+    allowlist = ["model-fallback"]
+    if model != "model-fallback":
+        allowlist.append(model)
+    return {
+        "agent_proxy": {
+            "enabled": True,
+            "allow_online": True,
+            "provider_name": "ollama"
+            if config["provider"] == "ollama"
+            else "openai-compatible",
+            "provider_base_url": config["api_base"],
+            "provider_chat_completions_url": "",
+            "model_allowlist": allowlist,
+            "default_model": model,
+        }
+    }
+
+
+def _agent_proxy_runtime_config_yaml(config: dict[str, str]) -> str:
+    payload = _agent_proxy_runtime_config_payload(config)
+    header = (
+        "# Local runtime config for codebase-tooling-mcp agent proxy.\n"
+        "# Do not store API keys here; keep credentials in environment variables or Continue secrets.\n"
+    )
+    if yaml is not None:
+        return header + yaml.safe_dump(payload, sort_keys=False)
+    return header + json.dumps(payload, indent=2) + "\n"
 
 
 def _continue_load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -32443,6 +32625,8 @@ async def continue_model_fallback_configure(request):
 
     profile_rel = Path(".continue/models/coding-openai-compatible.yaml")
     routing_rel = Path(".continue/model-routing.yaml")
+    agent_proxy_path = _agent_proxy_config_path()
+    agent_proxy_rel = Path(_continue_relative_path(agent_proxy_path))
     profile_text = _continue_model_yaml(
         name="coding-openai-compatible",
         display_name="Coding - OpenAI Compatible Endpoint" if config["provider"] == "openai" else "Coding - Ollama Endpoint",
@@ -32455,9 +32639,13 @@ async def continue_model_fallback_configure(request):
     routing_text = _continue_model_routing_yaml(
         config["model"], ".continue/models/coding-openai-compatible.yaml"
     )
+    agent_proxy_text = _agent_proxy_runtime_config_yaml(config)
     _require_tool_security_gate(
         "continue_model_fallback_configure",
-        {"mode": "write", "files": [str(profile_rel), str(routing_rel)]},
+        {
+            "mode": "write",
+            "files": [str(profile_rel), str(routing_rel), str(agent_proxy_rel)],
+        },
         enforce_mutation_permission=False,
     )
     if not ALLOW_MUTATIONS:
@@ -32469,6 +32657,7 @@ async def continue_model_fallback_configure(request):
                 "files": {
                     str(profile_rel): profile_text,
                     str(routing_rel): routing_text,
+                    str(agent_proxy_rel): agent_proxy_text,
                 },
             },
             status_code=403,
@@ -32478,15 +32667,18 @@ async def continue_model_fallback_configure(request):
     routing_path = (REPO_PATH / routing_rel).resolve()
     profile_path.relative_to(REPO_PATH)
     routing_path.relative_to(REPO_PATH)
+    agent_proxy_path.relative_to(REPO_PATH)
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     routing_path.parent.mkdir(parents=True, exist_ok=True)
+    agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(profile_text, encoding="utf-8")
     routing_path.write_text(routing_text, encoding="utf-8")
+    agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
     return JSONResponse(
         {
             "schema": "continue_model_fallback.configure.v1",
             "status": "written",
-            "files": [str(profile_rel), str(routing_rel)],
+            "files": [str(profile_rel), str(routing_rel), str(agent_proxy_rel)],
             "model": config["model"],
             "provider": config["provider"],
             "apiBase": config["api_base"],

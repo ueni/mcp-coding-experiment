@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from tests.server_test_support import ServerToolsTestBase
@@ -37,6 +38,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         super().setUp()
         self.proxy_attrs = [
             "MCP_AGENT_PROXY_ENABLED",
+            "MCP_AGENT_PROXY_CONFIG_FILE",
             "MCP_AGENT_PROXY_ALLOW_ONLINE",
             "MCP_AGENT_PROXY_NO_NETWORK",
             "MCP_AGENT_PROXY_PROVIDER_NAME",
@@ -45,6 +47,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "MCP_AGENT_PROXY_PROVIDER_API_KEY",
             "MCP_AGENT_PROXY_PROVIDER_AUTH_HEADER",
             "MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW",
+            "MCP_AGENT_PROXY_DEFAULT_MODEL",
             "MCP_AGENT_PROXY_LOCAL_MODELS_RAW",
             "MCP_AGENT_PROXY_PREFER_LOCAL",
             "MCP_AGENT_PROXY_TIMEOUT_SECONDS",
@@ -62,9 +65,25 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "MCP_AUDIT_LOG_FILE",
             "AGENT_EXECUTION_MODE_ENV",
         ]
+        self.proxy_env_names = [
+            "MCP_AGENT_PROXY_ENABLED",
+            "MCP_AGENT_PROXY_ALLOW_ONLINE",
+            "MCP_AGENT_PROXY_NO_NETWORK",
+            "MCP_AGENT_PROXY_PROVIDER_NAME",
+            "MCP_AGENT_PROXY_PROVIDER_BASE_URL",
+            "MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL",
+            "MCP_AGENT_PROXY_MODEL_ALLOWLIST",
+            "MCP_AGENT_PROXY_DEFAULT_MODEL",
+            "MCP_AGENT_PROXY_LOCAL_MODELS",
+            "MCP_AGENT_PROXY_PREFER_LOCAL",
+        ]
         self.orig_proxy_values = {name: getattr(self.server, name) for name in self.proxy_attrs}
+        self.orig_proxy_env = {name: os.environ.get(name) for name in self.proxy_env_names}
+        for name in self.proxy_env_names:
+            os.environ.pop(name, None)
         self.orig_post_json = self.server._agent_proxy_http_post_json
         self.orig_stream_json = self.server._agent_proxy_http_stream_json
+        self.server.MCP_AGENT_PROXY_CONFIG_FILE = Path(".codebase-tooling-mcp/agent-proxy.yaml")
         self.server.MCP_AGENT_PROXY_DISCLOSURE_AUDIT_FILE = Path(
             ".codebase-tooling-mcp/audit/proxy-disclosures.jsonl"
         )
@@ -84,6 +103,11 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.server._agent_proxy_http_stream_json = self.orig_stream_json
         for name, value in self.orig_proxy_values.items():
             setattr(self.server, name, value)
+        for name, value in self.orig_proxy_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         super().tearDown()
 
     def base_payload(self, **overrides):
@@ -116,6 +140,77 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.server.MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW = "gpt-proxy-test"
         self.server.MCP_AGENT_PROXY_LOCAL_MODELS_RAW = "local-*"
         self.server.MCP_AGENT_PROXY_PREFER_LOCAL = False
+
+    def write_agent_proxy_config(self, text: str):
+        return self.write_repo_text(".codebase-tooling-mcp/agent-proxy.yaml", text)
+
+    def test_agent_proxy_loads_runtime_yaml_routing_config(self):
+        self.write_agent_proxy_config(
+            "agent_proxy:\n"
+            "  enabled: true\n"
+            "  allow_online: true\n"
+            "  provider_name: openai-compatible\n"
+            "  provider_base_url: https://yaml-provider.example/v1\n"
+            "  model_allowlist:\n"
+            "    - yaml-model\n"
+            "  default_model: yaml-model\n"
+            "  local_models:\n"
+            "    - local-*\n"
+            "  prefer_local: false\n"
+        )
+
+        status = self.server._agent_proxy_status_payload()
+        route = self.server._agent_proxy_route(self.base_payload(model="yaml-model"))
+
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["routing_controls"]["config_exists"])
+        self.assertEqual("yaml", status["routing_controls"]["config_source"])
+        self.assertEqual(["yaml-model"], status["routing_controls"]["model_allowlist"])
+        self.assertEqual("online", route["backend"])
+        self.assertEqual("yaml", route["config_source"])
+        self.assertEqual("yaml-model", route["default_model"])
+        self.assertTrue(route["provider_configured"])
+
+    def test_agent_proxy_default_runtime_yaml_routes_to_model_fallback(self):
+        self.write_agent_proxy_config(
+            "agent_proxy:\n"
+            "  enabled: true\n"
+            "  allow_online: false\n"
+            "  model_allowlist:\n"
+            "    - model-fallback\n"
+            "  default_model: model-fallback\n"
+        )
+
+        route = self.server._agent_proxy_route({"messages": []})
+
+        self.assertEqual("model-fallback", route["requested_model"])
+        self.assertEqual("local", route["backend"])
+        self.assertEqual("local_preferred", route["reason"])
+
+    def test_agent_proxy_env_vars_override_runtime_yaml(self):
+        self.write_agent_proxy_config(
+            "agent_proxy:\n"
+            "  enabled: true\n"
+            "  allow_online: true\n"
+            "  provider_base_url: https://yaml-provider.example/v1\n"
+            "  model_allowlist:\n"
+            "    - yaml-model\n"
+            "  prefer_local: false\n"
+        )
+        os.environ["MCP_AGENT_PROXY_MODEL_ALLOWLIST"] = "env-model"
+        os.environ["MCP_AGENT_PROXY_PROVIDER_BASE_URL"] = "https://env-provider.example/v1"
+        os.environ["MCP_AGENT_PROXY_ALLOW_ONLINE"] = "true"
+        os.environ["MCP_AGENT_PROXY_PREFER_LOCAL"] = "false"
+
+        config = self.server._agent_proxy_effective_config()
+        yaml_route = self.server._agent_proxy_route(self.base_payload(model="yaml-model"))
+        env_route = self.server._agent_proxy_route(self.base_payload(model="env-model"))
+
+        self.assertEqual(["env-model"], config["model_allowlist"])
+        self.assertEqual("https://env-provider.example/v1/chat/completions", self.server._agent_proxy_provider_url(config))
+        self.assertEqual("blocked", yaml_route["backend"])
+        self.assertEqual("model_not_allowlisted", yaml_route["reason"])
+        self.assertEqual("online", env_route["backend"])
 
     def test_proxy_disabled_by_default_blocks_chat_completions(self):
         self.server.MCP_AGENT_PROXY_ENABLED = False
@@ -875,7 +970,11 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual("dry_run", payload["status"])
         self.assertIn(".continue/models/coding-openai-compatible.yaml", payload["files"])
+        self.assertIn(".codebase-tooling-mcp/agent-proxy.yaml", payload["files"])
+        self.assertIn("agent_proxy:", payload["files"][".codebase-tooling-mcp/agent-proxy.yaml"])
+        self.assertIn("model-fallback", payload["files"][".codebase-tooling-mcp/agent-proxy.yaml"])
         self.assertFalse((self.repo_path / ".continue/model-routing.yaml").exists())
+        self.assertFalse((self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").exists())
 
     def test_model_fallback_configure_writes_continue_files_when_allowed(self):
         self.server.ALLOW_MUTATIONS = True
@@ -903,10 +1002,17 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         routing_text = (self.repo_path / ".continue/model-routing.yaml").read_text(
             encoding="utf-8"
         )
+        agent_proxy_text = (self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("provider: openai", profile_text)
         self.assertIn("model: fallback-target", profile_text)
         self.assertIn("apiBase: http://127.0.0.1:8787/v1", profile_text)
         self.assertIn("proxy: http://127.0.0.1:8080", profile_text)
         self.assertIn("caBundlePath: /tmp/mitm-ca.pem", profile_text)
         self.assertIn("model: fallback-target", routing_text)
+        self.assertIn("agent_proxy:", agent_proxy_text)
+        self.assertIn("provider_base_url: http://127.0.0.1:8787/v1", agent_proxy_text)
+        self.assertIn("- model-fallback", agent_proxy_text)
+        self.assertIn("- fallback-target", agent_proxy_text)
 

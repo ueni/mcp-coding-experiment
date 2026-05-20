@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
+# Sanitized non-runtime example only.
+# Runtime user-specific config lives at .codebase-tooling-mcp/agent-proxy.yaml,
+# which is ignored by git. Keep API keys in environment variables or Continue secrets.
+agent_proxy:
+  enabled: true
+  allow_online: false
+  provider_name: openai-compatible
+  provider_base_url: ""
+  provider_chat_completions_url: ""
+  model_allowlist:
+    - model-fallback
+  default_model: model-fallback

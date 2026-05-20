@@ -16,6 +16,31 @@ POST /v1/chat/completions
 
 The first slice supports OpenAI-style chat completions, including `stream: true` Server-Sent Events chunks and final `data: [DONE]` semantics.
 
+## Repository-local YAML routing configuration
+
+The Model Fallback assistant can create or update the local runtime file:
+
+```text
+.codebase-tooling-mcp/agent-proxy.yaml
+```
+
+That path is ignored by git because it is user-specific runtime state. A sanitized non-runtime reference is checked in at [`docs/agent-proxy-config.example.yaml`](agent-proxy-config.example.yaml). Do not store API keys in YAML; keep provider credentials in environment variables or Continue secrets.
+
+Minimal runtime YAML defaults to `model-fallback` until a real allowlisted target model is configured:
+
+```yaml
+agent_proxy:
+  enabled: true
+  allow_online: false
+  provider_base_url: ""
+  provider_chat_completions_url: ""
+  model_allowlist:
+    - model-fallback
+  default_model: model-fallback
+```
+
+Existing `MCP_AGENT_PROXY_*` environment variables remain supported and override the YAML values when present.
+
 ## Minimal local/offline configuration
 
 ```bash
@@ -42,7 +67,7 @@ export MCP_AGENT_PROXY_MAX_OUTPUT_TOKENS=4096
 export MCP_AGENT_PROXY_MAX_COST_USD=0.25
 ```
 
-No provider URL is configured by default. Online calls are blocked unless online mode is explicitly enabled, a provider endpoint is configured, and the requested model matches `MCP_AGENT_PROXY_MODEL_ALLOWLIST`.
+No provider URL is configured by default. Online calls are blocked unless online mode is explicitly enabled, a provider endpoint is configured, and the requested model matches the YAML `model_allowlist` or `MCP_AGENT_PROXY_MODEL_ALLOWLIST`.
 
 ## Privacy behavior
 

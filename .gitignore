@@ -17,6 +17,8 @@ env/
 .mypy_cache/
 .ruff_cache/
 .codebase-tooling-mcp/
+# Assistant-managed local runtime config; never commit user/provider routing state
+/.codebase-tooling-mcp/agent-proxy.yaml
 
 # Local model assets used for explicit smoke-test runs
 .qwen-eval-models/
