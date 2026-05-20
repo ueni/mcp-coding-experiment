@@ -2,22 +2,471 @@
   "baseline_path": "source/tool_catalog_baseline.json",
   "canonicalization": {
     "json": "RFC8259 JSON with sort_keys=true, separators=(',', ':'), ensure_ascii=true",
-    "ordering": "tools are sorted by name; object keys are sorted recursively by JSON encoder",
-    "unicode": "metadata strings are hashed exactly as emitted by FastMCP/Pydantic"
+    "ordering": "tools, prompts, resources, and public-discovery entries are sorted by stable public identifiers; object keys are sorted recursively by JSON encoder",
+    "unicode": "metadata strings are hashed exactly as emitted by FastMCP/Pydantic after explicit prompt-argument redaction"
   },
   "digest_algorithm": "sha256",
   "generated_from": {
     "documentation_references": "public repository documentation paths/anchors only",
+    "mcp_get_prompt": "live FastMCP mcp.get_prompt() template text with synthetic argument values redacted to placeholders",
+    "mcp_list_prompts": "live FastMCP mcp.list_prompts() public prompt metadata",
+    "mcp_list_resource_templates": "live FastMCP mcp.list_resource_templates() public resource template metadata only",
+    "mcp_list_resources": "live FastMCP mcp.list_resources() public resource metadata only; resource payloads are not read or hashed",
     "mcp_list_tools": "live FastMCP mcp.list_tools() public metadata",
+    "public_discovery": "allowlisted /.well-known/mcp-server.json capability names plus README/docs mention checks",
     "tool_annotations": "tool_annotations.v1 from TOOL_SECURITY_METADATA",
     "tool_output_contracts": "tool_output_contracts.v1 checked-in contracts where present"
   },
+  "prompt_count": 5,
+  "prompts": [
+    {
+      "digest": "sha256:540827f6d4756ccbce391b53cbf6a564013de4d6ca630cf94da8f97c7678aaee",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README MCP prompt pack",
+            "path": "README.md#mcp-prompts-in-vs-code-and-copilot"
+          }
+        ],
+        "list_prompts": {
+          "arguments": [
+            {
+              "description": "MCP HTTP endpoint expected by VS Code or Copilot.",
+              "name": "endpoint",
+              "required": false
+            }
+          ],
+          "description": "Check VS Code/devcontainer MCP setup, forwarded ports, health endpoints, auth mode, and local model service state.",
+          "icons": null,
+          "meta": null,
+          "name": "devcontainer_health_check",
+          "title": "Devcontainer health check"
+        },
+        "template": {
+          "_meta": null,
+          "description": "Check VS Code/devcontainer MCP setup, forwarded ports, health endpoints, auth mode, and local model service state.",
+          "messages": [
+            {
+              "content": {
+                "_meta": null,
+                "annotations": null,
+                "text": "# Devcontainer health check\n\nGoal: Verify that VS Code/Copilot can discover and use the MCP server at `<argument:endpoint>` from the devcontainer workflow.\n\nUse this MCP workflow through the public `task_router` entrypoint. Prefer `mode='task'` for natural-language orchestration; when a client exposes internal workflow names in summaries or reports, keep the chain aligned with:\n- `task_router(mode='status')`\n- `healthz`\n- `docs/vscode-mcp-onboarding.md`\n\nSafety guardrails:\n- Never echo bearer token values; only report whether a token/header is configured.\n- Keep auth enabled unless the user intentionally selected documented insecure local-only mode.\n- Treat port and Ollama checks as diagnostics, not permission to change host services.\n\nReturn:\n- Discovery status for MCP prompts/tools/resources in VS Code or Copilot.\n- Health summary for `/healthz`, `/mcp`, port forwarding, auth mode, and Ollama.\n- Next actions with exact docs links or commands, redacting secrets.",
+                "type": "text"
+              },
+              "role": "user"
+            }
+          ]
+        },
+        "template_digest": "sha256:4291fbe646a2926e53e7c8d20768ad0a1ffb1bfcdf185feb6add183235224deb"
+      },
+      "name": "devcontainer_health_check"
+    },
+    {
+      "digest": "sha256:14524a518d0e98fdb067dc1cf74c9392acd0e1db4868f7e46de84e3d29709ed8",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README MCP prompt pack",
+            "path": "README.md#mcp-prompts-in-vs-code-and-copilot"
+          }
+        ],
+        "list_prompts": {
+          "arguments": [
+            {
+              "description": "Release comparison base ref.",
+              "name": "base_ref",
+              "required": false
+            },
+            {
+              "description": "Release comparison head ref.",
+              "name": "head_ref",
+              "required": false
+            },
+            {
+              "description": "Readiness summary detail, usually quick or full.",
+              "name": "summary_mode",
+              "required": false
+            }
+          ],
+          "description": "Prepare a release gate report using existing readiness, impact, docs, license, risk, security, and test checks.",
+          "icons": null,
+          "meta": null,
+          "name": "release_readiness_check",
+          "title": "Release readiness check"
+        },
+        "template": {
+          "_meta": null,
+          "description": "Prepare a release gate report using existing readiness, impact, docs, license, risk, security, and test checks.",
+          "messages": [
+            {
+              "content": {
+                "_meta": null,
+                "annotations": null,
+                "text": "# Release readiness check\n\nGoal: Assess whether `<argument:head_ref>` is ready to release against `<argument:base_ref>` with `<argument:summary_mode>` reporting.\n\nUse this MCP workflow through the public `task_router` entrypoint. Prefer `mode='task'` for natural-language orchestration; when a client exposes internal workflow names in summaries or reports, keep the chain aligned with:\n- `clarification_gate(operation='release_readiness')`\n- `quality_router(mode='release_readiness')`\n- `release_readiness`\n- `required_tool_chain`\n\nSafety guardrails:\n- Run or inspect clarification_gate first; if it returns ok_to_continue=false, render its fallback_checklist or MCP elicitation request instead of recommending release action.\n- Do not bypass failing gates; report blockers clearly.\n- Do not mutate files unless the user explicitly requests a follow-up fix workflow and ALLOW_MUTATIONS permits it.\n- Keep artifacts compatible with existing structured readiness reports.\n\nReturn:\n- Release decision: ready, not ready, or needs human review.\n- Gate-by-gate summary for tests, docs, license, impact, risk, and security.\n- Required follow-up tool chain or validation commands.",
+                "type": "text"
+              },
+              "role": "user"
+            }
+          ]
+        },
+        "template_digest": "sha256:aa5dc13fa1d274a7a702969e2bf2d48f9621373cde48e2d8e5e72b3ed7e3948d"
+      },
+      "name": "release_readiness_check"
+    },
+    {
+      "digest": "sha256:a12305ea7352dbeceb95d9bc661993a822385785f0c177eb8b238bc1001de22d",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README MCP prompt pack",
+            "path": "README.md#mcp-prompts-in-vs-code-and-copilot"
+          }
+        ],
+        "list_prompts": {
+          "arguments": [
+            {
+              "description": "Base Git ref for the comparison, for example origin/main or HEAD~1.",
+              "name": "base_ref",
+              "required": false
+            },
+            {
+              "description": "Optional review focus such as security, docs, tests, or API compatibility.",
+              "name": "focus",
+              "required": false
+            }
+          ],
+          "description": "Review the current branch diff with impact, risk, and test guidance without mutating files.",
+          "icons": null,
+          "meta": null,
+          "name": "review_changed_files",
+          "title": "Review changed files"
+        },
+        "template": {
+          "_meta": null,
+          "description": "Review the current branch diff with impact, risk, and test guidance without mutating files.",
+          "messages": [
+            {
+              "content": {
+                "_meta": null,
+                "annotations": null,
+                "text": "# Review changed files\n\nGoal: Compare the working branch against `<argument:base_ref>` and produce concise review findings for changed files. Focus area: <argument:focus>.\n\nUse this MCP workflow through the public `task_router` entrypoint. Prefer `mode='task'` for natural-language orchestration; when a client exposes internal workflow names in summaries or reports, keep the chain aligned with:\n- `task_router(mode='task', task='review')`\n- `change_impact_gate`\n- `quality_router(mode='change_impact')`\n\nSafety guardrails:\n- Stay read-only; do not edit files or run mutation modes.\n- Respect existing mutation and security gates if you later recommend fixes.\n- Consult `test_impact_map`/`impact_tests` before mutation or release-readiness checks; report selected tests and unmapped coverage gaps.\n- Call out high-risk files, missing tests, and rollback considerations before suggestions.\n\nReturn:\n- Findings first, each with file/path evidence when possible.\n- Changed-file risk summary and recommended validation commands.\n- Explicit note if no blocking issue is found.",
+                "type": "text"
+              },
+              "role": "user"
+            }
+          ]
+        },
+        "template_digest": "sha256:43816c6600f3f458f8897add355474d988d9852e4c512f6cc35d637fb6bfa7f2"
+      },
+      "name": "review_changed_files"
+    },
+    {
+      "digest": "sha256:0a51efb530d81e54100b321c6b22cf18a5985edb3d915765f06aed519a66e1a9",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README MCP prompt pack",
+            "path": "README.md#mcp-prompts-in-vs-code-and-copilot"
+          }
+        ],
+        "list_prompts": {
+          "arguments": [
+            {
+              "description": "File, directory, diff range, dependency, or feature area to triage.",
+              "name": "target",
+              "required": false
+            }
+          ],
+          "description": "Triage suspicious files, diffs, or dependencies through existing security/risk workflows without weakening gates.",
+          "icons": null,
+          "meta": null,
+          "name": "security_triage",
+          "title": "Security triage"
+        },
+        "template": {
+          "_meta": null,
+          "description": "Triage suspicious files, diffs, or dependencies through existing security/risk workflows without weakening gates.",
+          "messages": [
+            {
+              "content": {
+                "_meta": null,
+                "annotations": null,
+                "text": "# Security triage\n\nGoal: Investigate security-sensitive behavior in `<argument:target>` and separate confirmed findings from hypotheses.\n\nUse this MCP workflow through the public `task_router` entrypoint. Prefer `mode='task'` for natural-language orchestration; when a client exposes internal workflow names in summaries or reports, keep the chain aligned with:\n- `task_router(mode='task', task='security')`\n- `change_impact_gate`\n- `policy_simulator`\n\nSafety guardrails:\n- Prefer read-only inspection and minimal reproduction steps.\n- Do not print secrets, tokens, private keys, or credential material.\n- Do not disable authentication, sandboxing, policy, or mutation gates.\n\nReturn:\n- Prioritized findings with exploitability and affected paths.\n- Safe verification steps that avoid secret exposure.\n- Mitigation options and residual risk.",
+                "type": "text"
+              },
+              "role": "user"
+            }
+          ]
+        },
+        "template_digest": "sha256:33d4c20d6410c01b3107637c22513011496a67defad1046f6b043cda3dd62dd3"
+      },
+      "name": "security_triage"
+    },
+    {
+      "digest": "sha256:f7529e06439678c1c852c9e34b73786032158e55ce8f09b5cca66a0a27f909f2",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README MCP prompt pack",
+            "path": "README.md#mcp-prompts-in-vs-code-and-copilot"
+          }
+        ],
+        "list_prompts": {
+          "arguments": [
+            {
+              "description": "Short description of the intended refactor.",
+              "name": "refactor_goal",
+              "required": false
+            }
+          ],
+          "description": "Plan a safe pre-refactor snapshot and rollback path before any mutation workflow starts.",
+          "icons": null,
+          "meta": null,
+          "name": "snapshot_before_refactor",
+          "title": "Snapshot before refactor"
+        },
+        "template": {
+          "_meta": null,
+          "description": "Plan a safe pre-refactor snapshot and rollback path before any mutation workflow starts.",
+          "messages": [
+            {
+              "content": {
+                "_meta": null,
+                "annotations": null,
+                "text": "# Snapshot before refactor\n\nGoal: Before starting `<argument:refactor_goal>`, create a verifiable rollback point and summarize the safe mutation plan.\n\nUse this MCP workflow through the public `task_router` entrypoint. Prefer `mode='task'` for natural-language orchestration; when a client exposes internal workflow names in summaries or reports, keep the chain aligned with:\n- `workspace_transaction(mode='snapshot')`\n- `workspace_transaction(mode='restore')`\n- `quality_router(mode='self_check')`\n\nSafety guardrails:\n- Only create snapshots or mutate files when ALLOW_MUTATIONS and user intent permit it.\n- Record snapshot id and current Git status before edits.\n- Prefer small, reviewable edits and run validation before handing off.\n\nReturn:\n- Snapshot/rollback plan and whether mutation is currently allowed.\n- Refactor steps ordered from safest to riskiest.\n- Validation commands and restore instructions if the refactor fails.",
+                "type": "text"
+              },
+              "role": "user"
+            }
+          ]
+        },
+        "template_digest": "sha256:579e0b5c56ca1760e40354c84a121ee2204b754ca1248a4b09c4024eda9f175c"
+      },
+      "name": "snapshot_before_refactor"
+    }
+  ],
+  "public_discovery": [
+    {
+      "digest": "sha256:aa612194be320841bf5c207135a244421034d269585a35971c3d76247452b3f8",
+      "identity": "prompt:devcontainer_health_check",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "prompt",
+        "name": "devcontainer_health_check"
+      }
+    },
+    {
+      "digest": "sha256:0588b2125b3305cd77bfb217e578b346147d75284d543a8d1b7dc28a670a47e7",
+      "identity": "prompt:release_readiness_check",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "prompt",
+        "name": "release_readiness_check"
+      }
+    },
+    {
+      "digest": "sha256:5010eb526d38eb8086482ae75d39498987333d2efec8b25cb322f9bf573dd575",
+      "identity": "prompt:review_changed_files",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "prompt",
+        "name": "review_changed_files"
+      }
+    },
+    {
+      "digest": "sha256:4f5acd4fe0115a49f2875cd1fa573aa69ca181b2659212cdbbd54383b739fb0b",
+      "identity": "prompt:security_triage",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "prompt",
+        "name": "security_triage"
+      }
+    },
+    {
+      "digest": "sha256:373d49f126c73bdf57847c03802657df8f1ebdd776b4749d54bedf6fdf2b3f48",
+      "identity": "prompt:snapshot_before_refactor",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "prompt",
+        "name": "snapshot_before_refactor"
+      }
+    },
+    {
+      "digest": "sha256:765626dba28e95ebf9500f36a9d7a627f3483039005547a44934145c5c3795f4",
+      "identity": "resource:repo://file/{path}",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "resource",
+        "name": "repo_file_resource",
+        "uri_template": "repo://file/{path}"
+      }
+    },
+    {
+      "digest": "sha256:19cb42829bc9c84f4bb56b8368bd6894ae58d09194f6d9d47a98892d7d90a7a1",
+      "identity": "resource:repo://summary",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "resource",
+        "name": "repo_summary_resource",
+        "uri_template": "repo://summary"
+      }
+    },
+    {
+      "digest": "sha256:29452e5f3356af5fe73fad734044a65cac7f2c72d66de84fe1c4022f25ae1711",
+      "identity": "resource:repo://tree/{path}",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "resource",
+        "name": "repo_tree_resource",
+        "uri_template": "repo://tree/{path}"
+      }
+    },
+    {
+      "digest": "sha256:4e56eed7c777acc163d71c968e1831b034a6d5f7c98dc6b16d01079c39411020",
+      "identity": "resource:ui://codebase-tooling-mcp/release-readiness-dashboard",
+      "metadata": {
+        "documented": {
+          "README.md": true,
+          "docs/tool-catalog-integrity.md": true
+        },
+        "kind": "resource",
+        "name": "release_readiness_dashboard_resource",
+        "uri": "ui://codebase-tooling-mcp/release-readiness-dashboard"
+      }
+    }
+  ],
+  "public_discovery_count": 9,
+  "resource_count": 4,
+  "resources": [
+    {
+      "digest": "sha256:ca40d9c81fdd41aa53a09d839ffbfa7a0a9840b49f4e54948049e22dd5bb1b6e",
+      "identity": "repo://file/{path}",
+      "metadata": {
+        "annotations": null,
+        "capabilities": {
+          "listed": false,
+          "read_payload_hashed": false,
+          "readable_without_template_arguments": false,
+          "templated": true
+        },
+        "description": "Read a UTF-8 file from the repository by relative path.",
+        "icons": null,
+        "kind": "resource_template",
+        "meta": null,
+        "mime_type": "text/plain",
+        "name": "repo_file_resource",
+        "size": null,
+        "title": null,
+        "uri": null,
+        "uri_template": "repo://file/{path}"
+      },
+      "name": "repo_file_resource"
+    },
+    {
+      "digest": "sha256:995dad30598d23ac367d5f98b684a7df58a569232cd91db6f787acf5aec17f28",
+      "identity": "repo://summary",
+      "metadata": {
+        "annotations": null,
+        "capabilities": {
+          "listed": true,
+          "read_payload_hashed": false,
+          "readable_without_template_arguments": true,
+          "templated": false
+        },
+        "description": "Repository summary and basic server capability flags.",
+        "icons": null,
+        "kind": "resource",
+        "meta": null,
+        "mime_type": "application/json",
+        "name": "repo_summary_resource",
+        "size": null,
+        "title": null,
+        "uri": "repo://summary",
+        "uri_template": null
+      },
+      "name": "repo_summary_resource"
+    },
+    {
+      "digest": "sha256:d3ce582257274b54d363e057ff5f4a7ff18da9b12113e67f433f40f56e731ee2",
+      "identity": "repo://tree/{path}",
+      "metadata": {
+        "annotations": null,
+        "capabilities": {
+          "listed": false,
+          "read_payload_hashed": false,
+          "readable_without_template_arguments": false,
+          "templated": true
+        },
+        "description": "List repository entries under a relative path.",
+        "icons": null,
+        "kind": "resource_template",
+        "meta": null,
+        "mime_type": "application/json",
+        "name": "repo_tree_resource",
+        "size": null,
+        "title": null,
+        "uri": null,
+        "uri_template": "repo://tree/{path}"
+      },
+      "name": "repo_tree_resource"
+    },
+    {
+      "digest": "sha256:0fe237cf3fdb1aec6f83389fd0a7666b5258a705b110786836caf176c0bdf648",
+      "identity": "ui://codebase-tooling-mcp/release-readiness-dashboard",
+      "metadata": {
+        "annotations": null,
+        "capabilities": {
+          "listed": true,
+          "read_payload_hashed": false,
+          "readable_without_template_arguments": true,
+          "templated": false
+        },
+        "description": "Read-only MCP Apps dashboard template for release_readiness results.",
+        "icons": null,
+        "kind": "resource",
+        "meta": null,
+        "mime_type": "text/html;profile=mcp-app",
+        "name": "release_readiness_dashboard_resource",
+        "size": null,
+        "title": null,
+        "uri": "ui://codebase-tooling-mcp/release-readiness-dashboard",
+        "uri_template": null
+      },
+      "name": "release_readiness_dashboard_resource"
+    }
+  ],
   "schema": "tool_catalog_integrity_baseline.v1",
   "security": {
     "contains_host_absolute_paths": false,
     "contains_repository_contents": false,
     "contains_secrets": false,
-    "public_metadata_only": true
+    "prompt_argument_values_redacted": true,
+    "public_metadata_only": true,
+    "resource_payloads_hashed": false
   },
   "tool_count": 32,
   "tools": [
@@ -7662,7 +8111,7 @@
       "name": "tool_annotations"
     },
     {
-      "digest": "sha256:2975928b63e28c0837c316d899463c7168e13114189362a3c81e17c18354ce2d",
+      "digest": "sha256:815d571a41d6cc9463291dd255a0fb7928a46241e58467abdefca66b1e596107",
       "metadata": {
         "documentation": [
           {
@@ -7670,7 +8119,7 @@
             "path": "README.md#tool-catalog-by-category"
           },
           {
-            "label": "Tool catalog integrity",
+            "label": "Public MCP surface integrity",
             "path": "docs/tool-catalog-integrity.md"
           }
         ],
@@ -9789,5 +10238,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:6097a961196aa33a9f39676218864011601986ec5d899c9f25f46181b12474e1"
+  "whole_catalog_digest": "sha256:3fe2c3806df2d2b99688f42d12ae724fef957a0080dca78b9b7930285184e413"
 }

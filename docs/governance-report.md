@@ -16,7 +16,7 @@ The first-slice report schema is `governance_report.v1`. It includes:
 - latest stored `workflow_policy_plan` decision/plan ID as optional pre-execution workflow-policy evidence when available;
 - latest exported `dependency_security_report` status, vulnerability count, advisory freshness, and report path when available;
 - inline `ci_workflow_security_report` summary with checked workflow count, status, and active high/medium finding counts;
-- compact `tool_catalog_integrity` status, baseline/current digests, drift counts, and advisory lint counts without embedding the full catalog;
+- compact `tool_catalog_integrity` public-MCP-surface status, baseline/current digests, tool/prompt/resource counts, drift counts, and advisory lint counts without embedding the full catalog;
 - snapshot/rollback references from the state snapshot index when available;
 - a compact `workflow_diagnostics` summary for failed audit trajectories when blocked steps are present;
 - git base/head metadata for PR or release review;

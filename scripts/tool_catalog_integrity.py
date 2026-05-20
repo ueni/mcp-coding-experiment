@@ -40,7 +40,8 @@ def main() -> int:
         write_baseline(catalog)
         print(
             "PASS wrote source/tool_catalog_baseline.json "
-            f"digest={catalog['whole_catalog_digest']} tools={catalog['tool_count']}"
+            f"digest={catalog['whole_catalog_digest']} tools={catalog['tool_count']} "
+            f"prompts={catalog.get('prompt_count', 0)} resources={catalog.get('resource_count', 0)}"
         )
         return 0
     if args.print_current:
@@ -55,6 +56,8 @@ def main() -> int:
         f"{'PASS' if report.get('ok') else 'FAIL'} status={report.get('status')} "
         f"digest={report.get('current', {}).get('whole_catalog_digest', '')} "
         f"tools={report.get('current', {}).get('tool_count', 0)} "
+        f"prompts={report.get('current', {}).get('prompt_count', 0)} "
+        f"resources={report.get('current', {}).get('resource_count', 0)} "
         f"drift={drift} lint_findings={lint.get('finding_count', 0)}"
     )
     if not report.get("ok"):
