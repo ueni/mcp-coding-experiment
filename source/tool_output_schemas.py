@@ -65,7 +65,7 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "tool_catalog_integrity": ("schema", "ok", "status", "baseline", "current", "drift", "lint", "security"),
     "dependency_security_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "vulnerabilities", "advisory", "gate", "exports", "resource_links"),
     "ci_workflow_security_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "findings", "workflows", "exports"),
-    "mcp_threat_model_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "threats", "findings", "exports"),
+    "mcp_threat_model_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "dread_rubric", "threats", "findings", "exports"),
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports", "resource_links"),
     "self_optimization_report": ("schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "security"),
     "artifact_provenance": ("schema", "provenance_schema", "attestation_schema", "artifact_count", "ok", "checks"),
@@ -94,7 +94,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "tool_catalog_integrity": ("read_only", "baseline.per_tool", "current.per_tool", "drift.changed[].metadata_diff", "lint.findings"),
     "dependency_security_report": ("inputs", "skipped", "warnings", "security", "provenance", "_meta"),
     "ci_workflow_security_report": ("findings_by_severity", "suppressed_findings", "suppressions", "config", "action_uses", "security", "resource_links", "_meta"),
-    "mcp_threat_model_report": ("controls", "dread_rubric", "baseline", "fixtures", "security", "resource_links", "_meta"),
+    "mcp_threat_model_report": ("controls", "baseline", "fixtures", "security", "resource_links", "_meta"),
     "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "untrusted_content_signals", "lineage", "provenance", "compressed_observation", "_meta"),
     "self_optimization_report": ("sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "patch_survivorship", "_meta"),
     "artifact_provenance": ("checks[].attestation",),
@@ -523,7 +523,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "mcp_threat_model_report": _object_schema(
-        ["schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "threats", "findings", "exports"],
+        ["schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "dread_rubric", "threats", "findings", "exports"],
         {
             "schema": {"type": "string", "const": "mcp_threat_model_report.v1"},
             "report_id": {"type": "string"},

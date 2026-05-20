@@ -74,6 +74,14 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                         continue
                     self.assertIn(f"`{field}`", row)
 
+    def test_threat_model_dread_rubric_is_stable_required_contract(self):
+        contract = all_tool_output_contracts()["tools"][SCHEMA_BACKED_TOOL_NAMES.index("mcp_threat_model_report")]
+        schema = TOOL_OUTPUT_SCHEMAS["mcp_threat_model_report"]
+
+        self.assertIn("dread_rubric", contract["stableFields"])
+        self.assertIn("dread_rubric", schema["required"])
+        self.assertNotIn("dread_rubric", contract["experimentalFields"])
+
     def test_representative_success_outputs_validate_against_schemas(self):
         self.write_repo_text("src/schema_contract.py", "def schema_marker():\n    return 'marker'\n")
 
