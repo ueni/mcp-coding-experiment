@@ -23,7 +23,7 @@ build_cache_download() {
   local cache_path="$1"
   local download_url="$2"
   local label="${3:-${cache_path}}"
-  local tmp_path
+  local tmp_path retries retry_delay retry_max_time
 
   if [ -z "${cache_path}" ] || [ -z "${download_url}" ]; then
     build_cache_fail "cache path and download URL are required"
@@ -41,9 +41,17 @@ build_cache_download() {
     return $?
   fi
 
-  tmp_path="${cache_path}.tmp.$$"
-  rm -f "${tmp_path}"
-  curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --http1.1 \
+  retries="${BUILD_CACHE_DOWNLOAD_RETRIES:-12}"
+  retry_delay="${BUILD_CACHE_DOWNLOAD_RETRY_DELAY_SECONDS:-5}"
+  retry_max_time="${BUILD_CACHE_DOWNLOAD_RETRY_MAX_TIME_SECONDS:-1800}"
+  tmp_path="${cache_path}.part"
+  if build_cache_bool "${MCP_REFRESH_BUILD_DOWNLOAD_CACHE:-false}"; then
+    rm -f "${cache_path}" "${tmp_path}"
+  fi
+
+  curl --fail --location --retry "${retries}" --retry-all-errors --retry-delay "${retry_delay}" \
+    --retry-max-time "${retry_max_time}" --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
+    --continue-at - --http1.1 \
     "${download_url}" \
     -o "${tmp_path}"
   mv "${tmp_path}" "${cache_path}"
