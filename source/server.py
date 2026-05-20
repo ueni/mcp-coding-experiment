@@ -2150,6 +2150,7 @@ _AGENT_PROXY_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
 )
 _AGENT_PROXY_PLACEHOLDER_RE = re.compile(r"__MCP_(?:ANON|REDACTED)_[A-Z_]+_\d{4}__")
+_AGENT_PROXY_PLACEHOLDER_FRAGMENT_RE = re.compile(r"__MCP(?:_[A-Z0-9_]*)?")
 _AGENT_PROXY_CONFIG_ENV_KEYS = {
     "enabled": "MCP_AGENT_PROXY_ENABLED",
     "allow_online": "MCP_AGENT_PROXY_ALLOW_ONLINE",
@@ -2653,7 +2654,8 @@ def _agent_proxy_deanonymize_text(text: str, mapping: dict[str, Any]) -> str:
         result = result.replace(placeholder, value)
     for placeholder in sorted(mapping.get("irreversible", set()), key=len, reverse=True):
         result = result.replace(placeholder, "[REDACTED_SECRET]")
-    return _AGENT_PROXY_PLACEHOLDER_RE.sub("[REDACTED_SECRET]", result)
+    result = _AGENT_PROXY_PLACEHOLDER_RE.sub("[REDACTED_SECRET]", result)
+    return _AGENT_PROXY_PLACEHOLDER_FRAGMENT_RE.sub("[REDACTED_SECRET]", result)
 
 
 def _agent_proxy_deanonymize_value(value: Any, mapping: dict[str, Any]) -> Any:

@@ -539,18 +539,55 @@ class AgentAPIProxyTest(ServerToolsTestBase):
     def test_online_streaming_uses_sse_and_restores_split_placeholders(self):
         self.enable_online()
         self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = "Acme Corp"
+        provider_token = "stream-secret-token-1234567890"
 
         def fake_stream(url, payload, timeout):
             text = json.dumps(payload)
-            placeholder = [
-                p
-                for p in self.server._AGENT_PROXY_PLACEHOLDER_RE.findall(text)
-                if "ANON_TERM" in p
-            ][0]
-            midpoint = len(placeholder) // 2
+            placeholders = self.server._AGENT_PROXY_PLACEHOLDER_RE.findall(text)
+            term_placeholder = [p for p in placeholders if "ANON_TERM" in p][0]
+            secret_placeholder = [p for p in placeholders if "REDACTED_SECRET" in p][0]
+            term_midpoint = len(term_placeholder) // 2
+            secret_midpoint = len(secret_placeholder) // 2
             yield {"choices": [{"index": 0, "delta": {"role": "assistant"}}]}
-            yield {"choices": [{"index": 0, "delta": {"content": "Hi " + placeholder[:midpoint]}}]}
-            yield {"choices": [{"index": 0, "delta": {"content": placeholder[midpoint:] + "!"}}]}
+            yield {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "Hi " + term_placeholder[:term_midpoint]},
+                    }
+                ]
+            }
+            yield {
+                "choices": [
+                    {"index": 0, "delta": {"content": term_placeholder[term_midpoint:]}}
+                ]
+            }
+            yield {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": " secret " + secret_placeholder[:secret_midpoint]
+                        },
+                    }
+                ]
+            }
+            yield {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": secret_placeholder[secret_midpoint:]},
+                    }
+                ]
+            }
+            yield {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": " truncated " + term_placeholder[:5]},
+                    }
+                ]
+            }
             yield {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
 
         self.server._agent_proxy_http_stream_json = fake_stream
@@ -559,7 +596,12 @@ class AgentAPIProxyTest(ServerToolsTestBase):
                 FakeRequest(
                     self.base_payload(
                         stream=True,
-                        messages=[{"role": "user", "content": "Hello Acme Corp"}],
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"Hello Acme Corp with api_key={provider_token}",
+                            }
+                        ],
                     )
                 )
             )
@@ -570,7 +612,8 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(response.media_type, "text/event-stream")
         self.assertIn("data: [DONE]", body)
         self.assertIn("Acme Corp", body)
-        self.assertNotIn("__MCP_ANON_TERM", body)
+        self.assertIn("[REDACTED_SECRET]", body)
+        self.assertNotIn("__MCP", body)
 
     def test_online_streaming_redacts_full_bearer_authorization_before_forwarding(self):
         self.enable_online()
