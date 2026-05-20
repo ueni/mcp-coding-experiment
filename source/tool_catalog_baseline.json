@@ -3910,7 +3910,7 @@
       "name": "interaction_invariant_audit"
     },
     {
-      "digest": "sha256:0d952a4b7bfdbb57e829d4f909667b04ce3a979d1023371c1473fc85486ad087",
+      "digest": "sha256:3a134f10b91e172c6d38701036ebd06e6341a50783a39ee04bb202fa1fd1c403",
       "metadata": {
         "documentation": [
           {
@@ -3966,6 +3966,9 @@
                 "type": "array"
               },
               "controls": {
+                "type": "object"
+              },
+              "dread_rubric": {
                 "type": "object"
               },
               "exports": {
@@ -4143,6 +4146,7 @@
           },
           "experimentalFields": [
             "controls",
+            "dread_rubric",
             "baseline",
             "fixtures",
             "security",
@@ -4165,6 +4169,9 @@
                 "type": "array"
               },
               "controls": {
+                "type": "object"
+              },
+              "dread_rubric": {
                 "type": "object"
               },
               "exports": {
@@ -10665,5 +10672,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:21ff87cc780fb76d788a2a9167518b1573d3e9ae7766f005eb04c585690fcf8c"
+  "whole_catalog_digest": "sha256:0300b74f096bf4b6060cff16425b14ea0a180c1dd8d91d03a160fcf034f54f96"
 }

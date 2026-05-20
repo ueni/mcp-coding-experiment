@@ -245,6 +245,7 @@ CI_WORKFLOW_SECURITY_REPORT_SCHEMA = "ci_workflow_security_report.v1"
 MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
 MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
 MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
+MCP_THREAT_MODEL_DREAD_RUBRIC_SCHEMA = "mcp_threat_model_dread_rubric.v1"
 DEPENDENCY_SECURITY_SBOM_SCHEMA = "dependency_security_sbom.cyclonedx-lite.v1"
 DEPENDENCY_SECURITY_BLOCKING = os.getenv(
     "MCP_DEPENDENCY_SECURITY_BLOCKING", "false"
@@ -8867,9 +8868,30 @@ def _mcp_threat_model_report_paths(report_id: str) -> dict[str, str]:
     return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
 
 
+MCP_THREAT_MODEL_DREAD_RUBRIC: dict[str, Any] = {
+    "schema": MCP_THREAT_MODEL_DREAD_RUBRIC_SCHEMA,
+    "version": 1,
+    "fields": ["damage", "reproducibility", "exploitability", "affected_users", "discoverability"],
+    "field_range": {"min": 0, "max": 10, "type": "integer"},
+    "scoring": "clamp each field to 0..10 as an integer, then sum fields in the listed order",
+    "severity_thresholds": [
+        {"severity": "high", "min_score": 35, "max_score": 50},
+        {"severity": "medium", "min_score": 23, "max_score": 34},
+        {"severity": "low", "min_score": 1, "max_score": 22},
+        {"severity": "info", "min_score": 0, "max_score": 0},
+    ],
+}
+
+
+def _mcp_threat_model_dread_rubric() -> dict[str, Any]:
+    return json.loads(json.dumps(MCP_THREAT_MODEL_DREAD_RUBRIC, sort_keys=True))
+
+
 def _mcp_threat_model_severity(dread: dict[str, Any]) -> tuple[int, str]:
-    keys = ("damage", "reproducibility", "exploitability", "affected_users", "discoverability")
-    score = sum(max(0, min(10, int(dread.get(key, 0) or 0))) for key in keys)
+    score = sum(
+        max(0, min(10, int(dread.get(key, 0) or 0)))
+        for key in MCP_THREAT_MODEL_DREAD_RUBRIC["fields"]
+    )
     if score >= 35:
         return score, "high"
     if score >= 23:
@@ -8896,6 +8918,13 @@ def _mcp_threat_model_controls() -> dict[str, dict[str, Any]]:
         "tool_output_contracts": {
             "covered": "tool_output_contracts" in public_tools,
             "evidence": {"tool": "tool_output_contracts", "schema_backed_tool_count": len(schema_tools)},
+        },
+        "temporal_catalog_delta_audit": {
+            "covered": False,
+            "evidence": {
+                "scope": "mcp_client_session_delta_channel",
+                "note": "Static catalog hashing catches single-frame drift but does not prove clients audit notifications/tools/list_changed followed by repeated tools/list deltas.",
+            },
         },
         "http_scope_security_gates": {
             "covered": MCP_SCOPE_READ in MCP_SUPPORTED_SCOPES and MCP_SCOPE_MUTATE in MCP_SUPPORTED_SCOPES,
@@ -9043,8 +9072,8 @@ def _mcp_threat_model_catalog_transition_findings(
                 "dread": {"score": score, **dread},
                 "stride": ["Tampering", "Elevation of privilege", "Information disclosure"],
                 "message": "Fixture models a benign initial tools/list followed by a poisoned post-handshake tool-catalog mutation.",
-                "uncovered_controls": [],
-                "covered_by": ["tool_catalog_integrity", "untrusted_content_signals"],
+                "uncovered_controls": ["temporal_catalog_delta_audit"],
+                "covered_by": ["untrusted_content_signals"],
                 "evidence": {
                     "event_sequence": events,
                     "observed_notifications_tools_list_changed": "notifications/tools/list_changed" in events,
@@ -9312,6 +9341,7 @@ def _mcp_threat_model_report_impl(
         "components": list(MCP_THREAT_MODEL_COMPONENTS),
         "trust_boundaries": list(MCP_THREAT_MODEL_BOUNDARIES),
         "controls": controls,
+        "dread_rubric": _mcp_threat_model_dread_rubric(),
         "threats": threats,
         "findings": findings,
         "baseline": {
@@ -9331,7 +9361,7 @@ def _mcp_threat_model_report_impl(
             "mutates_repository": False,
             "repo_boundary_enforced": True,
             "fixture_policy": "fixtures are local JSON only and evidence is redacted/aggregate",
-            "limitations": "STRIDE/DREAD scores are deterministic advisory heuristics and do not replace human threat modeling.",
+            "limitations": "STRIDE/DREAD scores use the checked-in deterministic rubric and do not replace human threat modeling.",
         },
         "exports": {},
         "resource_links": [],

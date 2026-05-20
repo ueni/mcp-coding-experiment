@@ -45,6 +45,20 @@ class McpThreatModelReportTests(ServerToolsTestBase):
         self.assertEqual(report["fixtures"]["transition_count"], 1)
         self.assertEqual(report["baseline"]["newly_introduced_high_uncovered_finding_ids"], [])
         self.assertFalse(report["security"]["network_access"])
+        expected_dread_rubric = {
+            "schema": "mcp_threat_model_dread_rubric.v1",
+            "version": 1,
+            "fields": ["damage", "reproducibility", "exploitability", "affected_users", "discoverability"],
+            "field_range": {"min": 0, "max": 10, "type": "integer"},
+            "scoring": "clamp each field to 0..10 as an integer, then sum fields in the listed order",
+            "severity_thresholds": [
+                {"severity": "high", "min_score": 35, "max_score": 50},
+                {"severity": "medium", "min_score": 23, "max_score": 34},
+                {"severity": "low", "min_score": 1, "max_score": 22},
+                {"severity": "info", "min_score": 0, "max_score": 0},
+            ],
+        }
+        self.assertEqual(report["dread_rubric"], expected_dread_rubric)
 
         threat_dread_scores = {row["id"]: row["dread"]["score"] for row in report["threats"]}
         self.assertEqual(
@@ -63,8 +77,17 @@ class McpThreatModelReportTests(ServerToolsTestBase):
             if finding["rule_id"] == "temporal-tool-catalog-mutation"
         )
         self.assertEqual(transition["dread"]["score"], 38)
+        self.assertEqual(transition["uncovered_controls"], ["temporal_catalog_delta_audit"])
         self.assertTrue(transition["evidence"]["observed_notifications_tools_list_changed"])
         self.assertTrue(transition["evidence"]["observed_repeated_tools_list"])
+
+        report["dread_rubric"]["fields"].append("mutated_by_caller")
+        repeated = self.server.mcp_threat_model_report(
+            fixture_path=fixture_path,
+            baseline_path=baseline_path,
+            export=False,
+        )
+        self.assertEqual(repeated["dread_rubric"], expected_dread_rubric)
 
     def test_high_uncovered_fixture_regression_is_deterministic(self):
         fixture_path = self._copy_fixture("mcp_poisoned_tools.json")
@@ -90,7 +113,7 @@ class McpThreatModelReportTests(ServerToolsTestBase):
 
         self.assertFalse(report["ok"])
         self.assertEqual(report["status"], "regression")
-        self.assertEqual(report["summary"]["high_uncovered_finding_count"], 2)
+        self.assertEqual(report["summary"]["high_uncovered_finding_count"], 3)
         self.assertIn(
             "high_uncovered_regression",
             {failure["type"] for failure in report["baseline"]["failures"]},

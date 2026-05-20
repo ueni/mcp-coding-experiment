@@ -1,9 +1,10 @@
 {
   "schema": "mcp_threat_model_baseline.v1",
-  "allowed_high_uncovered_finding_count": 2,
+  "allowed_high_uncovered_finding_count": 3,
   "allowed_high_uncovered_finding_ids": [
     "fixture:ambiguous_parameter_visibility:ambiguous-parameter-visibility",
-    "fixture:client_transparency_control_gap:client-transparency-control-gap"
+    "fixture:client_transparency_control_gap:client-transparency-control-gap",
+    "fixture:post_handshake_tools_list_changed_poison:temporal-tool-catalog-mutation"
   ],
   "required_fixture_ids": [
     "hidden_instruction_poison",
@@ -13,13 +14,21 @@
     "post_handshake_tools_list_changed_poison"
   ],
   "required_fixture_rule_ids": {
-    "hidden_instruction_poison": ["poisoned-tool-metadata"],
-    "cross_tool_poison": ["poisoned-tool-metadata"],
+    "hidden_instruction_poison": [
+      "poisoned-tool-metadata"
+    ],
+    "cross_tool_poison": [
+      "poisoned-tool-metadata"
+    ],
     "ambiguous_parameter_visibility": [
       "ambiguous-parameter-visibility",
       "annotation-category-mismatch"
     ],
-    "client_transparency_control_gap": ["client-transparency-control-gap"],
-    "post_handshake_tools_list_changed_poison": ["temporal-tool-catalog-mutation"]
+    "client_transparency_control_gap": [
+      "client-transparency-control-gap"
+    ],
+    "post_handshake_tools_list_changed_poison": [
+      "temporal-tool-catalog-mutation"
+    ]
   }
 }
