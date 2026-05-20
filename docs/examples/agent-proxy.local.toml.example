@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
+# Copy to .codebase-tooling-mcp/agent-proxy.local.toml or let the Model
+# Fallback assistant generate it. This file is a sanitized example only.
+# Runtime TOML is local/user-specific and must not be committed.
+# Store real API keys as Continue secrets, for example in .continue/.env or
+# Continue Settings > Secrets. apiKey below is only a reference/symbolic name.
+
+[agent_proxy]
+provider = "azure"
+model = "my-azure-deployment"
+apiBase = "https://example-resource.openai.azure.com"
+apiType = "azure"
+apiVersion = "2024-10-21"
+apiKey = "${{ secrets.AGENT_PROXY_API_KEY }}"
+enabled = true
+allow_online = true

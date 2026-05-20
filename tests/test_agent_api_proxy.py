@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from tests.server_test_support import ServerToolsTestBase
@@ -35,8 +36,28 @@ async def collect_stream_text(response):
 class AgentAPIProxyTest(ServerToolsTestBase):
     def setUp(self):
         super().setUp()
+        self.proxy_env_names = [
+            "MCP_AGENT_PROXY_ENABLED",
+            "MCP_AGENT_PROXY_CONFIG_FILE",
+            "MCP_AGENT_PROXY_ALLOW_ONLINE",
+            "MCP_AGENT_PROXY_NO_NETWORK",
+            "MCP_AGENT_PROXY_PROVIDER_NAME",
+            "MCP_AGENT_PROXY_PROVIDER_BASE_URL",
+            "MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL",
+            "MCP_AGENT_PROXY_MODEL_ALLOWLIST",
+            "MCP_AGENT_PROXY_DEFAULT_MODEL",
+            "MCP_AGENT_PROXY_LOCAL_MODELS",
+            "MCP_AGENT_PROXY_PREFER_LOCAL",
+        ]
+        self.orig_proxy_env_values = {
+            name: os.environ.get(name) for name in self.proxy_env_names
+        }
+        for name in self.proxy_env_names:
+            os.environ.pop(name, None)
         self.proxy_attrs = [
             "MCP_AGENT_PROXY_ENABLED",
+            "MCP_AGENT_PROXY_CONFIG_RELATIVE_PATH",
+            "MCP_AGENT_PROXY_DEFAULT_MODEL",
             "MCP_AGENT_PROXY_ALLOW_ONLINE",
             "MCP_AGENT_PROXY_NO_NETWORK",
             "MCP_AGENT_PROXY_PROVIDER_NAME",
@@ -84,6 +105,11 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.server._agent_proxy_http_stream_json = self.orig_stream_json
         for name, value in self.orig_proxy_values.items():
             setattr(self.server, name, value)
+        for name, value in self.orig_proxy_env_values.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         super().tearDown()
 
     def base_payload(self, **overrides):
@@ -479,6 +505,102 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(payload["agent_proxy"]["routing"]["backend"], "local")
         self.assertEqual(payload["agent_proxy"]["routing"]["reason"], "offline_no_network")
 
+    def test_runtime_toml_configures_forwarding_without_env_routing_vars(self):
+        self.server.MCP_AGENT_PROXY_ENABLED = False
+        self.server.MCP_AGENT_PROXY_ALLOW_ONLINE = False
+        self.server.MCP_AGENT_PROXY_PROVIDER_BASE_URL = ""
+        self.server.MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW = ""
+        self.server.MCP_AGENT_PROXY_PREFER_LOCAL = False
+        self.write_repo_text(
+            ".codebase-tooling-mcp/agent-proxy.local.toml",
+            "[agent_proxy]\n"
+            "enabled = true\n"
+            "allow_online = true\n"
+            "provider = \"openai-compatible\"\n"
+            "model = \"gpt-proxy-test\"\n"
+            "apiBase = \"https://toml-provider.example/v1\"\n",
+        )
+        captured = {}
+
+        def fake_post(url, payload, timeout):
+            captured["url"] = url
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        self.server._agent_proxy_http_post_json = fake_post
+        response = asyncio.run(
+            self.server.openai_chat_completions(FakeRequest(self.base_payload()))
+        )
+        payload = self.response_json(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["url"], "https://toml-provider.example/v1/chat/completions")
+        self.assertEqual(payload["agent_proxy"]["routing"]["backend"], "online")
+        self.assertTrue(self.server._agent_proxy_status_payload()["config"]["loaded"])
+
+    def test_env_routing_vars_override_runtime_toml_config(self):
+        self.server.MCP_AGENT_PROXY_ENABLED = False
+        self.server.MCP_AGENT_PROXY_ALLOW_ONLINE = False
+        self.server.MCP_AGENT_PROXY_PROVIDER_BASE_URL = ""
+        self.server.MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW = ""
+        self.server.MCP_AGENT_PROXY_PREFER_LOCAL = False
+        self.write_repo_text(
+            ".codebase-tooling-mcp/agent-proxy.local.toml",
+            "[agent_proxy]\n"
+            "enabled = true\n"
+            "allow_online = true\n"
+            "provider = \"openai-compatible\"\n"
+            "model = \"toml-model\"\n"
+            "apiBase = \"https://toml-provider.example/v1\"\n",
+        )
+        os.environ["MCP_AGENT_PROXY_PROVIDER_BASE_URL"] = "https://env-provider.example/v1"
+        os.environ["MCP_AGENT_PROXY_MODEL_ALLOWLIST"] = "env-model"
+        captured = {}
+
+        def fake_post(url, payload, timeout):
+            captured["url"] = url
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        self.server._agent_proxy_http_post_json = fake_post
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(self.base_payload(model="env-model"))
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["url"], "https://env-provider.example/v1/chat/completions")
+
+    def test_agent_proxy_runtime_config_is_gitignored_and_example_is_committed(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        gitignore_text = (repo_root / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn("/.codebase-tooling-mcp/agent-proxy.local.toml", gitignore_text)
+        example = repo_root / "docs/examples/agent-proxy.local.toml.example"
+        self.assertTrue(example.is_file())
+        example_text = example.read_text(encoding="utf-8")
+        self.assertIn("apiKey = \"${{ secrets.AGENT_PROXY_API_KEY }}\"", example_text)
+        self.assertNotIn("sk-", example_text)
+        self.write_repo_text(".gitignore", gitignore_text)
+        self.assertTrue(
+            self.git("check-ignore", ".codebase-tooling-mcp/agent-proxy.local.toml").stdout.strip()
+        )
+
     def test_model_allowlist_blocks_unapproved_online_model(self):
         self.enable_online()
         self.server.MCP_AGENT_PROXY_MODEL_ALLOWLIST_RAW = "approved-model"
@@ -839,7 +961,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
                 self.server.continue_model_fallback_configure(
                     FakeRequest(
                         {
-                            "provider": "openai",
+                            "provider": "openai-compatible",
                             "model": "fallback-target",
                             "apiBase": "http://127.0.0.1:8787/v1",
                         }
@@ -862,7 +984,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             self.server.continue_model_fallback_configure(
                 FakeRequest(
                     {
-                        "provider": "openai",
+                        "provider": "openai-compatible",
                         "model": "fallback-target",
                         "apiBase": "http://127.0.0.1:8787/v1",
                         "proxy": "http://127.0.0.1:8080",
@@ -875,7 +997,12 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual("dry_run", payload["status"])
         self.assertIn(".continue/models/coding-openai-compatible.yaml", payload["files"])
+        self.assertIn(".codebase-tooling-mcp/agent-proxy.local.toml", payload["files"])
+        self.assertIn("[agent_proxy]", payload["files"][".codebase-tooling-mcp/agent-proxy.local.toml"])
+        self.assertIn("Status: dry_run", payload["message"])
+        self.assertIn("Secret state:", payload["message"])
         self.assertFalse((self.repo_path / ".continue/model-routing.yaml").exists())
+        self.assertFalse((self.repo_path / ".codebase-tooling-mcp/agent-proxy.local.toml").exists())
 
     def test_model_fallback_configure_writes_continue_files_when_allowed(self):
         self.server.ALLOW_MUTATIONS = True
@@ -884,7 +1011,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             self.server.continue_model_fallback_configure(
                 FakeRequest(
                     {
-                        "provider": "openai",
+                        "provider": "openai-compatible",
                         "model": "fallback-target",
                         "apiBase": "http://127.0.0.1:8787/v1",
                         "proxy": "http://127.0.0.1:8080",
@@ -903,10 +1030,120 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         routing_text = (self.repo_path / ".continue/model-routing.yaml").read_text(
             encoding="utf-8"
         )
+        agent_proxy_text = (self.repo_path / ".codebase-tooling-mcp/agent-proxy.local.toml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("provider: openai", profile_text)
         self.assertIn("model: fallback-target", profile_text)
         self.assertIn("apiBase: http://127.0.0.1:8787/v1", profile_text)
         self.assertIn("proxy: http://127.0.0.1:8080", profile_text)
         self.assertIn("caBundlePath: /tmp/mitm-ca.pem", profile_text)
         self.assertIn("model: fallback-target", routing_text)
+        self.assertIn("[agent_proxy]", agent_proxy_text)
+        self.assertIn('provider = "openai-compatible"', agent_proxy_text)
+        self.assertIn('model = "fallback-target"', agent_proxy_text)
+        self.assertIn('apiBase = "http://127.0.0.1:8787/v1"', agent_proxy_text)
+        self.assertIn('apiKey = ""', agent_proxy_text)
+        self.assertIn('allow_online = true', agent_proxy_text)
+        self.assertIn("Status: written", payload["message"])
+        self.assertIn("Secret state:", payload["message"])
+        self.assertNotIn("unit-test-secret-value", agent_proxy_text)
 
+
+    def test_model_fallback_configure_asks_for_api_key_when_required(self):
+        self.server.ALLOW_MUTATIONS = True
+
+        response = asyncio.run(
+            self.server.continue_model_fallback_configure(
+                FakeRequest(
+                    {
+                        "provider": "azure",
+                        "model": "azure-deployment",
+                        "apiBase": "https://example-resource.openai.azure.com",
+                        "apiType": "azure",
+                        "apiVersion": "2024-10-21",
+                    }
+                )
+            )
+        )
+        payload = self.response_json(response)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual("needs_secret", payload["status"])
+        self.assertIn("Status: needs-secret", payload["message"])
+        self.assertIn("Secret state:", payload["message"])
+        self.assertIn("Provide apiKey", payload["message"])
+        self.assertFalse((self.repo_path / ".codebase-tooling-mcp/agent-proxy.local.toml").exists())
+
+    def test_model_fallback_configure_stores_raw_api_key_as_continue_secret_only(self):
+        self.server.ALLOW_MUTATIONS = True
+        raw_key = "unit-test-secret-value"
+
+        response = asyncio.run(
+            self.server.continue_model_fallback_configure(
+                FakeRequest(
+                    {
+                        "provider": "azure",
+                        "model": "azure-deployment",
+                        "apiBase": "https://example-resource.openai.azure.com",
+                        "apiType": "azure",
+                        "apiVersion": "2024-10-21",
+                        "apiKeySecret": "AZURE_OPENAI_API_KEY",
+                        "apiKey": raw_key,
+                    }
+                )
+            )
+        )
+        payload = self.response_json(response)
+        combined_output = json.dumps(payload, sort_keys=True)
+        agent_proxy_text = (self.repo_path / ".codebase-tooling-mcp/agent-proxy.local.toml").read_text(
+            encoding="utf-8"
+        )
+        profile_text = (self.repo_path / ".continue/models/coding-openai-compatible.yaml").read_text(
+            encoding="utf-8"
+        )
+        secret_text = (self.repo_path / ".continue/.env").read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual("written", payload["status"])
+        self.assertIn('apiKey = "${{ secrets.AZURE_OPENAI_API_KEY }}"', agent_proxy_text)
+        self.assertIn("apiKey: ${{ secrets.AZURE_OPENAI_API_KEY }}", profile_text)
+        self.assertIn(f"AZURE_OPENAI_API_KEY={raw_key}", secret_text)
+        self.assertTrue(payload["agent_proxy_config"]["secrets_persisted"])
+        self.assertTrue(payload["agent_proxy_config"]["raw_secret_redacted"])
+        self.assertIn("Secret state:", payload["message"])
+        self.assertNotIn(raw_key, combined_output)
+        self.assertNotIn(raw_key, agent_proxy_text)
+        self.assertNotIn(raw_key, profile_text)
+
+    def test_model_fallback_configure_dry_run_redacts_api_key_and_formats_output(self):
+        self.server.ALLOW_MUTATIONS = False
+        raw_key = "unit-test-secret-value"
+
+        response = asyncio.run(
+            self.server.continue_model_fallback_configure(
+                FakeRequest(
+                    {
+                        "provider": "azure",
+                        "model": "azure-deployment",
+                        "apiBase": "https://example-resource.openai.azure.com",
+                        "apiType": "azure",
+                        "apiVersion": "2024-10-21",
+                        "apiKeySecret": "AZURE_OPENAI_API_KEY",
+                        "apiKey": raw_key,
+                    }
+                )
+            )
+        )
+        payload = self.response_json(response)
+        combined_output = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual("dry_run", payload["status"])
+        self.assertIn("Status: dry_run", payload["message"])
+        self.assertIn("Config file: .codebase-tooling-mcp/agent-proxy.local.toml", payload["message"])
+        self.assertIn("Secret state:", payload["message"])
+        self.assertIn("[agent_proxy]", payload["files"][".codebase-tooling-mcp/agent-proxy.local.toml"])
+        self.assertIn('${{ secrets.AZURE_OPENAI_API_KEY }}', payload["files"][".codebase-tooling-mcp/agent-proxy.local.toml"])
+        self.assertNotIn(raw_key, combined_output)
+        self.assertFalse((self.repo_path / ".continue/.env").exists())
