@@ -149,7 +149,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
     def provider_secret_value(self):
         return "".join(["unit-test", "-provider", "-credential"])
 
-    def test_agent_proxy_loads_runtime_yaml_routing_config(self):
+    def test_agent_proxy_loads_provider_style_runtime_yaml_routing_config(self):
         self.write_agent_proxy_config(
             "agent_proxy:\n"
             "  enabled: true\n"
@@ -182,10 +182,8 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "  allow_online: false\n"
             "  provider: model-fallback\n"
             "  model: model-fallback\n"
-            "  apiBase: \"\"\n"
-            "  apiType: \"\"\n"
-            "  apiVersion: \"\"\n"
-            "  apiKey: \"\"\n"
+            "  apiBase: ''\n"
+            "  apiKey: ''\n"
         )
 
         config, reason = self.server._continue_model_config_payload({})
@@ -201,7 +199,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual("local", route["backend"])
         self.assertEqual("local_preferred", route["reason"])
 
-    def test_agent_proxy_env_vars_override_runtime_yaml(self):
+    def test_agent_proxy_env_vars_override_provider_style_runtime_yaml(self):
         self.write_agent_proxy_config(
             "agent_proxy:\n"
             "  enabled: true\n"
