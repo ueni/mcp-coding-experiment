@@ -128,9 +128,14 @@ class ToolCatalogIntegrityTests(ServerToolsTestBase):
 
         lint = lint_tool_catalog(catalog)
         finding_types = {finding["type"] for finding in lint["findings"]}
+        report = integrity_report(baseline=catalog, current=catalog)
 
         self.assertIn("public_discovery_mismatch", finding_types)
         self.assertIn("public_docs_mismatch", finding_types)
+        self.assertEqual(
+            report["drift"]["public_discovery_docs_mismatch"]["status"],
+            "advisory_findings",
+        )
 
     def test_prompt_templates_redact_dynamic_argument_values(self):
         catalog = self.server._current_tool_catalog_baseline()
