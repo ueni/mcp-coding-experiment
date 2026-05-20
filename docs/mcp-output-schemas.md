@@ -25,6 +25,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `release_readiness`
 - `tool_catalog_integrity`
 - `dependency_security_report`
+- `ci_workflow_security_report`
 - `governance_report`
 - `self_optimization_report`
 - `artifact_provenance`
@@ -125,6 +126,8 @@ Example client response excerpt for `governance_report(export=true)`:
 
 `dependency_security_report(export=true)` writes a JSON dependency security report and, by default, a CycloneDX-compatible SBOM JSON artifact under `.codebase-tooling-mcp/reports/`; both use `artifact_resource_link.v1` links and local provenance sidecars. The report status is one of `clean`, `vulnerable`, `skipped`, `stale-cache`, `network-disabled`, or `scanner-unavailable`, so clients can distinguish "not checked" from "no vulnerabilities matched".
 
+`ci_workflow_security_report(export=true)` writes JSON and Markdown GitHub Actions posture artifacts under `.codebase-tooling-mcp/reports/`. Its status is one of `clean`, `warnings`, `findings`, `parse-error`, or `no-workflows`; evidence is repository-relative and redacts secret names/values plus host absolute paths.
+
 `tool_catalog_integrity()` compares live public MCP tool, prompt, resource/template, and discovery metadata with the checked-in `source/tool_catalog_baseline.json` digests and returns compact baseline/current digest summaries, surface-separated added/removed/changed metadata diffs, and advisory metadata-lint findings. It only covers public MCP metadata, prompt templates with synthetic arguments redacted, annotations, output contracts, resource URI metadata, and documentation references; it never embeds repository contents, resource payloads, host absolute paths, tokens, raw dynamic prompt arguments, or runtime secrets.
 
 `mutation_step_guard()` is a read-only final checkpoint before write/delete/git/workspace-transaction steps. It summarizes planned mutating tool/mode, target files, expected diff shape, rollback/snapshot evidence, selected tests or impact-gate status, recent invariant-audit status, and freshness metadata, then returns a deterministic decision such as `allow`, `needs_clarification`, `needs_snapshot`, `needs_fresh_context`, `needs_tests`, `needs_human_approval`, or `deny`. It never executes the planned mutation.
@@ -170,7 +173,8 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
 | `tool_catalog_integrity` | `schema`, `ok`, `status`, `baseline`, `current`, `drift`, `lint`, `security` | `read_only`, per-tool/prompt/resource/discovery digest lists, bounded surface-separated metadata diffs, advisory lint finding details |
 | `dependency_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `components`, `vulnerabilities`, `advisory`, `gate`, `exports`, `resource_links` | `inputs`, skipped/unresolved details, warnings, local provenance sidecars, and SBOM export metadata |
-| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `tool_catalog_integrity`, aggregate `untrusted_content_signals`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
+| `ci_workflow_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `findings`, `workflows`, `exports` | findings by severity, suppressions, action-use classifications, resource links, and redacted evidence |
+| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `tool_catalog_integrity`, `ci_workflow_security`, aggregate `untrusted_content_signals`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
 | `self_optimization_report` | `schema`, `report_id`, `generated_at`, `window`, `summary`, `metrics`, `optimization_candidates`, `security` | `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `patch_survivorship`, `_meta` |
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |

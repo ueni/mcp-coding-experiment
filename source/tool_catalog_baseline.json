@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 31,
+  "tool_count": 32,
   "tools": [
     {
       "digest": "sha256:dfaa3c9983cb8279b2f3e5494e332605321a2b3ddd3064bbcfd26f29967957c4",
@@ -657,6 +657,422 @@
         }
       },
       "name": "artifact_provenance"
+    },
+    {
+      "digest": "sha256:5e447b905c20908e9604b129789b845af38c718c5d404bdd3c70f49fea47ef90",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Build an offline, read-only GitHub Actions workflow security posture report.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              },
+              "path": {
+                "default": ".",
+                "title": "Path",
+                "type": "string"
+              }
+            },
+            "title": "ci_workflow_security_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "ci_workflow_security_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "action_uses": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "config": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "findings_by_severity": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "ci_workflow_security_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "clean",
+                  "warnings",
+                  "findings",
+                  "parse-error",
+                  "no-workflows"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "suppressed_findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "suppressions": {
+                "type": "object"
+              },
+              "workflows": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "workflows",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "findings_by_severity",
+            "suppressed_findings",
+            "suppressions",
+            "config",
+            "action_uses",
+            "security",
+            "resource_links",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "action_uses": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "config": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "findings_by_severity": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "ci_workflow_security_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "clean",
+                  "warnings",
+                  "findings",
+                  "parse-error",
+                  "no-workflows"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "suppressed_findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "suppressions": {
+                "type": "object"
+              },
+              "workflows": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "workflows",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "status",
+            "ok",
+            "summary",
+            "findings",
+            "workflows",
+            "exports"
+          ],
+          "tool": "ci_workflow_security_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "ci_workflow_security_report"
+        }
+      },
+      "name": "ci_workflow_security_report"
     },
     {
       "digest": "sha256:13f4d0f66ce4cc74847828b8aa7bffe71f19286485a6c58cf6e697e31d666dad",
@@ -1762,7 +2178,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:4b48e7fe4711ae31ec0790c9dfd1569afe03f5fb33f7c83f107a16243bf7b766",
+      "digest": "sha256:ed4374ba8470ae325c7844ac7e32dea05c4f9edb03be9790e267770a67e63a02",
       "metadata": {
         "documentation": [
           {
@@ -1824,6 +2240,9 @@
                 "type": "object"
               },
               "audit": {
+                "type": "object"
+              },
+              "ci_workflow_security": {
                 "type": "object"
               },
               "exports": {
@@ -1986,6 +2405,7 @@
             "security",
             "workflow_diagnostics",
             "tool_catalog_integrity",
+            "ci_workflow_security",
             "untrusted_content_signals",
             "lineage",
             "provenance",
@@ -1999,6 +2419,9 @@
                 "type": "object"
               },
               "audit": {
+                "type": "object"
+              },
+              "ci_workflow_security": {
                 "type": "object"
               },
               "exports": {
@@ -4899,7 +5322,7 @@
       "name": "read_snippet"
     },
     {
-      "digest": "sha256:28135fc490f527d9291e0e5879acfabd9a2ed4c729423763682791ea8d579f47",
+      "digest": "sha256:a1cd38f78792d1b3309fd10c5647faadae54f3f15ec6da1b20befd6ca678e06c",
       "metadata": {
         "documentation": [
           {
@@ -4926,6 +5349,11 @@
                 "default": "HEAD",
                 "title": "Head Ref",
                 "type": "string"
+              },
+              "run_ci_workflow_security_check": {
+                "default": true,
+                "title": "Run Ci Workflow Security Check",
+                "type": "boolean"
               },
               "run_dependency_security_check": {
                 "default": true,
@@ -9810,5 +10238,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:8b52486ad4941cdd0a237ca05234c40311561b85385d99641f6047e6df0bca6f"
+  "whole_catalog_digest": "sha256:3fe2c3806df2d2b99688f42d12ae724fef957a0080dca78b9b7930285184e413"
 }

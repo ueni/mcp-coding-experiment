@@ -130,7 +130,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -231,9 +231,11 @@ Restore:
 - Missing header detection.
 - Optional remediation and report generation.
 
-### 8.1.1 Dependency Security Governance
+### 8.1.1 Dependency and CI Workflow Security Governance
 
 `dependency_security_report` adds a read-only dependency inventory and vulnerability-evidence slice alongside `license_monitor`. It consumes repository-local requirements, optional advisory fixtures, or externally generated scanner JSON, then exports JSON and CycloneDX-compatible SBOM artifacts with provenance sidecars. Offline and stale-advisory states are explicit (`network-disabled`, `scanner-unavailable`, `stale-cache`) so release/governance summaries do not mistake "not checked" for "clean". Blocking is opt-in through `MCP_DEPENDENCY_SECURITY_BLOCKING` or the tool call, keeping the first slice informational by default.
+
+`ci_workflow_security_report` adds an offline GitHub Actions posture slice for `.github/workflows/*.yml`, including token-permission posture, mutable action refs, risky triggers, self-hosted runner and Docker/privileged usage, secret/publish signals, artifact-transfer paths, and rationale-plus-expiry suppressions. Evidence is repository-relative and redacted so release/governance summaries can distinguish missing workflow evidence, parser failure, advisory findings, and clean static checks.
 
 ### 8.2 Release Governance
 
@@ -243,6 +245,7 @@ Restore:
 - Documentation sync.
 - Security findings.
 - Dependency-security status from `dependency_security_report`, including vulnerable, stale, skipped, and network-disabled advisory states.
+- CI workflow posture from `ci_workflow_security_report`, including missing workflow evidence, parser failures, and active high-risk findings.
 - Risk score thresholds.
 - Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
 - First-slice replay lineage for `governance_report` via redacted `workflow_lineage.v1` manifests and read-only `workflow_lineage(mode="verify")` drift reports.

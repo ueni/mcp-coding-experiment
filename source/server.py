@@ -240,6 +240,8 @@ REUSE_SPDX_REPORT = Path(".codebase-tooling-mcp/reports/REUSE.spdx")
 REUSE_LINT_REPORT = Path(".codebase-tooling-mcp/reports/REUSE_LINT.txt")
 DEPENDENCY_SECURITY_REPORT_PREFIX = "dependency-security-report"
 DEPENDENCY_SECURITY_REPORT_SCHEMA = "dependency_security_report.v1"
+CI_WORKFLOW_SECURITY_REPORT_PREFIX = "ci-workflow-security-report"
+CI_WORKFLOW_SECURITY_REPORT_SCHEMA = "ci_workflow_security_report.v1"
 DEPENDENCY_SECURITY_SBOM_SCHEMA = "dependency_security_sbom.cyclonedx-lite.v1"
 DEPENDENCY_SECURITY_BLOCKING = os.getenv(
     "MCP_DEPENDENCY_SECURITY_BLOCKING", "false"
@@ -365,6 +367,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
     "dependency_security_report": {"categories": ["read-only"]},
+    "ci_workflow_security_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "self_optimization_report": {"categories": ["read-only"]},
     "artifact_provenance": {"categories": ["read-only"]},
@@ -7817,6 +7820,654 @@ def _latest_dependency_security_report(max_age_hours: int = 24) -> dict[str, Any
             latest = entry
     return latest or {"present": False, "required": False, "max_age_hours": max_age_hours}
 
+CI_WORKFLOW_SECRET_CONTEXT_RE = re.compile(r"\bsecrets\.[A-Za-z_][A-Za-z0-9_]*")
+CI_WORKFLOW_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+CI_WORKFLOW_PUBLISH_RE = re.compile(r"\b(?:docker\s+(?:login|push|buildx)|twine\s+upload|npm\s+publish|gh\s+release|pypi|publish|deploy|release)\b", re.IGNORECASE)
+CI_WORKFLOW_RISKY_TRIGGER_EVENTS = {"pull_request_target": "high", "workflow_run": "medium"}
+CI_WORKFLOW_WRITE_PERMISSION_SCOPES = {"actions", "checks", "contents", "deployments", "discussions", "issues", "packages", "pages", "pull-requests", "repository-projects", "security-events", "statuses"}
+
+
+def _ci_workflow_security_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
+
+def _ci_workflow_rel_path(path: Path) -> str:
+    return str(path.resolve().relative_to(REPO_PATH))
+
+
+def _ci_workflow_redact_evidence(text: str) -> str:
+    redacted = CI_WORKFLOW_SECRET_CONTEXT_RE.sub("secrets.<redacted>", text)
+    redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", redacted)
+    redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute_path>", redacted)
+    return _trim_text(redacted.strip(), max_chars=260)
+
+
+def _ci_workflow_line_excerpt(lines: list[str], line: int) -> str:
+    if line <= 0 or line > len(lines):
+        return ""
+    return _ci_workflow_redact_evidence(lines[line - 1])
+
+
+def _ci_workflow_find_line(lines: list[str], *needles: str) -> int:
+    lowered = [needle.lower() for needle in needles if needle]
+    if not lowered:
+        return 0
+    for index, line in enumerate(lines, start=1):
+        text = line.lower()
+        if all(needle in text for needle in lowered):
+            return index
+    return 0
+
+
+def _ci_workflow_get(mapping: dict[Any, Any], key: str, default: Any = None) -> Any:
+    if key in mapping:
+        return mapping[key]
+    # PyYAML still follows YAML 1.1 booleans in some environments, so `on:` can parse as True.
+    if key == "on" and True in mapping:
+        return mapping[True]
+    return default
+
+
+def _ci_workflow_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _ci_workflow_events(on_value: Any) -> set[str]:
+    if isinstance(on_value, str):
+        return {on_value}
+    if isinstance(on_value, list):
+        return {str(item) for item in on_value if str(item)}
+    if isinstance(on_value, dict):
+        return {str(key) for key in on_value.keys() if str(key)}
+    return set()
+
+
+def _ci_workflow_job_map(workflow: dict[str, Any]) -> dict[str, Any]:
+    jobs = workflow.get("jobs", {})
+    return jobs if isinstance(jobs, dict) else {}
+
+
+def _ci_workflow_permissions_findings(
+    *,
+    workflow: dict[str, Any],
+    rel_path: str,
+    lines: list[str],
+    add_finding: Callable[..., None],
+) -> None:
+    top_permissions = workflow.get("permissions")
+    if top_permissions is None:
+        add_finding(
+            "missing-top-level-permissions",
+            "medium",
+            "No top-level permissions block",
+            "Workflow omits top-level `permissions:`, so default GITHUB_TOKEN scope may be broader than intended.",
+            rel_path,
+            _ci_workflow_find_line(lines, "jobs:") or 1,
+            confidence="high",
+            tags=["permissions", "github-token"],
+        )
+    elif isinstance(top_permissions, str):
+        if top_permissions in {"write-all", "read-all"}:
+            add_finding(
+                "broad-token-permissions",
+                "high" if top_permissions == "write-all" else "low",
+                f"Top-level permissions use `{top_permissions}`",
+                "Prefer explicit least-privilege token scopes instead of broad permission aliases.",
+                rel_path,
+                _ci_workflow_find_line(lines, "permissions:") or 1,
+                confidence="high",
+                tags=["permissions", "github-token"],
+            )
+    elif isinstance(top_permissions, dict):
+        for scope, value in top_permissions.items():
+            scope_s = str(scope)
+            value_s = str(value).lower()
+            if value_s == "write" and scope_s in CI_WORKFLOW_WRITE_PERMISSION_SCOPES:
+                add_finding(
+                    "elevated-token-permission",
+                    "medium",
+                    f"Top-level `{scope_s}: write` permission",
+                    "Write-scoped GITHUB_TOKEN permissions should be justified and constrained to jobs that need them.",
+                    rel_path,
+                    _ci_workflow_find_line(lines, f"{scope_s}:", "write") or _ci_workflow_find_line(lines, "permissions:"),
+                    confidence="medium",
+                    tags=["permissions", "github-token"],
+                )
+            if scope_s == "id-token" and value_s == "write":
+                add_finding(
+                    "oidc-id-token-enabled",
+                    "low",
+                    "OIDC id-token permission enabled",
+                    "OIDC token minting is powerful; verify trust policy, audience, and environment gates.",
+                    rel_path,
+                    _ci_workflow_find_line(lines, "id-token:", "write") or _ci_workflow_find_line(lines, "permissions:"),
+                    confidence="medium",
+                    tags=["oidc", "permissions"],
+                )
+    for job_id, job in _ci_workflow_job_map(workflow).items():
+        if not isinstance(job, dict):
+            continue
+        permissions = job.get("permissions")
+        if isinstance(permissions, str) and permissions == "write-all":
+            add_finding(
+                "broad-token-permissions",
+                "high",
+                f"Job `{job_id}` uses `permissions: write-all`",
+                "Prefer job-local least-privilege scopes instead of write-all.",
+                rel_path,
+                _ci_workflow_find_line(lines, str(job_id), "permissions") or _ci_workflow_find_line(lines, "write-all"),
+                confidence="high",
+                tags=["permissions", "github-token"],
+            )
+        if isinstance(permissions, dict):
+            for scope, value in permissions.items():
+                if str(value).lower() == "write" and str(scope) in CI_WORKFLOW_WRITE_PERMISSION_SCOPES:
+                    add_finding(
+                        "elevated-token-permission",
+                        "medium",
+                        f"Job `{job_id}` requests `{scope}: write`",
+                        "Write-scoped job permissions should be tied to a specific publish/release need.",
+                        rel_path,
+                        _ci_workflow_find_line(lines, str(scope), "write") or _ci_workflow_find_line(lines, str(job_id)),
+                        confidence="medium",
+                        tags=["permissions", "github-token", f"job:{job_id}"],
+                    )
+
+
+def _ci_workflow_classify_action_ref(uses_value: str) -> dict[str, Any]:
+    uses = uses_value.strip()
+    if uses.startswith("./") or uses.startswith("../"):
+        return {"uses": uses, "kind": "local", "ref": "", "immutable": True, "remote": False}
+    if uses.startswith("docker://"):
+        return {"uses": uses, "kind": "docker", "ref": "", "immutable": False, "remote": True}
+    if "@" not in uses:
+        return {"uses": uses, "kind": "missing-ref", "ref": "", "immutable": False, "remote": True}
+    action, ref = uses.rsplit("@", 1)
+    if CI_WORKFLOW_FULL_SHA_RE.match(ref):
+        kind = "full-sha"
+        immutable = True
+    elif re.match(r"^v?\d+(?:\.\d+)*(?:[-+][A-Za-z0-9_.-]+)?$", ref):
+        kind = "tag"
+        immutable = False
+    else:
+        kind = "branch"
+        immutable = False
+    return {"uses": uses, "action": action, "kind": kind, "ref": ref, "immutable": immutable, "remote": True}
+
+
+def _ci_workflow_load_config() -> dict[str, Any]:
+    candidates = [
+        ".github/ci-workflow-security.yml",
+        ".github/ci-workflow-security.yaml",
+        ".codebase-tooling-mcp/ci-workflow-security.yml",
+        ".codebase-tooling-mcp/ci-workflow-security.yaml",
+    ]
+    for rel in candidates:
+        path = _resolve_repo_path(rel)
+        if not path.exists():
+            continue
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) if yaml is not None else {}
+        except Exception as exc:
+            return {"path": rel, "loaded": False, "error": type(exc).__name__, "suppressions": [], "action_ref_allowlist": []}
+        if not isinstance(payload, dict):
+            payload = {}
+        allowlist = payload.get("action_ref_allowlist", payload.get("allowlist", []))
+        if not isinstance(allowlist, list):
+            allowlist = []
+        suppressions = payload.get("suppressions", [])
+        if not isinstance(suppressions, list):
+            suppressions = []
+        return {
+            "path": rel,
+            "loaded": True,
+            "action_ref_allowlist": [str(item) for item in allowlist],
+            "suppressions": [item for item in suppressions if isinstance(item, dict)],
+        }
+    return {"path": "", "loaded": False, "action_ref_allowlist": [], "suppressions": []}
+
+
+def _ci_workflow_suppression_status(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
+    rule_id = str(raw.get("id") or raw.get("rule_id") or "").strip()
+    rationale = str(raw.get("rationale") or raw.get("reason") or "").strip()
+    expires_raw = str(raw.get("expires") or raw.get("expires_at") or "").strip()
+    expires = _parse_iso_datetime(expires_raw) if expires_raw else None
+    if expires is not None:
+        # Date-only values parse at midnight; keep them valid through that date in UTC.
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", expires_raw):
+            expires = expires + timedelta(days=1) - timedelta(microseconds=1)
+    valid = bool(rule_id and rationale and expires is not None and expires >= now)
+    reason = ""
+    if not rule_id:
+        reason = "missing_rule_id"
+    elif not rationale:
+        reason = "missing_rationale"
+    elif expires is None:
+        reason = "missing_or_invalid_expiry"
+    elif expires < now:
+        reason = "expired"
+    return {
+        "id": rule_id,
+        "path": str(raw.get("path") or ""),
+        "line": int(raw.get("line") or 0) if str(raw.get("line") or "").isdigit() else 0,
+        "contains": str(raw.get("contains") or ""),
+        "rationale": rationale,
+        "expires": expires_raw,
+        "valid": valid,
+        "invalid_reason": reason,
+    }
+
+
+def _ci_workflow_suppression_matches(finding: dict[str, Any], suppression: dict[str, Any]) -> bool:
+    if not suppression.get("valid") or suppression.get("id") != finding.get("rule_id"):
+        return False
+    path = str(suppression.get("path") or "")
+    if path and path != finding.get("path"):
+        return False
+    line = int(suppression.get("line") or 0)
+    if line and line != int(finding.get("line") or 0):
+        return False
+    contains = str(suppression.get("contains") or "")
+    if contains and contains not in json.dumps(finding.get("evidence", {}), sort_keys=True):
+        return False
+    return True
+
+
+def _ci_workflow_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    lines = [
+        f"# CI workflow security report {report.get('report_id', '')}",
+        "",
+        f"- Schema: `{report.get('schema', '')}`",
+        f"- Generated at: `{report.get('generated_at', '')}`",
+        f"- Status: `{report.get('status', '')}`",
+        f"- OK: {report.get('ok', False)}",
+        f"- Workflows checked: {summary.get('checked_workflow_count', 0)}",
+        f"- Active findings: {summary.get('finding_count', 0)}",
+        f"- Suppressed findings: {summary.get('suppressed_finding_count', 0)}",
+        "",
+        "## Findings by severity",
+    ]
+    by_severity = summary.get("by_severity", {}) if isinstance(summary.get("by_severity"), dict) else {}
+    for severity in ("critical", "high", "medium", "low", "info"):
+        lines.append(f"- `{severity}`: {by_severity.get(severity, 0)}")
+    lines.extend(["", "## Active findings"])
+    findings = report.get("findings", []) if isinstance(report.get("findings"), list) else []
+    if findings:
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            lines.append(f"- `{finding.get('severity')}` `{finding.get('rule_id')}` {finding.get('path')}:{finding.get('line')} - {finding.get('message')}")
+    else:
+        lines.append("- None")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_ci_workflow_security_report_exports(report: dict[str, Any]) -> dict[str, Any]:
+    paths = _ci_workflow_security_report_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    exports = {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+    report["exports"] = exports
+    report["resource_links"] = [
+        _artifact_resource_link(
+            title="CI workflow security report JSON",
+            rel_path=exports["json"],
+            mime_type="application/json",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="Workflow security report contains repository-relative workflow paths and redacted evidence only; workflow files are not modified.",
+        ),
+        _artifact_resource_link(
+            title="CI workflow security report Markdown",
+            rel_path=exports["markdown"],
+            mime_type="text/markdown",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="Markdown export summarizes static workflow findings with redacted evidence.",
+        ),
+    ]
+    report["_meta"] = _artifact_meta(report["resource_links"])
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(_ci_workflow_markdown(report), encoding="utf-8")
+    return exports
+
+
+def _ci_workflow_security_report_impl(path: str = ".", export: bool = False) -> dict[str, Any]:
+    _ensure_repo_path_exists()
+    root = _resolve_repo_path(path)
+    workflows_dir = root if root.name == "workflows" else root / ".github" / "workflows"
+    generated_at = _now_iso()
+    report_id = f"{CI_WORKFLOW_SECURITY_REPORT_PREFIX}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    config = _ci_workflow_load_config()
+    now = datetime.now(timezone.utc)
+    suppression_rows = [_ci_workflow_suppression_status(row, now) for row in config.get("suppressions", [])]
+    action_allowlist = set(str(item) for item in config.get("action_ref_allowlist", []))
+    workflows: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    action_uses: list[dict[str, Any]] = []
+    parse_error = False
+
+    def add_finding(
+        rule_id: str,
+        severity: str,
+        title: str,
+        message: str,
+        rel_path: str,
+        line: int,
+        *,
+        confidence: str = "medium",
+        tags: list[str] | None = None,
+        evidence_extra: dict[str, Any] | None = None,
+    ) -> None:
+        source_lines: list[str] = []
+        try:
+            source_lines = _resolve_repo_path(rel_path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            source_lines = []
+        evidence = {"path": rel_path, "line": line, "excerpt": _ci_workflow_line_excerpt(source_lines, line)}
+        if evidence_extra:
+            evidence.update(evidence_extra)
+        findings.append(
+            {
+                "id": f"{rule_id}:{hashlib.sha256(f'{rel_path}:{line}:{message}'.encode('utf-8')).hexdigest()[:12]}",
+                "rule_id": rule_id,
+                "severity": severity,
+                "confidence": confidence,
+                "title": title,
+                "message": message,
+                "path": rel_path,
+                "line": line,
+                "evidence": evidence,
+                "tags": sorted(set(tags or [])),
+            }
+        )
+
+    workflow_paths = sorted(workflows_dir.glob("*.yml")) + sorted(workflows_dir.glob("*.yaml")) if workflows_dir.exists() else []
+    if not workflow_paths:
+        findings.append(
+            {
+                "id": "no-github-actions-workflows",
+                "rule_id": "no-github-actions-workflows",
+                "severity": "info",
+                "confidence": "high",
+                "title": "No GitHub Actions workflows found",
+                "message": "No repository-local .github/workflows YAML files were found; CI workflow posture is unknown rather than clean.",
+                "path": str(workflows_dir.relative_to(REPO_PATH)) if workflows_dir.exists() else ".github/workflows",
+                "line": 0,
+                "evidence": {"path": ".github/workflows", "line": 0, "excerpt": ""},
+                "tags": ["evidence", "not-checked"],
+            }
+        )
+
+    for workflow_path in workflow_paths:
+        rel_path = _ci_workflow_rel_path(workflow_path)
+        lines = workflow_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        try:
+            if yaml is None:
+                raise RuntimeError("PyYAML unavailable")
+            payload = yaml.safe_load("\n".join(lines) + "\n")
+        except Exception as exc:
+            parse_error = True
+            workflows.append({"path": rel_path, "parsed": False, "error": type(exc).__name__, "finding_count": 1})
+            add_finding(
+                "malformed-workflow-yaml",
+                "high",
+                "Workflow YAML could not be parsed",
+                f"Workflow parser failed with {type(exc).__name__}; workflow security posture is unknown.",
+                rel_path,
+                getattr(getattr(exc, "problem_mark", None), "line", 0) + 1 if getattr(exc, "problem_mark", None) else 1,
+                confidence="high",
+                tags=["parse", "evidence"],
+            )
+            continue
+        if not isinstance(payload, dict):
+            workflows.append({"path": rel_path, "parsed": False, "error": "not-a-mapping", "finding_count": 1})
+            add_finding(
+                "malformed-workflow-yaml",
+                "high",
+                "Workflow YAML is not a mapping",
+                "Workflow file must parse to a YAML mapping before posture checks can run.",
+                rel_path,
+                1,
+                confidence="high",
+                tags=["parse", "evidence"],
+            )
+            parse_error = True
+            continue
+        events = sorted(_ci_workflow_events(_ci_workflow_get(payload, "on")))
+        jobs = _ci_workflow_job_map(payload)
+        workflow_record = {
+            "path": rel_path,
+            "name": str(payload.get("name") or workflow_path.stem),
+            "parsed": True,
+            "events": events,
+            "job_count": len(jobs),
+            "has_top_level_permissions": payload.get("permissions") is not None,
+        }
+        workflows.append(workflow_record)
+        _ci_workflow_permissions_findings(workflow=payload, rel_path=rel_path, lines=lines, add_finding=add_finding)
+        for event in events:
+            severity = CI_WORKFLOW_RISKY_TRIGGER_EVENTS.get(event)
+            if severity:
+                add_finding(
+                    "risky-trigger-event",
+                    severity,
+                    f"Risky trigger `{event}`",
+                    "This trigger can cross trust boundaries; verify checkout, token, and secret exposure controls.",
+                    rel_path,
+                    _ci_workflow_find_line(lines, event) or _ci_workflow_find_line(lines, "on:"),
+                    confidence="medium",
+                    tags=["trigger", event],
+                )
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            runs_on_values = _ci_workflow_list(job.get("runs-on"))
+            if any("self-hosted" in str(item).lower() for item in runs_on_values):
+                add_finding(
+                    "self-hosted-runner",
+                    "high",
+                    f"Job `{job_id}` uses a self-hosted runner",
+                    "Self-hosted runners need explicit trust-boundary controls for forked code, secrets, and cleanup.",
+                    rel_path,
+                    _ci_workflow_find_line(lines, "runs-on", "self-hosted") or _ci_workflow_find_line(lines, str(job_id)),
+                    confidence="high",
+                    tags=["runner", f"job:{job_id}"],
+                )
+            container = job.get("container")
+            if isinstance(container, dict) and "--privileged" in str(container.get("options", "")):
+                add_finding(
+                    "privileged-container-usage",
+                    "high",
+                    f"Job `{job_id}` uses privileged container options",
+                    "Privileged containers expand host/container escape impact and should be isolated and justified.",
+                    rel_path,
+                    _ci_workflow_find_line(lines, "--privileged") or _ci_workflow_find_line(lines, str(job_id)),
+                    confidence="high",
+                    tags=["container", "privileged", f"job:{job_id}"],
+                )
+            steps = job.get("steps", []) if isinstance(job.get("steps"), list) else []
+            job_if = str(job.get("if") or "")
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                step_name = str(step.get("name") or step.get("id") or "")
+                step_if = str(step.get("if") or "")
+                uses = str(step.get("uses") or "").strip()
+                run = str(step.get("run") or "")
+                with_block = step.get("with", {}) if isinstance(step.get("with"), dict) else {}
+                step_text = "\n".join([step_name, uses, run, json.dumps(with_block, sort_keys=True, default=str), step_if])
+                line = _ci_workflow_find_line(lines, uses) if uses else _ci_workflow_find_line(lines, step_name) or _ci_workflow_find_line(lines, run.splitlines()[0] if run else "")
+                if uses:
+                    classification = _ci_workflow_classify_action_ref(uses)
+                    classification.update({"path": rel_path, "line": line, "job": str(job_id)})
+                    action_uses.append(classification)
+                    allowed = uses in action_allowlist or str(classification.get("action", "")) in action_allowlist
+                    if classification.get("remote") and not classification.get("immutable") and not allowed:
+                        severity = "high" if classification.get("kind") in {"missing-ref", "docker"} else "medium"
+                        add_finding(
+                            "mutable-third-party-action-ref",
+                            severity,
+                            f"Mutable action reference `{uses}`",
+                            "Pin remote actions to a full-length commit SHA or document a time-bound exception.",
+                            rel_path,
+                            line or 1,
+                            confidence="high",
+                            tags=["action-ref", str(classification.get("kind", "unknown")), f"job:{job_id}"],
+                            evidence_extra={"uses": uses, "classification": classification.get("kind", "unknown")},
+                        )
+                    if uses.lower().startswith("actions/upload-artifact") or uses.lower().startswith("actions/download-artifact"):
+                        add_finding(
+                            "artifact-transfer-action",
+                            "low",
+                            f"Artifact transfer step `{uses}`",
+                            "Review artifact paths, retention, and consumers; artifacts can move build outputs between trust contexts.",
+                            rel_path,
+                            line or 1,
+                            confidence="medium",
+                            tags=["artifact", f"job:{job_id}"],
+                            evidence_extra={"artifact_path": _ci_workflow_redact_evidence(str(with_block.get("path", "")))},
+                        )
+                    if "docker/setup-buildx-action" in uses.lower() or "docker/build-push-action" in uses.lower():
+                        add_finding(
+                            "docker-buildx-usage",
+                            "medium",
+                            f"Docker Buildx action `{uses}`",
+                            "Docker build/publish steps should be isolated and gated before registry credentials are available.",
+                            rel_path,
+                            line or 1,
+                            confidence="medium",
+                            tags=["docker", f"job:{job_id}"],
+                        )
+                if "--privileged" in run or "docker.sock" in run or "/var/run/docker.sock" in run:
+                    add_finding(
+                        "privileged-container-usage",
+                        "high",
+                        f"Privileged Docker/container command in job `{job_id}`",
+                        "Privileged Docker flags or Docker socket access can grant host-level control in CI.",
+                        rel_path,
+                        line or _ci_workflow_find_line(lines, "--privileged") or 1,
+                        confidence="high",
+                        tags=["docker", "privileged", f"job:{job_id}"],
+                    )
+                if CI_WORKFLOW_SECRET_CONTEXT_RE.search(step_text):
+                    add_finding(
+                        "secret-reference",
+                        "medium",
+                        f"Step in job `{job_id}` references secrets",
+                        "Secret-bearing steps should be gated to trusted refs/environments; evidence redacts secret names.",
+                        rel_path,
+                        line or _ci_workflow_find_line(lines, "secrets.") or 1,
+                        confidence="high",
+                        tags=["secrets", f"job:{job_id}"],
+                    )
+                is_publish = bool(CI_WORKFLOW_PUBLISH_RE.search(step_text) or re.search(r"publish|release|deploy", step_name, re.IGNORECASE))
+                gate_text = f"{job_if}\n{step_if}".lower()
+                strong_gate = any(token in gate_text for token in ("github.ref", "github.ref_name", "environment", "protected"))
+                if is_publish and CI_WORKFLOW_SECRET_CONTEXT_RE.search(step_text) and not strong_gate:
+                    add_finding(
+                        "weak-publish-step-gate",
+                        "high",
+                        f"Publish-like secret-bearing step in job `{job_id}` lacks an obvious trusted-ref gate",
+                        "Static analysis did not find a branch/tag/environment gate around a secret-bearing publish step.",
+                        rel_path,
+                        line or _ci_workflow_find_line(lines, "publish") or _ci_workflow_find_line(lines, "docker login") or 1,
+                        confidence="medium",
+                        tags=["publish", "secrets", f"job:{job_id}"],
+                    )
+                if "pull_request" in events and re.search(r"github\.(?:event\.pull_request|head_ref|event\.issue)", run):
+                    add_finding(
+                        "untrusted-pr-context-in-shell",
+                        "medium",
+                        f"Job `{job_id}` uses pull request context in shell",
+                        "PR-controlled context in shell scripts can become injection-prone unless quoted and validated.",
+                        rel_path,
+                        line or 1,
+                        confidence="medium",
+                        tags=["trigger", "shell", f"job:{job_id}"],
+                    )
+    active_findings: list[dict[str, Any]] = []
+    suppressed_findings: list[dict[str, Any]] = []
+    for finding in findings:
+        match = next((row for row in suppression_rows if _ci_workflow_suppression_matches(finding, row)), None)
+        if match:
+            copied = dict(finding)
+            copied["suppression"] = {k: match.get(k) for k in ("id", "path", "line", "rationale", "expires")}
+            suppressed_findings.append(copied)
+        else:
+            active_findings.append(finding)
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    active_findings.sort(key=lambda row: (severity_order.get(str(row.get("severity")), 99), str(row.get("path", "")), int(row.get("line", 0) or 0), str(row.get("rule_id", ""))))
+    by_severity = {severity: 0 for severity in ("critical", "high", "medium", "low", "info")}
+    for finding in active_findings:
+        severity = str(finding.get("severity", "info"))
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+    if parse_error:
+        status = "parse-error"
+    elif not workflow_paths:
+        status = "no-workflows"
+    elif by_severity.get("critical", 0) or by_severity.get("high", 0) or by_severity.get("medium", 0):
+        status = "findings"
+    elif by_severity.get("low", 0) or by_severity.get("info", 0):
+        status = "warnings"
+    else:
+        status = "clean"
+    ok = status in {"clean", "no-workflows"}
+    summary = {
+        "checked_workflow_count": len([workflow for workflow in workflows if workflow.get("parsed")]),
+        "workflow_file_count": len(workflow_paths),
+        "finding_count": len(active_findings),
+        "suppressed_finding_count": len(suppressed_findings),
+        "by_severity": by_severity,
+        "secret_reference_count": len([f for f in active_findings if f.get("rule_id") == "secret-reference"]),
+        "action_use_count": len(action_uses),
+        "mutable_action_ref_count": len([a for a in action_uses if a.get("remote") and not a.get("immutable")]),
+    }
+    report: dict[str, Any] = {
+        "schema": CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "read_only": True,
+        "status": status,
+        "ok": ok,
+        "summary": summary,
+        "workflows": workflows,
+        "findings": active_findings,
+        "findings_by_severity": {severity: [f for f in active_findings if f.get("severity") == severity] for severity in by_severity},
+        "suppressed_findings": suppressed_findings,
+        "suppressions": {
+            "config_path": config.get("path", ""),
+            "configured_count": len(suppression_rows),
+            "valid_count": len([row for row in suppression_rows if row.get("valid")]),
+            "expired_count": len([row for row in suppression_rows if row.get("invalid_reason") == "expired"]),
+            "invalid_count": len([row for row in suppression_rows if not row.get("valid")]),
+            "entries": suppression_rows,
+        },
+        "config": {"path": config.get("path", ""), "loaded": bool(config.get("loaded", False)), "action_ref_allowlist_count": len(action_allowlist)},
+        "action_uses": action_uses,
+        "security": {
+            "offline": True,
+            "network_access": False,
+            "read_only": True,
+            "redaction": "secret names/values and host absolute paths are redacted in evidence excerpts",
+            "limitations": "Static workflow heuristics are advisory and do not prove a workflow is secure.",
+        },
+        "exports": {},
+    }
+    if export:
+        _write_ci_workflow_security_report_exports(report)
+    return report
+
 def _governance_markdown(report: dict[str, Any]) -> str:
     counts = report.get("audit", {}).get("counts", {}) if isinstance(report.get("audit"), dict) else {}
     lines = [
@@ -7889,6 +8540,21 @@ def _governance_markdown(report: dict[str, Any]) -> str:
                 f"- Status: `{dependency_security.get('status', 'absent')}`",
                 f"- Vulnerabilities: {dependency_security.get('vulnerability_count', 0)}",
                 f"- Advisory status: `{dependency_security.get('advisory_status', '')}`",
+            ]
+        )
+    ci_security = report.get("ci_workflow_security", {}) if isinstance(report.get("ci_workflow_security"), dict) else {}
+    if ci_security:
+        ci_summary = ci_security.get("summary", {}) if isinstance(ci_security.get("summary"), dict) else {}
+        by_severity = ci_summary.get("by_severity", {}) if isinstance(ci_summary.get("by_severity"), dict) else {}
+        lines.extend(
+            [
+                "",
+                "## CI workflow security",
+                f"- Status: `{ci_security.get('status', 'unknown')}`",
+                f"- OK: {ci_security.get('ok', False)}",
+                f"- Workflows checked: {ci_summary.get('checked_workflow_count', 0)}",
+                f"- Active findings: {ci_summary.get('finding_count', 0)}",
+                f"- High findings: {by_severity.get('high', 0)}",
             ]
         )
     snapshots = report.get("snapshots", {}) if isinstance(report.get("snapshots"), dict) else {}
@@ -8060,6 +8726,7 @@ def _governance_workflow_lineage_plan_inputs(
             "governance_report": "governance_report.v1",
             "workflow_diagnostics": "workflow_diagnostics.summary.v1",
             "artifact_provenance": PROVENANCE_SCHEMA,
+            "ci_workflow_security_report": CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
             "execution_mode": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
         },
     }
@@ -25739,6 +26406,7 @@ def _governance_report_impl(
         "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
+        "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),
         "snapshots": _governance_snapshot_references(),
         "security": {
@@ -26024,6 +26692,22 @@ def _dependency_security_report_impl(
             provenance_inputs=provenance_inputs,
         )
     return report
+
+
+@mcp.tool()
+def ci_workflow_security_report(
+    path: str = ".",
+    export: bool = False,
+) -> dict[str, Any]:
+    """Build an offline, read-only GitHub Actions workflow security posture report."""
+    arguments = {"path": path, "export": export}
+    with _otel_span(
+        "mcp.tool.ci_workflow_security_report",
+        _otel_tool_attributes("ci_workflow_security_report", arguments),
+    ) as span:
+        result = _ci_workflow_security_report_impl(path=path, export=export)
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 @mcp.tool()
@@ -26523,6 +27207,7 @@ def release_readiness(
     run_docs_check: bool = True,
     run_security_check: bool = True,
     run_dependency_security_check: bool = True,
+    run_ci_workflow_security_check: bool = True,
     run_license_check: bool = True,
     run_risk_check: bool = True,
     run_impact_check: bool = True,
@@ -26624,6 +27309,34 @@ def release_readiness(
         except Exception as exc:
             result["checks"]["dependency_security"] = {"ok": True, "status": "scanner-unavailable", "warning": True, "warning_reason": str(exc)}
 
+    if run_ci_workflow_security_check:
+        try:
+            ci_security = ci_workflow_security_report(export=False)
+            ci_summary = ci_security.get("summary", {}) if isinstance(ci_security.get("summary"), dict) else {}
+            by_severity = ci_summary.get("by_severity", {}) if isinstance(ci_summary.get("by_severity"), dict) else {}
+            ci_status = str(ci_security.get("status", "unknown"))
+            ci_warning = ci_status in {"no-workflows", "warnings"}
+            result["checks"]["ci_workflow_security"] = {
+                "ok": bool(ci_security.get("ok", False)),
+                "status": ci_status,
+                "checked_workflow_count": ci_summary.get("checked_workflow_count", 0),
+                "finding_count": ci_summary.get("finding_count", 0),
+                "high_count": by_severity.get("high", 0),
+                "medium_count": by_severity.get("medium", 0),
+                "suppressed_finding_count": ci_summary.get("suppressed_finding_count", 0),
+                "warning": ci_warning,
+                "warning_reason": "workflow evidence missing or advisory findings present" if ci_warning else "",
+            }
+            if not ci_security.get("ok", False):
+                result["ok"] = False
+        except Exception as exc:
+            result["checks"]["ci_workflow_security"] = {
+                "ok": False,
+                "status": "scanner-unavailable",
+                "error": str(exc),
+            }
+            result["ok"] = False
+
     if run_license_check:
         try:
             license_out = license_monitor(
@@ -26706,6 +27419,10 @@ def release_readiness(
                         "vulnerability_count",
                         "skipped_count",
                         "advisory_status",
+                        "checked_workflow_count",
+                        "high_count",
+                        "medium_count",
+                        "suppressed_finding_count",
                         "blocking_enabled",
                         "selected_count",
                         "needs_docs_update",
