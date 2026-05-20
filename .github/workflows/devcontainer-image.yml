@@ -215,7 +215,7 @@ jobs:
         env:
           IMAGE_NAME: docker.io/${{ secrets.DOCKER_USERNAME }}/codebase-tooling-mcp
         run: |
-          build_args=()
+          build_args=(--build-arg MCP_USE_LOCKED_DEPS=true)
           output_args=(--load)
           tag_args=(--tag "codebase-tooling-mcp:${GITHUB_SHA}")
 
