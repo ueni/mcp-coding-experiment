@@ -155,6 +155,17 @@ This server exposes a curated prompt pack for clients that support MCP prompts, 
 
 The prompts are workflow starters, not bypasses: they route users toward existing tools such as `task_router`, `quality_router`, `release_readiness`, `change_impact_gate`, and `state_snapshot`, while preserving mutation, authentication, and rollback guardrails. When unsure which workflow to use, call `task_router(mode="workflow_select", prompt="...", execution_mode="auto")` first; it returns read-only, ranked workflow cards with confidence, caveats, online/offline execution-mode guidance, and compact trust/safety metadata. External workflow-card loading remains disabled by default; proposed generated or external cards must pass the documented trust-lint review before import. See [Workflow selection cards](./docs/workflow-selection.md).
 
+## MCP resources
+
+The public MCP resource catalog is intentionally small and repository-scoped:
+
+- `repo://summary` (`repo_summary_resource`) - repository summary and server capability flags.
+- `repo://file/{path}` (`repo_file_resource`) - UTF-8 file reads by repository-relative path.
+- `repo://tree/{path}` (`repo_tree_resource`) - bounded repository tree listings by repository-relative path.
+- `ui://codebase-tooling-mcp/release-readiness-dashboard` (`release_readiness_dashboard_resource`) - read-only MCP Apps dashboard template for release readiness results.
+
+Resource metadata is public discovery data only. Resource reads remain bounded by repository path checks and must not expose host absolute paths, bearer tokens, environment values, or repository contents through discovery manifests or integrity baselines.
+
 ## Agent execution modes
 
 `codebase-tooling-mcp` defines two profiles on the same workflow-card/router path:

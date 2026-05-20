@@ -1673,6 +1673,10 @@ def _mcp_server_manifest_payload() -> dict[str, Any]:
                 {"uri_template": "repo://summary", "name": "repo_summary_resource"},
                 {"uri_template": "repo://file/{path}", "name": "repo_file_resource"},
                 {"uri_template": "repo://tree/{path}", "name": "repo_tree_resource"},
+                {
+                    "uri": RELEASE_READINESS_DASHBOARD_RESOURCE_URI,
+                    "name": "release_readiness_dashboard_resource",
+                },
             ],
             "prompts": [
                 "review_changed_files",
@@ -15472,19 +15476,19 @@ def tool_output_contracts(tool_name: str = "") -> dict[str, Any]:
     return all_tool_output_contracts()
 
 
-def _mcp_list_tools_payload() -> list[dict[str, Any]]:
-    """Return live FastMCP list_tools metadata from sync tool/report contexts."""
+def _mcp_model_dump(value: Any) -> dict[str, Any]:
+    try:
+        raw = value.model_dump(mode="json", by_alias=True)
+    except TypeError:
+        raw = value.model_dump(by_alias=True)
+    return json.loads(json.dumps(raw, sort_keys=True, ensure_ascii=True, default=str))
 
-    async def collect() -> list[dict[str, Any]]:
-        tools = await mcp.list_tools()
-        payloads: list[dict[str, Any]] = []
-        for tool in tools:
-            try:
-                raw = tool.model_dump(mode="json", by_alias=True)
-            except TypeError:
-                raw = tool.model_dump(by_alias=True)
-            payloads.append(json.loads(json.dumps(raw, sort_keys=True, ensure_ascii=True, default=str)))
-        return payloads
+
+def _run_mcp_metadata_collector(coro_factory: Callable[[], Any]) -> Any:
+    """Run an async FastMCP metadata collector from sync tool/report contexts."""
+
+    async def collect() -> Any:
+        return await coro_factory()
 
     try:
         asyncio.get_running_loop()
@@ -15495,11 +15499,134 @@ def _mcp_list_tools_payload() -> list[dict[str, Any]]:
         return executor.submit(lambda: asyncio.run(collect())).result()
 
 
+def _mcp_list_tools_payload() -> list[dict[str, Any]]:
+    """Return live FastMCP list_tools metadata from sync tool/report contexts."""
+
+    async def collect() -> list[dict[str, Any]]:
+        return [_mcp_model_dump(tool) for tool in await mcp.list_tools()]
+
+    return _run_mcp_metadata_collector(collect)
+
+
+def _mcp_list_prompts_payload() -> list[dict[str, Any]]:
+    """Return live FastMCP list_prompts metadata from sync tool/report contexts."""
+
+    async def collect() -> list[dict[str, Any]]:
+        return [_mcp_model_dump(prompt) for prompt in await mcp.list_prompts()]
+
+    return _run_mcp_metadata_collector(collect)
+
+
+def _mcp_list_resources_payload() -> list[dict[str, Any]]:
+    """Return live FastMCP list_resources metadata without reading payloads."""
+
+    async def collect() -> list[dict[str, Any]]:
+        return [_mcp_model_dump(resource) for resource in await mcp.list_resources()]
+
+    return _run_mcp_metadata_collector(collect)
+
+
+def _mcp_list_resource_templates_payload() -> list[dict[str, Any]]:
+    """Return live FastMCP list_resource_templates metadata without reading payloads."""
+
+    async def collect() -> list[dict[str, Any]]:
+        return [_mcp_model_dump(resource) for resource in await mcp.list_resource_templates()]
+
+    return _run_mcp_metadata_collector(collect)
+
+
+def _replace_prompt_argument_sentinels(value: Any, sentinels: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        redacted = value
+        for name, sentinel in sentinels.items():
+            redacted = redacted.replace(sentinel, f"<argument:{name}>")
+        return redacted
+    if isinstance(value, dict):
+        return {key: _replace_prompt_argument_sentinels(item, sentinels) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_prompt_argument_sentinels(item, sentinels) for item in value]
+    return value
+
+
+def _mcp_prompt_templates_payload(list_prompts_payload: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return prompt templates with synthetic argument values redacted to placeholders."""
+
+    async def collect() -> dict[str, dict[str, Any]]:
+        templates: dict[str, dict[str, Any]] = {}
+        for prompt in list_prompts_payload:
+            name = str(prompt.get("name", ""))
+            arguments = prompt.get("arguments", []) if isinstance(prompt.get("arguments"), list) else []
+            sentinels = {
+                str(argument.get("name", "")): f"__MCP_SURFACE_ARGUMENT_{name}_{argument.get('name', '')}__"
+                for argument in arguments
+                if isinstance(argument, dict) and str(argument.get("name", ""))
+            }
+            result = await mcp.get_prompt(name, sentinels)
+            templates[name] = _replace_prompt_argument_sentinels(_mcp_model_dump(result), sentinels)
+        return templates
+
+    return _run_mcp_metadata_collector(collect)
+
+
+def _public_docs_mentions(names: Iterable[str]) -> dict[str, dict[str, bool]]:
+    root = Path(__file__).resolve().parents[1]
+    doc_paths = [root / "README.md", root / "docs" / "tool-catalog-integrity.md"]
+    docs: dict[str, str] = {}
+    for path in doc_paths:
+        try:
+            docs[path.name if path.name == "README.md" else f"docs/{path.name}"] = path.read_text(encoding="utf-8")
+        except OSError:
+            docs[path.name] = ""
+    return {
+        name: {doc: name in text for doc, text in docs.items()}
+        for name in names
+    }
+
+
+def _public_discovery_surface_payload() -> dict[str, Any]:
+    manifest = _mcp_server_manifest_payload()
+    capabilities = manifest.get("capabilities", {}) if isinstance(manifest.get("capabilities"), dict) else {}
+    prompt_names = [str(name) for name in capabilities.get("prompts", []) if isinstance(name, str)]
+    resources = capabilities.get("resources", []) if isinstance(capabilities.get("resources"), list) else []
+    resource_keys = [
+        str(resource.get("uri_template") or resource.get("uri") or resource.get("name", ""))
+        for resource in resources
+        if isinstance(resource, dict)
+    ]
+    prompt_docs = _public_docs_mentions(prompt_names)
+    resource_docs = _public_docs_mentions(resource_keys)
+    return {
+        "prompts": [
+            {"name": name, "documented": prompt_docs.get(name, {})}
+            for name in sorted(prompt_names)
+        ],
+        "resources": [
+            {
+                **json.loads(json.dumps(resource, sort_keys=True, ensure_ascii=True, default=str)),
+                "documented": resource_docs.get(
+                    str(resource.get("uri_template") or resource.get("uri") or resource.get("name", "")),
+                    {},
+                ),
+            }
+            for resource in sorted(
+                [resource for resource in resources if isinstance(resource, dict)],
+                key=lambda item: str(item.get("uri_template") or item.get("uri") or item.get("name", "")),
+            )
+        ],
+    }
+
+
 def _current_tool_catalog_baseline() -> dict[str, Any]:
+    prompts = _mcp_list_prompts_payload()
     return build_tool_catalog_baseline(
         _mcp_list_tools_payload(),
         _tool_annotation_manifest(),
         all_tool_output_contracts(),
+        list_prompts_payload=prompts,
+        prompt_templates=_mcp_prompt_templates_payload(prompts),
+        list_resources_payload=_mcp_list_resources_payload(),
+        list_resource_templates_payload=_mcp_list_resource_templates_payload(),
+        public_discovery=_public_discovery_surface_payload(),
     )
 
 
@@ -15547,6 +15674,9 @@ def _tool_catalog_integrity_summary() -> dict[str, Any]:
         "baseline_digest": str(baseline.get("whole_catalog_digest", "")),
         "current_digest": str(current.get("whole_catalog_digest", "")),
         "tool_count": int(current.get("tool_count", 0) or 0),
+        "prompt_count": int(current.get("prompt_count", 0) or 0),
+        "resource_count": int(current.get("resource_count", 0) or 0),
+        "public_discovery_count": int(current.get("public_discovery_count", 0) or 0),
         "drift": drift.get("summary", {"added": 0, "removed": 0, "changed": 0}),
         "lint": {
             "advisory_only": True,
