@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
+# Sanitized reference only. The runtime copy lives at:
+# .codebase-tooling-mcp/agent-proxy.local.yaml
+# Do not commit the runtime copy. Keep API keys, bearer tokens, and other secrets
+# in Continue secrets or environment variables, not as raw YAML values.
+
+agent_proxy:
+  provider: model-fallback
+  model: model-fallback
+  apiBase: ""
+  apiType: ""
+  apiVersion: ""
+  apiKey: ""
+  enabled: true
+  allow_online: false

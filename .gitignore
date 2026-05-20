@@ -42,3 +42,4 @@ env/
 #/.devcontainer/
 /.docker-build/
 /.gitignore_codebase_tooling_mcp.touched
+/.codebase-tooling-mcp/agent-proxy.local.yaml
