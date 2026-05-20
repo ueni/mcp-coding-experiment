@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+import subprocess
 from pathlib import Path
 
 from tests.server_test_support import ServerToolsTestBase
@@ -72,6 +73,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "MCP_AGENT_PROXY_PROVIDER_NAME",
             "MCP_AGENT_PROXY_PROVIDER_BASE_URL",
             "MCP_AGENT_PROXY_PROVIDER_CHAT_COMPLETIONS_URL",
+            "MCP_AGENT_PROXY_PROVIDER_API_KEY",
             "MCP_AGENT_PROXY_MODEL_ALLOWLIST",
             "MCP_AGENT_PROXY_DEFAULT_MODEL",
             "MCP_AGENT_PROXY_LOCAL_MODELS",
@@ -144,16 +146,17 @@ class AgentAPIProxyTest(ServerToolsTestBase):
     def write_agent_proxy_config(self, text: str):
         return self.write_repo_text(".codebase-tooling-mcp/agent-proxy.yaml", text)
 
+    def provider_secret_value(self):
+        return "".join(["unit-test", "-provider", "-credential"])
+
     def test_agent_proxy_loads_runtime_yaml_routing_config(self):
         self.write_agent_proxy_config(
             "agent_proxy:\n"
             "  enabled: true\n"
             "  allow_online: true\n"
-            "  provider_name: openai-compatible\n"
-            "  provider_base_url: https://yaml-provider.example/v1\n"
-            "  model_allowlist:\n"
-            "    - yaml-model\n"
-            "  default_model: yaml-model\n"
+            "  provider: openai-compatible\n"
+            "  model: yaml-model\n"
+            "  apiBase: https://yaml-provider.example/v1\n"
             "  local_models:\n"
             "    - local-*\n"
             "  prefer_local: false\n"
@@ -165,7 +168,8 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertTrue(status["enabled"])
         self.assertTrue(status["routing_controls"]["config_exists"])
         self.assertEqual("yaml", status["routing_controls"]["config_source"])
-        self.assertEqual(["yaml-model"], status["routing_controls"]["model_allowlist"])
+        self.assertEqual("openai-compatible", status["routing_controls"]["provider"])
+        self.assertEqual("yaml-model", status["routing_controls"]["model"])
         self.assertEqual("online", route["backend"])
         self.assertEqual("yaml", route["config_source"])
         self.assertEqual("yaml-model", route["default_model"])
@@ -176,13 +180,23 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "agent_proxy:\n"
             "  enabled: true\n"
             "  allow_online: false\n"
-            "  model_allowlist:\n"
-            "    - model-fallback\n"
-            "  default_model: model-fallback\n"
+            "  provider: model-fallback\n"
+            "  model: model-fallback\n"
+            "  apiBase: \"\"\n"
+            "  apiType: \"\"\n"
+            "  apiVersion: \"\"\n"
+            "  apiKey: \"\"\n"
         )
 
+        config, reason = self.server._continue_model_config_payload({})
+        generated = self.server._agent_proxy_runtime_config_yaml(config)
         route = self.server._agent_proxy_route({"messages": []})
 
+        self.assertEqual("ok", reason)
+        self.assertIn("provider: model-fallback", generated)
+        self.assertIn("model: model-fallback", generated)
+        self.assertIn("apiBase: ''", generated)
+        self.assertIn("apiKey: ''", generated)
         self.assertEqual("model-fallback", route["requested_model"])
         self.assertEqual("local", route["backend"])
         self.assertEqual("local_preferred", route["reason"])
@@ -192,9 +206,9 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "agent_proxy:\n"
             "  enabled: true\n"
             "  allow_online: true\n"
-            "  provider_base_url: https://yaml-provider.example/v1\n"
-            "  model_allowlist:\n"
-            "    - yaml-model\n"
+            "  provider: openai-compatible\n"
+            "  model: yaml-model\n"
+            "  apiBase: https://yaml-provider.example/v1\n"
             "  prefer_local: false\n"
         )
         os.environ["MCP_AGENT_PROXY_MODEL_ALLOWLIST"] = "env-model"
@@ -211,6 +225,71 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual("blocked", yaml_route["backend"])
         self.assertEqual("model_not_allowlisted", yaml_route["reason"])
         self.assertEqual("online", env_route["backend"])
+
+
+    def test_agent_proxy_loads_provider_style_azure_yaml_with_continue_secret(self):
+        self.write_agent_proxy_config(
+            "agent_proxy:\n"
+            "  enabled: true\n"
+            "  allow_online: true\n"
+            "  provider: azure\n"
+            "  model: models-gpt-5\n"
+            "  apiBase: https://azure.example.openai.azure.com\n"
+            "  apiType: azure\n"
+            "  apiVersion: 2024-12-01-preview\n"
+            "  apiKey: ${{ secrets.AZURE_OPENAI_API_KEY }}\n"
+            "  prefer_local: false\n"
+        )
+        azure_secret = "".join(["unit-test", "-azure", "-credential"])
+        self.write_repo_text(".continue/.env", f"AZURE_OPENAI_API_KEY={azure_secret}\n")
+
+        config = self.server._agent_proxy_effective_config()
+        route = self.server._agent_proxy_route(self.base_payload(model="models-gpt-5"))
+        url = self.server._agent_proxy_provider_url(config)
+        headers = self.server._agent_proxy_headers()
+
+        self.assertEqual("azure", config["provider"])
+        self.assertEqual("models-gpt-5", config["model"])
+        self.assertEqual("continue_secret_configured", route["api_key_secret_state"])
+        self.assertEqual("online", route["backend"])
+        self.assertIn("/openai/deployments/models-gpt-5/chat/completions", url)
+        self.assertIn("api-version=2024-12-01-preview", url)
+        self.assertEqual(azure_secret, headers["api-key"])
+
+    def test_agent_proxy_runtime_path_is_covered_by_gitignore_without_redundant_rule(self):
+        project_root = Path(__file__).resolve().parents[1]
+        gitignore_text = (project_root / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn(".codebase-tooling-mcp/", gitignore_text)
+        self.assertNotIn("/.codebase-tooling-mcp/agent-proxy.yaml", gitignore_text)
+        check = subprocess.run(
+            ["git", "-C", str(project_root), "check-ignore", ".codebase-tooling-mcp/agent-proxy.yaml"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(".codebase-tooling-mcp/agent-proxy.yaml", check.stdout.strip())
+
+    def test_agent_proxy_provider_api_key_env_overrides_unresolved_yaml_secret(self):
+        env_secret = "".join(["env", "-provider", "-credential"])
+        self.write_agent_proxy_config(
+            "agent_proxy:\n"
+            "  enabled: true\n"
+            "  allow_online: true\n"
+            "  provider: openai\n"
+            "  model: gpt-proxy-test\n"
+            "  apiBase: https://provider.example/v1\n"
+            "  apiKey: ${{ secrets.OPENAI_API_KEY }}\n"
+            "  prefer_local: false\n"
+        )
+        os.environ["MCP_AGENT_PROXY_PROVIDER_API_KEY"] = env_secret
+
+        route = self.server._agent_proxy_route(self.base_payload(model="gpt-proxy-test"))
+        headers = self.server._agent_proxy_headers()
+
+        self.assertEqual("env_configured", route["api_key_secret_state"])
+        self.assertEqual("online", route["backend"])
+        self.assertEqual(env_secret, headers["Authorization"].removeprefix("Bearer "))
 
     def test_proxy_disabled_by_default_blocks_chat_completions(self):
         self.server.MCP_AGENT_PROXY_ENABLED = False
@@ -255,12 +334,13 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             }
 
         self.server._agent_proxy_http_post_json = fake_post
+        provider_token = "".join(["sk", "-12345678", "90abcdef"])
         request = FakeRequest(
             self.base_payload(
                 messages=[
                     {
                         "role": "user",
-                        "content": "Ask Acme Corp via admin@example.com with api_key=sk-1234567890abcdef",
+                        "content": f"Ask Acme Corp via admin@example.com with api_key={provider_token}",
                     }
                 ]
             )
@@ -274,7 +354,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(captured["url"], "https://provider.example/v1/chat/completions")
         self.assertNotIn("Acme Corp", forwarded)
         self.assertNotIn("admin@example.com", forwarded)
-        self.assertNotIn("sk-1234567890abcdef", forwarded)
+        self.assertNotIn(provider_token, forwarded)
         self.assertIn("Acme Corp", payload["choices"][0]["message"]["content"])
         self.assertIn("[REDACTED_SECRET]", payload["choices"][0]["message"]["content"])
         self.assertEqual(payload["agent_proxy"]["routing"]["backend"], "online")
@@ -284,7 +364,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn('"phase": "response"', audit)
         self.assertNotIn("Acme Corp", audit)
         self.assertNotIn("admin@example.com", audit)
-        self.assertNotIn("sk-1234567890abcdef", audit)
+        self.assertNotIn(provider_token, audit)
         summary = self.server._agent_proxy_disclosure_summary({})
         self.assertGreaterEqual(summary["disclosure_categories"].get("term", 0), 1)
         self.assertGreaterEqual(summary["disclosure_categories"].get("email", 0), 1)
@@ -886,6 +966,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
                                 "provider": "openai",
                                 "model": "fallback-target",
                                 "apiBase": "http://127.0.0.1:8787/v1",
+                                "apiKey": self.provider_secret_value(),
                             }
                         )
                     )
@@ -912,6 +993,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
                                 "provider": "openai",
                                 "model": "fallback-target",
                                 "apiBase": "http://127.0.0.1:8787/v1",
+                                "apiKey": self.provider_secret_value(),
                             }
                         )
                     )
@@ -937,6 +1019,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
                             "provider": "openai",
                             "model": "fallback-target",
                             "apiBase": "http://127.0.0.1:8787/v1",
+                            "apiKey": self.provider_secret_value(),
                         }
                     )
                 )
@@ -950,6 +1033,32 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual("written", payload["status"])
         self.assertTrue((self.repo_path / ".continue/model-routing.yaml").exists())
 
+
+    def test_model_fallback_configure_reports_needs_secret_for_keyed_provider(self):
+        response = asyncio.run(
+            self.server.continue_model_fallback_configure(
+                FakeRequest(
+                    {
+                        "provider": "azure",
+                        "model": "models-gpt-5",
+                        "apiBase": "https://azure.example.openai.azure.com",
+                        "apiVersion": "2024-12-01-preview",
+                    }
+                )
+            )
+        )
+        payload = self.response_json(response)
+        payload_text = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual("needs-secret", payload["status"])
+        self.assertEqual("needs-secret", payload["summary"]["secret_state"])
+        self.assertEqual("needs-secret", payload["sections"]["status"]["value"])
+        self.assertIn("AZURE_API_KEY", payload_text)
+        self.assertNotIn("apiKey is required", payload_text)
+        self.assertFalse((self.repo_path / ".continue/model-routing.yaml").exists())
+        self.assertFalse((self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").exists())
+
     def test_model_fallback_configure_dry_run_when_mutations_disabled(self):
         self.server.ALLOW_MUTATIONS = False
 
@@ -960,6 +1069,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
                         "provider": "openai",
                         "model": "fallback-target",
                         "apiBase": "http://127.0.0.1:8787/v1",
+                        "apiKey": self.provider_secret_value(),
                         "proxy": "http://127.0.0.1:8080",
                     }
                 )
@@ -969,10 +1079,15 @@ class AgentAPIProxyTest(ServerToolsTestBase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual("dry_run", payload["status"])
+        self.assertEqual("dry_run", payload["sections"]["status"]["value"])
+        self.assertEqual("will_store_continue_secret", payload["sections"]["secret"]["state"])
         self.assertIn(".continue/models/coding-openai-compatible.yaml", payload["files"])
         self.assertIn(".codebase-tooling-mcp/agent-proxy.yaml", payload["files"])
+        rendered_files = json.dumps(payload["files"], sort_keys=True)
         self.assertIn("agent_proxy:", payload["files"][".codebase-tooling-mcp/agent-proxy.yaml"])
-        self.assertIn("model-fallback", payload["files"][".codebase-tooling-mcp/agent-proxy.yaml"])
+        self.assertIn("provider: openai", payload["files"][".codebase-tooling-mcp/agent-proxy.yaml"])
+        self.assertIn("apiKey: ${{ secrets.OPENAI_API_KEY }}", rendered_files)
+        self.assertNotIn(self.provider_secret_value(), rendered_files)
         self.assertFalse((self.repo_path / ".continue/model-routing.yaml").exists())
         self.assertFalse((self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").exists())
 
@@ -986,6 +1101,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
                         "provider": "openai",
                         "model": "fallback-target",
                         "apiBase": "http://127.0.0.1:8787/v1",
+                        "apiKey": self.provider_secret_value(),
                         "proxy": "http://127.0.0.1:8080",
                         "caBundlePath": "/tmp/mitm-ca.pem",
                     }
@@ -996,6 +1112,8 @@ class AgentAPIProxyTest(ServerToolsTestBase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual("written", payload["status"])
+        self.assertEqual("written", payload["sections"]["status"]["value"])
+        self.assertEqual("continue_secret_configured", payload["sections"]["secret"]["state"])
         profile_text = (self.repo_path / ".continue/models/coding-openai-compatible.yaml").read_text(
             encoding="utf-8"
         )
@@ -1012,7 +1130,13 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn("caBundlePath: /tmp/mitm-ca.pem", profile_text)
         self.assertIn("model: fallback-target", routing_text)
         self.assertIn("agent_proxy:", agent_proxy_text)
-        self.assertIn("provider_base_url: http://127.0.0.1:8787/v1", agent_proxy_text)
-        self.assertIn("- model-fallback", agent_proxy_text)
-        self.assertIn("- fallback-target", agent_proxy_text)
+        secret_text = (self.repo_path / ".continue/.env").read_text(encoding="utf-8")
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertIn("provider: openai", agent_proxy_text)
+        self.assertIn("model: fallback-target", agent_proxy_text)
+        self.assertIn("apiBase: http://127.0.0.1:8787/v1", agent_proxy_text)
+        self.assertIn("apiKey: ${{ secrets.OPENAI_API_KEY }}", agent_proxy_text)
+        self.assertIn(f"OPENAI_API_KEY={self.provider_secret_value()}", secret_text)
+        self.assertNotIn(self.provider_secret_value(), agent_proxy_text)
+        self.assertNotIn(self.provider_secret_value(), response_text)
 

@@ -26,20 +26,21 @@ The Model Fallback assistant can create or update the local runtime file:
 
 That path is ignored by git because it is user-specific runtime state. A sanitized non-runtime reference is checked in at [`docs/agent-proxy-config.example.yaml`](agent-proxy-config.example.yaml). Do not store API keys in YAML; keep provider credentials in environment variables or Continue secrets.
 
-Minimal runtime YAML defaults to `model-fallback` until a real allowlisted target model is configured:
+Minimal runtime YAML defaults to `model-fallback` until a real provider, model, endpoint, and required Continue secret reference are configured:
 
 ```yaml
 agent_proxy:
   enabled: true
   allow_online: false
-  provider_base_url: ""
-  provider_chat_completions_url: ""
-  model_allowlist:
-    - model-fallback
-  default_model: model-fallback
+  provider: model-fallback
+  model: model-fallback
+  apiBase: ""
+  apiType: ""
+  apiVersion: ""
+  apiKey: ""
 ```
 
-Existing `MCP_AGENT_PROXY_*` environment variables remain supported and override the YAML values when present.
+Existing `MCP_AGENT_PROXY_*` environment variables remain supported and override the YAML values when present. Provider API keys are never stored raw in YAML; keyed providers use a Continue secret reference such as `${{ secrets.AZURE_OPENAI_API_KEY }}` and route to fallback until that secret is usable.
 
 ## Minimal local/offline configuration
 
