@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) Nico Ueberfeldt
+#
+# SPDX-License-Identifier: MIT
+
+# Sanitized non-runtime example only.
+# Runtime user-specific config lives at .codebase-tooling-mcp/agent-proxy.yaml,
+# which is ignored by git. Keep raw API keys in Continue secrets or environment
+# variables; apiKey below is only a symbolic secret reference.
+agent_proxy:
+  enabled: true
+  allow_online: false
+  provider: model-fallback
+  model: model-fallback
+  apiBase: ""
+  apiType: ""
+  apiVersion: ""
+  apiKey: ""
+
+# Example once a real Azure provider is ready (local runtime file only):
+# agent_proxy:
+#   enabled: true
+#   allow_online: true
+#   provider: azure
+#   model: models-gpt-5
+#   apiBase: https://example.openai.azure.com
+#   apiType: azure
+#   apiVersion: 2024-12-01-preview
+#   apiKey: ${{ secrets.AZURE_OPENAI_API_KEY }}

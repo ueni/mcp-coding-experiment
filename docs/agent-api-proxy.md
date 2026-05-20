@@ -16,6 +16,32 @@ POST /v1/chat/completions
 
 The first slice supports OpenAI-style chat completions, including `stream: true` Server-Sent Events chunks and final `data: [DONE]` semantics.
 
+## Repository-local YAML routing configuration
+
+The Model Fallback assistant can create or update the local runtime file:
+
+```text
+.codebase-tooling-mcp/agent-proxy.yaml
+```
+
+That path is ignored by git because it is user-specific runtime state. A sanitized non-runtime reference is checked in at [`docs/agent-proxy-config.example.yaml`](agent-proxy-config.example.yaml). Do not store raw API keys in YAML; `apiKey` is only a symbolic Continue secret reference.
+
+Minimal runtime YAML defaults to `model-fallback` until a real provider, model, endpoint, and required Continue secret reference are configured:
+
+```yaml
+agent_proxy:
+  enabled: true
+  allow_online: false
+  provider: model-fallback
+  model: model-fallback
+  apiBase: ""
+  apiType: ""
+  apiVersion: ""
+  apiKey: ""
+```
+
+Existing `MCP_AGENT_PROXY_*` environment variables remain supported and override the YAML values when present. Provider API keys are never stored raw in YAML; keyed providers use a Continue secret reference such as `${{ secrets.AZURE_OPENAI_API_KEY }}` and route to fallback until that secret is usable.
+
 ## Minimal local/offline configuration
 
 ```bash
@@ -42,7 +68,7 @@ export MCP_AGENT_PROXY_MAX_OUTPUT_TOKENS=4096
 export MCP_AGENT_PROXY_MAX_COST_USD=0.25
 ```
 
-No provider URL is configured by default. Online calls are blocked unless online mode is explicitly enabled, a provider endpoint is configured, and the requested model matches `MCP_AGENT_PROXY_MODEL_ALLOWLIST`.
+No provider URL is configured by default. Online calls are blocked unless online mode is explicitly enabled, a provider endpoint is configured, the requested model matches the provider-style YAML `model` (or the legacy YAML/env allowlist), and any required provider secret resolves from a Continue secret or `MCP_AGENT_PROXY_PROVIDER_API_KEY`.
 
 ## Privacy behavior
 
@@ -92,4 +118,4 @@ The protected status endpoint returns current proxy controls without exposing se
 GET /v1/agent-proxy/status
 ```
 
-Use it to verify whether online forwarding, no-network mode, model allowlists, token/cost/time limits, policy/anonymization/facade versions, strict audit mode, anonymization, and memory capture gates are active.
+Use it to verify whether online forwarding, no-network mode, provider/model/API-base state, secret-reference state, model allowlists, token/cost/time limits, policy/anonymization/facade versions, strict audit mode, anonymization, and memory capture gates are active.
