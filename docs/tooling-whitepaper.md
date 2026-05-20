@@ -130,7 +130,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `mcp_threat_model_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -147,6 +147,8 @@ Public tools:
 `policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
 
 `tool_catalog_integrity` is a read-only rug-pull drift guard for the public MCP surface. It hashes live `mcp.list_tools()`, `mcp.list_prompts()`, `mcp.get_prompt()` template text with synthetic arguments redacted, `mcp.list_resources()`, `mcp.list_resource_templates()`, allowlisted discovery/docs metadata, `tool_annotations`, checked-in output contracts, security categories/mode categories, and public documentation references against `source/tool_catalog_baseline.json`, then reports compact tool/prompt/resource/discovery added/removed/changed metadata diffs and advisory metadata-lint findings without embedding repository contents, resource payloads, host paths, tokens, raw dynamic prompt arguments, or runtime secrets.
+
+`mcp_threat_model_report` is the offline public governance tool for MCP trust-boundary review. It maps host/client, LLM, server, repository, and external-service boundaries to STRIDE/DREAD-style threats, returns the checked-in deterministic DREAD rubric, links existing controls to risks, analyzes secret-free poisoned-tool fixtures including post-handshake `notifications/tools/list_changed` plus repeated `tools/list` mutations, and can compare a local baseline for high-severity uncovered regressions without exposing secrets or raw external state.
 
 `self_optimization_report` is the direct public tool for the software team's self-optimization loop on this repository. It stays offline/repo-local while aggregating redacted audit events, local spans, task handles, cache metadata, and local Git refs into usage, savings, throughput, bottleneck, and duplicate-suppressed recommendation summaries.
 

@@ -37,6 +37,8 @@ REQUIRED_SNIPPETS = {
     "refresh_arg": "ARG MCP_REFRESH_BUILD_DOWNLOAD_CACHE=false",
     "helper_copy": "COPY build-download-cache.sh /usr/local/bin/build-download-cache.sh",
     "generic_cached_download": "build_cache_download",
+    "resumable_cached_download": "--continue-at -",
+    "bounded_download_retries": "BUILD_CACHE_DOWNLOAD_RETRIES",
     "pip_wheelhouse_helper": "build_cache_pip_install",
     "pip_no_index_helper": "--no-index --find-links",
     "offline_model_guard": "missing from the BuildKit cache while MCP_BUILD_OFFLINE=true",

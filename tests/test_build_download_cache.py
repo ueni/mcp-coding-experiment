@@ -119,7 +119,75 @@ class BuildDownloadCacheTests(unittest.TestCase):
 
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(cache_file.read_text(encoding="utf-8").strip(), "refreshed")
-            self.assertFalse(list(cache_file.parent.glob("*.tmp.*")))
+            self.assertFalse(list(cache_file.parent.glob("*.part")))
+
+    def test_failed_download_can_resume_stable_partial_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_file = tmp_path / "cache" / "artifact.bin"
+            counter = tmp_path / "curl-count"
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "curl").write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env bash
+                    count=0
+                    if [ -f {counter} ]; then
+                      count="$(cat {counter})"
+                    fi
+                    count=$((count + 1))
+                    echo "${{count}}" > {counter}
+                    out=""
+                    saw_continue=false
+                    while [ "$#" -gt 0 ]; do
+                      case "$1" in
+                        --continue-at)
+                          [ "$2" = "-" ] || exit 64
+                          saw_continue=true
+                          shift 2
+                          ;;
+                        -o)
+                          out="$2"
+                          shift 2
+                          ;;
+                        *)
+                          shift
+                          ;;
+                      esac
+                    done
+                    [ "${{saw_continue}}" = "true" ] || exit 65
+                    if [ "${{count}}" -eq 1 ]; then
+                      mkdir -p "$(dirname "${{out}}")"
+                      echo partial >"${{out}}"
+                      exit 56
+                    fi
+                    grep -q partial "${{out}}" || exit 66
+                    echo complete >"${{out}}"
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (fake_bin / "curl").chmod(0o755)
+
+            proc = self._run_helper(
+                textwrap.dedent(
+                    f"""\
+                    set +e
+                    build_cache_download {cache_file} https://example.invalid/artifact artifact
+                    first_rc=$?
+                    set -e
+                    [ "${{first_rc}}" -ne 0 ]
+                    build_cache_download {cache_file} https://example.invalid/artifact artifact
+                    """
+                ),
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(counter.read_text(encoding="utf-8").strip(), "2")
+            self.assertEqual(cache_file.read_text(encoding="utf-8").strip(), "complete")
+            self.assertFalse((cache_file.parent / "artifact.bin.part").exists())
 
     def test_dockerfile_cache_contract_survives_first_line_change(self):
         original = subprocess.run(

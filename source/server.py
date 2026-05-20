@@ -242,6 +242,10 @@ DEPENDENCY_SECURITY_REPORT_PREFIX = "dependency-security-report"
 DEPENDENCY_SECURITY_REPORT_SCHEMA = "dependency_security_report.v1"
 CI_WORKFLOW_SECURITY_REPORT_PREFIX = "ci-workflow-security-report"
 CI_WORKFLOW_SECURITY_REPORT_SCHEMA = "ci_workflow_security_report.v1"
+MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
+MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
+MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
+MCP_THREAT_MODEL_DREAD_RUBRIC_SCHEMA = "mcp_threat_model_dread_rubric.v1"
 DEPENDENCY_SECURITY_SBOM_SCHEMA = "dependency_security_sbom.cyclonedx-lite.v1"
 DEPENDENCY_SECURITY_BLOCKING = os.getenv(
     "MCP_DEPENDENCY_SECURITY_BLOCKING", "false"
@@ -368,6 +372,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "release_readiness": {"categories": ["read-only"]},
     "dependency_security_report": {"categories": ["read-only"]},
     "ci_workflow_security_report": {"categories": ["read-only", "governance"]},
+    "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "self_optimization_report": {"categories": ["read-only"]},
     "artifact_provenance": {"categories": ["read-only"]},
@@ -8800,6 +8805,576 @@ def _ci_workflow_security_report_impl(path: str = ".", export: bool = False) -> 
     if export:
         _write_ci_workflow_security_report_exports(report)
     return report
+
+MCP_THREAT_MODEL_COMPONENTS: tuple[dict[str, Any], ...] = (
+    {"id": "mcp_host", "name": "MCP Host", "trust_zone": "client_runtime", "assets": ["user intent", "tool-call approvals", "visible tool metadata"]},
+    {"id": "mcp_client", "name": "MCP Client", "trust_zone": "client_runtime", "assets": ["tool list", "parameter forms", "model-visible tool descriptions"]},
+    {"id": "llm", "name": "LLM", "trust_zone": "model_context", "assets": ["prompt context", "tool-selection reasoning"]},
+    {"id": "mcp_server", "name": "codebase-tooling-mcp server", "trust_zone": "repo_service", "assets": ["tool implementations", "HTTP scopes", "audit events"]},
+    {"id": "repo", "name": "Mounted repository", "trust_zone": "repository", "assets": ["source files", "generated reports", "fixtures"]},
+    {"id": "external_services", "name": "External stores and authorization services", "trust_zone": "external", "assets": ["GitHub APIs", "registries", "tokens", "attestations"]},
+)
+
+MCP_THREAT_MODEL_BOUNDARIES: tuple[dict[str, str], ...] = (
+    {"id": "host_client", "from": "mcp_host", "to": "mcp_client", "risk": "Client UI may hide or transform tool metadata, parameter visibility, or approval context."},
+    {"id": "client_llm", "from": "mcp_client", "to": "llm", "risk": "Tool descriptions and untrusted content enter model context as text."},
+    {"id": "client_server", "from": "mcp_client", "to": "mcp_server", "risk": "Tool calls cross an authorization and scope boundary."},
+    {"id": "server_repo", "from": "mcp_server", "to": "repo", "risk": "Read-only analysis and approved mutations must stay inside the mounted repository."},
+    {"id": "server_external", "from": "mcp_server", "to": "external_services", "risk": "Network, registry, and token-bearing integrations are explicit and gated."},
+)
+
+MCP_THREAT_MODEL_THREATS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "tool_metadata_poisoning",
+        "title": "Tool metadata poisoning steers model behavior",
+        "stride": ["Tampering", "Elevation of privilege", "Information disclosure"],
+        "components": ["mcp_client", "llm", "mcp_server"],
+        "required_controls": ["tool_catalog_integrity", "untrusted_content_signals", "tool_output_contracts"],
+        "dread": {"damage": 8, "reproducibility": 8, "exploitability": 7, "affected_users": 8, "discoverability": 8},
+    },
+    {
+        "id": "ambiguous_parameter_visibility",
+        "title": "Client transparency gaps hide parameters or tool effects",
+        "stride": ["Spoofing", "Tampering", "Repudiation"],
+        "components": ["mcp_host", "mcp_client", "llm"],
+        "required_controls": ["tool_output_contracts", "client_transparency_review"],
+        "dread": {"damage": 6, "reproducibility": 6, "exploitability": 5, "affected_users": 5, "discoverability": 6},
+    },
+    {
+        "id": "cross_boundary_secret_exfiltration",
+        "title": "Prompted tool chain exfiltrates secrets or repository data",
+        "stride": ["Information disclosure", "Elevation of privilege"],
+        "components": ["llm", "mcp_server", "repo", "external_services"],
+        "required_controls": ["http_scope_security_gates", "mutation_step_guard", "workflow_policy_preflight", "untrusted_content_signals"],
+        "dread": {"damage": 9, "reproducibility": 7, "exploitability": 6, "affected_users": 7, "discoverability": 7},
+    },
+    {
+        "id": "unauthorized_repository_mutation",
+        "title": "Tool call mutates repository outside the declared intent",
+        "stride": ["Tampering", "Elevation of privilege"],
+        "components": ["mcp_client", "mcp_server", "repo"],
+        "required_controls": ["http_scope_security_gates", "mutation_step_guard", "workflow_policy_preflight"],
+        "dread": {"damage": 8, "reproducibility": 6, "exploitability": 5, "affected_users": 6, "discoverability": 6},
+    },
+    {
+        "id": "audit_repudiation",
+        "title": "Security-relevant decisions lack durable evidence",
+        "stride": ["Repudiation"],
+        "components": ["mcp_server", "repo"],
+        "required_controls": ["governance_report", "workflow_diagnostics", "artifact_provenance"],
+        "dread": {"damage": 5, "reproducibility": 5, "exploitability": 4, "affected_users": 5, "discoverability": 5},
+    },
+)
+
+
+def _mcp_threat_model_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
+
+MCP_THREAT_MODEL_DREAD_RUBRIC: dict[str, Any] = {
+    "schema": MCP_THREAT_MODEL_DREAD_RUBRIC_SCHEMA,
+    "version": 1,
+    "fields": ["damage", "reproducibility", "exploitability", "affected_users", "discoverability"],
+    "field_range": {"min": 0, "max": 10, "type": "integer"},
+    "scoring": "clamp each field to 0..10 as an integer, then sum fields in the listed order",
+    "severity_thresholds": [
+        {"severity": "high", "min_score": 35, "max_score": 50},
+        {"severity": "medium", "min_score": 23, "max_score": 34},
+        {"severity": "low", "min_score": 1, "max_score": 22},
+        {"severity": "info", "min_score": 0, "max_score": 0},
+    ],
+}
+
+
+def _mcp_threat_model_dread_rubric() -> dict[str, Any]:
+    return json.loads(json.dumps(MCP_THREAT_MODEL_DREAD_RUBRIC, sort_keys=True))
+
+
+def _mcp_threat_model_severity(dread: dict[str, Any]) -> tuple[int, str]:
+    score = sum(
+        max(0, min(10, int(dread.get(key, 0) or 0)))
+        for key in MCP_THREAT_MODEL_DREAD_RUBRIC["fields"]
+    )
+    if score >= 35:
+        return score, "high"
+    if score >= 23:
+        return score, "medium"
+    if score > 0:
+        return score, "low"
+    return 0, "info"
+
+
+def _mcp_threat_model_controls() -> dict[str, dict[str, Any]]:
+    integrity = _tool_catalog_integrity_summary()
+    untrusted = _untrusted_content_signal_event_summary()
+    public_tools = set(PUBLIC_MCP_TOOL_NAMES)
+    schema_tools = set(SCHEMA_BACKED_TOOL_NAMES)
+    return {
+        "tool_catalog_integrity": {
+            "covered": bool(integrity.get("ok", False)),
+            "evidence": {"tool": "tool_catalog_integrity", "status": integrity.get("status", "unknown"), "digest": integrity.get("current_digest", "")},
+        },
+        "untrusted_content_signals": {
+            "covered": True,
+            "evidence": {"tool": "risk_scoring/governance_report", "summary": untrusted},
+        },
+        "tool_output_contracts": {
+            "covered": "tool_output_contracts" in public_tools,
+            "evidence": {"tool": "tool_output_contracts", "schema_backed_tool_count": len(schema_tools)},
+        },
+        "temporal_catalog_delta_audit": {
+            "covered": False,
+            "evidence": {
+                "scope": "mcp_client_session_delta_channel",
+                "note": "Static catalog hashing catches single-frame drift but does not prove clients audit notifications/tools/list_changed followed by repeated tools/list deltas.",
+            },
+        },
+        "http_scope_security_gates": {
+            "covered": MCP_SCOPE_READ in MCP_SUPPORTED_SCOPES and MCP_SCOPE_MUTATE in MCP_SUPPORTED_SCOPES,
+            "evidence": {"scopes": list(MCP_SUPPORTED_SCOPES), "sensitive_categories": sorted(SENSITIVE_TOOL_CATEGORIES)},
+        },
+        "workflow_policy_preflight": {
+            "covered": "workflow_policy_plan" in public_tools,
+            "evidence": {"tool": "workflow_policy_plan"},
+        },
+        "mutation_step_guard": {
+            "covered": "mutation_step_guard" in public_tools,
+            "evidence": {"tool": "mutation_step_guard"},
+        },
+        "governance_report": {
+            "covered": "governance_report" in public_tools,
+            "evidence": {"tool": "governance_report"},
+        },
+        "workflow_diagnostics": {
+            "covered": "workflow_diagnostics" in public_tools,
+            "evidence": {"tool": "workflow_diagnostics"},
+        },
+        "artifact_provenance": {
+            "covered": "artifact_provenance" in public_tools,
+            "evidence": {"tool": "artifact_provenance"},
+        },
+        "client_transparency_review": {
+            "covered": False,
+            "evidence": {"scope": "external_client_behavior", "note": "Server can expose metadata/contracts, but cannot prove every MCP client displays all tool text and parameters."},
+        },
+    }
+
+
+def _mcp_threat_model_load_fixture(
+    path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    if not path.strip():
+        return [], [], {"path": "", "loaded": False, "tool_count": 0, "transition_count": 0, "digest": ""}
+    fixture_path = _resolve_repo_path(path)
+    try:
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("fixture_path must contain valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("fixture_path must contain a JSON object")
+    raw_tools = payload.get("tools", [])
+    if not isinstance(raw_tools, list):
+        raise ValueError("fixture_path tools must be a list")
+    tools = [item for item in raw_tools if isinstance(item, dict)]
+    raw_transitions = payload.get("tool_catalog_transitions", payload.get("catalog_transitions", []))
+    if not isinstance(raw_transitions, list):
+        raise ValueError("fixture_path tool_catalog_transitions must be a list")
+    transitions = [item for item in raw_transitions if isinstance(item, dict)]
+    digest_payload = {"tools": tools, "tool_catalog_transitions": transitions}
+    digest = "sha256:" + hashlib.sha256(json.dumps(digest_payload, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
+    return tools, transitions, {"path": str(fixture_path.relative_to(REPO_PATH)), "loaded": True, "tool_count": len(tools), "transition_count": len(transitions), "digest": digest, "schema": str(payload.get("schema", ""))}
+
+
+def _mcp_threat_model_load_baseline(path: str) -> dict[str, Any]:
+    if not path.strip():
+        return {"path": "", "loaded": False}
+    baseline_path = _resolve_repo_path(path)
+    try:
+        payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("baseline_path must contain valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("baseline_path must contain a JSON object")
+    payload = dict(payload)
+    payload["path"] = str(baseline_path.relative_to(REPO_PATH))
+    payload["loaded"] = True
+    return payload
+
+
+def _mcp_threat_model_tool_identity(tool: dict[str, Any], fallback: str) -> str:
+    return str(tool.get("id") or tool.get("name") or fallback)[:120]
+
+
+def _mcp_threat_model_tool_name(tool: dict[str, Any], fallback: str) -> str:
+    return str(tool.get("name") or tool.get("id") or fallback)[:120]
+
+
+def _mcp_threat_model_tool_signal_counts(
+    tool: dict[str, Any],
+    *,
+    fixture_id: str,
+) -> dict[str, Any]:
+    name = _mcp_threat_model_tool_name(tool, fixture_id)
+    description = str(tool.get("description") or tool.get("tool_description") or "")
+    input_schema = tool.get("input_schema", {}) if isinstance(tool.get("input_schema"), dict) else {}
+    annotations = tool.get("annotations", {}) if isinstance(tool.get("annotations"), dict) else {}
+    text = "\n".join([name, description, json.dumps(input_schema, sort_keys=True, default=str), json.dumps(annotations, sort_keys=True, default=str)])
+    signals = _prompt_injection_signals_for_text(text, tool_name="mcp_threat_model_report", input_scope=f"fixture:{fixture_id}")
+    return _prompt_injection_signal_counts(signals)
+
+
+def _mcp_threat_model_catalog_transition_findings(
+    transitions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for index, transition in enumerate(transitions):
+        transition_id = str(transition.get("id") or f"catalog_transition_{index}")[:120]
+        before_tools_raw = transition.get("initial_tools", transition.get("before_tools", []))
+        after_tools_raw = transition.get("mutated_tools", transition.get("after_tools", []))
+        if not isinstance(before_tools_raw, list) or not isinstance(after_tools_raw, list):
+            continue
+        before_tools = [item for item in before_tools_raw if isinstance(item, dict)]
+        after_tools = [item for item in after_tools_raw if isinstance(item, dict)]
+        before_by_identity = {
+            _mcp_threat_model_tool_identity(tool, f"before_{tool_index}"): tool
+            for tool_index, tool in enumerate(before_tools)
+        }
+        poisoned_mutations: list[dict[str, Any]] = []
+        for tool_index, after_tool in enumerate(after_tools):
+            identity = _mcp_threat_model_tool_identity(after_tool, f"after_{tool_index}")
+            before_tool = before_by_identity.get(identity)
+            before_counts = (
+                _mcp_threat_model_tool_signal_counts(before_tool, fixture_id=f"{transition_id}:before:{identity}")
+                if before_tool is not None
+                else {"detected": False, "severity": "none", "total": 0}
+            )
+            after_counts = _mcp_threat_model_tool_signal_counts(after_tool, fixture_id=f"{transition_id}:after:{identity}")
+            if bool(after_counts.get("detected")) and not bool(before_counts.get("detected")):
+                poisoned_mutations.append(
+                    {
+                        "identity": identity,
+                        "tool_name": _mcp_threat_model_tool_name(after_tool, identity),
+                        "mutation": "added" if before_tool is None else "changed",
+                        "before_signals": before_counts,
+                        "after_signals": after_counts,
+                    }
+                )
+        if not poisoned_mutations:
+            continue
+        events = [str(item) for item in transition.get("event_sequence", [])] if isinstance(transition.get("event_sequence"), list) else []
+        dread = {"damage": 8, "reproducibility": 8, "exploitability": 7, "affected_users": 7, "discoverability": 8}
+        score, severity = _mcp_threat_model_severity(dread)
+        findings.append(
+            {
+                "id": f"fixture:{transition_id}:temporal-tool-catalog-mutation",
+                "rule_id": "temporal-tool-catalog-mutation",
+                "threat_id": "tool_metadata_poisoning",
+                "fixture_id": transition_id,
+                "tool_name": ",".join(sorted({str(item.get("tool_name", "")) for item in poisoned_mutations if str(item.get("tool_name", ""))}))[:120],
+                "severity": severity,
+                "dread": {"score": score, **dread},
+                "stride": ["Tampering", "Elevation of privilege", "Information disclosure"],
+                "message": "Fixture models a benign initial tools/list followed by a poisoned post-handshake tool-catalog mutation.",
+                "uncovered_controls": ["temporal_catalog_delta_audit"],
+                "covered_by": ["untrusted_content_signals"],
+                "evidence": {
+                    "event_sequence": events,
+                    "observed_notifications_tools_list_changed": "notifications/tools/list_changed" in events,
+                    "observed_repeated_tools_list": events.count("tools/list") >= 2,
+                    "mutated_tool_count": len(poisoned_mutations),
+                    "mutations": poisoned_mutations,
+                },
+            }
+        )
+    return findings
+
+
+def _mcp_threat_model_fixture_findings(
+    tools: list[dict[str, Any]],
+    transitions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for index, tool in enumerate(tools):
+        fixture_id = _mcp_threat_model_tool_identity(tool, f"fixture_{index}")
+        name = _mcp_threat_model_tool_name(tool, fixture_id)
+        input_schema = tool.get("input_schema", {}) if isinstance(tool.get("input_schema"), dict) else {}
+        annotations = tool.get("annotations", {}) if isinstance(tool.get("annotations"), dict) else {}
+        categories = [str(item) for item in tool.get("categories", [])] if isinstance(tool.get("categories"), list) else []
+        counts = _mcp_threat_model_tool_signal_counts(tool, fixture_id=fixture_id)
+        signal_severity = str(counts.get("severity", "none"))
+        if counts.get("detected"):
+            dread = {"damage": 8, "reproducibility": 8, "exploitability": 7, "affected_users": 7, "discoverability": 8}
+            score, severity = _mcp_threat_model_severity(dread)
+            findings.append(
+                {
+                    "id": f"fixture:{fixture_id}:poisoned-tool-metadata",
+                    "rule_id": "poisoned-tool-metadata",
+                    "threat_id": "tool_metadata_poisoning",
+                    "fixture_id": fixture_id,
+                    "tool_name": name,
+                    "severity": severity if signal_severity == "high" else signal_severity,
+                    "dread": {"score": score, **dread},
+                    "stride": ["Tampering", "Elevation of privilege", "Information disclosure"],
+                    "message": "Fixture tool metadata contains prompt-injection/tool-poisoning language.",
+                    "uncovered_controls": [],
+                    "covered_by": ["tool_catalog_integrity", "untrusted_content_signals"],
+                    "evidence": {"signals": counts},
+                }
+            )
+        transparent = bool(tool.get("metadata_visible_to_client", tool.get("transparent_to_client", True)))
+        parameter_visibility = str(tool.get("parameter_visibility", "full"))
+        sensitive_or_mutating = bool(set(categories).intersection(SENSITIVE_TOOL_CATEGORIES))
+        hidden_param_names = [str(k) for k, v in input_schema.get("properties", {}).items()] if isinstance(input_schema.get("properties"), dict) and parameter_visibility != "full" else []
+        if hidden_param_names:
+            dread = {"damage": 9 if sensitive_or_mutating else 6, "reproducibility": 7, "exploitability": 6, "affected_users": 6, "discoverability": 7}
+            score, severity = _mcp_threat_model_severity(dread)
+            findings.append(
+                {
+                    "id": f"fixture:{fixture_id}:ambiguous-parameter-visibility",
+                    "rule_id": "ambiguous-parameter-visibility",
+                    "threat_id": "ambiguous_parameter_visibility",
+                    "fixture_id": fixture_id,
+                    "tool_name": name,
+                    "severity": severity,
+                    "dread": {"score": score, **dread},
+                    "stride": ["Spoofing", "Tampering", "Repudiation"],
+                    "message": "Fixture models ambiguous client/model visibility for sensitive tool parameters.",
+                    "uncovered_controls": ["client_transparency_review"],
+                    "covered_by": ["tool_output_contracts"],
+                    "evidence": {"metadata_visible_to_client": transparent, "parameter_visibility": parameter_visibility, "hidden_parameter_count": len(hidden_param_names), "categories": categories},
+                }
+            )
+        if not transparent:
+            dread = {"damage": 9 if sensitive_or_mutating else 6, "reproducibility": 7, "exploitability": 6, "affected_users": 6, "discoverability": 7}
+            score, severity = _mcp_threat_model_severity(dread)
+            findings.append(
+                {
+                    "id": f"fixture:{fixture_id}:client-transparency-control-gap",
+                    "rule_id": "client-transparency-control-gap",
+                    "threat_id": "cross_boundary_secret_exfiltration" if sensitive_or_mutating else "ambiguous_parameter_visibility",
+                    "fixture_id": fixture_id,
+                    "tool_name": name,
+                    "severity": severity,
+                    "dread": {"score": score, **dread},
+                    "stride": ["Repudiation", "Information disclosure", "Elevation of privilege"],
+                    "message": "Fixture models a client transparency/control gap for user-visible tool effects or cross-boundary consent.",
+                    "uncovered_controls": ["client_transparency_review"],
+                    "covered_by": ["http_scope_security_gates", "workflow_policy_preflight"],
+                    "evidence": {"metadata_visible_to_client": transparent, "parameter_visibility": parameter_visibility, "categories": categories},
+                }
+            )
+        read_only_hint = annotations.get("readOnlyHint")
+        if read_only_hint is True and sensitive_or_mutating:
+            dread = {"damage": 8, "reproducibility": 7, "exploitability": 6, "affected_users": 6, "discoverability": 7}
+            score, severity = _mcp_threat_model_severity(dread)
+            findings.append(
+                {
+                    "id": f"fixture:{fixture_id}:annotation-category-mismatch",
+                    "rule_id": "annotation-category-mismatch",
+                    "threat_id": "unauthorized_repository_mutation",
+                    "fixture_id": fixture_id,
+                    "tool_name": name,
+                    "severity": severity,
+                    "dread": {"score": score, **dread},
+                    "stride": ["Tampering", "Elevation of privilege"],
+                    "message": "Fixture marks a sensitive or mutating tool as read-only.",
+                    "uncovered_controls": [],
+                    "covered_by": ["tool_catalog_integrity", "mutation_step_guard"],
+                    "evidence": {"categories": categories, "annotations": {"readOnlyHint": read_only_hint}},
+                }
+            )
+    findings.extend(_mcp_threat_model_catalog_transition_findings(transitions))
+    order = {"high": 0, "medium": 1, "low": 2, "info": 3, "none": 4}
+    findings.sort(key=lambda row: (order.get(str(row.get("severity")), 9), str(row.get("fixture_id", "")), str(row.get("rule_id", ""))))
+    return findings
+
+
+def _mcp_threat_model_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    lines = [
+        f"# MCP threat-model report {report.get('report_id', '')}",
+        "",
+        f"- Schema: `{report.get('schema', '')}`",
+        f"- Generated at: `{report.get('generated_at', '')}`",
+        f"- Status: `{report.get('status', '')}`",
+        f"- OK: {report.get('ok', False)}",
+        f"- Threats modeled: {summary.get('threat_count', 0)}",
+        f"- Fixture findings: {summary.get('fixture_finding_count', 0)}",
+        f"- High-severity uncovered findings: {summary.get('high_uncovered_finding_count', 0)}",
+        "",
+        "## STRIDE coverage",
+    ]
+    for category, count in sorted((summary.get("stride_counts", {}) or {}).items()):
+        lines.append(f"- `{category}`: {count}")
+    lines.extend(["", "## Threats"])
+    for threat in report.get("threats", []) if isinstance(report.get("threats"), list) else []:
+        lines.append(f"- `{threat.get('severity')}` `{threat.get('id')}` - {threat.get('title')} (uncovered: {', '.join(threat.get('uncovered_controls', [])) or 'none'})")
+    lines.extend(["", "## Fixture findings"])
+    findings = report.get("findings", []) if isinstance(report.get("findings"), list) else []
+    if findings:
+        for finding in findings:
+            lines.append(f"- `{finding.get('severity')}` `{finding.get('rule_id')}` `{finding.get('fixture_id')}` - {finding.get('message')}")
+    else:
+        lines.append("- None")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_mcp_threat_model_report_exports(report: dict[str, Any]) -> dict[str, Any]:
+    paths = _mcp_threat_model_report_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    exports = {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+    report["exports"] = exports
+    report["resource_links"] = [
+        _artifact_resource_link(
+            title="MCP threat-model report JSON",
+            rel_path=exports["json"],
+            mime_type="application/json",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="Threat-model report contains static controls, aggregate evidence, and secret-free fixture identifiers only.",
+        ),
+        _artifact_resource_link(
+            title="MCP threat-model report Markdown",
+            rel_path=exports["markdown"],
+            mime_type="text/markdown",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="Markdown export summarizes STRIDE/DREAD findings without raw secrets or repository contents.",
+        ),
+    ]
+    report["_meta"] = _artifact_meta(report["resource_links"])
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(_mcp_threat_model_markdown(report), encoding="utf-8")
+    return exports
+
+
+def _mcp_threat_model_report_impl(
+    fixture_path: str = "",
+    baseline_path: str = "",
+    export: bool = False,
+) -> dict[str, Any]:
+    _require_git_repo()
+    fixtures, transitions, fixture_meta = _mcp_threat_model_load_fixture(fixture_path)
+    baseline = _mcp_threat_model_load_baseline(baseline_path)
+    controls = _mcp_threat_model_controls()
+    generated_at = _now_iso()
+    report_id = f"{MCP_THREAT_MODEL_REPORT_PREFIX}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    threats: list[dict[str, Any]] = []
+    stride_counts: dict[str, int] = {}
+    uncovered_control_counts: dict[str, int] = {}
+    for spec in MCP_THREAT_MODEL_THREATS:
+        dread = spec.get("dread", {}) if isinstance(spec.get("dread"), dict) else {}
+        score, severity = _mcp_threat_model_severity(dread)
+        required = [str(item) for item in spec.get("required_controls", [])]
+        uncovered = [control for control in required if not bool(controls.get(control, {}).get("covered", False))]
+        for category in spec.get("stride", []):
+            stride_counts[str(category)] = stride_counts.get(str(category), 0) + 1
+        for control in uncovered:
+            uncovered_control_counts[control] = uncovered_control_counts.get(control, 0) + 1
+        threats.append(
+            {
+                "id": str(spec.get("id", "")),
+                "title": str(spec.get("title", "")),
+                "stride": list(spec.get("stride", [])),
+                "components": list(spec.get("components", [])),
+                "dread": {"score": score, **dread},
+                "severity": severity,
+                "required_controls": required,
+                "covered_controls": [control for control in required if control not in uncovered],
+                "uncovered_controls": uncovered,
+                "evidence": {control: controls.get(control, {}).get("evidence", {}) for control in required},
+            }
+        )
+    findings = _mcp_threat_model_fixture_findings(fixtures, transitions)
+    high_uncovered = [finding for finding in findings if finding.get("severity") == "high" and finding.get("uncovered_controls")]
+    high_uncovered_ids = sorted(str(finding.get("id", "")) for finding in high_uncovered if str(finding.get("id", "")))
+    allowed_high_uncovered = int(baseline.get("allowed_high_uncovered_finding_count", 0) or 0) if baseline.get("loaded") else 0
+    allowed_high_uncovered_ids = (
+        {str(item) for item in baseline.get("allowed_high_uncovered_finding_ids", []) if str(item)}
+        if baseline.get("loaded") and isinstance(baseline.get("allowed_high_uncovered_finding_ids"), list)
+        else set()
+    )
+    newly_introduced_high_uncovered = sorted(set(high_uncovered_ids) - allowed_high_uncovered_ids)
+    baseline_failures: list[dict[str, Any]] = []
+    if baseline.get("loaded"):
+        expected_fixture_ids = {str(item) for item in baseline.get("required_fixture_ids", []) if str(item)} if isinstance(baseline.get("required_fixture_ids"), list) else set()
+        observed_fixture_ids = {str(finding.get("fixture_id", "")) for finding in findings}
+        for missing in sorted(expected_fixture_ids - observed_fixture_ids):
+            baseline_failures.append({"type": "missing_fixture_detection", "fixture_id": missing})
+        expected_rules = baseline.get("required_fixture_rule_ids", {}) if isinstance(baseline.get("required_fixture_rule_ids"), dict) else {}
+        for fixture_id, rules in expected_rules.items():
+            required_rules = {str(item) for item in rules} if isinstance(rules, list) else set()
+            observed_rules = {str(finding.get("rule_id", "")) for finding in findings if str(finding.get("fixture_id", "")) == str(fixture_id)}
+            for missing_rule in sorted(required_rules - observed_rules):
+                baseline_failures.append({"type": "missing_fixture_rule", "fixture_id": str(fixture_id), "rule_id": missing_rule})
+        if allowed_high_uncovered_ids:
+            for finding_id in newly_introduced_high_uncovered:
+                baseline_failures.append({"type": "new_high_uncovered_regression", "finding_id": finding_id})
+        elif len(high_uncovered) > allowed_high_uncovered:
+            baseline_failures.append({"type": "high_uncovered_regression", "allowed": allowed_high_uncovered, "actual": len(high_uncovered)})
+    by_severity = {severity: 0 for severity in ("high", "medium", "low", "info")}
+    for finding in findings:
+        severity = str(finding.get("severity", "info"))
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+    fallback_count_regression = bool(baseline.get("loaded")) and not allowed_high_uncovered_ids and len(high_uncovered) > allowed_high_uncovered
+    status = "regression" if baseline_failures or fallback_count_regression else "findings" if findings else "clean"
+    report: dict[str, Any] = {
+        "schema": MCP_THREAT_MODEL_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "read_only": True,
+        "status": status,
+        "ok": status != "regression",
+        "summary": {
+            "component_count": len(MCP_THREAT_MODEL_COMPONENTS),
+            "trust_boundary_count": len(MCP_THREAT_MODEL_BOUNDARIES),
+            "threat_count": len(threats),
+            "fixture_count": len(fixtures),
+            "fixture_finding_count": len(findings),
+            "by_severity": by_severity,
+            "high_uncovered_finding_count": len(high_uncovered),
+            "high_uncovered_finding_ids": high_uncovered_ids,
+            "new_high_uncovered_finding_count": len(newly_introduced_high_uncovered),
+            "uncovered_control_counts": dict(sorted(uncovered_control_counts.items())),
+            "stride_counts": dict(sorted(stride_counts.items())),
+        },
+        "components": list(MCP_THREAT_MODEL_COMPONENTS),
+        "trust_boundaries": list(MCP_THREAT_MODEL_BOUNDARIES),
+        "controls": controls,
+        "dread_rubric": _mcp_threat_model_dread_rubric(),
+        "threats": threats,
+        "findings": findings,
+        "baseline": {
+            "path": baseline.get("path", ""),
+            "loaded": bool(baseline.get("loaded", False)),
+            "schema": baseline.get("schema", ""),
+            "allowed_high_uncovered_finding_count": allowed_high_uncovered,
+            "allowed_high_uncovered_finding_ids": sorted(allowed_high_uncovered_ids),
+            "newly_introduced_high_uncovered_finding_ids": newly_introduced_high_uncovered,
+            "failures": baseline_failures,
+        },
+        "fixtures": fixture_meta,
+        "security": {
+            "read_only": True,
+            "offline": True,
+            "network_access": False,
+            "mutates_repository": False,
+            "repo_boundary_enforced": True,
+            "fixture_policy": "fixtures are local JSON only and evidence is redacted/aggregate",
+            "limitations": "STRIDE/DREAD scores use the checked-in deterministic rubric and do not replace human threat modeling.",
+        },
+        "exports": {},
+        "resource_links": [],
+        "_meta": _artifact_meta([]),
+    }
+    if export:
+        _write_mcp_threat_model_report_exports(report)
+    return report
+
 
 def _governance_markdown(report: dict[str, Any]) -> str:
     counts = report.get("audit", {}).get("counts", {}) if isinstance(report.get("audit"), dict) else {}
@@ -27662,6 +28237,27 @@ def self_optimization_report(
             github_issue_update_mode=github_issue_update_mode,
             github_repository=github_repository,
             github_token_env=github_token_env,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
+def mcp_threat_model_report(
+    fixture_path: str = "",
+    baseline_path: str = "",
+    export: bool = False,
+) -> dict[str, Any]:
+    """Build an offline, read-only STRIDE/DREAD threat-model regression report for MCP tool poisoning risks."""
+    arguments = {"fixture_path": fixture_path, "baseline_path": baseline_path, "export": export}
+    with _otel_span(
+        "mcp.tool.mcp_threat_model_report",
+        _otel_tool_attributes("mcp_threat_model_report", arguments),
+    ) as span:
+        result = _mcp_threat_model_report_impl(
+            fixture_path=fixture_path,
+            baseline_path=baseline_path,
+            export=export,
         )
         _otel_set_result_attributes(span, result)
         return result

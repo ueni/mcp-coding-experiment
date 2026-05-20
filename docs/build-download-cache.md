@@ -89,5 +89,9 @@ CI runs the same script before building the devcontainer image.
 - APT package archives and lists are tied to the configured Debian/Docker APT
   repositories and the persistent BuildKit cache store.
 
+Large standalone downloads use a stable `.part` file with curl resume support
+(`--continue-at -`) and bounded retries, so transient connection resets can
+continue from the last written byte instead of restarting the whole artifact.
+
 If a cache entry is corrupt, the Dockerfile discards it and re-downloads online;
 with `MCP_BUILD_OFFLINE=true`, missing required cache entries fail the build.

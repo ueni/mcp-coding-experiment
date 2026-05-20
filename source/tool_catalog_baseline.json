@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 32,
+  "tool_count": 33,
   "tools": [
     {
       "digest": "sha256:dfaa3c9983cb8279b2f3e5494e332605321a2b3ddd3064bbcfd26f29967957c4",
@@ -3908,6 +3908,442 @@
         }
       },
       "name": "interaction_invariant_audit"
+    },
+    {
+      "digest": "sha256:0f69fd347292c81800d746fbd711531e2bb919f9996d7b8cc6b341e1acea560a",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "MCP threat-model regression report",
+            "path": "docs/mcp-threat-model-report.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Build an offline, read-only STRIDE/DREAD threat-model regression report for MCP tool poisoning risks.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "baseline_path": {
+                "default": "",
+                "title": "Baseline Path",
+                "type": "string"
+              },
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              },
+              "fixture_path": {
+                "default": "",
+                "title": "Fixture Path",
+                "type": "string"
+              }
+            },
+            "title": "mcp_threat_model_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "mcp_threat_model_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "baseline": {
+                "type": "object"
+              },
+              "components": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "controls": {
+                "type": "object"
+              },
+              "dread_rubric": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fixtures": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "mcp_threat_model_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "clean",
+                  "findings",
+                  "regression"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "threats": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "trust_boundaries": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "status",
+              "ok",
+              "summary",
+              "components",
+              "trust_boundaries",
+              "dread_rubric",
+              "threats",
+              "findings",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "controls",
+            "baseline",
+            "fixtures",
+            "security",
+            "resource_links",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "baseline": {
+                "type": "object"
+              },
+              "components": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "controls": {
+                "type": "object"
+              },
+              "dread_rubric": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fixtures": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "mcp_threat_model_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "clean",
+                  "findings",
+                  "regression"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "threats": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "trust_boundaries": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "status",
+              "ok",
+              "summary",
+              "components",
+              "trust_boundaries",
+              "dread_rubric",
+              "threats",
+              "findings",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "status",
+            "ok",
+            "summary",
+            "components",
+            "trust_boundaries",
+            "dread_rubric",
+            "threats",
+            "findings",
+            "exports"
+          ],
+          "tool": "mcp_threat_model_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "mcp_threat_model_report"
+        }
+      },
+      "name": "mcp_threat_model_report"
     },
     {
       "digest": "sha256:df461b69832fd5ba687ed8972d9913e7a5c820f58095016250229d4368e99e5e",
@@ -10238,5 +10674,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:3fe2c3806df2d2b99688f42d12ae724fef957a0080dca78b9b7930285184e413"
+  "whole_catalog_digest": "sha256:e8b8ac89770a456a912fb1b6e235681c782ab58ea1f95f44019bcc81bc3dcb20"
 }
