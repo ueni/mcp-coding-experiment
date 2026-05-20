@@ -16,6 +16,7 @@ The first-slice report schema is `governance_report.v1`. It includes:
 - latest stored `workflow_policy_plan` decision/plan ID as optional pre-execution workflow-policy evidence when available;
 - latest exported `dependency_security_report` status, vulnerability count, advisory freshness, and report path when available;
 - inline `ci_workflow_security_report` summary with checked workflow count, status, and active high/medium finding counts;
+- companion `mcp_threat_model_report` workflow for STRIDE/DREAD fixture regressions when a focused MCP threat-model view is needed;
 - compact `tool_catalog_integrity` public-MCP-surface status, baseline/current digests, tool/prompt/resource counts, drift counts, and advisory lint counts without embedding the full catalog;
 - snapshot/rollback references from the state snapshot index when available;
 - a compact `workflow_diagnostics` summary for failed audit trajectories when blocked steps are present;
@@ -83,3 +84,7 @@ Security boundaries:
 - GitHub attestation success requires both verifier success and expected policy identity matches; disabled backends, missing dependencies/files/tokens, unavailable online verification, or private-repository transparency gaps report `unavailable` or `unsupported`, never `verified`;
 - external OPA or Agent Governance Toolkit integrations are intentionally out of scope for this first slice;
 - CI-hosted GitHub Artifact Attestations and future Sigstore/cosign signing complement local sidecars and workflow lineage rather than replacing them.
+
+## Threat-model companion
+
+Use [`mcp_threat_model_report`](./mcp-threat-model-report.md) when the review needs an explicit STRIDE/DREAD map across MCP host/client, LLM, server, repository, and external-service boundaries. It reuses governance evidence such as tool-catalog integrity and untrusted-content signals but keeps poisoned-tool fixture regression output separate from the broader governance audit.

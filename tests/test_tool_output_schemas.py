@@ -40,6 +40,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "tool_catalog_integrity",
                 "dependency_security_report",
                 "ci_workflow_security_report",
+                "mcp_threat_model_report",
                 "governance_report",
                 "self_optimization_report",
                 "artifact_provenance",

@@ -1,0 +1,23 @@
+{
+  "schema": "mcp_threat_model_baseline.v1",
+  "allowed_high_uncovered_finding_count": 2,
+  "allowed_high_uncovered_finding_ids": [
+    "fixture:ambiguous_parameter_visibility:ambiguous-parameter-visibility",
+    "fixture:client_transparency_control_gap:client-transparency-control-gap"
+  ],
+  "required_fixture_ids": [
+    "hidden_instruction_poison",
+    "cross_tool_poison",
+    "ambiguous_parameter_visibility",
+    "client_transparency_control_gap"
+  ],
+  "required_fixture_rule_ids": {
+    "hidden_instruction_poison": ["poisoned-tool-metadata"],
+    "cross_tool_poison": ["poisoned-tool-metadata"],
+    "ambiguous_parameter_visibility": [
+      "ambiguous-parameter-visibility",
+      "annotation-category-mismatch"
+    ],
+    "client_transparency_control_gap": ["client-transparency-control-gap"]
+  }
+}
