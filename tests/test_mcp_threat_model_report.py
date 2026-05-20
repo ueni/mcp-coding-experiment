@@ -68,7 +68,7 @@ class McpThreatModelReportTests(ServerToolsTestBase):
 
         self.assertFalse(report["ok"])
         self.assertEqual(report["status"], "regression")
-        self.assertEqual(report["summary"]["high_uncovered_finding_count"], 1)
+        self.assertEqual(report["summary"]["high_uncovered_finding_count"], 2)
         self.assertIn(
             "high_uncovered_regression",
             {failure["type"] for failure in report["baseline"]["failures"]},

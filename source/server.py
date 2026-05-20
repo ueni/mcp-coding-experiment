@@ -9191,7 +9191,7 @@ def _mcp_threat_model_report_impl(
     for finding in findings:
         severity = str(finding.get("severity", "info"))
         by_severity[severity] = by_severity.get(severity, 0) + 1
-    fallback_count_regression = (not baseline.get("loaded") or not allowed_high_uncovered_ids) and len(high_uncovered) > allowed_high_uncovered
+    fallback_count_regression = bool(baseline.get("loaded")) and not allowed_high_uncovered_ids and len(high_uncovered) > allowed_high_uncovered
     status = "regression" if baseline_failures or fallback_count_regression else "findings" if findings else "clean"
     report: dict[str, Any] = {
         "schema": MCP_THREAT_MODEL_REPORT_SCHEMA,
