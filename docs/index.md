@@ -19,6 +19,7 @@ SPDX-License-Identifier: MIT
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [Mutation step guard](./mutation-step-guard.md) - read-only final checkpoint before workspace/git mutation steps.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
+- [Skill-pack risk and fit scoring](./skill-pack-score.md) - read-only `skill_pack_score` risk/fit decisions for workflow cards and offline imported-skill fixtures.
 - [Context retrieval regression suite](./context-retrieval-regression.md) - offline ContextBench-style fixtures and metrics for task-router workflow-card retrieval.
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) - offline Terminal-Bench-style task fixtures, direct baseline runner, agent hooks, and trajectory/safety metrics for complete MCP workflows.
 - [Agent execution modes](./execution-modes.md) - online/cloud-assisted and offline/onboard-only routing contracts layered onto workflow selection.
@@ -64,6 +65,7 @@ This index lists documentation ownership and status.
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
+- [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`
 - [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`
 - [Context retrieval regression suite](./context-retrieval-regression.md) (`docs/context-retrieval-regression.md`) - Status: `prototype`
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) (`docs/e2e-mcp-workflow-benchmarks.md`) - Status: `prototype`
