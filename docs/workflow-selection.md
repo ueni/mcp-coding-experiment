@@ -31,7 +31,7 @@ Each card contains:
 - `trust`: `workflow_card_trust.v1` provenance and permission metadata. Built-in cards use an explicit repository-owned trusted default with `source="repository_builtin"`, `trust_tier="trusted_repository"`, `review_status="repository_owned"`, bounded permissions, no network access, sandbox guidance, and a deterministic `provenance_digest`.
 - `safety`: compact `workflow_card_safety.v1` lint/trust summary with `lint_status`, finding counts, trust tier, risk, and whether a card was suppressed by default.
 
-The selector returns `workflow_selection.v1` with ranked `matches`, per-match `confidence`, `match_reasons`, trust/safety metadata, global `caveats`, and an `agent_execution_mode.v1` profile. High-risk phrasings surface snapshot, clarification, release, security, or mode-fallback gates where relevant. If an injected/test card is untrusted and high risk, the selector suppresses it by default and reports it in `suppressed_matches` instead of ranking it like a repository-owned card.
+The selector returns `workflow_selection.v1` with ranked `matches`, per-match `confidence`, `match_reasons`, trust/safety metadata, `skill_pack_score.v1` risk/fit evidence, global `caveats`, and an `agent_execution_mode.v1` profile. High-risk phrasings surface snapshot, clarification, release, security, or mode-fallback gates where relevant. If an injected/test card is quarantined by skill-pack scoring or is untrusted and high risk, the selector suppresses it by default and reports it in `suppressed_matches` instead of ranking it like a repository-owned card. Low-fit cards are demoted so irrelevant skill context does not crowd out better workflow choices.
 
 ## Seeded cards
 
@@ -61,7 +61,7 @@ Structured findings include:
 - `outside_repo_write` for writes, moves, chmods, or deletes outside `REPO_PATH`.
 - `missing_sandbox_guidance` when high-risk cards do not explain sandbox/`REPO_PATH` expectations.
 
-External/generated workflow-card or agent-skill loading remains disabled by default. To accept a future card, reviewers must require complete trust metadata, a passing lint report or documented rejection of each finding, a provenance digest tied to the reviewed card content, least-privilege permissions, explicit `do_not_use_when` guardrails, sandbox guidance for high-risk flows, and confirmation that no card asks agents to bypass MCP mutation, secret, auth, network, or `REPO_PATH` boundaries.
+External/generated workflow-card or agent-skill loading remains disabled by default. To accept a future card, reviewers must require complete trust metadata, a passing lint report or documented rejection of each finding, a provenance digest tied to the reviewed card content, least-privilege permissions, explicit `do_not_use_when` guardrails, sandbox guidance for high-risk flows, and confirmation that no card asks agents to bypass MCP mutation, secret, auth, network, or `REPO_PATH` boundaries. Also run the read-only `skill_pack_score` report described in [Skill-pack risk and fit scoring](./skill-pack-score.md): trust linting checks structural safety, while skill-pack scoring adds task-specific usefulness, low-fit demotion, and quarantine decisions for risky imported skills.
 
 ## Usage
 

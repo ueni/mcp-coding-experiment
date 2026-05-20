@@ -10,6 +10,7 @@ import time
 import unittest
 import urllib.parse
 import zipfile
+from pathlib import Path
 from unittest.mock import patch
 
 from tests.server_test_support import ServerToolsTestBase
@@ -219,7 +220,67 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["suppressed_matches"][0]["id"], "malicious-release-card")
         self.assertTrue(out["suppressed_matches"][0]["safety"]["suppressed_by_default"])
         self.assertEqual(out["suppressed_matches"][0]["safety"]["suppression_reason"], "untrusted_high_risk")
+        self.assertEqual(out["suppressed_matches"][0]["skill_pack_score"]["decision"], "quarantine")
         self.assertTrue(any("suppressed" in caveat.lower() for caveat in out["caveats"]))
+
+    def test_skill_pack_score_scores_fixture_imported_skills(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "skill_pack_score_skills.json"
+        skills = json.loads(fixture_path.read_text())
+
+        report = self.server.skill_pack_score(
+            prompt="Select pytest commands for changed Python files",
+            items=skills,
+        )
+
+        self.assertEqual(report["schema"], "skill_pack_score.v1")
+        self.assertTrue(report["read_only"])
+        scores = {row["item_id"]: row for row in report["scores"]}
+        benign = scores["pytest-impact-helper"]
+        noisy = scores["noisy-gardening-helper"]
+        risky = scores["risky-upload-helper"]
+
+        self.assertEqual(benign["item_kind"], "imported_skill")
+        self.assertLess(benign["risk_score"], 25)
+        self.assertGreaterEqual(benign["fit_score"], 55)
+        self.assertIn(benign["decision"], {"allow", "allow_with_caveats"})
+        self.assertLess(noisy["fit_score"], 25)
+        self.assertEqual(noisy["decision"], "allow_with_caveats")
+        self.assertTrue(any(ev["signal"] == "low_fit_demote" for ev in noisy["evidence"]))
+        self.assertGreaterEqual(risky["risk_score"], 75)
+        self.assertEqual(risky["decision"], "quarantine")
+        risky_signals = {ev["signal"] for ev in risky["evidence"]}
+        self.assertIn("network_exfiltration_pattern", risky_signals)
+        self.assertIn("prompt_injection_instruction", risky_signals)
+
+    def test_workflow_select_exposes_score_and_demotes_low_fit_cards(self):
+        safe = self._workflow_card_fixture(
+            id="safe-release-card",
+            title="Safe release card",
+            intent="Review release readiness without mutations.",
+            triggers=["release"],
+            risk="medium",
+            routing_terms=["release", "readiness"],
+        )
+        noisy = self._workflow_card_fixture(
+            id="noisy-card",
+            title="Gardening checklist",
+            intent="Plan watering schedules for seedlings.",
+            triggers=["garden", "watering"],
+            risk="low",
+            routing_terms=["garden", "watering"],
+        )
+
+        out = self.server._workflow_select_from_cards(
+            "release readiness gate",
+            top_k=2,
+            cards=[noisy, safe],
+        )
+
+        self.assertEqual(out["matches"][0]["id"], "safe-release-card")
+        self.assertEqual(out["matches"][1]["id"], "noisy-card")
+        self.assertEqual(out["matches"][0]["skill_pack_score"]["schema"], "skill_pack_score.v1")
+        self.assertLess(out["matches"][1]["skill_pack_score"]["fit_score"], 25)
+        self.assertIn("low-fit-demotion", out["matches"][1]["match_reasons"])
 
     def test_task_router_workflow_select_devcontainer_and_test_impact(self):
         health = self.server.task_router(

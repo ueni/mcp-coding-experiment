@@ -1020,6 +1020,7 @@ WORKFLOW_SELECT_SCHEMA_VERSION = "workflow_selection.v1"
 WORKFLOW_CARD_TRUST_SCHEMA_VERSION = "workflow_card_trust.v1"
 WORKFLOW_CARD_LINT_SCHEMA_VERSION = "workflow_card_lint.v1"
 WORKFLOW_CARD_SAFETY_SCHEMA_VERSION = "workflow_card_safety.v1"
+SKILL_PACK_SCORE_SCHEMA_VERSION = "skill_pack_score.v1"
 WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED = False
 WORKFLOW_CARD_FIELDS = (
     "id",
@@ -1036,6 +1037,9 @@ WORKFLOW_CARD_FIELDS = (
     "routing_terms",
     "supported_execution_modes",
     "mode_routing",
+    "required_tools",
+    "benchmark",
+    "updated_at",
 )
 WORKFLOW_CARD_TRUST_REQUIRED_FIELDS = (
     "source",
@@ -23958,6 +23962,7 @@ def _workflow_card_public(
     apply_repository_trust_default: bool = False,
     lint_findings: list[dict[str, Any]] | None = None,
     safety: dict[str, Any] | None = None,
+    skill_pack_score: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     public = {field: card[field] for field in WORKFLOW_CARD_FIELDS if field in card}
     supported = list(card.get("supported_execution_modes", AGENT_EXECUTION_MODES))
@@ -23978,6 +23983,8 @@ def _workflow_card_public(
         public["trust"] = trust
     findings = lint_findings if lint_findings is not None else _workflow_card_lint_findings(card, apply_repository_trust_default=apply_repository_trust_default)
     public["safety"] = safety if safety is not None else _workflow_card_safety_summary(card, findings, trust=trust)
+    if skill_pack_score is not None:
+        public["skill_pack_score"] = skill_pack_score
     return public
 
 
@@ -23988,6 +23995,507 @@ def _workflow_selection_tokens(text: str) -> set[str]:
         if token not in TASK_RETRIEVAL_STOPWORDS and not token.isdigit()
     }
 
+
+
+
+def _skill_pack_item_id(item: dict[str, Any]) -> str:
+    return str(item.get("id") or item.get("name") or item.get("title") or "<unknown>")
+
+
+def _skill_pack_item_kind(item: dict[str, Any]) -> str:
+    schema = str(item.get("schema") or "").strip().lower()
+    if schema == WORKFLOW_CARD_SCHEMA_VERSION or "recommended_entrypoint" in item:
+        return "workflow_card"
+    if "skill" in schema or "skill" in str(item.get("type") or "").lower():
+        return "imported_skill"
+    return "skill_pack_item"
+
+
+def _skill_pack_score_add_evidence(
+    evidence: list[dict[str, Any]],
+    *,
+    category: str,
+    signal: str,
+    weight: float,
+    message: str,
+    severity: str = "info",
+    field: str = "",
+    excerpt: str = "",
+) -> None:
+    row: dict[str, Any] = {
+        "category": category,
+        "signal": signal,
+        "severity": severity,
+        "weight": round(float(weight), 2),
+        "message": message,
+    }
+    if field:
+        row["field"] = field
+    if excerpt:
+        row["excerpt"] = _redact_untrusted_content_excerpt(str(excerpt), max_chars=180)
+    evidence.append(row)
+
+
+def _skill_pack_values(item: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str):
+            if value.strip():
+                values.append(value)
+        elif isinstance(value, dict):
+            values.extend(_skill_pack_values(value, tuple(str(k) for k in value.keys())))
+        elif isinstance(value, (list, tuple, set)):
+            values.extend(str(part) for part in value if str(part).strip())
+    return values
+
+
+def _skill_pack_text(item: dict[str, Any]) -> str:
+    text_keys = (
+        "id",
+        "name",
+        "title",
+        "summary",
+        "description",
+        "intent",
+        "triggers",
+        "prerequisites",
+        "risk",
+        "mutation_mode",
+        "outputs",
+        "do_not_use_when",
+        "recommended_entrypoint",
+        "routing_terms",
+        "supported_execution_modes",
+        "mode_routing",
+        "required_tools",
+        "tools",
+        "languages",
+        "paths",
+        "content",
+        "body",
+        "readme",
+    )
+    return "\n".join(_skill_pack_values(item, text_keys))
+
+
+def _skill_pack_numeric_rate(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        rate = float(value)
+    elif isinstance(value, str):
+        try:
+            rate = float(value.strip().rstrip("%"))
+            if value.strip().endswith("%"):
+                rate /= 100.0
+        except ValueError:
+            return None
+    else:
+        return None
+    if rate > 1.0:
+        rate /= 100.0
+    return max(0.0, min(1.0, rate))
+
+
+def _skill_pack_fit_score(item: dict[str, Any], query: str, evidence: list[dict[str, Any]]) -> int:
+    query_tokens = _workflow_selection_tokens(query)
+    if not query_tokens:
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="fit",
+            signal="no_query",
+            weight=50,
+            message="No task query supplied; fit is neutral.",
+        )
+        return 50
+
+    score = 10.0
+    text = _skill_pack_text(item).lower()
+    item_tokens = _workflow_selection_tokens(text)
+    overlap = sorted(query_tokens.intersection(item_tokens))
+    if overlap:
+        weight = min(35.0, 5.0 * len(overlap))
+        score += weight
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="fit",
+            signal="token_overlap",
+            weight=weight,
+            message="Task query overlaps skill/card text.",
+            excerpt=", ".join(overlap[:12]),
+        )
+
+    phrase_hits: list[str] = []
+    for term in _skill_pack_values(item, ("routing_terms", "triggers")):
+        term_text = str(term).strip().lower()
+        if len(term_text) >= 3 and term_text in query.lower():
+            phrase_hits.append(term_text)
+    if phrase_hits:
+        weight = min(24.0, 8.0 * len(set(phrase_hits)))
+        score += weight
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="fit",
+            signal="routing_phrase_match",
+            weight=weight,
+            message="Task query matches routing phrases.",
+            excerpt=", ".join(sorted(set(phrase_hits))[:6]),
+        )
+
+    required_tools = _skill_pack_values(item, ("required_tools", "tools"))
+    if required_tools:
+        tool_tokens = _workflow_selection_tokens(" ".join(required_tools))
+        tool_overlap = sorted(query_tokens.intersection(tool_tokens))
+        if tool_overlap:
+            weight = min(10.0, 5.0 * len(tool_overlap))
+            score += weight
+            _skill_pack_score_add_evidence(
+                evidence,
+                category="fit",
+                signal="required_tool_match",
+                weight=weight,
+                message="Task query mentions required tool terms.",
+                excerpt=", ".join(tool_overlap[:8]),
+            )
+        else:
+            _skill_pack_score_add_evidence(
+                evidence,
+                category="fit",
+                signal="required_tools_unmatched",
+                weight=-4,
+                severity="warning",
+                message="Required tools are declared but not indicated by the query.",
+                excerpt=", ".join(required_tools[:6]),
+            )
+            score -= 4.0
+
+    affinity_terms = {
+        "python": ("python", "pytest", ".py"),
+        "docs": ("docs/", "markdown", ".md", "documentation"),
+        "github": ("github", ".github", "actions", "workflow"),
+        "docker": ("docker", "container", "devcontainer"),
+    }
+    for label, terms in affinity_terms.items():
+        if any(term in query.lower() for term in terms) and any(term in text for term in terms):
+            score += 6.0
+            _skill_pack_score_add_evidence(
+                evidence,
+                category="fit",
+                signal="repository_affinity",
+                weight=6,
+                message=f"Task and item share {label} language/path affinity.",
+            )
+            break
+
+    benchmark = item.get("benchmark") if isinstance(item.get("benchmark"), dict) else {}
+    pass_rate = _skill_pack_numeric_rate(
+        item.get("pass_rate")
+        or item.get("prior_pass_rate")
+        or benchmark.get("pass_rate")
+        or benchmark.get("prior_pass_rate")
+    )
+    if pass_rate is not None:
+        weight = 10.0 * pass_rate
+        score += weight
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="fit",
+            signal="prior_benchmark_pass_rate",
+            weight=weight,
+            message="Prior local benchmark/pass data improves fit confidence.",
+            excerpt=str(pass_rate),
+        )
+
+    if score < 25:
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="fit",
+            signal="low_fit_demote",
+            weight=-8,
+            severity="warning",
+            message="Low query overlap; selector should demote this item rather than inject noisy context.",
+        )
+    return int(round(max(0.0, min(100.0, score))))
+
+
+def _skill_pack_risk_score(
+    item: dict[str, Any],
+    *,
+    apply_repository_trust_default: bool,
+    lint_findings: list[dict[str, Any]] | None,
+    trust: dict[str, Any] | None,
+    evidence: list[dict[str, Any]],
+) -> int:
+    item_id = _skill_pack_item_id(item)
+    text = _skill_pack_text(item)
+    lower_text = text.lower()
+    trust_metadata = trust if trust is not None else _workflow_card_trust_metadata(item, apply_repository_default=apply_repository_trust_default)
+    findings = lint_findings if lint_findings is not None else _workflow_card_lint_findings(item, apply_repository_trust_default=apply_repository_trust_default)
+    score = 0.0
+
+    if not trust_metadata:
+        score += 20.0
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="risk",
+            signal="missing_trust_metadata",
+            weight=20,
+            severity="error",
+            field="trust",
+            message="Item has no trust/provenance metadata.",
+        )
+    else:
+        tier = str(trust_metadata.get("trust_tier") or "missing").strip().lower()
+        tier_weight = {
+            "trusted_repository": 0,
+            "trusted_internal": 2,
+            "reviewed_external": 6,
+            "external_reviewed": 6,
+            "generated_reviewed": 8,
+            "generated_unreviewed": 18,
+            "external_untrusted": 24,
+            "untrusted": 24,
+            "missing": 20,
+        }.get(tier, 12)
+        if tier_weight:
+            score += tier_weight
+            _skill_pack_score_add_evidence(
+                evidence,
+                category="risk",
+                signal="trust_tier_risk",
+                weight=tier_weight,
+                severity="warning" if tier_weight < 20 else "error",
+                field="trust.trust_tier",
+                message=f"Trust tier `{tier}` increases import risk.",
+            )
+        review_status = str(trust_metadata.get("review_status") or "").lower()
+        if "unreviewed" in review_status or not review_status:
+            score += 8.0
+            _skill_pack_score_add_evidence(
+                evidence,
+                category="risk",
+                signal="unreviewed_provenance",
+                weight=8,
+                severity="warning",
+                field="trust.review_status",
+                message="Review status is missing or unreviewed.",
+            )
+        network_access = str(trust_metadata.get("network_access") or "none").strip().lower()
+        if network_access not in {"", "none", "no", "false"}:
+            weight = 14.0 if "egress" in network_access or "unrestricted" in network_access else 8.0
+            score += weight
+            _skill_pack_score_add_evidence(
+                evidence,
+                category="risk",
+                signal="network_access_requested",
+                weight=weight,
+                severity="warning",
+                field="trust.network_access",
+                message="Item declares network access.",
+                excerpt=network_access,
+            )
+        sensitive_paths = trust_metadata.get("sensitive_paths", [])
+        if isinstance(sensitive_paths, list) and sensitive_paths:
+            score += min(12.0, 4.0 * len(sensitive_paths))
+            _skill_pack_score_add_evidence(
+                evidence,
+                category="risk",
+                signal="sensitive_paths_declared",
+                weight=min(12.0, 4.0 * len(sensitive_paths)),
+                severity="warning",
+                field="trust.sensitive_paths",
+                message="Item references sensitive paths.",
+                excerpt=", ".join(str(path) for path in sensitive_paths[:5]),
+            )
+
+    risk_value = str(item.get("risk") or "").strip().lower()
+    if risk_value == "high":
+        score += 20.0
+        _skill_pack_score_add_evidence(evidence, category="risk", signal="declared_high_risk", weight=20, severity="warning", field="risk", message="Item declares high-risk usage.")
+    elif risk_value == "medium":
+        score += 8.0
+        _skill_pack_score_add_evidence(evidence, category="risk", signal="declared_medium_risk", weight=8, field="risk", message="Item declares medium-risk usage.")
+
+    missing_fields = []
+    for field in ("do_not_use_when", "prerequisites"):
+        value = item.get(field)
+        if not isinstance(value, list) or not any(str(part).strip() for part in value):
+            missing_fields.append(field)
+    if _skill_pack_item_kind(item) == "imported_skill" and not (item.get("summary") or item.get("description") or item.get("intent")):
+        missing_fields.append("summary")
+    if missing_fields:
+        weight = min(12.0, 4.0 * len(missing_fields))
+        score += weight
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="risk",
+            signal="documentation_incomplete",
+            weight=weight,
+            severity="warning",
+            message="Incomplete metadata reduces safe routing observability.",
+            excerpt=", ".join(missing_fields),
+        )
+
+    links = re.findall(r"https?://[^\s`\"')]+", text)
+    if links:
+        weight = min(12.0, 4.0 * len(links))
+        score += weight
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="risk",
+            signal="external_links",
+            weight=weight,
+            severity="warning",
+            message="External links require review before import.",
+            excerpt=", ".join(links[:3]),
+        )
+
+    pattern_checks = (
+        ("dangerous_shell_obfuscation", WORKFLOW_CARD_DANGEROUS_SHELL_PATTERNS, 25, "error", "Dangerous shell execution or obfuscation wording found."),
+        ("network_exfiltration_pattern", WORKFLOW_CARD_NETWORK_EXFILTRATION_PATTERNS, 25, "error", "Network upload/exfiltration wording found."),
+        ("outside_repo_write", (f"{WORKFLOW_CARD_OUTSIDE_REPO_WRITE_VERBS}.{{0,160}}(?:{WORKFLOW_CARD_OUTSIDE_REPO_PATHS}|outside\\s+(?:repo_path|the\\s+repository|the\\s+repo))", rf"(?:>|>>)\\s*{WORKFLOW_CARD_OUTSIDE_REPO_PATHS}",), 18, "error", "Potential outside-repository write/delete wording found."),
+        ("secret_or_credential_wording", (r"\b(?:secret|token|credential|api[-_ ]?key|private[-_ ]?key|authorization)\b",), 12, "warning", "Secret or credential wording needs review."),
+        ("prompt_injection_instruction", (r"\b(?:ignore previous instructions|system prompt|developer message|act as system|jailbreak)\b",), 18, "error", "Prompt-injection-like instruction wording found."),
+    )
+    for signal, patterns, weight, severity, message in pattern_checks:
+        for pattern in patterns:
+            match = re.search(pattern, lower_text, flags=re.DOTALL)
+            if match:
+                score += float(weight)
+                _skill_pack_score_add_evidence(
+                    evidence,
+                    category="risk",
+                    signal=signal,
+                    weight=weight,
+                    severity=severity,
+                    message=message,
+                    excerpt=match.group(0),
+                )
+                break
+
+    for finding in findings:
+        severity = str(finding.get("severity") or "warning")
+        weight = 16.0 if severity == "error" else 5.0
+        score += weight
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="risk",
+            signal=str(finding.get("code") or "lint_finding"),
+            weight=weight,
+            severity=severity,
+            field=str(finding.get("field") or ""),
+            message=f"Trust lint finding for `{item_id}`: {finding.get('message') or finding.get('code')}",
+            excerpt=str(finding.get("evidence") or ""),
+        )
+    return int(round(max(0.0, min(100.0, score))))
+
+
+def _skill_pack_decision(
+    item: dict[str, Any],
+    risk_score: int,
+    fit_score: int,
+    evidence: list[dict[str, Any]],
+    trust: dict[str, Any] | None = None,
+) -> str:
+    error_signals = {str(row.get("signal")) for row in evidence if row.get("severity") == "error"}
+    severe_signals = {
+        "dangerous_shell_obfuscation",
+        "network_exfiltration_pattern",
+        "outside_repo_write",
+        "overbroad_permissions",
+        "prompt_injection_instruction",
+    }
+    trust_metadata = trust if trust is not None else item.get("trust") if isinstance(item.get("trust"), dict) else {}
+    trust_tier = str(trust_metadata.get("trust_tier") or "missing").lower()
+    untrusted = trust_tier not in WORKFLOW_CARD_TRUSTED_TIERS and trust_tier != "trusted_repository"
+    if risk_score >= 75 or severe_signals.intersection(error_signals):
+        return "quarantine"
+    if risk_score >= 55 and untrusted:
+        return "quarantine"
+    if risk_score >= 45:
+        return "needs_human_review"
+    if fit_score < 25 or risk_score >= 25:
+        return "allow_with_caveats"
+    return "allow"
+
+
+def _skill_pack_refinement_suggestions(item: dict[str, Any], fit_score: int, risk_score: int, query: str) -> list[str]:
+    suggestions: list[str] = []
+    if query and fit_score < 25:
+        suggestions.append("Do not inject this item for the current query unless a reviewer tightens its summary/routing_terms to the task vocabulary.")
+    if risk_score >= 45:
+        suggestions.append("Keep source content unchanged and route to human review before importing or trusting this item.")
+    if item.get("summary") and query and fit_score < 40:
+        suggestions.append("Optional local-only refinement: rewrite the retrieval summary to emphasize exact prerequisites, tools, and do_not_use_when guardrails.")
+    return suggestions[:3]
+
+
+def _skill_pack_score_item(
+    item: dict[str, Any],
+    query: str = "",
+    *,
+    apply_repository_trust_default: bool = False,
+    lint_findings: list[dict[str, Any]] | None = None,
+    trust: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    evidence: list[dict[str, Any]] = []
+    risk_score = _skill_pack_risk_score(
+        item,
+        apply_repository_trust_default=apply_repository_trust_default,
+        lint_findings=lint_findings,
+        trust=trust,
+        evidence=evidence,
+    )
+    fit_score = _skill_pack_fit_score(item, query, evidence)
+    trust_metadata = trust if trust is not None else _workflow_card_trust_metadata(item, apply_repository_default=apply_repository_trust_default)
+    decision = _skill_pack_decision(item, risk_score, fit_score, evidence, trust=trust_metadata)
+    return {
+        "schema": SKILL_PACK_SCORE_SCHEMA_VERSION,
+        "item_id": _skill_pack_item_id(item),
+        "item_kind": _skill_pack_item_kind(item),
+        "read_only": True,
+        "risk_score": risk_score,
+        "fit_score": fit_score,
+        "decision": decision,
+        "evidence": evidence[:24],
+        "refinement_suggestions": _skill_pack_refinement_suggestions(item, fit_score, risk_score, query),
+    }
+
+
+def skill_pack_score(
+    prompt: str = "",
+    items: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    *,
+    apply_repository_trust_defaults: bool | None = None,
+) -> dict[str, Any]:
+    """Read-only risk/fit scoring report for workflow cards and imported skill fixtures."""
+    items_to_score = WORKFLOW_CARDS if items is None else tuple(items)
+    if apply_repository_trust_defaults is None:
+        apply_repository_trust_defaults = items is None
+    scores = [
+        _skill_pack_score_item(
+            item,
+            prompt,
+            apply_repository_trust_default=apply_repository_trust_defaults,
+        )
+        for item in items_to_score
+    ]
+    decision_counts: dict[str, int] = {}
+    for score in scores:
+        decision = str(score.get("decision") or "unknown")
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
+    return {
+        "schema": SKILL_PACK_SCORE_SCHEMA_VERSION,
+        "read_only": True,
+        "card_schema": WORKFLOW_CARD_SCHEMA_VERSION,
+        "query": str(prompt or ""),
+        "items_scored": len(items_to_score),
+        "summary": {
+            "decision_counts": decision_counts,
+            "quarantined": decision_counts.get("quarantine", 0),
+            "low_fit": sum(1 for row in scores if int(row.get("fit_score", 0)) < 25),
+        },
+        "scores": scores,
+    }
 
 def _workflow_card_score(
     card: dict[str, Any],
@@ -24137,8 +24645,20 @@ def _workflow_select_from_cards(
             trust = _workflow_card_trust_metadata(card, apply_repository_default=apply_repository_trust_defaults)
             findings = _workflow_card_lint_findings(card, apply_repository_trust_default=apply_repository_trust_defaults)
             safety = _workflow_card_safety_summary(card, findings, trust=trust)
-            row = {"card": card, "trust": trust, "findings": findings, "safety": safety, **details}
-            if safety.get("suppressed_by_default"):
+            pack_score = _skill_pack_score_item(
+                card,
+                query,
+                apply_repository_trust_default=apply_repository_trust_defaults,
+                lint_findings=findings,
+                trust=trust,
+            )
+            if pack_score["fit_score"] < 25:
+                details["score"] = float(details["score"]) - 1.5
+                details["reasons"] = [*details["reasons"], "low-fit-demotion"][:6]
+            elif pack_score["fit_score"] >= 60:
+                details["score"] = float(details["score"]) + 0.5
+            row = {"card": card, "trust": trust, "findings": findings, "safety": safety, "skill_pack_score": pack_score, **details}
+            if safety.get("suppressed_by_default") or pack_score.get("decision") == "quarantine":
                 suppressed.append(row)
                 continue
             max_score = max(max_score, float(details["score"]))
@@ -24154,6 +24674,7 @@ def _workflow_select_from_cards(
                 apply_repository_trust_default=apply_repository_trust_defaults,
                 lint_findings=row["findings"],
                 safety=row["safety"],
+                skill_pack_score=row["skill_pack_score"],
             )
             score = float(row["score"])
             confidence = round(min(0.99, score / max(max_score, 6.0)), 2)
@@ -24174,6 +24695,7 @@ def _workflow_select_from_cards(
                 "score": round(float(row["score"]), 2),
                 "match_reasons": row["reasons"],
                 "safety": row["safety"],
+                "skill_pack_score": row["skill_pack_score"],
             }
             for row in suppressed[:5]
         ]
