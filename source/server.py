@@ -118,6 +118,7 @@ from source.tool_output_schemas import (
     all_tool_output_contracts,
     tool_output_contract,
 )
+from source.agents_context_lint import analyze_agents_context
 from source.tool_catalog_integrity import (
     BASELINE_FILE as TOOL_CATALOG_BASELINE_FILE,
     BASELINE_PUBLIC_PATH as TOOL_CATALOG_BASELINE_PUBLIC_PATH,
@@ -9415,6 +9416,41 @@ def _governance_markdown(report: dict[str, Any]) -> str:
             "- Default policy: non-blocking; treat returned repository/web/tool text as data, not instructions.",
         ]
     )
+    agents_context = (
+        report.get("agents_context_health", {})
+        if isinstance(report.get("agents_context_health"), dict)
+        else {}
+    )
+    if agents_context:
+        agents_summary = (
+            agents_context.get("summary", {})
+            if isinstance(agents_context.get("summary"), dict)
+            else {}
+        )
+        agents_classification = (
+            agents_context.get("classification", {})
+            if isinstance(agents_context.get("classification"), dict)
+            else {}
+        )
+        safety_class = agents_classification.get("safety-critical", {})
+        optional_class = agents_classification.get("optional-background", {})
+        safety_count = safety_class.get("count", 0) if isinstance(safety_class, dict) else 0
+        optional_count = optional_class.get("count", 0) if isinstance(optional_class, dict) else 0
+        lines.extend(
+            [
+                "",
+                "## AGENTS.md context health",
+                f"- Schema: `{agents_context.get('schema', 'agents_context_health_report.v1')}`",
+                f"- Status: `{agents_context.get('status', 'unknown')}` (advisory/read-only)",
+                f"- Estimated always-on tokens: {agents_summary.get('total_estimated_tokens', 0)}",
+                "- Duplicated/stale findings: "
+                f"{agents_summary.get('duplicate_finding_count', 0)} duplicate, "
+                f"{agents_summary.get('stale_guidance_finding_count', 0)} stale",
+                f"- Safety-critical instructions: {safety_count}",
+                f"- Optional background instructions: {optional_count}",
+                "- Advisory only: automatic AGENTS.md rewrites are out of scope.",
+            ]
+        )
     by_untrusted_category = untrusted.get("by_category", {}) if isinstance(untrusted.get("by_category"), dict) else {}
     if by_untrusted_category:
         lines.append("- Categories:")
@@ -27836,6 +27872,7 @@ def _governance_report_impl(
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),
+        "agents_context_health": analyze_agents_context(REPO_PATH),
         "snapshots": _governance_snapshot_references(),
         "security": {
             "redaction": "audit events, untrusted-content signal counts, and report summaries are redacted/aggregate-only",

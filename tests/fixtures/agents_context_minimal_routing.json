@@ -1,0 +1,37 @@
+{
+  "schema": "agents_context_effectiveness_fixture_set.v1",
+  "name": "agents-context-minimal-routing-smoke",
+  "target": "task_router(mode='workflow_select')",
+  "description": "Offline regression fixtures comparing workflow selection with and without a compact always-on AGENTS.md summary.",
+  "default_top_k": 3,
+  "minimal_context_summary": "Always-on repository context summary: codebase-tooling-mcp is a repository-scoped MCP server. Start with read-only inspection, keep secrets and host paths out of outputs, use task_router workflow selection when unsure, use quality_router for verification gates, and create a snapshot or normal Git rollback point before risky mutation. The user task follows.",
+  "thresholds": {
+    "min_baseline_top_workflow_card_accuracy": 1.0,
+    "min_with_context_top_workflow_card_accuracy": 1.0,
+    "min_routing_preservation": 1.0,
+    "max_minimal_context_estimated_tokens": 100
+  },
+  "fixtures": [
+    {
+      "id": "security-review-with-agents-summary",
+      "coverage": "security-review",
+      "prompt": "Review this auth change for leaked tokens, credential handling, and security vulnerabilities before approval.",
+      "execution_mode": "auto",
+      "expected_top_workflow_card": "security-triage"
+    },
+    {
+      "id": "release-readiness-with-agents-summary",
+      "coverage": "release-readiness",
+      "prompt": "We are ready to ship version 1.2; check release readiness, changelog, CI gate, merge blockers, and rollback notes.",
+      "execution_mode": "auto",
+      "expected_top_workflow_card": "release-readiness"
+    },
+    {
+      "id": "test-impact-with-agents-summary",
+      "coverage": "test-impact",
+      "prompt": "Changed src/router.py and tests/test_router.py; choose the smallest pytest coverage and impact verification gate.",
+      "execution_mode": "auto",
+      "expected_top_workflow_card": "test-impact"
+    }
+  ]
+}

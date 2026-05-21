@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT
 
 - [MCP Registry server.json readiness](./mcp-registry-readiness.md) - checked-in official-registry metadata, OCI ownership marker, local dry-run validation, and maintainer-gated publishing path.
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting plus first-slice `workflow_lineage.v1` manifests for MCP policy and tool-gate decisions.
+- [AGENTS.md context-health lint](./agents-context-health.md) - read-only minimal-context budget, duplication/staleness, instruction-class, and routing-effectiveness checks for always-on agent context.
 - [MCP threat-model regression report](./mcp-threat-model-report.md) - offline STRIDE/DREAD report for MCP tool-poisoning controls, fixtures, and high-severity uncovered regressions.
 - [GitHub Actions workflow security report](./ci-workflow-security.md) - offline read-only workflow posture checks for permissions, action refs, risky triggers, runners, Docker/secrets/artifacts, and suppressions.
 - [Dependency security report](./dependency-security.md) - read-only dependency inventory, SBOM export, and vulnerability-gate evidence with offline/caller-provided advisory sources.
@@ -39,6 +40,7 @@ This index lists documentation ownership and status.
 
 - [Repository Overview](../README.md) (`README.md`) - Status: `canonical`
 - [Coding-agent entrypoint](../AGENTS.md) (`AGENTS.md`) - Status: `canonical/agent guidance`
+- [AGENTS.md context-health lint](./agents-context-health.md) (`docs/agents-context-health.md`) - Status: `prototype`
 - [JSON Settings Files](./json-settings.md) (`docs/json-settings.md`) - Status: `canonical`
 - [MCP Fun Labs](./labs.md) (`docs/labs.md`) - Status: `lab/experimental`
 - [Tooling White Paper](./tooling-whitepaper.md) (`docs/tooling-whitepaper.md`) - Status: `canonical/strategy`

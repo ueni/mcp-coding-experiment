@@ -18,6 +18,7 @@ The first-slice report schema is `governance_report.v1`. It includes:
 - inline `ci_workflow_security_report` summary with checked workflow count, status, and active high/medium finding counts;
 - companion `mcp_threat_model_report` workflow for STRIDE/DREAD fixture regressions when a focused MCP threat-model view is needed;
 - compact `tool_catalog_integrity` public-MCP-surface status, baseline/current digests, tool/prompt/resource counts, drift counts, and advisory lint counts without embedding the full catalog;
+- advisory `agents_context_health` summary for `AGENTS.md` minimal-context budget, duplicated/stale guidance, broad global instructions, and safety-critical vs optional-background instruction counts without embedding raw file contents;
 - snapshot/rollback references from the state snapshot index when available;
 - a compact `workflow_diagnostics` summary for failed audit trajectories when blocked steps are present;
 - git base/head metadata for PR or release review;
@@ -77,6 +78,7 @@ Security boundaries:
 - absolute audit paths outside the repository are not read by the report workflow;
 - secrets and tokens are redacted before aggregation and export;
 - tool-catalog integrity summaries include only public MCP metadata digests/counts, never repository contents or host absolute paths;
+- AGENTS.md context-health summaries are advisory, read-only, repository-relative, and do not auto-rewrite context files or embed raw instructions/secrets;
 - resource links and lineage manifests expose only repository-relative `repo://file/{path}` paths, never host absolute paths or raw secret-bearing inputs;
 - unsigned provenance sidecars and workflow-lineage manifests are local integrity/replay metadata only and are not cryptographic signatures;
 - the `local-dsse-fixture` backend is deterministic offline verifier plumbing for tests/local demos, not a production release trust root;
