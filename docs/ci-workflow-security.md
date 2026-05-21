@@ -38,4 +38,13 @@ action_ref_allowlist:
 
 Suppressions must include a rule id, rationale, and unexpired `expires` date. Optional `path`, `line`, and `contains` fields narrow a suppression match. Action allowlists only suppress mutable action-ref findings; broader risk exceptions should use suppressions with rationale and expiry.
 
+## SARIF export
+
+With `export=true`, the workflow also writes a local SARIF 2.1.0 artifact:
+
+- `.codebase-tooling-mcp/reports/ci-workflow-security-report-*.sarif`
+- an adjacent `mcp_artifact_provenance.v1` sidecar for the SARIF artifact
+
+The SARIF export is offline/no-upload by default. It contains stable rule IDs, repository-relative locations, deterministic partial fingerprints based on redacted rule/path/line context, and `artifact_resource_link.v1` metadata in the tool result. Clean reports export a SARIF run with zero results.
+
 `governance_report` embeds a compact `ci_workflow_security` section. `release_readiness` runs the check inline and reports workflow posture separately from dependency-security freshness.

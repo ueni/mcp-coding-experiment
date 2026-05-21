@@ -148,3 +148,77 @@ jobs:
         self.assertIn("secrets.<redacted>", excerpts)
         self.assertNotIn("MY_TOKEN", excerpts)
         self.assertNotIn("/home/user", excerpts)
+
+    def test_sarif_export_has_stable_rules_results_and_repo_relative_paths(self):
+        self.write_repo_text(
+            ".github/workflows/ci.yml",
+            """name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+""",
+        )
+
+        first = self.server._ci_workflow_security_report_impl(export=True)
+        second = self.server._ci_workflow_security_report_impl(export=True)
+
+        sarif_path = self.repo_path / first["exports"]["sarif"]
+        sarif = self.server.json.loads(sarif_path.read_text(encoding="utf-8"))
+        run = sarif["runs"][0]
+        missing_permissions = next(
+            result
+            for result in run["results"]
+            if result["ruleId"] == "missing-top-level-permissions"
+        )
+        second_sarif = self.server.json.loads(
+            (self.repo_path / second["exports"]["sarif"]).read_text(encoding="utf-8")
+        )
+        second_missing_permissions = next(
+            result
+            for result in second_sarif["runs"][0]["results"]
+            if result["ruleId"] == "missing-top-level-permissions"
+        )
+
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertTrue(run["tool"]["driver"]["rules"])
+        self.assertTrue(run["results"])
+        self.assertEqual(
+            missing_permissions["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            ".github/workflows/ci.yml",
+        )
+        self.assertNotIn(str(self.repo_path), self.server.json.dumps(sarif))
+        self.assertEqual(
+            missing_permissions["partialFingerprints"],
+            second_missing_permissions["partialFingerprints"],
+        )
+        self.assertIn(first["exports"]["sarif"], first["provenance"]["sidecars"])
+        self.assertEqual(
+            self.server.artifact_provenance(artifact_path=first["exports"]["sarif"])["ok"],
+            True,
+        )
+
+    def test_clean_sarif_export_has_zero_results(self):
+        self.write_repo_text(
+            ".github/workflows/ci.yml",
+            f"""name: CI
+on: [push]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{FULL_SHA}
+""",
+        )
+
+        report = self.server._ci_workflow_security_report_impl(export=True)
+        sarif = self.server.json.loads(
+            (self.repo_path / report["exports"]["sarif"]).read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(report["status"], "clean")
+        self.assertEqual(sarif["runs"][0]["results"], [])

@@ -2050,12 +2050,32 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["summary"]["vulnerability_count"], 1)
         self.assertEqual(out["vulnerabilities"][0]["id"], "GHSA-test-vuln")
         self.assertIn("json", out["exports"])
+        self.assertIn("sarif", out["exports"])
         self.assertIn("sbom", out["exports"])
-        self.assertEqual(len(out["resource_links"]), 2)
+        self.assertEqual(len(out["resource_links"]), 3)
         self.assertFalse(out["security"]["mutates_dependency_files"])
+
+        sarif = self.server.json.loads(
+            (self.repo_path / out["exports"]["sarif"]).read_text(encoding="utf-8")
+        )
+        sarif_result = sarif["runs"][0]["results"][0]
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertEqual(sarif_result["ruleId"], "dependency-vulnerability/GHSA-test-vuln")
+        self.assertEqual(
+            sarif_result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "requirements.txt",
+        )
+        self.assertEqual(
+            sarif_result["locations"][0]["physicalLocation"]["region"]["startLine"],
+            1,
+        )
+        self.assertIn("codebase-tooling-mcp/redacted-context/v1", sarif_result["partialFingerprints"])
+        self.assertNotIn(str(self.repo_path), self.server.json.dumps(sarif))
 
         verify = self.server.artifact_provenance(artifact_path=out["exports"]["json"])
         self.assertTrue(verify["ok"], verify)
+        sarif_verify = self.server.artifact_provenance(artifact_path=out["exports"]["sarif"])
+        self.assertTrue(sarif_verify["ok"], sarif_verify)
         governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
         self.assertTrue(governance["dependency_security"]["present"])
         self.assertEqual(governance["dependency_security"]["status"], "vulnerable")
