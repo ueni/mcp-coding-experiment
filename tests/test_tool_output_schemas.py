@@ -43,6 +43,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "mcp_threat_model_report",
                 "governance_report",
                 "self_optimization_report",
+                "agents_context_health",
                 "artifact_provenance",
                 "workflow_diagnostics",
                 "workflow_lineage",
@@ -135,6 +136,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "dependency_security_report": self.server.dependency_security_report(export=False),
             "ci_workflow_security_report": self.server.ci_workflow_security_report(export=False),
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
+            "agents_context_health": self.server.agents_context_health(),
             "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
             "workflow_lineage": self.server.workflow_lineage(

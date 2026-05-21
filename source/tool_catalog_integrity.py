@@ -93,6 +93,10 @@ _DOC_REFS_BY_TOOL: dict[str, tuple[dict[str, str], ...]] = {
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Self-optimization efficiency report", "path": "docs/self-optimization-report.md"},
     ),
+    "agents_context_health": (
+        {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
+        {"label": "AGENTS.md context health report", "path": "docs/agents-context-health.md"},
+    ),
     "artifact_provenance": (
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Governance report workflow", "path": "docs/governance-report.md"},

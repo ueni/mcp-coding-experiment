@@ -112,6 +112,7 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
 from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field, RootModel
+from source.agents_context_health import analyze_agents_context
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
     TOOL_OUTPUT_SCHEMAS,
@@ -375,6 +376,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "self_optimization_report": {"categories": ["read-only"]},
+    "agents_context_health": {"categories": ["read-only", "governance"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
     "workflow_lineage": {"categories": ["read-only"]},
@@ -17273,6 +17275,22 @@ def tool_catalog_integrity(include_tools: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool()
+def agents_context_health(
+    path: str = "AGENTS.md",
+    token_budget: int = 1600,
+    byte_budget: int = 6000,
+) -> dict[str, Any]:
+    """Read-only AGENTS.md minimal-context health and regression report."""
+    _ensure_repo_path_exists()
+    return analyze_agents_context(
+        REPO_PATH,
+        path=path,
+        token_budget=token_budget,
+        byte_budget=byte_budget,
+    )
+
+
+@mcp.tool()
 def repo_info() -> dict[str, Any]:
     """Read-only capability probe: repo/git/docker state, branch/head, and server limits."""
     _ensure_repo_path_exists()
@@ -29431,6 +29449,7 @@ _WORKFLOW_POLICY_READ_TOOLS = {
     "workflow_diagnostics",
     "workflow_lineage",
     "interaction_invariant_audit",
+    "agents_context_health",
     "test_impact_map",
 }
 _WORKFLOW_POLICY_RELEASE_TOOLS = {
