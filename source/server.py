@@ -8478,9 +8478,34 @@ def _ci_workflow_markdown(report: dict[str, Any]) -> str:
 
 
 def _sarif_redact_text(value: Any, *, max_chars: int = 500) -> str:
-    text = _redact_audit_string(str(value or ""))
+    text = re.sub(r"\s+", " ", str(value or "").replace("\x00", " ")).strip()
+    text = DEPENDENCY_SECURITY_URL_VALUE_RE.sub("<redacted:url>", text)
+    text = DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.sub("<redacted:credential>", text)
+    text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
+    text = DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE.sub("<redacted:vcs_ref>", text)
     text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute_path>", text)
-    return _trim_text(text.strip(), max_chars=max_chars)
+    text = _redact_audit_string(text)
+    return _trim_text(text, max_chars=max_chars)
+
+
+def _sarif_redact_rule_id(value: Any, *, fallback: str = "finding", max_chars: int = 160) -> str:
+    text = _sarif_redact_text(value, max_chars=max_chars)
+    text = re.sub(r"[^A-Za-z0-9._/-]+", "-", text).strip("-./")
+    text = re.sub(r"[-/]{2,}", "-", text)
+    if not text:
+        text = fallback
+    return _trim_text(text, max_chars=max_chars).strip("-./") or fallback
+
+
+def _sarif_redact_tags(tags: Any) -> list[str]:
+    if not isinstance(tags, list):
+        return []
+    safe_tags = []
+    for tag in tags:
+        redacted = _sarif_redact_rule_id(tag, fallback="tag", max_chars=80)
+        if redacted:
+            safe_tags.append(redacted)
+    return sorted(set(safe_tags))
 
 
 def _sarif_repo_relative_uri(path_value: Any) -> str:
@@ -8509,7 +8534,7 @@ def _sarif_rule_index(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_rule: dict[str, dict[str, Any]] = {}
     severity_rank = {"error": 0, "warning": 1, "note": 2, "none": 3}
     for result in results:
-        rule_id = str(result.get("ruleId") or "finding")
+        rule_id = _sarif_redact_rule_id(result.get("ruleId") or "finding")
         properties = result.get("properties", {}) if isinstance(result.get("properties"), dict) else {}
         finding = properties.get("source_finding", {}) if isinstance(properties.get("source_finding"), dict) else {}
         title = _sarif_redact_text(finding.get("title") or rule_id, max_chars=120)
@@ -8528,10 +8553,8 @@ def _sarif_rule_index(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 },
                 "defaultConfiguration": {"level": level},
                 "properties": {
-                    "precision": str(finding.get("confidence") or "medium"),
-                    "tags": sorted(str(tag) for tag in finding.get("tags", []) if str(tag))
-                    if isinstance(finding.get("tags"), list)
-                    else [],
+                    "precision": _sarif_redact_text(finding.get("confidence") or "medium", max_chars=40),
+                    "tags": _sarif_redact_tags(finding.get("tags", [])),
                 },
             }
             continue
@@ -8562,7 +8585,8 @@ def _sarif_result_from_finding(
         start_line = int(line or 0)
     except (TypeError, ValueError):
         start_line = 0
-    redacted_message = _sarif_redact_text(message or title or rule_id)
+    redacted_rule_id = _sarif_redact_rule_id(rule_id)
+    redacted_message = _sarif_redact_text(message or title or redacted_rule_id)
     physical_location: dict[str, Any] = {
         "artifactLocation": {"uri": rel_path, "uriBaseId": "%SRCROOT%"},
     }
@@ -8571,7 +8595,7 @@ def _sarif_result_from_finding(
     fingerprint_payload = {
         "schema": MCP_SARIF_EXPORT_SCHEMA,
         "source": source,
-        "rule_id": str(rule_id),
+        "rule_id": redacted_rule_id,
         "path": rel_path,
         "line": start_line,
         "message": redacted_message,
@@ -8580,13 +8604,13 @@ def _sarif_result_from_finding(
     fingerprint = hashlib.sha256(_canonical_json_bytes(fingerprint_payload)).hexdigest()
     source_finding = {
         "id": _sarif_redact_text(finding.get("id", ""), max_chars=160),
-        "title": _sarif_redact_text(title or rule_id, max_chars=160),
+        "title": _sarif_redact_text(title or redacted_rule_id, max_chars=160),
         "message": redacted_message,
         "confidence": _sarif_redact_text(confidence, max_chars=40),
-        "tags": sorted(str(tag) for tag in (tags or []) if str(tag)),
+        "tags": _sarif_redact_tags(tags or []),
     }
     return {
-        "ruleId": str(rule_id),
+        "ruleId": redacted_rule_id,
         "level": _sarif_level(severity),
         "message": {"text": redacted_message},
         "locations": [{"physicalLocation": physical_location}],

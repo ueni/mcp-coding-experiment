@@ -2083,6 +2083,61 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(governance["dependency_security"]["present"])
         self.assertEqual(governance["dependency_security"]["status"], "vulnerable")
 
+    def test_dependency_security_report_redacts_caller_controlled_advisory_fields_in_sarif(self):
+        self.write_repo_text("requirements.txt", "vulnerable-pkg==1.0.0\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/malicious-advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-test https://advisory.example/leak git@github.example:private/repo.git token=supersecret /home/alice/host",
+                    "package": "vulnerable-pkg",
+                    "affected_versions": "<2.0.0",
+                    "severity": "high",
+                    "fixed_versions": ["2.0.0"],
+                    "summary": "See https://summary.example/path, file:///home/alice/secret.whl, build-host:/srv/private/repo.git, user:pass@private.example/pkg, and /home/alice/private/token.txt",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/malicious-advisories.json",
+            export=True,
+            include_sbom=False,
+            advisory_max_age_hours=24,
+        )
+
+        sarif_text = (self.repo_path / out["exports"]["sarif"]).read_text(encoding="utf-8")
+        sarif = self.server.json.loads(sarif_text)
+        sarif_payload = self.server.json.dumps(sarif, sort_keys=True)
+        allowed_sarif_schema_uri = "https://json.schemastore.org/sarif-2.1.0.json"
+        self.assertEqual(sarif["$schema"], allowed_sarif_schema_uri)
+        self.assertIn(allowed_sarif_schema_uri, sarif_payload)
+        leak_scan_payload = sarif_payload.replace(allowed_sarif_schema_uri, "")
+
+        for leaked_fragment in (
+            "https://",
+            "file://",
+            "advisory.example",
+            "summary.example",
+            "github.example",
+            "git@github.example:private/repo.git",
+            "private/repo.git",
+            "build-host",
+            "/srv/private",
+            "private.example",
+            "supersecret",
+            "user:pass",
+            "/home/alice",
+            str(self.repo_path),
+        ):
+            self.assertNotIn(leaked_fragment, leak_scan_payload)
+        self.assertIn("redacted-url", sarif_payload)
+        self.assertIn("<redacted:url>", sarif_payload)
+        self.assertIn("<redacted:vcs_ref>", sarif_payload)
+        self.assertIn("<redacted:absolute_path>", sarif_payload)
+
     def test_dependency_security_report_clean_fixture(self):
         self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
         self._write_dependency_advisory_fixture(
