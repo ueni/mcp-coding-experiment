@@ -468,8 +468,290 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 35,
+  "tool_count": 36,
   "tools": [
+    {
+      "digest": "sha256:bc3eda387116f1123ad26e3571384764bca9e36126bc04b97ad40cd67314be85",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "AGENTS.md context health report",
+            "path": "docs/agents-context-health.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Read-only AGENTS.md minimal-context health and regression report.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "byte_budget": {
+                "default": 6000,
+                "title": "Byte Budget",
+                "type": "integer"
+              },
+              "path": {
+                "default": "AGENTS.md",
+                "title": "Path",
+                "type": "string"
+              },
+              "token_budget": {
+                "default": 1600,
+                "title": "Token Budget",
+                "type": "integer"
+              }
+            },
+            "title": "agents_context_healthArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "agents_context_health",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "budget": {
+                "type": "object"
+              },
+              "duplicate_guidance": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "instruction_categories": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "move_candidates": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "risky_global_instructions": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safety": {
+                "type": "object"
+              },
+              "schema": {
+                "const": "agents_context_health.v1",
+                "type": "string"
+              },
+              "stale_guidance": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "target": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "advisory_only",
+              "target",
+              "budget",
+              "summary",
+              "instruction_categories",
+              "duplicate_guidance",
+              "stale_guidance",
+              "risky_global_instructions",
+              "move_candidates",
+              "safety"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "findings",
+            "summary.severity_counts",
+            "budget.remaining_bytes",
+            "budget.remaining_tokens"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "budget": {
+                "type": "object"
+              },
+              "duplicate_guidance": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "instruction_categories": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "move_candidates": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "risky_global_instructions": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safety": {
+                "type": "object"
+              },
+              "schema": {
+                "const": "agents_context_health.v1",
+                "type": "string"
+              },
+              "stale_guidance": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "target": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "advisory_only",
+              "target",
+              "budget",
+              "summary",
+              "instruction_categories",
+              "duplicate_guidance",
+              "stale_guidance",
+              "risky_global_instructions",
+              "move_candidates",
+              "safety"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "advisory_only",
+            "target",
+            "budget",
+            "summary",
+            "instruction_categories",
+            "duplicate_guidance",
+            "stale_guidance",
+            "risky_global_instructions",
+            "move_candidates",
+            "safety"
+          ],
+          "tool": "agents_context_health"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "agents_context_health"
+        }
+      },
+      "name": "agents_context_health"
+    },
     {
       "digest": "sha256:dfaa3c9983cb8279b2f3e5494e332605321a2b3ddd3064bbcfd26f29967957c4",
       "metadata": {
@@ -2178,7 +2460,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:3a4d368cb71182c4c3995032d8984ff457ad45aa2f3275bfedd955b23e7bb588",
+      "digest": "sha256:f97e0c31806ca3e938f08973fb53e34d974d2b8632a9ada57f579d8fa3d987b4",
       "metadata": {
         "documentation": [
           {
@@ -2237,6 +2519,9 @@
             "additionalProperties": true,
             "properties": {
               "_meta": {
+                "type": "object"
+              },
+              "agents_context_health": {
                 "type": "object"
               },
               "audit": {
@@ -2358,6 +2643,7 @@
               "generated_at",
               "audit",
               "governance_hooks",
+              "agents_context_health",
               "exports"
             ],
             "type": "object"
@@ -2423,6 +2709,9 @@
               "_meta": {
                 "type": "object"
               },
+              "agents_context_health": {
+                "type": "object"
+              },
               "audit": {
                 "type": "object"
               },
@@ -2542,6 +2831,7 @@
               "generated_at",
               "audit",
               "governance_hooks",
+              "agents_context_health",
               "exports"
             ],
             "type": "object"
@@ -2553,6 +2843,7 @@
             "generated_at",
             "audit",
             "governance_hooks",
+            "agents_context_health",
             "exports",
             "resource_links"
           ],
@@ -7576,7 +7867,7 @@
       "name": "secret_exposure_report"
     },
     {
-      "digest": "sha256:4e712b4653056d2177c8eb7eced0dc8dfd4643d923633ea826a5cc672161811a",
+      "digest": "sha256:6f60e0bd083f5173770b84b3bef5bddea33901c15a24683c75235b96ca77901d",
       "metadata": {
         "documentation": [
           {
@@ -7693,6 +7984,9 @@
               "_meta": {
                 "type": "object"
               },
+              "agents_context_health": {
+                "type": "object"
+              },
               "bottlenecks": {
                 "items": {
                   "type": "object"
@@ -7827,6 +8121,7 @@
               "metrics",
               "optimization_candidates",
               "optimization_integrity_report",
+              "agents_context_health",
               "security"
             ],
             "type": "object"
@@ -7889,6 +8184,9 @@
               "_meta": {
                 "type": "object"
               },
+              "agents_context_health": {
+                "type": "object"
+              },
               "bottlenecks": {
                 "items": {
                   "type": "object"
@@ -8023,6 +8321,7 @@
               "metrics",
               "optimization_candidates",
               "optimization_integrity_report",
+              "agents_context_health",
               "security"
             ],
             "type": "object"
@@ -8037,6 +8336,7 @@
             "metrics",
             "optimization_candidates",
             "optimization_integrity_report",
+            "agents_context_health",
             "security"
           ],
           "tool": "self_optimization_report"
@@ -11419,5 +11719,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:ebe4f5d9cd1e4e23ab7e5816c7f614a8a0b28d934bedacf0300913d65ff21ee7"
+  "whole_catalog_digest": "sha256:307f6b73587d3630f9d5a08dcb17d9094efe1d721b8b3f71393f1d8ef18d9679"
 }
