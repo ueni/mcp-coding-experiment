@@ -155,6 +155,72 @@ class ServerMemoryWorkspaceCoverageTest(ServerToolsTestBase):
         self.assertEqual(report["entries"][0]["source"], "agent")
         self.assertNotIn("src/sample.py", json.dumps(report))
 
+    def test_memory_governance_report_redacts_invalid_timestamp_metadata(self):
+        safe_timestamp = datetime.now(timezone.utc).isoformat()
+        safe_expires = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        poisoned_created = "ghp_poisonedTimestampSecret1234567890"
+        poisoned_updated = "-----BEGIN PRIVATE KEY----- poisoned updated_at"
+        poisoned_expires = "expires_at contains secret_token=abc123"
+        self._write_context_memory_fixture(
+            {
+                "schema": "context_memory.v1",
+                "policy_version": "memory_governance_policy.v1",
+                "entries": [
+                    {
+                        "namespace": "safe",
+                        "key": "timestamp-ok",
+                        "value": {"note": "metadata only"},
+                        "source": "agent",
+                        "confidence": 0.9,
+                        "provenance_digest": "sha256:valid",
+                        "created_at": safe_timestamp,
+                        "updated_at": safe_timestamp,
+                        "expires_at": safe_expires,
+                        "policy_version": "memory_governance_policy.v1",
+                    },
+                    {
+                        "namespace": "unsafe",
+                        "key": "timestamp-poison",
+                        "value": {"note": "timestamps carry poisoned content"},
+                        "source": "agent",
+                        "confidence": 0.6,
+                        "provenance_digest": "sha256:poisoned",
+                        "created_at": poisoned_created,
+                        "updated_at": poisoned_updated,
+                        "expires_at": poisoned_expires,
+                        "policy_version": "memory_governance_policy.v1",
+                    },
+                ],
+                "summaries": [],
+                "decisions": [],
+            }
+        )
+
+        report = self.server.memory_governance_report(max_entries=20)
+        serialized = json.dumps(report)
+        self.assertEqual(len(report["entries"]), 2)
+        valid_entry = report["entries"][0]
+        poisoned_entry = report["entries"][1]
+
+        self.assertEqual(valid_entry["created_at"], safe_timestamp)
+        self.assertEqual(valid_entry["updated_at"], safe_timestamp)
+        self.assertEqual(valid_entry["expires_at"], safe_expires)
+        self.assertIsNone(poisoned_entry["created_at"])
+        self.assertIsNone(poisoned_entry["updated_at"])
+        self.assertIsNone(poisoned_entry["expires_at"])
+        self.assertEqual(
+            {item["field"] for item in poisoned_entry["timestamp_redactions"]},
+            {"created_at", "updated_at", "expires_at"},
+        )
+        self.assertIn("invalid_timestamp_metadata", {finding["rule_id"] for finding in report["findings"]})
+        self.assertGreaterEqual(report["summary"]["timestamp_redacted_field_count"], 3)
+        self.assertFalse(report["security"]["invalid_timestamp_values_included"])
+        self.assertNotIn(poisoned_created, serialized)
+        self.assertNotIn(poisoned_updated, serialized)
+        self.assertNotIn(poisoned_expires, serialized)
+        self.assertNotIn("PRIVATE KEY", serialized)
+        self.assertNotIn("secret_token", serialized)
+
     def test_memory_governance_report_flags_stale_sensitive_untrusted_and_drift(self):
         old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
         self._write_context_memory_fixture(

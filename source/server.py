@@ -27857,6 +27857,22 @@ def _memory_governance_parse_dt(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _memory_governance_public_timestamp(
+    value: Any,
+    parsed: datetime | None,
+) -> tuple[str | None, bool]:
+    if value in (None, ""):
+        return None, False
+    if not isinstance(value, str):
+        return None, True
+    timestamp = value.strip()
+    if not timestamp:
+        return None, False
+    if parsed is None:
+        return None, True
+    return timestamp, False
+
+
 def _memory_governance_scalar(value: Any) -> str:
     if isinstance(value, str):
         return _redact_untrusted_content_excerpt(value, max_chars=120)
@@ -28014,6 +28030,16 @@ def _memory_governance_entry_metadata(
     created_dt = _memory_governance_parse_dt(created)
     updated_dt = _memory_governance_parse_dt(updated)
     expires_dt = _memory_governance_parse_dt(expires)
+    public_created, created_redacted = _memory_governance_public_timestamp(created, created_dt)
+    public_updated, updated_redacted = _memory_governance_public_timestamp(updated, updated_dt)
+    public_expires, expires_redacted = _memory_governance_public_timestamp(expires, expires_dt)
+    timestamp_redacted_fields = []
+    if created_redacted:
+        timestamp_redacted_fields.append("created_at")
+    if updated_redacted:
+        timestamp_redacted_fields.append("updated_at")
+    if expires_redacted:
+        timestamp_redacted_fields.append("expires_at")
     age_days = None
     if created_dt is not None:
         age_days = round(max(0.0, (now - created_dt).total_seconds() / 86400.0), 3)
@@ -28038,9 +28064,10 @@ def _memory_governance_entry_metadata(
         "policy_version": policy_version,
         "source": source,
         "confidence": confidence_value,
-        "created_at": created if isinstance(created, str) else "",
-        "updated_at": updated if isinstance(updated, str) else "",
-        "expires_at": expires if isinstance(expires, str) else "",
+        "created_at": public_created,
+        "updated_at": public_updated,
+        "expires_at": public_expires,
+        "timestamp_redacted_fields": timestamp_redacted_fields,
         "age_days": age_days,
         "expired": expires_dt is not None and expires_dt < now,
         "tag_count": len(tags),
@@ -28053,7 +28080,7 @@ def _memory_governance_entry_metadata(
 
 
 def _memory_governance_public_entry(meta: dict[str, Any]) -> dict[str, Any]:
-    return {
+    entry = {
         "entry_ref": meta["entry_ref"],
         "store_id": meta["store_id"],
         "kind": meta["kind"],
@@ -28070,6 +28097,12 @@ def _memory_governance_public_entry(meta: dict[str, Any]) -> dict[str, Any]:
         "logical_key_hash": meta["logical_key_hash"],
         "content_digest": meta["content_digest"],
     }
+    if meta.get("timestamp_redacted_fields"):
+        entry["timestamp_redactions"] = [
+            {"field": field, "reason": "invalid_or_untrusted_timestamp"}
+            for field in sorted(meta["timestamp_redacted_fields"])
+        ]
+    return entry
 
 
 def _memory_governance_finding(
@@ -28261,6 +28294,19 @@ def _memory_governance_report_impl(
                 recommendation="refresh_or_revalidate_before_consolidation",
                 evidence={"expected_policy_version": MEMORY_GOVERNANCE_POLICY_VERSION, "actual_policy_version": meta.get("policy_version")},
             )
+        if meta.get("timestamp_redacted_fields"):
+            _memory_governance_finding(
+                findings,
+                rule_id="invalid_timestamp_metadata",
+                severity="medium",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="revalidate_or_expire_before_consolidation",
+                evidence={
+                    "fields": sorted(meta["timestamp_redacted_fields"]),
+                    "raw_values_included": False,
+                },
+            )
         if meta.get("expired"):
             _memory_governance_finding(
                 findings,
@@ -28395,12 +28441,16 @@ def _memory_governance_report_impl(
             "expiry_recommended_count": sum(
                 count for rec, count in recommendation_counts.items() if "expire" in rec
             ),
+            "timestamp_redacted_field_count": sum(
+                len(meta.get("timestamp_redacted_fields", [])) for meta in all_meta[:max_entries]
+            ),
             "raw_memory_content_included": False,
         },
         "stores": stores,
         "findings": findings,
         "security": {
-            "redaction": "report contains store metadata, hashes, counts, and redacted scalar metadata only",
+            "redaction": "report contains store metadata, hashes, counts, safe timestamps, and redacted scalar metadata only",
+            "invalid_timestamp_values_included": False,
             "raw_memory_content_included": False,
             "host_absolute_paths_included": False,
             "mutates_memory": False,
