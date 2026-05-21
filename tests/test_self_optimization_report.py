@@ -713,6 +713,37 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         enriched = self.server._self_opt_attach_candidate_integrity([candidate], integrity)[0]
         self.assertTrue(enriched["anti_gaming"]["auto_issue_review_required"])
 
+    def test_optimization_integrity_report_blocks_unknown_gate_status_despite_holdout_gain(self):
+        metrics = {
+            "totals": {"estimated_saved_seconds": 30.0, "estimated_saved_tokens": 0, "success_rate": 1.0},
+            "test_gates": {
+                "by_gate": [{"name": "release holdout regression", "count": 1}],
+                "by_status": [{"name": "passed", "count": 1}, {"name": "unknown", "count": 1}],
+                "evidence_counters": {},
+            },
+            "data_availability": {"test_gates": {"status": "observed", "confidence": "high"}},
+            "retries_rework": {"retry_count": 0, "rework_count": 0},
+        }
+
+        integrity = self.server._self_opt_optimization_integrity_report(metrics)
+
+        self.assertEqual(integrity["verdict"], "needs_human_review")
+        self.assertEqual(integrity["holdout_regression"]["status"], "observed")
+        self.assertEqual(integrity["counters"]["unknown_gate_count"], 1)
+        self.assertTrue(any(item["code"] == "unknown_gate_status" for item in integrity["reasons"]))
+        candidate = self.server._self_opt_candidate("cache-reuse", "Reuse cache", "r", {}, "a", confidence="high")
+        enriched = self.server._self_opt_attach_candidate_integrity([candidate], integrity)[0]
+        self.assertTrue(enriched["anti_gaming"]["auto_issue_review_required"])
+        gate = self.server._self_opt_issue_update_gate(
+            [enriched],
+            "dry_run",
+            "owner/repo",
+            "SELF_OPT_TEST_GITHUB_TOKEN",
+            "report-123",
+        )
+        self.assertEqual(gate["eligible_count"], 0)
+        self.assertTrue(any(action["reason"] == "anti_gaming_review_required" for action in gate["blocked_actions"]))
+
     def test_optimization_integrity_report_trusts_clean_holdout_improvement(self):
         record = {
             "source": "trace",

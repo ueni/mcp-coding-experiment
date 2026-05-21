@@ -6484,9 +6484,10 @@ def _self_opt_optimization_integrity_report(
         reasons.append({"code": "missing_holdout_regression_evidence", "severity": "review", "status": holdout["status"]})
 
     risk_reason_count = sum(1 for item in reasons if item.get("severity") == "risk")
+    review_reason_count = sum(1 for item in reasons if item.get("severity") == "review")
     if efficiency_gain_observed and risk_reason_count:
         verdict = "proxy_gaming_risk"
-    elif efficiency_gain_observed and not missing_denominators and holdout["status"] == "observed":
+    elif efficiency_gain_observed and not review_reason_count and holdout["status"] == "observed":
         verdict = "trusted_improvement"
     else:
         verdict = "needs_human_review"
