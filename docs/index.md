@@ -20,6 +20,7 @@ SPDX-License-Identifier: MIT
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
+- [AGENTS.md context health report](./agents-context-health.md) - read-only minimal-context budget, duplication, stale guidance, risky global instruction, and move-candidate lint.
 - [Mutation step guard](./mutation-step-guard.md) - read-only final checkpoint before workspace/git mutation steps.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) - read-only `skill_pack_score` risk/fit decisions for workflow cards and offline imported-skill fixtures.
@@ -68,6 +69,7 @@ This index lists documentation ownership and status.
 - [Self-optimization efficiency report](./self-optimization-report.md) (`docs/self-optimization-report.md`) - Status: `prototype`
 - [Build download cache verification](./build-download-cache.md) (`docs/build-download-cache.md`) - Status: `operational verification`
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
+- [AGENTS.md context health report](./agents-context-health.md) (`docs/agents-context-health.md`) - Status: `prototype`
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`

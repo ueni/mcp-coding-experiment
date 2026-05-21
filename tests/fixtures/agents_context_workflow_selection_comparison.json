@@ -1,0 +1,29 @@
+{
+  "schema": "agents_context_workflow_selection_comparison.v1",
+  "name": "agents-context-routing-effectiveness-smoke",
+  "target": "task_router(mode='workflow_select')",
+  "description": "Deterministic regression fixtures comparing workflow selection with and without a compact always-on AGENTS context-health summary.",
+  "default_top_k": 3,
+  "max_added_context_tokens": 80,
+  "always_on_context_summary": "AGENTS context-health summary: advisory read-only guidance, protect secrets, stay within repository boundaries, and use task_router workflow selection before specialized workflows.",
+  "fixtures": [
+    {
+      "id": "security-review-with-agents-summary",
+      "coverage": "security-review",
+      "prompt": "Review this auth change for leaked tokens, credential handling, and security vulnerabilities before approval.",
+      "expected_top_workflow_card": "security-triage"
+    },
+    {
+      "id": "release-readiness-with-agents-summary",
+      "coverage": "release-readiness",
+      "prompt": "We are ready to ship version 1.2; check release readiness, changelog, CI gate, merge blockers, and rollback notes.",
+      "expected_top_workflow_card": "release-readiness"
+    },
+    {
+      "id": "test-impact-with-agents-summary",
+      "coverage": "test-impact",
+      "prompt": "Changed src/router.py and tests/test_router.py; choose the smallest pytest coverage and impact verification gate.",
+      "expected_top_workflow_card": "test-impact"
+    }
+  ]
+}

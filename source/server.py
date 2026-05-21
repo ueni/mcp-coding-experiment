@@ -113,6 +113,7 @@ from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import EventMessage, EventStore
 from pydantic import Field, RootModel
+from source.agents_context_health import analyze_agents_context, summarize_agents_context_health
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
     TOOL_OUTPUT_SCHEMAS,
@@ -392,6 +393,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
     "self_optimization_report": {"categories": ["read-only"]},
+    "agents_context_health": {"categories": ["read-only", "governance"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
     "workflow_lineage": {"categories": ["read-only"]},
@@ -7030,6 +7032,9 @@ def _self_optimization_report_impl(
             "recommended_call": "self_optimization_report(window_hours=168, export=true)",
             "issue_creation_policy": "GitHub issue create/update is off by default. Use github_issue_update_mode='dry_run' to inspect high-confidence actions or 'apply' with explicit repository/token configuration and mutation permission.",
         },
+        "agents_context_health": summarize_agents_context_health(
+            analyze_agents_context(REPO_PATH)
+        ),
         "security": {
             "offline_capable": True,
             "network_used": False,
@@ -18076,6 +18081,22 @@ def _tool_catalog_integrity_summary() -> dict[str, Any]:
 def tool_catalog_integrity(include_tools: bool = False) -> dict[str, Any]:
     """Compare the live public MCP tool catalog with the checked-in digest baseline."""
     return _tool_catalog_integrity_impl(include_tools=include_tools)
+
+
+@mcp.tool()
+def agents_context_health(
+    path: str = "AGENTS.md",
+    token_budget: int = 1600,
+    byte_budget: int = 6000,
+) -> dict[str, Any]:
+    """Read-only AGENTS.md minimal-context health and regression report."""
+    _ensure_repo_path_exists()
+    return analyze_agents_context(
+        REPO_PATH,
+        path=path,
+        token_budget=token_budget,
+        byte_budget=byte_budget,
+    )
 
 
 @mcp.tool()
@@ -29390,6 +29411,9 @@ def _governance_report_impl(
         "governance_hooks": _governance_result_store_summary(),
         "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
+        "agents_context_health": summarize_agents_context_health(
+            analyze_agents_context(REPO_PATH)
+        ),
         "memory_governance": _memory_governance_report_impl(max_entries=1000, stale_days=90, include_entries=False)["summary"],
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
@@ -31087,6 +31111,7 @@ _WORKFLOW_POLICY_READ_TOOLS = {
     "workflow_diagnostics",
     "workflow_lineage",
     "interaction_invariant_audit",
+    "agents_context_health",
     "test_impact_map",
 }
 _WORKFLOW_POLICY_RELEASE_TOOLS = {
