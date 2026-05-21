@@ -2050,15 +2050,93 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertEqual(out["summary"]["vulnerability_count"], 1)
         self.assertEqual(out["vulnerabilities"][0]["id"], "GHSA-test-vuln")
         self.assertIn("json", out["exports"])
+        self.assertIn("sarif", out["exports"])
         self.assertIn("sbom", out["exports"])
-        self.assertEqual(len(out["resource_links"]), 2)
+        self.assertEqual(len(out["resource_links"]), 3)
         self.assertFalse(out["security"]["mutates_dependency_files"])
+
+        sarif = self.server.json.loads(
+            (self.repo_path / out["exports"]["sarif"]).read_text(encoding="utf-8")
+        )
+        sarif_result = sarif["runs"][0]["results"][0]
+        self.assertEqual(
+            sarif["$schema"], "https://json.schemastore.org/sarif-2.1.0.json"
+        )
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertEqual(sarif_result["ruleId"], "dependency-vulnerability/GHSA-test-vuln")
+        self.assertEqual(
+            sarif_result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "requirements.txt",
+        )
+        self.assertEqual(
+            sarif_result["locations"][0]["physicalLocation"]["region"]["startLine"],
+            1,
+        )
+        self.assertIn("codebase-tooling-mcp/redacted-context/v1", sarif_result["partialFingerprints"])
+        self.assertNotIn(str(self.repo_path), self.server.json.dumps(sarif))
 
         verify = self.server.artifact_provenance(artifact_path=out["exports"]["json"])
         self.assertTrue(verify["ok"], verify)
+        sarif_verify = self.server.artifact_provenance(artifact_path=out["exports"]["sarif"])
+        self.assertTrue(sarif_verify["ok"], sarif_verify)
         governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
         self.assertTrue(governance["dependency_security"]["present"])
         self.assertEqual(governance["dependency_security"]["status"], "vulnerable")
+
+    def test_dependency_security_report_redacts_caller_controlled_advisory_fields_in_sarif(self):
+        self.write_repo_text("requirements.txt", "vulnerable-pkg==1.0.0\n")
+        self._write_dependency_advisory_fixture(
+            ".codebase-tooling-mcp/reports/malicious-advisories.json",
+            self.server._now_iso(),
+            [
+                {
+                    "id": "GHSA-test https://advisory.example/leak git@github.example:private/repo.git token=supersecret /home/alice/host",
+                    "package": "vulnerable-pkg",
+                    "affected_versions": "<2.0.0",
+                    "severity": "high",
+                    "fixed_versions": ["2.0.0"],
+                    "summary": "See https://summary.example/path, file:///home/alice/secret.whl, build-host:/srv/private/repo.git, user:pass@private.example/pkg, and /home/alice/private/token.txt",
+                }
+            ],
+        )
+
+        out = self.server.dependency_security_report(
+            requirements_paths=["requirements.txt"],
+            advisory_fixture_path=".codebase-tooling-mcp/reports/malicious-advisories.json",
+            export=True,
+            include_sbom=False,
+            advisory_max_age_hours=24,
+        )
+
+        sarif_text = (self.repo_path / out["exports"]["sarif"]).read_text(encoding="utf-8")
+        sarif = self.server.json.loads(sarif_text)
+        sarif_payload = self.server.json.dumps(sarif, sort_keys=True)
+        allowed_sarif_schema_uri = "https://json.schemastore.org/sarif-2.1.0.json"
+        self.assertEqual(sarif["$schema"], allowed_sarif_schema_uri)
+        self.assertIn(allowed_sarif_schema_uri, sarif_payload)
+        leak_scan_payload = sarif_payload.replace(allowed_sarif_schema_uri, "")
+
+        for leaked_fragment in (
+            "https://",
+            "file://",
+            "advisory.example",
+            "summary.example",
+            "github.example",
+            "git@github.example:private/repo.git",
+            "private/repo.git",
+            "build-host",
+            "/srv/private",
+            "private.example",
+            "supersecret",
+            "user:pass",
+            "/home/alice",
+            str(self.repo_path),
+        ):
+            self.assertNotIn(leaked_fragment, leak_scan_payload)
+        self.assertIn("redacted-url", sarif_payload)
+        self.assertIn("<redacted:url>", sarif_payload)
+        self.assertIn("<redacted:vcs_ref>", sarif_payload)
+        self.assertIn("<redacted:absolute_path>", sarif_payload)
 
     def test_dependency_security_report_clean_fixture(self):
         self.write_repo_text("requirements.txt", "safe-pkg==1.2.3\n")
@@ -2132,6 +2210,9 @@ class ServerToolsTest(ServerToolsTestBase):
             for rel_path in out["provenance"]["sidecars"].values()
         )
         exported_and_returned = "\n".join(payloads)
+        allowed_sarif_schema_uri = "https://json.schemastore.org/sarif-2.1.0.json"
+        self.assertIn(allowed_sarif_schema_uri, exported_and_returned)
+        leak_scan_payload = exported_and_returned.replace(allowed_sarif_schema_uri, "")
 
         for leaked_fragment in (
             "https://",
@@ -2150,7 +2231,7 @@ class ServerToolsTest(ServerToolsTestBase):
             "/home/alice/other",
             str(self.repo_path),
         ):
-            self.assertNotIn(leaked_fragment, exported_and_returned)
+            self.assertNotIn(leaked_fragment, leak_scan_payload)
         self.assertIn("<redacted:url>", exported_and_returned)
         self.assertIn("<redacted:vcs_ref>", exported_and_returned)
         self.assertIn("<redacted:absolute_path>", exported_and_returned)
