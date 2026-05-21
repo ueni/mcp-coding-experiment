@@ -114,6 +114,34 @@ class SecretExposureReportTests(ServerToolsTestBase):
         self.assertIn("large_file", reasons)
         self._assert_report_is_redacted(report, raw_value)
 
+    def test_outside_repository_paths_are_skipped_without_host_path_exposure(self):
+        raw_value = self._fake_openai_key()
+        outside = self.repo_path.parent / "outside-secret.txt"
+        outside.write_text(raw_value + "\n", encoding="utf-8")
+
+        report = self.server.secret_exposure_report(paths=[str(outside)], baseline_ref="HEAD")
+
+        self.assertEqual(report["summary"]["finding_count"], 0)
+        self.assertEqual(report["skipped"], [{"path": "<redacted:outside_repo>", "reason": "outside_repo_boundary"}])
+        self.assertTrue(report["security"]["repo_boundary_enforced"])
+        self.assertFalse(report["security"]["host_absolute_paths_exposed"])
+        self.assertNotIn(str(outside), json.dumps(report, sort_keys=True))
+        self._assert_report_is_redacted(report, raw_value)
+
+    def test_exports_are_redacted_and_linked(self):
+        raw_value = self._fake_openai_key()
+        self.write_repo_text("src/export_secret.py", "OPENAI_API_KEY = '" + raw_value + "'\n")
+
+        report = self.server.secret_exposure_report(paths=["src"], baseline_ref="HEAD", export=True)
+
+        self.assertIn("json", report["exports"])
+        self.assertIn("markdown", report["exports"])
+        self.assertEqual(len(report["resource_links"]), 2)
+        for rel_path in report["exports"].values():
+            exported = (self.repo_path / rel_path).read_text(encoding="utf-8")
+            self.assertNotIn(raw_value, exported)
+        self._assert_report_is_redacted(report, raw_value)
+
     def test_mutation_step_guard_blocks_only_in_scope_new_high_confidence_findings(self):
         raw_value = self._fake_openai_key()
         self.write_repo_text("src/secret_client.py", "OPENAI_API_KEY = '" + raw_value + "'\n")
