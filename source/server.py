@@ -4094,6 +4094,7 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 SELF_OPTIMIZATION_REPORT_SCHEMA = "self_optimization_report.v1"
+OPTIMIZATION_INTEGRITY_REPORT_SCHEMA = "optimization_integrity_report.v1"
 SELF_OPTIMIZATION_NO_ATTRIBUTION = "unattributed"
 SELF_OPTIMIZATION_NAME_PLACEHOLDER = "<redacted:name>"
 SELF_OPTIMIZATION_COMPANY_SUFFIX_RE = re.compile(
@@ -4782,6 +4783,42 @@ def _self_opt_gate_name_from_payload(value: dict[str, Any]) -> str:
     return "test_gate"
 
 
+def _self_opt_gate_evidence_from_payload(value: dict[str, Any]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for key in (
+        "artifact_status",
+        "freshness",
+        "freshness_status",
+        "artifact_age_hours",
+        "stale",
+        "skipped_reason",
+        "suppression_count",
+        "unmapped_changed_files",
+    ):
+        if key not in value:
+            continue
+        item = value.get(key)
+        if isinstance(item, bool):
+            evidence[key] = item
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            evidence[key] = item
+        elif isinstance(item, str):
+            evidence[key] = _self_opt_redact_string(item, [])[:160]
+        elif isinstance(item, list):
+            evidence[key] = len(item)
+    return evidence
+
+
+def _self_opt_gate_row_from_payload(value: dict[str, Any], source: str, name: str | None = None) -> dict[str, Any]:
+    row = {
+        "name": _self_opt_redact_string(name, [])[:120] if name else _self_opt_gate_name_from_payload(value),
+        "status": _self_opt_gate_status_from_payload(value),
+        "source": source,
+    }
+    row.update(_self_opt_gate_evidence_from_payload(value))
+    return row
+
+
 def _self_opt_collect_test_gates(value: Any, out: list[dict[str, Any]], depth: int = 0) -> None:
     if depth > 5 or len(out) >= 80:
         return
@@ -4791,23 +4828,11 @@ def _self_opt_collect_test_gates(value: Any, out: list[dict[str, Any]], depth: i
             if isinstance(rows, list):
                 for item in rows[:50]:
                     if isinstance(item, dict):
-                        out.append(
-                            {
-                                "name": _self_opt_gate_name_from_payload(item),
-                                "status": _self_opt_gate_status_from_payload(item),
-                                "source": key,
-                            }
-                        )
+                        out.append(_self_opt_gate_row_from_payload(item, key))
             elif isinstance(rows, dict):
                 for gate_name, item in list(rows.items())[:50]:
                     if isinstance(item, dict):
-                        out.append(
-                            {
-                                "name": _self_opt_redact_string(str(gate_name), [])[:120],
-                                "status": _self_opt_gate_status_from_payload(item),
-                                "source": key,
-                            }
-                        )
+                        out.append(_self_opt_gate_row_from_payload(item, key, str(gate_name)))
         blob = _self_opt_json_text(value).lower()[:4000]
         looks_like_gate = any(term in blob for term in SELF_OPTIMIZATION_TEST_GATE_TERMS)
         if looks_like_gate:
@@ -5885,6 +5910,7 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
     transition_counts: dict[str, int] = {}
     test_gate_counts: dict[str, int] = {}
     test_gate_status_counts: dict[str, int] = {}
+    test_gate_evidence_counts = {"stale_artifact_count": 0, "suppression_count": 0, "unmapped_file_count": 0}
     retry_rework_reasons: dict[str, int] = {}
     models: dict[str, int] = {}
     backends: dict[str, int] = {}
@@ -6014,6 +6040,15 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
             gate_status = str(gate.get("status", "unknown") or "unknown")
             test_gate_counts[gate_name] = test_gate_counts.get(gate_name, 0) + 1
             test_gate_status_counts[gate_status] = test_gate_status_counts.get(gate_status, 0) + 1
+            artifact_status = str(gate.get("artifact_status") or gate.get("freshness") or gate.get("freshness_status") or "").lower()
+            if gate.get("stale") is True or artifact_status in {"stale", "expired", "outdated"}:
+                test_gate_evidence_counts["stale_artifact_count"] += 1
+            suppression_count = gate.get("suppression_count")
+            if isinstance(suppression_count, (int, float)) and not isinstance(suppression_count, bool) and suppression_count > 0:
+                test_gate_evidence_counts["suppression_count"] += int(suppression_count)
+            unmapped = gate.get("unmapped_changed_files")
+            if isinstance(unmapped, int) and unmapped > 0:
+                test_gate_evidence_counts["unmapped_file_count"] += unmapped
         retry_rework = record.get("retry_rework", {}) if isinstance(record.get("retry_rework"), dict) else {}
         retry_count = int(retry_rework.get("retry_count", 0) or 0)
         rework_count = int(retry_rework.get("rework_count", 0) or 0)
@@ -6113,6 +6148,7 @@ def _self_opt_aggregate_records(records: list[dict[str, Any]], cache_stats: dict
             "count": totals["test_gate_count"],
             "by_gate": _self_opt_counter_rows(test_gate_counts),
             "by_status": _self_opt_counter_rows(test_gate_status_counts),
+            "evidence_counters": dict(test_gate_evidence_counts),
             "status": test_gate_status,
             "data_available": test_gate_status == "observed",
         },
@@ -6356,6 +6392,163 @@ def _self_opt_suppress_github_issue_duplicates(
     return out
 
 
+
+def _self_opt_count_rows(rows: list[dict[str, Any]], names: set[str]) -> int:
+    total = 0
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("name", "")).lower() in names:
+            total += int(row.get("count", 0) or 0)
+    return total
+
+
+def _self_opt_holdout_regression_status(metrics: dict[str, Any]) -> dict[str, Any]:
+    test_gates = metrics.get("test_gates", {}) if isinstance(metrics.get("test_gates"), dict) else {}
+    by_gate = test_gates.get("by_gate", []) if isinstance(test_gates.get("by_gate"), list) else []
+    names = {str(row.get("name", "")).lower() for row in by_gate if isinstance(row, dict)}
+    has_holdout = any("holdout" in name or "regression" in name for name in names)
+    has_release_or_test = any("release" in name or "pytest" in name or "test" in name for name in names)
+    status = "observed" if has_holdout else ("partial" if has_release_or_test else "missing")
+    return {
+        "status": status,
+        "required_before_auto_issue": True,
+        "observed_gate_names": sorted(name for name in names if name)[:20],
+        "policy": "High-confidence self-optimization issue actions should include holdout/regression evidence; absent evidence keeps recommendations advisory.",
+    }
+
+
+def _self_opt_optimization_integrity_report(
+    metrics: dict[str, Any],
+    patch_survivorship: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    totals = metrics.get("totals", {}) if isinstance(metrics.get("totals"), dict) else {}
+    test_gates = metrics.get("test_gates", {}) if isinstance(metrics.get("test_gates"), dict) else {}
+    data_availability = metrics.get("data_availability", {}) if isinstance(metrics.get("data_availability"), dict) else {}
+    retries = metrics.get("retries_rework", {}) if isinstance(metrics.get("retries_rework"), dict) else {}
+    by_status = test_gates.get("by_status", []) if isinstance(test_gates.get("by_status"), list) else []
+    evidence_counters = test_gates.get("evidence_counters", {}) if isinstance(test_gates.get("evidence_counters"), dict) else {}
+    patch = patch_survivorship if isinstance(patch_survivorship, dict) else {}
+    patch_summary = patch.get("summary", {}) if isinstance(patch.get("summary"), dict) else {}
+    patch_states = patch_summary.get("state_counts", {}) if isinstance(patch_summary.get("state_counts"), dict) else {}
+
+    estimated_saved_seconds = float(totals.get("estimated_saved_seconds", 0.0) or 0.0)
+    estimated_saved_tokens = int(totals.get("estimated_saved_tokens", 0) or 0)
+    efficiency_gain_observed = estimated_saved_seconds > 0 or estimated_saved_tokens > 0
+    failed_gate_count = _self_opt_count_rows(by_status, {"failed", "error", "cancelled", "timed_out"})
+    skipped_gate_count = _self_opt_count_rows(by_status, {"skipped"})
+    unknown_gate_count = _self_opt_count_rows(by_status, {"unknown"})
+    stale_artifact_count = int(evidence_counters.get("stale_artifact_count", 0) or 0)
+    suppression_count = int(evidence_counters.get("suppression_count", 0) or 0)
+    unmapped_file_count = int(evidence_counters.get("unmapped_file_count", 0) or 0)
+    retry_count = int(retries.get("retry_count", 0) or 0)
+    rework_count = int(retries.get("rework_count", 0) or 0)
+    failed_or_noisy = int(totals.get("failed_or_noisy_count", 0) or 0)
+    success_rate = float(totals.get("success_rate", 1.0) or 0.0)
+    human_pushback = int(patch_summary.get("human_pushback_patch_count", 0) or 0)
+    reverted = int(patch_states.get("reverted", 0) or 0)
+    rewritten = int(patch_states.get("rewritten", 0) or 0)
+    missing_denominators = [
+        key
+        for key, item in sorted(data_availability.items())
+        if isinstance(item, dict) and item.get("status") in {"unknown", "not_available"}
+    ]
+    holdout = _self_opt_holdout_regression_status(metrics)
+
+    reasons: list[dict[str, Any]] = []
+    if not efficiency_gain_observed:
+        reasons.append({"code": "no_efficiency_gain_observed", "severity": "review", "detail": "No positive saved-time/token signal was observed."})
+    if failed_or_noisy:
+        reasons.append({"code": "failed_or_noisy_after_gain", "severity": "risk", "count": failed_or_noisy})
+    if failed_gate_count:
+        reasons.append({"code": "failed_quality_gate_after_gain", "severity": "risk", "count": failed_gate_count})
+    if skipped_gate_count:
+        reasons.append({"code": "skipped_work_false_improvement", "severity": "risk", "count": skipped_gate_count})
+    if stale_artifact_count:
+        reasons.append({"code": "stale_artifact_false_improvement", "severity": "risk", "count": stale_artifact_count})
+    if retry_count or rework_count:
+        reasons.append({"code": "retry_or_rework_counter_signal", "severity": "risk", "retry_count": retry_count, "rework_count": rework_count})
+    if success_rate < 0.9:
+        reasons.append({"code": "low_success_rate_counter_signal", "severity": "risk", "success_rate": round(success_rate, 4)})
+    if human_pushback or reverted or rewritten:
+        reasons.append({"code": "human_review_or_survivorship_pushback", "severity": "risk", "human_pushback_patch_count": human_pushback, "reverted_patch_count": reverted, "rewritten_patch_count": rewritten})
+    if suppression_count:
+        reasons.append({"code": "suppression_counter_signal", "severity": "risk", "count": suppression_count})
+    if unmapped_file_count:
+        reasons.append({"code": "unmapped_file_counter_signal", "severity": "risk", "count": unmapped_file_count})
+    if unknown_gate_count:
+        reasons.append({"code": "unknown_gate_status", "severity": "review", "count": unknown_gate_count})
+    if missing_denominators:
+        reasons.append({"code": "missing_denominators", "severity": "review", "fields": missing_denominators})
+    if holdout["status"] != "observed":
+        reasons.append({"code": "missing_holdout_regression_evidence", "severity": "review", "status": holdout["status"]})
+
+    risk_reason_count = sum(1 for item in reasons if item.get("severity") == "risk")
+    if efficiency_gain_observed and risk_reason_count:
+        verdict = "proxy_gaming_risk"
+    elif efficiency_gain_observed and not missing_denominators and holdout["status"] == "observed":
+        verdict = "trusted_improvement"
+    else:
+        verdict = "needs_human_review"
+    return {
+        "schema": OPTIMIZATION_INTEGRITY_REPORT_SCHEMA,
+        "advisory_only": True,
+        "offline_first": True,
+        "release_blocker": False,
+        "verdict": verdict,
+        "efficiency_gain_observed": efficiency_gain_observed,
+        "reasons": reasons,
+        "holdout_regression": holdout,
+        "counters": {
+            "failed_or_noisy_count": failed_or_noisy,
+            "failed_quality_gate_count": failed_gate_count,
+            "skipped_gate_count": skipped_gate_count,
+            "unknown_gate_count": unknown_gate_count,
+            "stale_artifact_count": stale_artifact_count,
+            "suppression_count": suppression_count,
+            "unmapped_file_count": unmapped_file_count,
+            "retry_count": retry_count,
+            "rework_count": rework_count,
+            "human_pushback_patch_count": human_pushback,
+            "reverted_patch_count": reverted,
+            "rewritten_patch_count": rewritten,
+            "success_rate": round(success_rate, 4),
+        },
+        "evidence": {
+            "estimated_saved_seconds": round(estimated_saved_seconds, 3),
+            "estimated_saved_tokens": estimated_saved_tokens,
+            "data_availability": data_availability,
+            "test_gate_status_counts": by_status,
+        },
+        "privacy": {
+            "repository_relative_evidence_only": True,
+            "redacted": True,
+            "raw_prompts_or_traces_included": False,
+            "network_used": False,
+        },
+    }
+
+
+def _self_opt_candidate_integrity_gate(candidate: dict[str, Any], integrity: dict[str, Any]) -> dict[str, Any]:
+    verdict = str(integrity.get("verdict") or "needs_human_review")
+    reason_codes = [str(item.get("code", "")) for item in integrity.get("reasons", []) if isinstance(item, dict) and item.get("code")]
+    return {
+        "verdict": verdict,
+        "advisory_only": True,
+        "auto_issue_review_required": verdict != "trusted_improvement",
+        "requires_holdout_regression_evidence": True,
+        "reason_codes": reason_codes[:12],
+    }
+
+
+def _self_opt_attach_candidate_integrity(candidates: list[dict[str, Any]], integrity: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {**candidate, "anti_gaming": _self_opt_candidate_integrity_gate(candidate, integrity)}
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+
+
 def _self_opt_build_recommendations(
     metrics: dict[str, Any],
     sources: dict[str, Any],
@@ -6480,6 +6673,7 @@ def _self_opt_candidate_issue_body(candidate: dict[str, Any], report_id: str) ->
             f"Category: `{candidate.get('category', '')}`",
             f"Duplicate key: `{candidate.get('duplicate_key', '')}`",
             f"Confidence: `{candidate.get('confidence', 'medium')}`",
+            f"Anti-gaming verdict: `{(candidate.get('anti_gaming') or {}).get('verdict', 'needs_human_review') if isinstance(candidate.get('anti_gaming'), dict) else 'needs_human_review'}`",
             "",
             "## Rationale",
             str(candidate.get("rationale", "")),
@@ -6592,6 +6786,17 @@ def _self_opt_issue_update_gate(
         if not _self_opt_confidence_at_least(str(candidate.get("confidence", "medium")), "high"):
             gate["blocked_actions"].append({**candidate_ref, "reason": "confidence_below_high"})
             continue
+        anti_gaming = candidate.get("anti_gaming", {}) if isinstance(candidate.get("anti_gaming"), dict) else {}
+        if anti_gaming.get("auto_issue_review_required"):
+            gate["blocked_actions"].append(
+                {
+                    **candidate_ref,
+                    "reason": "anti_gaming_review_required",
+                    "anti_gaming_verdict": anti_gaming.get("verdict", "needs_human_review"),
+                    "reason_codes": anti_gaming.get("reason_codes", []),
+                }
+            )
+            continue
         duplicate_of = str(candidate.get("duplicate_of", "") or "")
         if candidate.get("suppressed") and not _self_opt_issue_number_from_ref(duplicate_of):
             gate["blocked_actions"].append({**candidate_ref, "reason": "duplicate_suppressed_without_github_issue"})
@@ -6609,7 +6814,7 @@ def _self_opt_issue_update_gate(
     gate["blocked_count"] = len(gate["blocked_actions"])
     if normalized_mode == "dry_run":
         gate["status"] = "dry_run"
-        gate["caveats"].append("Dry-run mode plans high-confidence create/update actions without contacting GitHub.")
+        gate["caveats"].append("Dry-run mode plans high-confidence create/update actions without contacting GitHub; anti-gaming review blocks proxy-risk candidates.")
         return gate
     if not ALLOW_MUTATIONS:
         gate["status"] = "blocked"
@@ -6689,6 +6894,7 @@ def _self_opt_markdown(report: dict[str, Any]) -> str:
     metrics = report.get("metrics", {}) if isinstance(report.get("metrics"), dict) else {}
     throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
     candidates = report.get("optimization_candidates", []) if isinstance(report.get("optimization_candidates"), list) else []
+    integrity = report.get("optimization_integrity_report", {}) if isinstance(report.get("optimization_integrity_report"), dict) else {}
     lines = [
         f"# Self-optimization report `{report.get('report_id', '')}`",
         "",
@@ -6705,13 +6911,21 @@ def _self_opt_markdown(report: dict[str, Any]) -> str:
         f"- PRs touched: {', '.join(throughput.get('prs_touched', []) or []) or 'none observed'}",
         f"- Workflows touched: {', '.join(throughput.get('workflows_touched', []) or []) or 'none observed'}",
         "",
+        "## Optimization integrity",
+        "",
+        f"- Verdict: `{integrity.get('verdict', 'needs_human_review')}`",
+        f"- Advisory only: `{integrity.get('advisory_only', True)}`",
+        f"- Reason codes: {', '.join(str(item.get('code', '')) for item in integrity.get('reasons', []) if isinstance(item, dict) and item.get('code')) or 'none'}",
+        "",
         "## Optimization candidates",
         "",
     ]
     if candidates:
         for item in candidates:
             status = "suppressed duplicate" if item.get("suppressed") else "new"
-            lines.append(f"- **{item.get('title', '')}** ({status}): {item.get('recommended_action', '')}")
+            anti_gaming = item.get("anti_gaming", {}) if isinstance(item.get("anti_gaming"), dict) else {}
+            verdict = anti_gaming.get("verdict", "needs_human_review")
+            lines.append(f"- **{item.get('title', '')}** ({status}, anti-gaming: `{verdict}`): {item.get('recommended_action', '')}")
     else:
         lines.append("- No candidates generated for this window.")
     lines.extend(
@@ -6836,6 +7050,7 @@ def _self_optimization_report_impl(
         "sources": sources,
         "bottlenecks": _self_opt_bottlenecks(metrics),
         "optimization_candidates": [],
+        "optimization_integrity_report": {},
         "github_issue_gate": {},
         "usage_guidance": {
             "direct_tool": "self_optimization_report",
@@ -6845,7 +7060,7 @@ def _self_optimization_report_impl(
                 "before creating optimization issues for the software team",
             ],
             "recommended_call": "self_optimization_report(window_hours=168, export=true)",
-            "issue_creation_policy": "GitHub issue create/update is off by default. Use github_issue_update_mode='dry_run' to inspect high-confidence actions or 'apply' with explicit repository/token configuration and mutation permission.",
+            "issue_creation_policy": "GitHub issue create/update is off by default. Use github_issue_update_mode='dry_run' to inspect high-confidence actions or 'apply' with explicit repository/token configuration and mutation permission. Each candidate carries an anti_gaming verdict; non-trusted verdicts require human review and holdout/regression evidence before policy adoption.",
         },
         "security": {
             "offline_capable": True,
@@ -6867,12 +7082,20 @@ def _self_optimization_report_impl(
         local_metadata=patch_metadata_rows,
         local_metadata_source=patch_metadata_source,
     )
-    report["optimization_candidates"] = _self_opt_build_recommendations(
+    report["optimization_integrity_report"] = _self_opt_optimization_integrity_report(
+        metrics,
+        report["patch_survivorship"],
+    )
+    candidates = _self_opt_build_recommendations(
         metrics,
         report["sources"],
         recommendation_limit,
         github_issue_metadata=github_issue_rows,
         redact_terms=redaction_terms,
+    )
+    report["optimization_candidates"] = _self_opt_attach_candidate_integrity(
+        candidates,
+        report["optimization_integrity_report"],
     )
     issue_gate = _self_opt_issue_update_gate(
         report["optimization_candidates"],

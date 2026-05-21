@@ -6841,7 +6841,7 @@
       "name": "runtime_state"
     },
     {
-      "digest": "sha256:b8fd65a658150d88d36ce0ae2012eca44b1583128e5e95953bf82c44c4720a6d",
+      "digest": "sha256:4e712b4653056d2177c8eb7eced0dc8dfd4643d923633ea826a5cc672161811a",
       "metadata": {
         "documentation": [
           {
@@ -6991,6 +6991,9 @@
                 },
                 "type": "array"
               },
+              "optimization_integrity_report": {
+                "type": "object"
+              },
               "patch_survivorship": {
                 "type": "object"
               },
@@ -7088,6 +7091,7 @@
               "summary",
               "metrics",
               "optimization_candidates",
+              "optimization_integrity_report",
               "security"
             ],
             "type": "object"
@@ -7141,6 +7145,7 @@
             "caveats",
             "github_issue_gate",
             "patch_survivorship",
+            "optimization_candidates[].anti_gaming",
             "_meta"
           ],
           "outputSchema": {
@@ -7181,6 +7186,9 @@
                   "type": "object"
                 },
                 "type": "array"
+              },
+              "optimization_integrity_report": {
+                "type": "object"
               },
               "patch_survivorship": {
                 "type": "object"
@@ -7279,6 +7287,7 @@
               "summary",
               "metrics",
               "optimization_candidates",
+              "optimization_integrity_report",
               "security"
             ],
             "type": "object"
@@ -7292,6 +7301,7 @@
             "summary",
             "metrics",
             "optimization_candidates",
+            "optimization_integrity_report",
             "security"
           ],
           "tool": "self_optimization_report"
@@ -10674,5 +10684,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:e8b8ac89770a456a912fb1b6e235681c782ab58ea1f95f44019bcc81bc3dcb20"
+  "whole_catalog_digest": "sha256:b1809bf9bcd9e657844212662fe9581ca71e3dcec336eae1c67fd38af505e32e"
 }

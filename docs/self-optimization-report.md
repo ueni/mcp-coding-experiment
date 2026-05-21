@@ -56,7 +56,10 @@ The tool returns `self_optimization_report.v1` with:
 - failed/noisy run counts and bottleneck summaries;
 - issue/PR/workflow/task throughput attribution from local refs such as `issue #90`, `PR #12`, or persisted task IDs;
 - duplicate-suppressed optimization candidates with stable `duplicate_key` values;
+- an `optimization_integrity_report` (`optimization_integrity_report.v1`) that compares claimed efficiency wins with independent counter-signals before recommendations are used as process or release policy;
 - compact `patch_survivorship` data using schema `patch_survivorship_report.v1`.
+
+`optimization_integrity_report` is advisory and non-blocking. It flags suspicious proxy wins such as faster/cheaper runs paired with failed, skipped, stale, or unknown release/test gates; retries or rework; suppressions; unmapped changed files; low success rate; missing denominators; and human-review/patch-survivorship pushback. It also records whether holdout or regression evidence was observed. Candidates whose verdict is not `trusted_improvement` carry `anti_gaming.auto_issue_review_required=true`, so high-confidence GitHub issue automation remains dry-run/blocked until a human reviews the counter-signals.
 
 The patch-survivorship extension aggregates proposed, applied, committed, rewritten, reverted, and `retained_after_n_commits` states by workflow, tool, and execution mode. It keeps only patch IDs or SHA-256 digests plus aggregate diff metrics (line/hunk/add/delete counts), structured local human-pushback labels/review decisions, and available correlations to test gates, security/risk artifacts, and governance artifacts. It does not persist raw prompts, full private patches, or private conversation text.
 
@@ -83,8 +86,8 @@ Optimization candidates are recommendations, not automatic GitHub issues. Each c
 GitHub create/update behavior is gated:
 
 - default `github_issue_update_mode="off"`: no issue writes and no network calls;
-- `github_issue_update_mode="dry_run"`: plans create/update actions for high-confidence candidates only, still without contacting GitHub;
-- `github_issue_update_mode="apply"`: requires explicit `github_repository`, a configured token environment variable, high candidate confidence, server mutation permission, and an authorized mutation-capable MCP session before creating a new issue or updating a matched issue with a comment.
+- `github_issue_update_mode="dry_run"`: plans create/update actions for high-confidence candidates only when `anti_gaming.auto_issue_review_required=false`, still without contacting GitHub;
+- `github_issue_update_mode="apply"`: requires explicit `github_repository`, a configured token environment variable, high candidate confidence, a trusted anti-gaming verdict, server mutation permission, and an authorized mutation-capable MCP session before creating a new issue or updating a matched issue with a comment.
 
 When turning a candidate into a GitHub issue, first check the current project board/issues and only file unsuppressed high-confidence candidates that still match team priorities.
 

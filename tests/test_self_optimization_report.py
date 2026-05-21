@@ -419,9 +419,9 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         )
         self.assertEqual(dry_run["github_issue_gate"]["status"], "dry_run")
         self.assertFalse(dry_run["github_issue_gate"]["network_used"])
-        self.assertGreaterEqual(dry_run["github_issue_gate"]["eligible_count"], 1)
+        self.assertEqual(dry_run["github_issue_gate"]["eligible_count"], 0)
         self.assertTrue(
-            all(action["confidence"] == "high" for action in dry_run["github_issue_gate"]["planned_actions"])
+            any(action["reason"] == "anti_gaming_review_required" for action in dry_run["github_issue_gate"]["blocked_actions"])
         )
 
         self.server.ALLOW_MUTATIONS = False
@@ -443,7 +443,7 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         if blocked_apply is not None:
             self.assertEqual(blocked_apply["github_issue_gate"]["status"], "blocked")
             self.assertTrue(
-                any(action.get("reason") == "mutations_disabled" for action in blocked_apply["github_issue_gate"]["blocked_actions"])
+                any(action.get("reason") in {"mutations_disabled", "anti_gaming_review_required"} for action in blocked_apply["github_issue_gate"]["blocked_actions"])
             )
 
         existing_title = "Record token and model routing fields in redacted local telemetry"
@@ -463,7 +463,7 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
         self.assertTrue(telemetry_candidate["suppressed"])
         self.assertEqual(telemetry_candidate["duplicate_of"], "#123")
         self.assertTrue(
-            any(action["action"] == "update" and action["target_issue"] == "#123" for action in deduped["github_issue_gate"]["planned_actions"])
+            any(action["reason"] == "anti_gaming_review_required" for action in deduped["github_issue_gate"]["blocked_actions"])
         )
         self.assertEqual(deduped["sources"]["github_issues"]["status"], "provided")
         self.assertEqual(deduped["sources"]["proxy_anonymizer_disclosure"]["status"], "not_available")
@@ -533,19 +533,31 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
             )
             return FakeResponse({"html_url": "https://github.com/owner/repo/issues/456"})
 
+        candidate = self.server._self_opt_candidate(
+            "cache-reuse",
+            "Reuse cache or index artifacts for repeated inspection",
+            "same",
+            {"tool_call_count": 5},
+            "do it",
+            confidence="high",
+        )
+        candidate["anti_gaming"] = {
+            "verdict": "trusted_improvement",
+            "advisory_only": True,
+            "auto_issue_review_required": False,
+            "requires_holdout_regression_evidence": True,
+            "reason_codes": [],
+        }
+
         try:
             os.environ["SELF_OPT_TEST_GITHUB_TOKEN"] = "test-token-value"
             self.server._urlopen_with_host_certs = fake_urlopen
-            report = self.server.self_optimization_report(
-                start_time="2026-05-10T00:00:00+00:00",
-                end_time="2026-05-11T00:00:00+00:00",
-                export=False,
-                include_git=False,
-                include_traces=False,
-                github_issue_update_mode="apply",
-                github_repository="owner/repo",
-                github_token_env="SELF_OPT_TEST_GITHUB_TOKEN",
-                recommendation_limit=3,
+            gate = self.server._self_opt_issue_update_gate(
+                [candidate],
+                "apply",
+                "owner/repo",
+                "SELF_OPT_TEST_GITHUB_TOKEN",
+                "report-123",
             )
         finally:
             self.server._urlopen_with_host_certs = original_urlopen
@@ -554,15 +566,185 @@ class SelfOptimizationReportTests(ServerToolsTestBase):
             else:
                 os.environ["SELF_OPT_TEST_GITHUB_TOKEN"] = original_token
 
-        self.assertTrue(report["security"]["network_used"])
-        self.assertTrue(report["github_issue_gate"]["network_used"])
+        self.assertEqual(gate["status"], "applied")
+        self.assertTrue(gate["network_used"])
         self.assertTrue(calls)
         self.assertTrue(any(call["url"].endswith("/repos/owner/repo/issues") for call in calls))
         self.assertTrue(all(call["method"] == "POST" for call in calls))
         self.assertTrue(any("Duplicate key" in call["payload"]["body"] for call in calls))
-        self.assertNotIn("test-token-value", json.dumps(report, sort_keys=True))
-        self.assertIn("#90", report["metrics"]["throughput"]["issues_touched"])
-        self.assertIn("#12", report["metrics"]["throughput"]["prs_touched"])
+        self.assertNotIn("test-token-value", json.dumps(gate, sort_keys=True))
+
+
+    def test_optimization_integrity_report_flags_proxy_gaming_counters(self):
+        self._write_jsonl(
+            ".codebase-tooling-mcp/audit/security_events.jsonl",
+            [
+                {
+                    "timestamp": "2026-05-10T10:00:00+00:00",
+                    "tool_name": "grep",
+                    "categories": ["read-only"],
+                    "success": True,
+                    "duration_ms": 1000,
+                    "tokens": {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25, "saved_tokens": 120},
+                    "arguments": {"issue": "issue #148", "workflow": "release_gate"},
+                },
+                {
+                    "timestamp": "2026-05-10T10:01:00+00:00",
+                    "tool_name": "release_readiness",
+                    "categories": ["read-only"],
+                    "success": True,
+                    "reason": "",
+                    "arguments": {
+                        "issue": "issue #148",
+                        "test_gates": [
+                            {"name": "release smoke", "status": "skipped", "skipped_reason": "cached artifact claimed current"},
+                            {"name": "security scanner", "status": "passed", "artifact_status": "stale", "suppression_count": 2},
+                            {"name": "coverage gate", "status": "failed", "unmapped_changed_files": 3},
+                        ],
+                    },
+                },
+                {
+                    "timestamp": "2026-05-10T10:02:00+00:00",
+                    "tool_name": "review_router",
+                    "categories": ["read-only"],
+                    "success": True,
+                    "reason": "review rework",
+                    "arguments": {
+                        "patch_survivorship": {
+                            "patch_id": "patch-review",
+                            "state": "rewritten",
+                            "workflow": "review_rework",
+                            "tool": "review_router",
+                            "human_pushback": [{"label": "changes-requested", "body": "private wording"}],
+                        }
+                    },
+                },
+            ],
+        )
+        task_dir = self.repo_path / ".codebase-tooling-mcp" / "tasks"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "task-issue-148.json").write_text(
+            json.dumps(
+                {
+                    "schema": "workflow_task.v1",
+                    "task_id": "task-issue-148",
+                    "workflow": "release_gate",
+                    "status": "completed",
+                    "created_at": "2026-05-10T09:59:00+00:00",
+                    "started_at": "2026-05-10T10:00:00+00:00",
+                    "blocked_at": "2026-05-10T10:03:00+00:00",
+                    "finished_at": "2026-05-10T10:05:00+00:00",
+                    "attempt": 2,
+                    "retries": [{"reason": "rerun after scanner skip"}],
+                    "audit_events": [
+                        {"event": "queued", "at": "2026-05-10T09:59:00+00:00"},
+                        {"event": "blocked", "at": "2026-05-10T10:03:00+00:00"},
+                        {"event": "complete", "at": "2026-05-10T10:05:00+00:00"},
+                    ],
+                    "test_gates": [{"name": "release holdout regression", "status": "passed"}],
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        report = self.server.self_optimization_report(
+            start_time="2026-05-10T00:00:00+00:00",
+            end_time="2026-05-11T00:00:00+00:00",
+            export=False,
+            include_git=False,
+            include_traces=False,
+            github_issue_update_mode="dry_run",
+            github_repository="owner/repo",
+        )
+
+        integrity = report["optimization_integrity_report"]
+        self.assertEqual(integrity["schema"], "optimization_integrity_report.v1")
+        self.assertTrue(integrity["advisory_only"])
+        self.assertFalse(integrity["release_blocker"])
+        self.assertEqual(integrity["verdict"], "proxy_gaming_risk")
+        reason_codes = {item["code"] for item in integrity["reasons"]}
+        self.assertIn("skipped_work_false_improvement", reason_codes)
+        self.assertIn("stale_artifact_false_improvement", reason_codes)
+        self.assertIn("failed_quality_gate_after_gain", reason_codes)
+        self.assertIn("retry_or_rework_counter_signal", reason_codes)
+        self.assertIn("human_review_or_survivorship_pushback", reason_codes)
+        self.assertEqual(integrity["counters"]["skipped_gate_count"], 1)
+        self.assertEqual(integrity["counters"]["stale_artifact_count"], 1)
+        self.assertEqual(integrity["counters"]["suppression_count"], 2)
+        self.assertEqual(integrity["holdout_regression"]["status"], "observed")
+        self.assertTrue(report["optimization_candidates"])
+        self.assertTrue(all(candidate["anti_gaming"]["auto_issue_review_required"] for candidate in report["optimization_candidates"]))
+        self.assertEqual(report["github_issue_gate"]["eligible_count"], 0)
+        self.assertTrue(
+            any(action["reason"] == "anti_gaming_review_required" for action in report["github_issue_gate"]["blocked_actions"])
+        )
+
+    def test_optimization_integrity_report_marks_missing_holdout_advisory(self):
+        record = {
+            "source": "trace",
+            "tool": "grep",
+            "workflow": "search",
+            "success": True,
+            "duration_ms": 1000,
+            "categories": [],
+            "issue_refs": ["#148"],
+            "pr_refs": [],
+            "routing": {"models": [], "backends": [], "execution_modes": []},
+            "tokens": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "saved_tokens": 20},
+            "cache_hit_count": 0,
+            "compression": {"compressed_observation_count": 0, "omitted_signal_count": 0, "estimated_saved_tokens": 0},
+            "state_transitions": [],
+            "test_gates": [{"name": "pytest focused", "status": "passed"}],
+            "retry_rework": {"retry_count": 0, "rework_count": 0, "reasons": []},
+            "blocked_waiting_seconds": 0,
+            "blocked_waiting_signal_count": 0,
+            "has_explicit_duration": True,
+            "has_explicit_tokens": True,
+        }
+        metrics = self.server._self_opt_aggregate_records([record], {"total_entries": 0, "tools": {}})
+
+        integrity = self.server._self_opt_optimization_integrity_report(metrics)
+
+        self.assertEqual(integrity["verdict"], "needs_human_review")
+        self.assertEqual(integrity["holdout_regression"]["status"], "partial")
+        self.assertTrue(any(item["code"] == "missing_holdout_regression_evidence" for item in integrity["reasons"]))
+        candidate = self.server._self_opt_candidate("cache-reuse", "Reuse cache", "r", {}, "a", confidence="high")
+        enriched = self.server._self_opt_attach_candidate_integrity([candidate], integrity)[0]
+        self.assertTrue(enriched["anti_gaming"]["auto_issue_review_required"])
+
+    def test_optimization_integrity_report_trusts_clean_holdout_improvement(self):
+        record = {
+            "source": "trace",
+            "tool": "grep",
+            "workflow": "search",
+            "success": True,
+            "duration_ms": 1000,
+            "categories": [],
+            "issue_refs": ["#148"],
+            "pr_refs": [],
+            "routing": {"models": ["local-model"], "backends": ["offline"], "execution_modes": ["local"]},
+            "tokens": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "saved_tokens": 20},
+            "cache_hit_count": 0,
+            "compression": {"compressed_observation_count": 0, "omitted_signal_count": 0, "estimated_saved_tokens": 0},
+            "state_transitions": [{"from": "queued", "to": "completed"}],
+            "test_gates": [{"name": "release holdout regression", "status": "passed"}],
+            "retry_rework": {"retry_count": 0, "rework_count": 0, "reasons": []},
+            "blocked_waiting_seconds": 2,
+            "blocked_waiting_signal_count": 1,
+            "has_explicit_duration": True,
+            "has_explicit_tokens": True,
+        }
+        metrics = self.server._self_opt_aggregate_records([record], {"total_entries": 0, "tools": {}})
+
+        integrity = self.server._self_opt_optimization_integrity_report(metrics)
+
+        self.assertEqual(integrity["verdict"], "trusted_improvement")
+        self.assertEqual(integrity["reasons"], [])
+        self.assertEqual(integrity["holdout_regression"]["status"], "observed")
+        candidate = self.server._self_opt_candidate("cache-reuse", "Reuse cache", "r", {}, "a", confidence="high")
+        enriched = self.server._self_opt_attach_candidate_integrity([candidate], integrity)[0]
+        self.assertFalse(enriched["anti_gaming"]["auto_issue_review_required"])
 
     def test_report_output_is_stable_except_generated_metadata(self):
         self._write_sample_usage_fixtures()
