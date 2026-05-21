@@ -181,7 +181,62 @@ class BuildDownloadCacheTests(unittest.TestCase):
                     build_cache_download {cache_file} https://example.invalid/artifact artifact
                     """
                 ),
-                env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+                env={
+                    "BUILD_CACHE_DOWNLOAD_ATTEMPTS": "1",
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(counter.read_text(encoding="utf-8").strip(), "2")
+            self.assertEqual(cache_file.read_text(encoding="utf-8").strip(), "complete")
+            self.assertFalse((cache_file.parent / "artifact.bin.part").exists())
+
+    def test_transient_download_retries_preserve_partial_in_single_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_file = tmp_path / "cache" / "artifact.bin"
+            counter = tmp_path / "curl-count"
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "curl").write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env bash
+                    count=0
+                    if [ -f {counter} ]; then
+                      count="$(cat {counter})"
+                    fi
+                    count=$((count + 1))
+                    echo "${{count}}" > {counter}
+                    out=""
+                    while [ "$#" -gt 0 ]; do
+                      if [ "$1" = "-o" ]; then
+                        out="$2"
+                        shift 2
+                      else
+                        shift
+                      fi
+                    done
+                    if [ "${{count}}" -eq 1 ]; then
+                      mkdir -p "$(dirname "${{out}}")"
+                      echo partial >"${{out}}"
+                      exit 56
+                    fi
+                    grep -q partial "${{out}}" || exit 66
+                    echo complete >"${{out}}"
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (fake_bin / "curl").chmod(0o755)
+
+            proc = self._run_helper(
+                f"build_cache_download {cache_file} https://example.invalid/artifact artifact",
+                env={
+                    "BUILD_CACHE_DOWNLOAD_RETRY_DELAY_SECONDS": "0",
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                },
             )
 
             self.assertEqual(proc.returncode, 0, proc.stderr)

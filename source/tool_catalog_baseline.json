@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 33,
+  "tool_count": 34,
   "tools": [
     {
       "digest": "sha256:dfaa3c9983cb8279b2f3e5494e332605321a2b3ddd3064bbcfd26f29967957c4",
@@ -2178,7 +2178,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:ed4374ba8470ae325c7844ac7e32dea05c4f9edb03be9790e267770a67e63a02",
+      "digest": "sha256:9ad90e0a4a5b157e5c7dc6bbcca6e85c2dbb3afc544435b030871f20122e8a0e",
       "metadata": {
         "documentation": [
           {
@@ -2407,6 +2407,7 @@
             "tool_catalog_integrity",
             "ci_workflow_security",
             "untrusted_content_signals",
+            "memory_governance",
             "lineage",
             "provenance",
             "compressed_observation",
@@ -4344,6 +4345,245 @@
         }
       },
       "name": "mcp_threat_model_report"
+    },
+    {
+      "digest": "sha256:2e5983eaf0b4e0269e03508efcf4bc52b0898ea448dff035d3186a6a3294e001",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Inventory repository memory stores and flag consolidation governance risks without mutating memory.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "include_entries": {
+                "default": true,
+                "title": "Include Entries",
+                "type": "boolean"
+              },
+              "max_entries": {
+                "default": 1000,
+                "title": "Max Entries",
+                "type": "integer"
+              },
+              "stale_days": {
+                "default": 90,
+                "title": "Stale Days",
+                "type": "integer"
+              }
+            },
+            "title": "memory_governance_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "memory_governance_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "entries": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "object"
+              },
+              "policy_version": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "schema": {
+                "const": "memory_governance_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "stores": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "generated_at",
+              "read_only",
+              "policy_version",
+              "summary",
+              "stores",
+              "findings",
+              "security"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "inputs",
+            "entries",
+            "advisory_only"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "entries": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "object"
+              },
+              "policy_version": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "schema": {
+                "const": "memory_governance_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "stores": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "generated_at",
+              "read_only",
+              "policy_version",
+              "summary",
+              "stores",
+              "findings",
+              "security"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "generated_at",
+            "read_only",
+            "policy_version",
+            "summary",
+            "stores",
+            "findings",
+            "security"
+          ],
+          "tool": "memory_governance_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "memory_governance_report"
+        }
+      },
+      "name": "memory_governance_report"
     },
     {
       "digest": "sha256:df461b69832fd5ba687ed8972d9913e7a5c820f58095016250229d4368e99e5e",
@@ -10684,5 +10924,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:b1809bf9bcd9e657844212662fe9581ca71e3dcec336eae1c67fd38af505e32e"
+  "whole_catalog_digest": "sha256:2a6ecde4e38d6663ac9dacd3f63f0d715d26d51353f1e1edf381131022a07975"
 }

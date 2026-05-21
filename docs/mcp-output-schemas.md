@@ -28,6 +28,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `ci_workflow_security_report`
 - `mcp_threat_model_report`
 - `governance_report`
+- `memory_governance_report`
 - `self_optimization_report`
 - `artifact_provenance`
 - `workflow_diagnostics`
@@ -178,7 +179,8 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `dependency_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `components`, `vulnerabilities`, `advisory`, `gate`, `exports`, `resource_links` | `inputs`, skipped/unresolved details, warnings, local provenance sidecars, and SBOM export metadata |
 | `ci_workflow_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `findings`, `workflows`, `exports` | findings by severity, suppressions, action-use classifications, resource links, and redacted evidence |
 | `mcp_threat_model_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `components`, `trust_boundaries`, `dread_rubric`, `threats`, `findings`, `exports` | controls, fixture/baseline metadata, temporal catalog mutation evidence, resource links, and offline STRIDE/DREAD evidence |
-| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `tool_catalog_integrity`, `ci_workflow_security`, aggregate `untrusted_content_signals`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
+| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `tool_catalog_integrity`, `ci_workflow_security`, aggregate `untrusted_content_signals`, compact `memory_governance`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
+| `memory_governance_report` | `schema`, `generated_at`, `read_only`, `policy_version`, `summary`, `stores`, `findings`, `security` | `inputs`, redacted metadata-only `entries`, `advisory_only` |
 | `self_optimization_report` | `schema`, `report_id`, `generated_at`, `window`, `summary`, `metrics`, `optimization_candidates`, `optimization_integrity_report`, `security` | `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `patch_survivorship`, `optimization_candidates[].anti_gaming`, `_meta` |
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_step_candidate`, `failure_category`, `evidence`, `safe_next_actions`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories` |
