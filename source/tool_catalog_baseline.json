@@ -941,7 +941,7 @@
       "name": "artifact_provenance"
     },
     {
-      "digest": "sha256:5e447b905c20908e9604b129789b845af38c718c5d404bdd3c70f49fea47ef90",
+      "digest": "sha256:26215e29a8e1be2f6c68ababdf95bdbdb52080c0e6953fd41b2a2b1408c31107",
       "metadata": {
         "documentation": [
           {
@@ -1172,6 +1172,7 @@
             "action_uses",
             "security",
             "resource_links",
+            "provenance",
             "_meta"
           ],
           "outputSchema": {
@@ -11719,5 +11720,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:307f6b73587d3630f9d5a08dcb17d9094efe1d721b8b3f71393f1d8ef18d9679"
+  "whole_catalog_digest": "sha256:1da634208730cba9c6a1d239ac28686d20d3504a268c0cc86a84898c72b2d659"
 }
