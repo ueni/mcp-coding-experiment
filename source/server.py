@@ -893,6 +893,8 @@ SAFE_GIT_SUBCOMMANDS = {
 }
 OUTPUT_PROFILES = {"compact", "normal", "verbose"}
 CONTINUE_MODEL_ROUTING_RELATIVE_PATH = Path(".continue/model-routing.yaml")
+CONTINUE_AGENT_API_BASE = "http://localhost:8000/v1"
+CONTINUE_AGENT_API_AUTHORIZATION = "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}"
 TASK_ROUTE_CODE_MAP = {
     "general": "G",
     "coding": "C",
@@ -32369,6 +32371,7 @@ def _continue_model_yaml(
     proxy: str = "",
     ca_bundle_path: str = "",
     api_key_ref: str = "",
+    authorization: str = "",
     timeout: int = 300000,
 ) -> str:
     role_items = roles or ["chat", "edit", "apply"]
@@ -32385,7 +32388,10 @@ def _continue_model_yaml(
         "    roles:",
     ]
     lines.extend(f"      - {role}" for role in role_items)
-    lines.extend(["    requestOptions:", f"      timeout: {timeout}"])
+    lines.append("    requestOptions:")
+    if authorization:
+        lines.extend(["      headers:", f"        Authorization: \"{authorization}\""])
+    lines.append(f"      timeout: {timeout}")
     if proxy:
         lines.append(f"      proxy: {proxy}")
     if ca_bundle_path:
@@ -32437,6 +32443,8 @@ def _agent_proxy_runtime_config_payload(config: dict[str, str]) -> dict[str, Any
             "apiType": config.get("api_type", ""),
             "apiVersion": config.get("api_version", ""),
             "apiKey": api_key_ref if ready_for_online else "",
+            "proxy": config.get("proxy", "") if ready_for_online else "",
+            "caBundlePath": config.get("ca_bundle_path", "") if ready_for_online else "",
         }
     }
 
@@ -33320,13 +33328,11 @@ def _continue_model_configure_payload(payload: dict[str, Any]) -> tuple[dict[str
     display_provider = config["provider"]
     profile_text = _continue_model_yaml(
         name="coding-openai-compatible",
-        display_name=f"Coding - {display_provider} Endpoint",
-        provider="openai" if display_provider == "azure" else display_provider,
+        display_name=f"Coding - {display_provider} via codebase-tooling-mcp",
+        provider="openai",
         model=config["model"],
-        api_base=config["api_base"] or "http://localhost:8000/v1/model-fallback",
-        proxy=config["proxy"],
-        ca_bundle_path=config["ca_bundle_path"],
-        api_key_ref=config["api_key_ref"],
+        api_base=CONTINUE_AGENT_API_BASE,
+        authorization=CONTINUE_AGENT_API_AUTHORIZATION,
     )
     routing_text = _continue_model_routing_yaml(
         config["model"], ".continue/models/coding-openai-compatible.yaml"

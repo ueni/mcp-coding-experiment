@@ -19,7 +19,7 @@ log() {
 
 usage() {
   log "Usage: $0 [--enable-vulkan-gpu|--disable-vulkan-gpu] [--continue-model-profile local|openai-compatible|none]"
-  log "Environment overrides for OpenAI-compatible setup: CONTINUE_MODEL_ID, CONTINUE_MODEL_API_BASE, CONTINUE_MODEL_PROXY, CONTINUE_MODEL_CA_BUNDLE"
+  log "Environment overrides for server-routed model setup: CONTINUE_MODEL_ID, CONTINUE_MODEL_API_BASE, CONTINUE_MODEL_PROXY, CONTINUE_MODEL_CA_BUNDLE"
 }
 
 require_cmd() {
@@ -154,7 +154,7 @@ prompt_continue_model_profile() {
     log ""
     log "Continue model setup:"
     log "  1) local bundled Ollama model (qwen2.5-coder:1.5b)"
-    log "  2) OpenAI-compatible endpoint (custom apiBase/model, optional MITM proxy)"
+    log "  2) server-routed OpenAI-compatible backend (custom provider apiBase/model, optional MITM proxy)"
     log "  3) skip Continue model config"
     printf 'Select Continue model profile [1]: ' >&2
     read -r choice || choice=""
@@ -193,21 +193,21 @@ write_openai_compatible_continue_model() {
 
   if [ -t 0 ]; then
     if [ -z "$model_id" ]; then
-      printf 'OpenAI-compatible model id [gpt-4.1-mini]: ' >&2
+      printf 'Backend model id [gpt-4.1-mini]: ' >&2
       read -r model_id || model_id=""
       model_id=${model_id:-gpt-4.1-mini}
     fi
     if [ -z "$api_base" ]; then
-      printf 'OpenAI-compatible apiBase, include /v1 [http://127.0.0.1:4000/v1]: ' >&2
+      printf 'Backend provider apiBase, include /v1 [http://127.0.0.1:4000/v1]: ' >&2
       read -r api_base || api_base=""
       api_base=${api_base:-http://127.0.0.1:4000/v1}
     fi
     if [ -z "$proxy" ]; then
-      printf 'Optional MITM/proxy URL, empty for none: ' >&2
+      printf 'Optional backend MITM/proxy URL, empty for none: ' >&2
       read -r proxy || proxy=""
     fi
     if [ -n "$proxy" ] && [ -z "$ca_bundle" ]; then
-      printf 'Optional MITM CA bundle path, empty to use system trust: ' >&2
+      printf 'Optional backend MITM CA bundle path, empty to use system trust: ' >&2
       read -r ca_bundle || ca_bundle=""
     fi
   fi
@@ -224,26 +224,43 @@ name: coding-openai-compatible
 version: 0.0.1
 schema: v1
 models:
-  - name: Coding - OpenAI Compatible Endpoint
+  - name: Coding - codebase-tooling-mcp Agent API
     provider: openai
     model: $(json_escape "$model_id")
-    apiBase: $(json_escape "$api_base")
+    apiBase: http://localhost:8000/v1
     roles:
       - chat
       - edit
       - apply
     requestOptions:
+      headers:
+        Authorization: "Bearer \${{ secrets.MCP_HTTP_BEARER_TOKEN }}"
       timeout: 300000
+EOF
+
+  mkdir -p .codebase-tooling-mcp
+  cat > .codebase-tooling-mcp/agent-proxy.yaml <<EOF
+# Local runtime config for codebase-tooling-mcp agent proxy.
+# Do not store API keys here; keep credentials in environment variables or Continue secrets.
+agent_proxy:
+  enabled: true
+  allow_online: true
+  provider: openai-compatible
+  model: $(json_escape "$model_id")
+  apiBase: $(json_escape "$api_base")
+  apiType: ""
+  apiVersion: ""
+  apiKey: ""
 EOF
   if [ -n "$proxy" ] || [ -n "$ca_bundle" ]; then
     {
       if [ -n "$proxy" ]; then
-        printf '      proxy: %s\n' "$(json_escape "$proxy")"
+        printf '  proxy: %s\n' "$(json_escape "$proxy")"
       fi
       if [ -n "$ca_bundle" ]; then
-        printf '      caBundlePath: %s\n' "$(json_escape "$ca_bundle")"
+        printf '  caBundlePath: %s\n' "$(json_escape "$ca_bundle")"
       fi
-    } >> "$profile_path"
+    } >> .codebase-tooling-mcp/agent-proxy.yaml
   fi
 }
 
@@ -291,18 +308,17 @@ name: coding-openai-compatible
 version: 0.0.1
 schema: v1
 models:
-  - name: Coding - OpenAI Compatible Endpoint
+  - name: Coding - codebase-tooling-mcp Agent API
     provider: openai
-    model: gpt-4.1-mini
-    apiBase: http://127.0.0.1:4000/v1
+    model: model-fallback
+    apiBase: http://localhost:8000/v1
     roles:
       - chat
       - edit
       - apply
     requestOptions:
-      # Set this to a local MITM/proxy URL when request inspection is needed.
-      # proxy: http://127.0.0.1:8080
-      # caBundlePath: /path/to/mitm-ca.pem
+      headers:
+        Authorization: "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}"
       timeout: 300000
 EOF
 }

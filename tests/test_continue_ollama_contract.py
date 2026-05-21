@@ -36,7 +36,7 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             self.assertIn(f"apiBase: {NATIVE_OLLAMA_BASE}", text, str(path))
             self.assertNotIn(f"apiBase: {NATIVE_OLLAMA_BASE}/v1", text, str(path))
 
-    def test_continue_includes_openai_compatible_model_template(self):
+    def test_continue_includes_server_routed_openai_compatible_model_template(self):
         for config_path in [
             REPO_ROOT / ".continue" / "models" / "coding-openai-compatible.yaml",
             REPO_ROOT
@@ -46,12 +46,20 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             / "models"
             / "coding-openai-compatible.yaml",
         ]:
-            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            text = config_path.read_text(encoding="utf-8")
+            config = yaml.safe_load(text)
             model = config["models"][0]
             self.assertEqual("openai", model["provider"], str(config_path))
-            self.assertEqual("gpt-4.1-mini", model["model"], str(config_path))
-            self.assertEqual("http://127.0.0.1:4000/v1", model["apiBase"], str(config_path))
+            self.assertTrue(model["model"], str(config_path))
+            self.assertEqual("http://localhost:8000/v1", model["apiBase"], str(config_path))
+            self.assertEqual(
+                "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}",
+                model["requestOptions"]["headers"]["Authorization"],
+                str(config_path),
+            )
             self.assertEqual(300000, model["requestOptions"]["timeout"], str(config_path))
+            self.assertNotIn("apiKey:", text, str(config_path))
+            self.assertNotIn("127.0.0.1:4000", text, str(config_path))
 
     def test_continue_includes_model_fallback_template(self):
         for config_path in [
@@ -316,13 +324,27 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
+            agent_proxy = yaml.safe_load(
+                (repo_root / ".codebase-tooling-mcp" / "agent-proxy.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )["agent_proxy"]
 
         model = model_config["models"][0]
         self.assertEqual("openai", model["provider"])
         self.assertEqual("local-proxy-model", model["model"])
-        self.assertEqual("http://127.0.0.1:8787/v1", model["apiBase"])
-        self.assertEqual("http://127.0.0.1:8080", model["requestOptions"]["proxy"])
-        self.assertEqual("/tmp/mitm-ca.pem", model["requestOptions"]["caBundlePath"])
+        self.assertEqual("http://localhost:8000/v1", model["apiBase"])
+        self.assertEqual(
+            "Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}",
+            model["requestOptions"]["headers"]["Authorization"],
+        )
+        self.assertNotIn("proxy", model["requestOptions"])
+        self.assertNotIn("caBundlePath", model["requestOptions"])
+        self.assertEqual("openai-compatible", agent_proxy["provider"])
+        self.assertEqual("local-proxy-model", agent_proxy["model"])
+        self.assertEqual("http://127.0.0.1:8787/v1", agent_proxy["apiBase"])
+        self.assertEqual("http://127.0.0.1:8080", agent_proxy["proxy"])
+        self.assertEqual("/tmp/mitm-ca.pem", agent_proxy["caBundlePath"])
         self.assertEqual("local-proxy-model", routing["router"]["model"])
         self.assertEqual(
             ".continue/models/coding-openai-compatible.yaml", routing["router"]["file"]
@@ -444,6 +466,12 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
         self.assertNotIn("[mcp_servers.codebase_tooling_mcp]", default_config_toml)
         self.assertNotIn('sandbox_mode = "danger-full-access"', config_toml)
         self.assertNotIn('sandbox_mode = "danger-full-access"', default_config_toml)
+        combined = config_toml + "\n" + default_config_toml
+        self.assertNotIn("api_key", combined.lower())
+        self.assertNotIn("api_base", combined.lower())
+        self.assertNotIn("model_provider", combined.lower())
+        self.assertNotIn("azure", combined.lower())
+        self.assertNotIn("openai", combined.lower())
 
     def test_devcontainer_relaxes_security_profile_for_nested_client_sandboxes(self):
         config = json.loads(
@@ -592,15 +620,25 @@ class ContinueOllamaContractConfigTest(unittest.TestCase):
             routing = routing_path.read_text(encoding="utf-8")
             config = yaml.safe_load(routing)
             routes = config["routes"]
+            router_file = config["router"]["file"]
 
-            self.assertEqual("qwen2.5-coder:1.5b", config["router"]["model"], str(routing_path))
-            self.assertEqual(
-                ".continue/models/coding-qwen2.5-coder-1.5b.yaml",
-                config["router"]["file"],
-                str(routing_path),
-            )
-            self.assertEqual("qwen2.5-coder:1.5b", routes["coding"]["model"], str(routing_path))
-            self.assertEqual("qwen2.5-coder:1.5b", routes["coding_agent"]["model"], str(routing_path))
+            if routing_path.parts[-3:] == ("source", "defaults", "continue") or "source/defaults/continue" in str(routing_path):
+                self.assertEqual("qwen2.5-coder:1.5b", config["router"]["model"], str(routing_path))
+                self.assertEqual(
+                    ".continue/models/coding-qwen2.5-coder-1.5b.yaml",
+                    router_file,
+                    str(routing_path),
+                )
+                self.assertEqual("qwen2.5-coder:1.5b", routes["coding"]["model"], str(routing_path))
+                self.assertEqual("qwen2.5-coder:1.5b", routes["coding_agent"]["model"], str(routing_path))
+            elif router_file == ".continue/models/coding-openai-compatible.yaml":
+                profile_text = (REPO_ROOT / router_file).read_text(encoding="utf-8")
+                self.assertEqual(config["router"]["model"], routes["coding"]["model"], str(routing_path))
+                self.assertEqual(config["router"]["model"], routes["coding_agent"]["model"], str(routing_path))
+                self.assertIn("apiBase: http://localhost:8000/v1", profile_text)
+                self.assertNotIn("apiKey:", profile_text)
+            else:
+                self.fail(f"unexpected Continue routing profile in {routing_path}: {router_file}")
             self.assertEqual("qwen2.5-coder:1.5b", routes["coding_micro"]["model"], str(routing_path))
             self.assertNotIn("high_quality_chat_edit", routes)
             for model in obsolete_models:

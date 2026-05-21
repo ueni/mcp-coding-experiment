@@ -58,7 +58,9 @@ Accepted fields include `provider`, `model`, `apiBase`, `apiType`, `apiVersion`,
   apiKey: "${{ secrets.AZURE_API_KEY }}"
 ```
 
-Raw `apiKey` values are accepted only as configure input for the mutation-gated secret path. Assistant responses and dry-run file payloads report the key as present but do not print it back; written provider configs store a Continue secret reference while `.continue/.env` holds the local secret value.
+Raw `apiKey` values are accepted only as configure input for the mutation-gated secret path. Assistant responses and dry-run file payloads report the key as present but do not print it back; written backend runtime configs store a Continue secret reference while `.continue/.env` holds the local secret value.
+
+Successful assistant setup does not write the upstream provider endpoint or provider API key into Continue or Codex model config. Continue receives an OpenAI-compatible model profile that points only at this server's Agent API (`http://localhost:8000/v1`, `POST /v1/chat/completions`) and uses `MCP_HTTP_BEARER_TOKEN` only for local MCP/server authorization. Provider/model/API-base details live behind `server.py` in `.codebase-tooling-mcp/agent-proxy.yaml` and ignored secret storage.
 
 ## Minimal local/offline configuration
 
@@ -86,7 +88,7 @@ export MCP_AGENT_PROXY_MAX_OUTPUT_TOKENS=4096
 export MCP_AGENT_PROXY_MAX_COST_USD=0.25
 ```
 
-No provider URL is configured by default. Online calls are blocked unless online mode is explicitly enabled, a provider endpoint is configured, the requested model matches the provider-style YAML `model` (or the legacy YAML/env allowlist), and any required provider secret resolves from a Continue secret or `MCP_AGENT_PROXY_PROVIDER_API_KEY`.
+No provider URL is configured by default. Online calls are blocked unless online mode is explicitly enabled, a provider endpoint is configured in the server-side agent-proxy runtime, the requested model matches the provider-style YAML `model` (or the legacy YAML/env allowlist), and any required provider secret resolves from a Continue secret or `MCP_AGENT_PROXY_PROVIDER_API_KEY`.
 
 ## Privacy behavior
 

@@ -1094,15 +1094,51 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertTrue((self.repo_path / ".continue/model-routing.yaml").exists())
         self.assertTrue((self.repo_path / ".continue/models/coding-openai-compatible.yaml").exists())
         self.assertTrue((self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").exists())
+        profile_text = (self.repo_path / ".continue/models/coding-openai-compatible.yaml").read_text(
+            encoding="utf-8"
+        )
         secret_text = (self.repo_path / ".continue/.env").read_text(encoding="utf-8")
         agent_proxy_text = (self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").read_text(
             encoding="utf-8"
         )
+        self.assertIn("apiBase: http://localhost:8000/v1", profile_text)
+        self.assertIn("Authorization: \"Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}\"", profile_text)
+        self.assertNotIn("https://azure.example/api", profile_text)
+        self.assertNotIn("apiKey:", profile_text)
         self.assertIn(f"AZURE_API_KEY={secret}", secret_text)
         self.assertIn("provider: azure", agent_proxy_text)
         self.assertIn("model: models-gpt-5", agent_proxy_text)
+        self.assertIn("apiBase: https://azure.example/api", agent_proxy_text)
         self.assertNotIn(secret, response_text)
+        self.assertNotIn(secret, profile_text)
         self.assertNotIn(secret, agent_proxy_text)
+
+        captured = {}
+
+        def fake_post(url, payload, timeout):
+            captured["url"] = url
+            captured["payload"] = payload
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+        self.server._agent_proxy_http_post_json = fake_post
+        chat_response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(self.base_payload(model="models-gpt-5"))
+            )
+        )
+        chat_payload = self.response_json(chat_response)
+
+        self.assertEqual(200, chat_response.status_code)
+        self.assertIn("/openai/deployments/models-gpt-5/chat/completions", captured["url"])
+        self.assertEqual("online", chat_payload["agent_proxy"]["routing"]["backend"])
 
     def test_model_fallback_configure_requires_mutate_scope_in_http_context(self):
         self.server.ALLOW_MUTATIONS = True
@@ -1219,10 +1255,14 @@ class AgentAPIProxyTest(ServerToolsTestBase):
 
         self.assertIn("provider: openai", profile_text)
         self.assertIn("model: models-gpt-5", profile_text)
-        self.assertIn("apiBase: https://azure.example/api", profile_text)
+        self.assertIn("apiBase: http://localhost:8000/v1", profile_text)
+        self.assertIn("Authorization: \"Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}\"", profile_text)
+        self.assertNotIn("https://azure.example/api", profile_text)
+        self.assertNotIn("apiKey:", profile_text)
         self.assertIn("provider: azure", agent_proxy_text)
         self.assertIn("apiType: azure", agent_proxy_text)
         self.assertIn("apiVersion: 2024-12-01-preview", agent_proxy_text)
+        self.assertIn("apiBase: https://azure.example/api", agent_proxy_text)
         self.assertIn(f"AZURE_API_KEY={secret}", secret_text)
         self.assertNotIn(secret, profile_text)
         self.assertNotIn(secret, agent_proxy_text)
@@ -1278,8 +1318,12 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn(".continue/models/coding-openai-compatible.yaml", payload["files"])
         self.assertIn(".codebase-tooling-mcp/agent-proxy.yaml", payload["files"])
         rendered_files = json.dumps(payload["files"], sort_keys=True)
+        continue_profile = payload["files"][".continue/models/coding-openai-compatible.yaml"]
         self.assertIn("agent_proxy:", payload["files"][".codebase-tooling-mcp/agent-proxy.yaml"])
         self.assertIn("provider: openai", payload["files"][".codebase-tooling-mcp/agent-proxy.yaml"])
+        self.assertIn("apiBase: http://localhost:8000/v1", continue_profile)
+        self.assertNotIn("http://127.0.0.1:8787/v1", continue_profile)
+        self.assertNotIn("apiKey:", continue_profile)
         self.assertIn("apiKey: ${{ secrets.OPENAI_API_KEY }}", rendered_files)
         self.assertNotIn(self.provider_secret_value(), rendered_files)
         self.assertFalse((self.repo_path / ".continue/model-routing.yaml").exists())
@@ -1319,9 +1363,12 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         )
         self.assertIn("provider: openai", profile_text)
         self.assertIn("model: fallback-target", profile_text)
-        self.assertIn("apiBase: http://127.0.0.1:8787/v1", profile_text)
-        self.assertIn("proxy: http://127.0.0.1:8080", profile_text)
-        self.assertIn("caBundlePath: /tmp/mitm-ca.pem", profile_text)
+        self.assertIn("apiBase: http://localhost:8000/v1", profile_text)
+        self.assertIn("Authorization: \"Bearer ${{ secrets.MCP_HTTP_BEARER_TOKEN }}\"", profile_text)
+        self.assertNotIn("apiKey:", profile_text)
+        self.assertNotIn("apiBase: http://127.0.0.1:8787/v1", profile_text)
+        self.assertNotIn("proxy: http://127.0.0.1:8080", profile_text)
+        self.assertNotIn("caBundlePath: /tmp/mitm-ca.pem", profile_text)
         self.assertIn("model: fallback-target", routing_text)
         self.assertIn("agent_proxy:", agent_proxy_text)
         secret_text = (self.repo_path / ".continue/.env").read_text(encoding="utf-8")
@@ -1329,6 +1376,8 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn("provider: openai", agent_proxy_text)
         self.assertIn("model: fallback-target", agent_proxy_text)
         self.assertIn("apiBase: http://127.0.0.1:8787/v1", agent_proxy_text)
+        self.assertIn("proxy: http://127.0.0.1:8080", agent_proxy_text)
+        self.assertIn("caBundlePath: /tmp/mitm-ca.pem", agent_proxy_text)
         self.assertIn("apiKey: ${{ secrets.OPENAI_API_KEY }}", agent_proxy_text)
         self.assertIn(f"OPENAI_API_KEY={self.provider_secret_value()}", secret_text)
         self.assertNotIn(self.provider_secret_value(), agent_proxy_text)

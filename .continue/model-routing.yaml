@@ -1,14 +1,14 @@
 schema: v1
 router:
-  model: qwen2.5-coder:1.5b
-  file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
+  model: models-gpt-5
+  file: .continue/models/coding-openai-compatible.yaml
 routes:
   coding:
-    model: qwen2.5-coder:1.5b
-    file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
+    model: models-gpt-5
+    file: .continue/models/coding-openai-compatible.yaml
   coding_agent:
-    model: qwen2.5-coder:1.5b
-    file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
+    model: models-gpt-5
+    file: .continue/models/coding-openai-compatible.yaml
   coding_micro:
     model: qwen2.5-coder:1.5b
     file: .continue/models/coding-qwen2.5-coder-1.5b.yaml
