@@ -583,6 +583,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "workflow_diagnostics": {"type": "object"},
             "governance_hooks": {"type": "object"},
             "ci_workflow_security": {"type": "object"},
+            "secret_exposure": {"type": "object"},
             "untrusted_content_signals": {"type": "object"},
             "snapshots": {"type": "object"},
             "security": {"type": "object"},

@@ -147,3 +147,28 @@ class SecretExposureReportTests(ServerToolsTestBase):
         self.assertNotEqual(unrelated["decision"], "deny")
         self.assertFalse(unrelated["input_summary"]["secret_exposure"]["would_block"])
         self._assert_report_is_redacted(report, raw_value)
+
+    def test_release_readiness_blocks_on_new_high_confidence_secret(self):
+        raw_value = self._fake_openai_key()
+        self.write_repo_text("src/release_secret.py", "OPENAI_API_KEY = '" + raw_value + "'\n")
+
+        readiness = self.server.release_readiness(
+            base_ref="HEAD",
+            head_ref="HEAD",
+            run_tests=False,
+            run_docs_check=False,
+            run_security_check=False,
+            run_dependency_security_check=False,
+            run_ci_workflow_security_check=False,
+            run_secret_exposure_check=True,
+            run_license_check=False,
+            run_risk_check=False,
+            run_impact_check=False,
+        )
+
+        self.assertFalse(readiness["ok"])
+        secret_check = readiness["checks"]["secret_exposure"]
+        self.assertFalse(secret_check["ok"])
+        self.assertEqual(secret_check["status"], "blocked")
+        self.assertEqual(secret_check["new_high_confidence_count"], 1)
+        self.assertNotIn(raw_value, json.dumps(readiness, sort_keys=True))

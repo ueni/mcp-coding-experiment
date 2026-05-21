@@ -130,7 +130,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `mcp_threat_model_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `mcp_threat_model_report`, `governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -239,6 +239,8 @@ Restore:
 
 `ci_workflow_security_report` adds an offline GitHub Actions posture slice for `.github/workflows/*.yml`, including token-permission posture, mutable action refs, risky triggers, self-hosted runner and Docker/privileged usage, secret/publish signals, artifact-transfer paths, and rationale-plus-expiry suppressions. Evidence is repository-relative and redacted so release/governance summaries can distinguish missing workflow evidence, parser failure, advisory findings, and clean static checks.
 
+`secret_exposure_report` adds a local/offline redacted repository scanner for conservative token, private-key, cloud-key, connection-string, bearer-token, and generic secret-assignment patterns. It emits only rule ids, repository-relative paths, line numbers, severity/confidence, baseline/new classification, and stable fingerprints; a repository allowlist can suppress known canaries without exposing raw values. `mutation_step_guard` and `release_readiness` can block on newly introduced high-confidence findings, while `governance_report` carries only a compact redacted summary.
+
 ### 8.2 Release Governance
 
 `clarification_gate`, `release_readiness`, `required_tool_chain`, and `change_impact_gate` allow policy-gated release decisions based on:
@@ -248,6 +250,7 @@ Restore:
 - Security findings.
 - Dependency-security status from `dependency_security_report`, including vulnerable, stale, skipped, and network-disabled advisory states.
 - CI workflow posture from `ci_workflow_security_report`, including missing workflow evidence, parser failures, and active high-risk findings.
+- Secret-exposure posture from `secret_exposure_report`, including newly introduced high-confidence blockers and suppressed allowlisted canaries.
 - Risk score thresholds.
 - Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
 - First-slice replay lineage for `governance_report` via redacted `workflow_lineage.v1` manifests and read-only `workflow_lineage(mode="verify")` drift reports.
