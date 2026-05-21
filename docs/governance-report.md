@@ -16,6 +16,7 @@ The first-slice report schema is `governance_report.v1`. It includes:
 - latest stored `workflow_policy_plan` decision/plan ID as optional pre-execution workflow-policy evidence when available;
 - latest exported `dependency_security_report` status, vulnerability count, advisory freshness, and report path when available;
 - inline `ci_workflow_security_report` summary with checked workflow count, status, and active high/medium finding counts;
+- compact redacted `secret_exposure_report` summary with new high-confidence secret blockers for governance/release review;
 - companion `mcp_threat_model_report` workflow for STRIDE/DREAD fixture regressions when a focused MCP threat-model view is needed;
 - compact `tool_catalog_integrity` public-MCP-surface status, baseline/current digests, tool/prompt/resource counts, drift counts, and advisory lint counts without embedding the full catalog;
 - snapshot/rollback references from the state snapshot index when available;
@@ -75,7 +76,7 @@ Security boundaries:
 - report generation does not require mutation mode;
 - relative audit/report paths are resolved inside `REPO_PATH`;
 - absolute audit paths outside the repository are not read by the report workflow;
-- secrets and tokens are redacted before aggregation and export;
+- secret-exposure evidence contains only redacted metadata/fingerprints, and secrets/tokens are redacted before aggregation and export;
 - tool-catalog integrity summaries include only public MCP metadata digests/counts, never repository contents or host absolute paths;
 - resource links and lineage manifests expose only repository-relative `repo://file/{path}` paths, never host absolute paths or raw secret-bearing inputs;
 - unsigned provenance sidecars and workflow-lineage manifests are local integrity/replay metadata only and are not cryptographic signatures;
