@@ -27865,12 +27865,11 @@ def _memory_governance_public_timestamp(
         return None, False
     if not isinstance(value, str):
         return None, True
-    timestamp = value.strip()
-    if not timestamp:
+    if not value.strip():
         return None, False
     if parsed is None:
         return None, True
-    return timestamp, False
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"), False
 
 
 def _memory_governance_scalar(value: Any) -> str:
