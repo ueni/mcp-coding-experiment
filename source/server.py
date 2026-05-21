@@ -13881,15 +13881,31 @@ def _secret_exposure_file_candidates(
         else:
             found: list[Path] = []
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = sorted(d for d in dirnames if d != ".git")
                 base = Path(dirpath)
+                safe_dirnames: list[str] = []
+                for dirname in sorted(d for d in dirnames if d != ".git"):
+                    directory = base / dirname
+                    if directory.is_symlink():
+                        rel_dir = str(directory.relative_to(REPO_PATH)).replace("\\", "/")
+                        try:
+                            directory.resolve().relative_to(REPO_PATH)
+                        except (OSError, RuntimeError, ValueError):
+                            skipped.append({"path": rel_dir, "reason": "outside_repo_boundary"})
+                        continue
+                    safe_dirnames.append(dirname)
+                dirnames[:] = safe_dirnames
                 for name in sorted(filenames):
                     found.append(base / name)
             iterable = found
         for path in iterable:
+            rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
+            try:
+                path.resolve().relative_to(REPO_PATH)
+            except (OSError, RuntimeError, ValueError):
+                skipped.append({"path": rel, "reason": "outside_repo_boundary"})
+                continue
             if not path.is_file():
                 continue
-            rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
             if rel in seen:
                 continue
             if not _allowed_by_globs(rel, include_globs, exclude):

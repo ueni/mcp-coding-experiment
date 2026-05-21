@@ -129,6 +129,33 @@ class SecretExposureReportTests(ServerToolsTestBase):
         self.assertNotIn(str(outside), json.dumps(report, sort_keys=True))
         self._assert_report_is_redacted(report, raw_value)
 
+    def test_broad_scan_skips_symlinks_to_outside_repo_without_exposure(self):
+        raw_value = self._fake_openai_key()
+        outside_file = self.repo_path.parent / f"{self.repo_path.name}-outside-symlink-secret.txt"
+        outside_file.write_text(raw_value + "\n", encoding="utf-8")
+        outside_dir = self.repo_path.parent / f"{self.repo_path.name}-outside-secret-dir"
+        outside_dir.mkdir()
+        outside_nested = outside_dir / "nested-secret.txt"
+        outside_nested.write_text(raw_value + "\n", encoding="utf-8")
+        links_dir = self.repo_path / "links"
+        links_dir.mkdir()
+        (links_dir / "outside-file.txt").symlink_to(outside_file)
+        (links_dir / "outside-dir").symlink_to(outside_dir, target_is_directory=True)
+
+        report = self.server.secret_exposure_report(paths=["."], baseline_ref="HEAD")
+        skipped_by_path = {item["path"]: item["reason"] for item in report["skipped"]}
+        encoded = json.dumps(report, sort_keys=True)
+
+        self.assertEqual(report["summary"]["finding_count"], 0)
+        self.assertEqual(report["inputs"]["paths"], ["."])
+        self.assertEqual(skipped_by_path["links/outside-file.txt"], "outside_repo_boundary")
+        self.assertEqual(skipped_by_path["links/outside-dir"], "outside_repo_boundary")
+        self.assertTrue(report["security"]["repo_boundary_enforced"])
+        self.assertFalse(report["security"]["host_absolute_paths_exposed"])
+        self.assertNotIn(str(outside_file), encoded)
+        self.assertNotIn(str(outside_dir), encoded)
+        self._assert_report_is_redacted(report, raw_value)
+
     def test_outside_repository_paths_are_redacted_in_exports(self):
         raw_value = self._fake_openai_key()
         outside = self.repo_path.parent / "outside-export-secret.txt"
