@@ -44,7 +44,7 @@ Existing `MCP_AGENT_PROXY_*` environment variables remain supported and override
 
 ## Model fallback configuration input
 
-The Model Fallback assistant returns readable Markdown sections rather than a single paragraph. It renders the numbered choices in a fenced `text` block, with options such as `[1] skip`, `[2] use default`, `[3] token`, and `[4] custom` so users can reply with a single option number. Numeric replies are recognized by the fallback assistant and produce a selected-option response instead of repeating the menu. It also recognizes pasted Continue-style YAML or simple `key: value` input in chat and in `POST /v1/model-fallback/configure`.
+The Model Fallback assistant returns readable Markdown sections rather than a single paragraph. It renders the numbered choices in a fenced `text` block, with options such as `[1] skip`, `[2] use default`, `[3] token`, and `[4] custom` so users can reply with a single option number. Numeric replies are recognized by the fallback assistant and produce a selected-option response instead of repeating the menu. It also recognizes pasted Continue-style YAML or simple `key: value` input in chat and in `POST /v1/model-fallback/configure`. When the conversation already contains complete custom backend details, replying `1` to confirm the parsed config writes the same Continue/runtime files through the assistant chat endpoint; users do not need to call `/v1/model-fallback/configure` directly.
 
 Accepted fields include `provider`, `model`, `apiBase`, `apiType`, `apiVersion`, `apiKey`, `apiKeyRef`, `apiKeySecretName`, `proxy`, and `caBundlePath`. A pasted list item works:
 

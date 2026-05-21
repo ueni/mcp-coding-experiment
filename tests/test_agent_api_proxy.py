@@ -1010,7 +1010,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn("not the real coding model", content)
 
     def test_model_fallback_chat_parses_pasted_key_value_config_without_echoing_secret(self):
-        secret = self.provider_secret_value()
+        secret = "a0b1c2d3e4f506172839405060708090"
         config_text = (
             "- name: Azure OpenAI API Example\n"
             "  provider: azure\n"
@@ -1049,6 +1049,60 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             payload["model_fallback"]["parsed_request_config"]["apiKeySecretName"],
         )
         self.assertNotIn(secret, response_text)
+
+    def test_model_fallback_chat_option_one_writes_parsed_custom_config_without_echoing_secret(self):
+        self.server.ALLOW_MUTATIONS = True
+        secret = "a0b1c2d3e4f506172839405060708090"
+        config_text = (
+            "- name: Azure OpenAI API Example\n"
+            "  provider: azure\n"
+            "  model: models-gpt-5\n"
+            "  apiBase: https://azure.example/api\n"
+            "  apiType: azure\n"
+            "  apiVersion: 2024-12-01-preview\n"
+            f"  apiKey: {secret}\n"
+        )
+        response = asyncio.run(
+            self.server.continue_model_fallback_chat_completions(
+                FakeRequest(
+                    {
+                        "model": "model-fallback",
+                        "messages": [
+                            {"role": "user", "content": config_text},
+                            {"role": "assistant", "content": "I parsed the model details. Choose option 1."},
+                            {"role": "user", "content": "1"},
+                        ],
+                    }
+                )
+            )
+        )
+        payload = self.response_json(response)
+        content = payload["choices"][0]["message"]["content"]
+        response_text = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("**Configuration Write**", content)
+        self.assertIn("status: written", content)
+        self.assertIn("assistant setup conversation", content)
+        self.assertIn("No direct configure endpoint call was needed", content)
+        self.assertNotIn("Send the same YAML or JSON to `/v1/model-fallback/configure`", content)
+        self.assertEqual("written", payload["model_fallback"]["configuration_result"]["status"])
+        self.assertEqual(
+            "provided",
+            payload["model_fallback"]["parsed_request_config"]["apiKey"],
+        )
+        self.assertTrue((self.repo_path / ".continue/model-routing.yaml").exists())
+        self.assertTrue((self.repo_path / ".continue/models/coding-openai-compatible.yaml").exists())
+        self.assertTrue((self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").exists())
+        secret_text = (self.repo_path / ".continue/.env").read_text(encoding="utf-8")
+        agent_proxy_text = (self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"AZURE_API_KEY={secret}", secret_text)
+        self.assertIn("provider: azure", agent_proxy_text)
+        self.assertIn("model: models-gpt-5", agent_proxy_text)
+        self.assertNotIn(secret, response_text)
+        self.assertNotIn(secret, agent_proxy_text)
 
     def test_model_fallback_configure_requires_mutate_scope_in_http_context(self):
         self.server.ALLOW_MUTATIONS = True

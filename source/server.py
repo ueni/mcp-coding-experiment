@@ -32701,6 +32701,10 @@ def _continue_model_config_alias(key: Any) -> str:
     return _CONTINUE_MODEL_CONFIG_ALIASES.get(normalized, "")
 
 
+def _continue_api_key_value_is_secret_ref(value: str) -> bool:
+    return bool(re.fullmatch(r"\$\{\{\s*secrets\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}", value.strip()))
+
+
 def _continue_model_config_from_mapping(value: Any) -> dict[str, str]:
     if isinstance(value, list):
         for item in value:
@@ -32719,7 +32723,7 @@ def _continue_model_config_from_mapping(value: Any) -> dict[str, str]:
         parsed_value = str(raw_value).strip()
         if not parsed_value:
             continue
-        if alias == "apiKey" and _agent_proxy_secret_name_from_ref(parsed_value):
+        if alias == "apiKey" and _continue_api_key_value_is_secret_ref(parsed_value):
             parsed["apiKeyRef"] = parsed_value
         else:
             parsed[alias] = parsed_value
@@ -32797,7 +32801,7 @@ def _continue_model_config_from_text(text: str) -> dict[str, str]:
         value = match.group(2).strip().strip("\"'")
         if not value:
             continue
-        if alias == "apiKey" and _agent_proxy_secret_name_from_ref(value):
+        if alias == "apiKey" and _continue_api_key_value_is_secret_ref(value):
             fallback["apiKeyRef"] = value
         else:
             fallback[alias] = value
@@ -32956,6 +32960,11 @@ def _continue_model_fallback_content(
     parsed_config = _continue_model_config_from_payload_text(payload)
     parsed_summary = _continue_model_config_safe_summary(parsed_config) if parsed_config else {}
     selected_option = _continue_model_fallback_selected_option(payload)
+    configuration_result = (
+        status.get("configuration_result")
+        if isinstance(status.get("configuration_result"), dict)
+        else {}
+    )
     if detected_default:
         default_label = " ".join(
             part
@@ -32987,11 +32996,27 @@ def _continue_model_fallback_content(
         if ALLOW_MUTATIONS
         else "Mutations are off, so I can only show copy/paste config until ALLOW_MUTATIONS=true."
     )
+    if configuration_result:
+        mutation_note = "I can write/update config directly from this assistant setup conversation."
     token_handled = any(
         marker in user_text
         for marker in ["skip", "mcp_http_bearer_token", "bearer", "token"]
     )
-    if selected_option:
+    if configuration_result:
+        result_status = str(configuration_result.get("status", ""))
+        if result_status == "written":
+            next_step = "Configuration files were written. Restart/reload the client, then use the configured model."
+            configure_hint = "No direct configure endpoint call was needed for this write."
+        elif result_status == "needs-secret":
+            next_step = "I parsed the model details, but a usable provider secret is still required before online routing can be enabled."
+            configure_hint = "Send the provider apiKey through this assistant flow or create the referenced Continue secret."
+        elif result_status == "dry_run":
+            next_step = "I parsed the model details, but mutations are disabled so I did not write files."
+            configure_hint = "Set ALLOW_MUTATIONS=true before asking me to write the config."
+        else:
+            next_step = "I could not write the parsed model config."
+            configure_hint = str(configuration_result.get("error", "Check the parsed model details and try again."))
+    elif selected_option:
         next_step = "I recognized your menu choice."
         configure_hint = "No further menu input is required for this response."
     elif parsed_summary:
@@ -33043,7 +33068,24 @@ def _continue_model_fallback_content(
         )
         if parsed_summary.get("apiKey") == "provided":
             lines.append("- I will not print the raw apiKey back in this response.")
-    selection_lines = _continue_model_fallback_selection_lines(
+    if configuration_result:
+        lines.extend(
+            [
+                "",
+                "**Configuration Write**",
+                f"- status: {configuration_result.get('status', 'unknown')}",
+            ]
+        )
+        summary = configuration_result.get("summary")
+        if isinstance(summary, dict):
+            lines.extend(
+                [
+                    f"- provider: {summary.get('provider') or 'missing'}",
+                    f"- model: {summary.get('model') or 'missing'}",
+                    f"- secret: {summary.get('secret_state') or 'not_required'}",
+                ]
+            )
+    selection_lines = [] if configuration_result else _continue_model_fallback_selection_lines(
         selected_option, detected_default, parsed_summary
     )
     if selection_lines:
@@ -33181,7 +33223,6 @@ def _continue_upsert_secret(name: str, value: str) -> bool:
     return True
 
 
-
 async def continue_model_fallback_chat_completions(request):
     trace_id = uuid.uuid4().hex[:16]
     try:
@@ -33200,6 +33241,17 @@ async def continue_model_fallback_chat_completions(request):
         return JSONResponse(error, status_code=status)
     status_payload = _continue_model_fallback_status()
     parsed_config = _continue_model_config_from_payload_text(payload)
+    selected_option = _continue_model_fallback_selected_option(payload)
+    configuration_result: dict[str, Any] | None = None
+    if parsed_config and selected_option == "1":
+        configuration_result, configuration_status = _continue_model_configure_payload(parsed_config)
+        status_payload = _continue_model_fallback_status()
+        status_payload["configuration_http_status"] = configuration_status
+        status_payload["configuration_result"] = {
+            key: value
+            for key, value in configuration_result.items()
+            if key not in {"files"}
+        }
     if parsed_config:
         status_payload = {
             **status_payload,
@@ -33255,19 +33307,10 @@ def _continue_model_configure_sections(
         "next_step": str(summary.get("next_step", "")),
     }
 
-
-async def continue_model_fallback_configure(request):
-    try:
-        payload = await request.json()
-    except Exception:
-        return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
-    if isinstance(payload, str):
-        payload = {"input": payload}
-    if not isinstance(payload, dict):
-        return JSONResponse({"error": "request body must be a JSON object or string"}, status_code=400)
+def _continue_model_configure_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     config, reason = _continue_model_config_payload(payload)
     if config is None:
-        return JSONResponse({"error": reason}, status_code=400)
+        return {"error": reason}, 400
 
     profile_rel = Path(".continue/models/coding-openai-compatible.yaml")
     routing_rel = Path(".continue/model-routing.yaml")
@@ -33342,37 +33385,31 @@ async def continue_model_fallback_configure(request):
         sections = _continue_model_configure_sections(
             status="needs-secret", reason=reason, summary=summary
         )
-        return JSONResponse(
-            {
-                "schema": "continue_model_fallback.configure.v1",
-                "status": "needs-secret",
-                "reason": "provider requires an API key but no usable Continue secret is configured",
-                "summary": summary,
-                "sections": sections,
-            },
-            status_code=200,
-        )
+        return {
+            "schema": "continue_model_fallback.configure.v1",
+            "status": "needs-secret",
+            "reason": "provider requires an API key but no usable Continue secret is configured",
+            "summary": summary,
+            "sections": sections,
+        }, 200
     if not ALLOW_MUTATIONS:
         sections = _continue_model_configure_sections(
             status="dry_run",
             reason="mutations disabled; set ALLOW_MUTATIONS=true to write files",
             summary=summary,
         )
-        return JSONResponse(
-            {
-                "schema": "continue_model_fallback.configure.v1",
-                "status": "dry_run",
-                "reason": "mutations disabled; set ALLOW_MUTATIONS=true to write files",
-                "summary": summary,
-                "sections": sections,
-                "files": {
-                    str(profile_rel): profile_text,
-                    str(routing_rel): routing_text,
-                    str(agent_proxy_rel): agent_proxy_text,
-                },
+        return {
+            "schema": "continue_model_fallback.configure.v1",
+            "status": "dry_run",
+            "reason": "mutations disabled; set ALLOW_MUTATIONS=true to write files",
+            "summary": summary,
+            "sections": sections,
+            "files": {
+                str(profile_rel): profile_text,
+                str(routing_rel): routing_text,
+                str(agent_proxy_rel): agent_proxy_text,
             },
-            status_code=403,
-        )
+        }, 403
 
     profile_path = (REPO_PATH / profile_rel).resolve()
     routing_path = (REPO_PATH / routing_rel).resolve()
@@ -33393,22 +33430,33 @@ async def continue_model_fallback_configure(request):
         _agent_proxy_runtime_config_payload(config)["agent_proxy"]
     )
     written_summary = {**summary, "secret_state": written_secret_state}
-    return JSONResponse(
-        {
-            "schema": "continue_model_fallback.configure.v1",
-            "status": "written",
-            "summary": written_summary,
-            "sections": _continue_model_configure_sections(
-                status="written", reason="configuration files written", summary=written_summary
-            ),
-            "files": [str(profile_rel), str(routing_rel), str(agent_proxy_rel)]
-            + ([str(secret_rel)] if config.get("api_key") else []),
-            "model": config["model"],
-            "provider": config["provider"],
-            "apiBase": config["api_base"],
-            "secret_state": written_secret_state,
-        }
-    )
+    return {
+        "schema": "continue_model_fallback.configure.v1",
+        "status": "written",
+        "summary": written_summary,
+        "sections": _continue_model_configure_sections(
+            status="written", reason="configuration files written", summary=written_summary
+        ),
+        "files": [str(profile_rel), str(routing_rel), str(agent_proxy_rel)]
+        + ([str(secret_rel)] if config.get("api_key") else []),
+        "model": config["model"],
+        "provider": config["provider"],
+        "apiBase": config["api_base"],
+        "secret_state": written_secret_state,
+    }, 200
+
+
+async def continue_model_fallback_configure(request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
+    if isinstance(payload, str):
+        payload = {"input": payload}
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "request body must be a JSON object or string"}, status_code=400)
+    response_payload, status_code = _continue_model_configure_payload(payload)
+    return JSONResponse(response_payload, status_code=status_code)
 
 
 async def mcp_server_manifest(_request):
