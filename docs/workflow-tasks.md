@@ -28,6 +28,16 @@ for non-terminal updates, and terminal states force a final `100/100` update.
 Clients that do not support progress notifications continue to use persisted
 polling without behavior changes.
 
+For Streamable HTTP clients, the server enables the MCP SDK's resumable SSE path
+for this workflow-task progress slice. Keep the `Mcp-Session-Id` returned by the
+server and, after a disconnect, reconnect to the same MCP stream with
+`Last-Event-ID` set to the last received SSE `id`. The replay journal is local,
+bounded, and scoped to the original workflow task request stream; it retains
+priming markers plus redacted workflow-task lifecycle/progress messages, not raw
+prompts, bearer tokens, stdout/stderr, or host paths. If the event id has expired
+or the current SDK/client path cannot resume the stream, keep the task running
+and call `task_status(task_id="task-...")` to recover the latest persisted state.
+
 Cancel a running task with:
 
 ```text
@@ -78,6 +88,9 @@ Defaults are environment-configurable:
 
 - `MCP_WORKFLOW_TASK_EXPIRY_HOURS=24`
 - `MCP_WORKFLOW_TASK_RETENTION_DAYS=7`
+- `MCP_STREAM_REPLAY_MAX_EVENTS=200`
+- `MCP_STREAM_REPLAY_RETENTION_SECONDS=86400`
+- `MCP_STREAM_REPLAY_RETRY_INTERVAL_MS=1000`
 
 Non-final tasks observed after `expires_at` are marked `expired` on the next
 `task_status` read. On task start, status records whose `retention_expires_at`

@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tests.server_test_support import ServerToolsTestBase
@@ -374,6 +375,101 @@ class WorkflowTaskTests(ServerToolsTestBase):
                 for item in fake_session.notifications
             )
         )
+
+    def test_streamable_http_event_store_replays_only_same_workflow_task_stream(self):
+        store = self.server._BoundedWorkflowTaskEventStore(max_events=10, retention_seconds=3600)
+        msg_a1 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 10}))
+        msg_a2 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 30}))
+        msg_b = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 20}))
+        msg_same_stream_other_task = SimpleNamespace(
+            root=SimpleNamespace(method="notifications/progress", params={"progress": 40})
+        )
+
+        async def _exercise():
+            priming_event = await store.store_event("stream-a", None)
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-a"] = "task-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-b"] = "task-b"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-a"] = time.monotonic()
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-b"] = time.monotonic()
+            event_a1 = await store.store_event("stream-a", msg_a1)
+            await store.store_event("stream-b", msg_b)
+            event_a2 = await store.store_event("stream-a", msg_a2)
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-a"] = "task-c"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-a"] = time.monotonic()
+            await store.store_event("stream-a", msg_same_stream_other_task)
+
+            replayed = []
+            replayed_after_priming = []
+
+            async def send(event_message):
+                replayed.append(event_message)
+
+            async def send_after_priming(event_message):
+                replayed_after_priming.append(event_message)
+
+            stream_id = await store.replay_events_after(event_a1, send)
+            priming_stream_id = await store.replay_events_after(priming_event, send_after_priming)
+            return stream_id, event_a1, event_a2, replayed, priming_stream_id, replayed_after_priming
+
+        try:
+            stream_id, event_a1, event_a2, replayed, priming_stream_id, replayed_after_priming = asyncio.run(_exercise())
+        finally:
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-b", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-b", None)
+
+        self.assertEqual(stream_id, "stream-a")
+        self.assertEqual([item.event_id for item in replayed], [event_a2])
+        self.assertIs(replayed[0].message, msg_a2)
+        self.assertEqual(priming_stream_id, "stream-a")
+        self.assertEqual([item.event_id for item in replayed_after_priming], [event_a1, event_a2])
+
+    def test_streamable_http_event_store_bounds_retention_and_skips_unscoped_messages(self):
+        store = self.server._BoundedWorkflowTaskEventStore(max_events=2, retention_seconds=3600)
+        raw_unscoped = SimpleNamespace(root=SimpleNamespace(result={"stdout": "raw output"}))
+        msg1 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 10}))
+        msg2 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 20}))
+        msg3 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 30}))
+
+        async def _exercise():
+            await store.store_event("stream-raw", raw_unscoped)
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-a"] = "task-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-a"] = time.monotonic()
+            old_event = await store.store_event("stream-a", msg1)
+            kept_event = await store.store_event("stream-a", msg2)
+            newest_event = await store.store_event("stream-a", msg3)
+
+            replay_from_old = []
+            replay_from_kept = []
+
+            async def send_old(event_message):
+                replay_from_old.append(event_message)
+
+            async def send_kept(event_message):
+                replay_from_kept.append(event_message)
+
+            old_stream = await store.replay_events_after(old_event, send_old)
+            kept_stream = await store.replay_events_after(kept_event, send_kept)
+            return old_stream, kept_stream, newest_event, replay_from_old, replay_from_kept, store.stats()
+
+        try:
+            old_stream, kept_stream, newest_event, replay_from_old, replay_from_kept, stats = asyncio.run(_exercise())
+        finally:
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-a", None)
+
+        self.assertIsNone(old_stream)
+        self.assertEqual(replay_from_old, [])
+        self.assertEqual(kept_stream, "stream-a")
+        self.assertEqual([item.event_id for item in replay_from_kept], [newest_event])
+        self.assertEqual(stats["events"], 2)
+        self.assertEqual(stats["tasks"], 1)
 
     def test_workflow_task_cancel_unknown_task_raises_without_persisting_status(self):
         with self.assertRaises(FileNotFoundError):
