@@ -242,6 +242,8 @@ DEPENDENCY_SECURITY_REPORT_PREFIX = "dependency-security-report"
 DEPENDENCY_SECURITY_REPORT_SCHEMA = "dependency_security_report.v1"
 CI_WORKFLOW_SECURITY_REPORT_PREFIX = "ci-workflow-security-report"
 CI_WORKFLOW_SECURITY_REPORT_SCHEMA = "ci_workflow_security_report.v1"
+SARIF_SCHEMA = "sarif.2.1.0"
+SARIF_VERSION = "2.1.0"
 MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
 MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
 MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
@@ -7217,6 +7219,7 @@ def _dependency_security_report_paths(report_id: str) -> dict[str, str]:
     return {
         "json": str(base.with_suffix(".json")),
         "sbom": str(base.with_suffix(".sbom.cdx.json")),
+        "sarif": str(base.with_suffix(".sarif")),
     }
 
 
@@ -7978,6 +7981,306 @@ def _dependency_security_gate(
     }
 
 
+def _sarif_redact_text(value: Any, *, max_chars: int = 500) -> str:
+    text = str(value or "")
+    text = DEPENDENCY_SECURITY_URL_VALUE_RE.sub("<redacted:url>", text)
+    text = DEPENDENCY_SECURITY_INLINE_CREDENTIAL_RE.sub("<redacted:credential>", text)
+    text = DEPENDENCY_SECURITY_SCHEMELESS_REF_VALUE_RE.sub("<redacted:vcs_ref>", text)
+    text = CI_WORKFLOW_SECRET_CONTEXT_RE.sub("secrets.<redacted>", text)
+    text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
+    text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute_path>", text)
+    return _trim_text(text.strip(), max_chars=max_chars)
+
+
+def _sarif_safe_rel_path(path_value: Any) -> str:
+    raw = str(path_value or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("<redacted") or "://" in raw or raw == "installed_environment":
+        return ""
+    candidates = [raw]
+    if ":" in raw:
+        before_colon = raw.split(":", 1)[0]
+        if before_colon:
+            candidates.append(before_colon)
+    for candidate in candidates:
+        candidate = candidate.strip() or "."
+        if candidate.startswith("./"):
+            candidate = candidate[2:] or "."
+        if candidate.startswith("/") or candidate.startswith("../") or "/../" in f"/{candidate}/":
+            continue
+        try:
+            return str(_resolve_repo_path(candidate).relative_to(REPO_PATH)).replace("\\", "/")
+        except ValueError:
+            continue
+    return ""
+
+
+def _sarif_artifact_uri(rel_path: str) -> str:
+    return urllib.parse.quote(rel_path.replace("\\", "/"), safe="/._-:@")
+
+
+def _sarif_location(rel_path: str, line: Any) -> dict[str, Any]:
+    location: dict[str, Any] = {
+        "physicalLocation": {
+            "artifactLocation": {"uri": _sarif_artifact_uri(rel_path)},
+        }
+    }
+    try:
+        start_line = int(line or 0)
+    except (TypeError, ValueError):
+        start_line = 0
+    if start_line > 0:
+        location["physicalLocation"]["region"] = {"startLine": start_line}
+    return location
+
+
+def _sarif_fingerprint(*parts: Any) -> str:
+    redacted_parts = [_sarif_redact_text(part, max_chars=260) for part in parts]
+    payload = json.dumps(redacted_parts, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _sarif_level(severity: Any) -> str:
+    return {
+        "critical": "error",
+        "high": "error",
+        "medium": "warning",
+        "low": "warning",
+        "info": "note",
+        "unknown": "note",
+        "none": "none",
+    }.get(str(severity or "info").lower(), "warning")
+
+
+def _sarif_security_severity(severity: Any) -> str:
+    return {
+        "critical": "9.0",
+        "high": "7.0",
+        "medium": "5.0",
+        "low": "2.0",
+        "info": "0.0",
+        "unknown": "0.0",
+    }.get(str(severity or "info").lower(), "0.0")
+
+
+def _sarif_rule(
+    *,
+    rule_id: str,
+    name: str,
+    severity: str,
+    short_description: str,
+    full_description: str,
+    help_markdown: str,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    level = _sarif_level(severity)
+    return {
+        "id": rule_id,
+        "name": _sarif_redact_text(name, max_chars=120) or rule_id,
+        "shortDescription": {"text": _sarif_redact_text(short_description, max_chars=200) or rule_id},
+        "fullDescription": {"text": _sarif_redact_text(full_description, max_chars=500)},
+        "help": {"markdown": _sarif_redact_text(help_markdown, max_chars=1200)},
+        "defaultConfiguration": {"level": level},
+        "properties": {
+            "precision": "medium",
+            "security-severity": _sarif_security_severity(severity),
+            "tags": sorted(set(tags or [])),
+        },
+    }
+
+
+def _sarif_payload(
+    *,
+    source_name: str,
+    source_schema: str,
+    report_id: str,
+    generated_at: str,
+    rules: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+    artifact_paths: set[str],
+) -> dict[str, Any]:
+    git_state = _git_state_for_provenance()
+    driver_version = mcp_coding_experiment_version().rendered
+    return {
+        "version": SARIF_VERSION,
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "codebase-tooling-mcp",
+                        "fullName": f"codebase-tooling-mcp {source_name}",
+                        "semanticVersion": driver_version,
+                        "rules": [rules[key] for key in sorted(rules)],
+                    }
+                },
+                "invocations": [
+                    {
+                        "executionSuccessful": True,
+                        "startTimeUtc": generated_at,
+                        "endTimeUtc": generated_at,
+                        "properties": {
+                            "offline": True,
+                            "networkAccess": False,
+                            "sourceSchema": source_schema,
+                            "reportId": report_id,
+                        },
+                    }
+                ],
+                "artifacts": [
+                    {
+                        "location": {"uri": _sarif_artifact_uri(rel_path)},
+                        "roles": ["analysisTarget"],
+                        "properties": {
+                            "repositoryRelative": True,
+                            "redacted": True,
+                            "source": source_name,
+                        },
+                    }
+                    for rel_path in sorted(artifact_paths)
+                ],
+                "results": results,
+                "automationDetails": {"id": f"codebase-tooling-mcp/{source_name}"},
+                "versionControlProvenance": [
+                    {
+                        "repositoryUri": "repo://root",
+                        "revisionId": str(git_state.get("head", "")),
+                    }
+                ],
+                "properties": {
+                    "source": source_name,
+                    "sourceSchema": source_schema,
+                    "reportId": report_id,
+                    "generatedAt": generated_at,
+                    "offline": True,
+                    "networkAccess": False,
+                    "redacted": True,
+                    "repoBoundaryEnforced": True,
+                    "hostAbsolutePathsExposed": False,
+                    "secretValuesExposed": False,
+                },
+            }
+        ],
+    }
+
+
+def _ci_workflow_sarif(report: dict[str, Any]) -> dict[str, Any]:
+    rules: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+    artifacts: set[str] = set()
+    for finding in report.get("findings", []) if isinstance(report.get("findings"), list) else []:
+        if not isinstance(finding, dict):
+            continue
+        rel_path = _sarif_safe_rel_path(finding.get("path") or finding.get("evidence", {}).get("path", ""))
+        if not rel_path:
+            continue
+        artifacts.add(rel_path)
+        base_rule_id = str(finding.get("rule_id") or "ci-workflow-finding")
+        rule_id = f"ci-workflow-security/{base_rule_id}"
+        severity = str(finding.get("severity") or "info")
+        tags = [str(item) for item in finding.get("tags", [])] if isinstance(finding.get("tags"), list) else []
+        if rule_id not in rules:
+            title = _sarif_redact_text(finding.get("title") or base_rule_id, max_chars=200)
+            message = _sarif_redact_text(finding.get("message") or title, max_chars=500)
+            rules[rule_id] = _sarif_rule(
+                rule_id=rule_id,
+                name=base_rule_id,
+                severity=severity,
+                short_description=title,
+                full_description=message,
+                help_markdown=f"### {title}\n\n{message}\n\nGenerated offline by `ci_workflow_security_report`; evidence is repository-relative and redacted.",
+                tags=["security", "github-actions", *tags],
+            )
+        evidence = finding.get("evidence", {}) if isinstance(finding.get("evidence"), dict) else {}
+        line = int(finding.get("line") or evidence.get("line") or 0)
+        message = _sarif_redact_text(finding.get("message") or finding.get("title") or base_rule_id, max_chars=500)
+        results.append(
+            {
+                "ruleId": rule_id,
+                "level": _sarif_level(severity),
+                "message": {"text": message},
+                "locations": [_sarif_location(rel_path, line)],
+                "partialFingerprints": {
+                    "codebase-tooling-mcp/redacted-rule-path-line-v1": _sarif_fingerprint("ci_workflow_security_report", rule_id, rel_path, line, evidence.get("excerpt", "")),
+                },
+                "properties": {
+                    "sourceSchema": CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
+                    "findingId": _sarif_redact_text(finding.get("id", ""), max_chars=160),
+                    "confidence": _sarif_redact_text(finding.get("confidence", ""), max_chars=40),
+                    "severity": severity,
+                    "redacted": True,
+                },
+            }
+        )
+    return _sarif_payload(
+        source_name="ci_workflow_security_report",
+        source_schema=CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
+        report_id=str(report.get("report_id", "")),
+        generated_at=str(report.get("generated_at", _now_iso())),
+        rules=rules,
+        results=results,
+        artifact_paths=artifacts,
+    )
+
+
+def _dependency_security_sarif(report: dict[str, Any]) -> dict[str, Any]:
+    rule_id = "dependency-security/known-vulnerability"
+    rules = {
+        rule_id: _sarif_rule(
+            rule_id=rule_id,
+            name="known-vulnerability",
+            severity="high",
+            short_description="Dependency with a known vulnerability",
+            full_description="A declared dependency version matched a caller-provided offline advisory source.",
+            help_markdown="### Dependency with a known vulnerability\n\nUpgrade to a fixed version when one is available. The MCP server does not install, update, upload, or fetch advisory data for this SARIF export.",
+            tags=["security", "dependency", "vulnerability"],
+        )
+    }
+    results: list[dict[str, Any]] = []
+    artifacts: set[str] = set()
+    for vulnerability in report.get("vulnerabilities", []) if isinstance(report.get("vulnerabilities"), list) else []:
+        if not isinstance(vulnerability, dict):
+            continue
+        component = vulnerability.get("component", {}) if isinstance(vulnerability.get("component"), dict) else {}
+        rel_path = _sarif_safe_rel_path(component.get("source", ""))
+        if not rel_path:
+            continue
+        artifacts.add(rel_path)
+        line = int(component.get("line") or 0)
+        advisory_id = _sarif_redact_text(vulnerability.get("id", "dependency advisory"), max_chars=160)
+        component_name = _sarif_redact_text(component.get("name", "dependency"), max_chars=120)
+        component_version = _sarif_redact_text(component.get("version", ""), max_chars=80)
+        severity = str(vulnerability.get("severity") or "unknown").lower()
+        message = f"Dependency `{component_name}` version `{component_version}` matches advisory `{advisory_id}`."
+        if vulnerability.get("summary"):
+            message = f"{message} {_sarif_redact_text(vulnerability.get('summary'), max_chars=300)}"
+        results.append(
+            {
+                "ruleId": rule_id,
+                "level": _sarif_level(severity),
+                "message": {"text": message},
+                "locations": [_sarif_location(rel_path, line)],
+                "partialFingerprints": {
+                    "codebase-tooling-mcp/redacted-rule-path-line-v1": _sarif_fingerprint("dependency_security_report", rule_id, rel_path, line, component_name, advisory_id),
+                },
+                "properties": {
+                    "sourceSchema": DEPENDENCY_SECURITY_REPORT_SCHEMA,
+                    "advisoryId": advisory_id,
+                    "component": component_name,
+                    "severity": severity,
+                    "redacted": True,
+                },
+            }
+        )
+    return _sarif_payload(
+        source_name="dependency_security_report",
+        source_schema=DEPENDENCY_SECURITY_REPORT_SCHEMA,
+        report_id=str(report.get("report_id", "")),
+        generated_at=str(report.get("generated_at", _now_iso())),
+        rules=rules if results else {},
+        results=results,
+        artifact_paths=artifacts,
+    )
+
+
 def _dependency_security_sbom(report: dict[str, Any]) -> dict[str, Any]:
     components = []
     bom_ref_by_component: dict[tuple[str, str, str], str] = {}
@@ -8062,9 +8365,10 @@ def _write_dependency_security_report_exports(
 ) -> dict[str, Any]:
     paths = _dependency_security_report_paths(str(report["report_id"]))
     json_rel = str(_resolve_repo_path(paths["json"]).relative_to(REPO_PATH))
-    exports: dict[str, Any] = {"json": json_rel}
-    artifact_paths = [json_rel]
-    artifact_schemas = {json_rel: DEPENDENCY_SECURITY_REPORT_SCHEMA}
+    sarif_rel = str(_resolve_repo_path(paths["sarif"]).relative_to(REPO_PATH))
+    exports: dict[str, Any] = {"json": json_rel, "sarif": sarif_rel}
+    artifact_paths = [json_rel, sarif_rel]
+    artifact_schemas = {json_rel: DEPENDENCY_SECURITY_REPORT_SCHEMA, sarif_rel: SARIF_SCHEMA}
     if include_sbom:
         sbom_rel = str(_resolve_repo_path(paths["sbom"]).relative_to(REPO_PATH))
         exports["sbom"] = sbom_rel
@@ -8085,6 +8389,16 @@ def _write_dependency_security_report_exports(
         safety_note="Dependency report contains package names, versions, advisory IDs, and repository-relative source paths only; no dependency files are modified.",
     )
     resource_links = [json_link]
+    resource_links.append(
+        _artifact_resource_link(
+            title="Dependency security SARIF",
+            rel_path=sarif_rel,
+            mime_type="application/sarif+json",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="SARIF export is generated offline with repository-relative locations, redacted fingerprints, and no upload/network access.",
+        )
+    )
     if include_sbom:
         resource_links.append(
             _artifact_resource_link(
@@ -8101,6 +8415,8 @@ def _write_dependency_security_report_exports(
 
     json_path = _resolve_repo_path(json_rel)
     json_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path = _resolve_repo_path(sarif_rel)
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
     if include_sbom:
         sbom_path = _resolve_repo_path(str(exports["sbom"]))
         sbom_path.parent.mkdir(parents=True, exist_ok=True)
@@ -8108,6 +8424,10 @@ def _write_dependency_security_report_exports(
             json.dumps(_dependency_security_sbom(report), indent=2, sort_keys=True, ensure_ascii=True) + "\n",
             encoding="utf-8",
         )
+    sarif_path.write_text(
+        json.dumps(_dependency_security_sarif(report), indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
     _write_artifact_provenance_sidecars(
         tool_name="dependency_security_report",
@@ -8169,7 +8489,11 @@ CI_WORKFLOW_WRITE_PERMISSION_SCOPES = {"actions", "checks", "contents", "deploym
 
 def _ci_workflow_security_report_paths(report_id: str) -> dict[str, str]:
     base = REPORTS_DIR / report_id
-    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+    return {
+        "json": str(base.with_suffix(".json")),
+        "markdown": str(base.with_suffix(".md")),
+        "sarif": str(base.with_suffix(".sarif")),
+    }
 
 
 def _ci_workflow_rel_path(path: Path) -> str:
@@ -8455,9 +8779,22 @@ def _write_ci_workflow_security_report_exports(report: dict[str, Any]) -> dict[s
     paths = _ci_workflow_security_report_paths(str(report["report_id"]))
     json_path = _resolve_repo_path(paths["json"])
     md_path = _resolve_repo_path(paths["markdown"])
+    sarif_path = _resolve_repo_path(paths["sarif"])
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    exports = {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+    exports = {
+        "json": str(json_path.relative_to(REPO_PATH)),
+        "markdown": str(md_path.relative_to(REPO_PATH)),
+        "sarif": str(sarif_path.relative_to(REPO_PATH)),
+    }
+    artifact_paths = [exports["json"], exports["markdown"], exports["sarif"]]
     report["exports"] = exports
+    report["provenance"] = {
+        "schema": PROVENANCE_SCHEMA,
+        "sidecars": {
+            artifact: str(_artifact_provenance_path(artifact).relative_to(REPO_PATH))
+            for artifact in artifact_paths
+        },
+    }
     report["resource_links"] = [
         _artifact_resource_link(
             title="CI workflow security report JSON",
@@ -8475,10 +8812,33 @@ def _write_ci_workflow_security_report_exports(report: dict[str, Any]) -> dict[s
             redacted=True,
             safety_note="Markdown export summarizes static workflow findings with redacted evidence.",
         ),
+        _artifact_resource_link(
+            title="CI workflow security SARIF",
+            rel_path=exports["sarif"],
+            mime_type="application/sarif+json",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="SARIF export is generated offline with repository-relative locations, redacted fingerprints, and no upload/network access.",
+        ),
     ]
     report["_meta"] = _artifact_meta(report["resource_links"])
+    sarif_path.write_text(
+        json.dumps(_ci_workflow_sarif(report), indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
     md_path.write_text(_ci_workflow_markdown(report), encoding="utf-8")
+    _write_artifact_provenance_sidecars(
+        tool_name="ci_workflow_security_report",
+        artifact_paths=artifact_paths,
+        inputs=report.get("inputs", {"path": ".", "export": True}) if isinstance(report.get("inputs"), dict) else {"path": ".", "export": True},
+        git_state=_git_state_for_provenance(),
+        artifact_schemas={
+            exports["json"]: CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
+            exports["markdown"]: "text/markdown",
+            exports["sarif"]: SARIF_SCHEMA,
+        },
+    )
     return exports
 
 
@@ -8781,6 +9141,7 @@ def _ci_workflow_security_report_impl(path: str = ".", export: bool = False) -> 
         "status": status,
         "ok": ok,
         "summary": summary,
+        "inputs": {"path": path, "export": export},
         "workflows": workflows,
         "findings": active_findings,
         "findings_by_severity": {severity: [f for f in active_findings if f.get("severity") == severity] for severity in by_severity},
