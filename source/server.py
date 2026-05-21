@@ -36,6 +36,7 @@ import concurrent.futures
 import importlib.util
 import inspect
 import signal
+import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Callable, Iterable
@@ -32637,6 +32638,302 @@ def _continue_model_fallback_user_text(payload: dict[str, Any]) -> str:
     return "\n".join(parts).lower()
 
 
+def _continue_model_fallback_latest_user_text(payload: dict[str, Any]) -> str:
+    messages = payload.get("messages", [])
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content.strip().lower()
+        if isinstance(content, list):
+            parts = [
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            return "\n".join(parts).strip().lower()
+    return ""
+
+
+def _continue_model_fallback_selected_option(payload: dict[str, Any]) -> str:
+    latest = _continue_model_fallback_latest_user_text(payload)
+    normalized = re.sub(r"\s+", " ", latest).strip()
+    if normalized in {"1", "[1]", "option 1", "skip"}:
+        return "1"
+    if normalized in {"2", "[2]", "option 2", "default", "use default"}:
+        return "2"
+    if normalized in {"3", "[3]", "option 3", "token"}:
+        return "3"
+    if normalized in {"4", "[4]", "option 4", "custom"}:
+        return "4"
+    return ""
+
+
+_CONTINUE_MODEL_CONFIG_ALIASES = {
+    "provider": "provider",
+    "model": "model",
+    "apibase": "apiBase",
+    "api_base": "apiBase",
+    "provider_base_url": "apiBase",
+    "baseurl": "apiBase",
+    "base_url": "apiBase",
+    "apitype": "apiType",
+    "api_type": "apiType",
+    "apiversion": "apiVersion",
+    "api_version": "apiVersion",
+    "apikey": "apiKey",
+    "api_key": "apiKey",
+    "apikeyref": "apiKeyRef",
+    "api_key_ref": "apiKeyRef",
+    "apikeysecretname": "apiKeySecretName",
+    "api_key_secret_name": "apiKeySecretName",
+    "proxy": "proxy",
+    "cabundlepath": "caBundlePath",
+    "ca_bundle_path": "caBundlePath",
+}
+
+
+def _continue_model_config_alias(key: Any) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "", str(key or "")).lower()
+    return _CONTINUE_MODEL_CONFIG_ALIASES.get(normalized, "")
+
+
+def _continue_model_config_from_mapping(value: Any) -> dict[str, str]:
+    if isinstance(value, list):
+        for item in value:
+            parsed = _continue_model_config_from_mapping(item)
+            if parsed:
+                return parsed
+        return {}
+    if not isinstance(value, dict):
+        return {}
+
+    parsed: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        alias = _continue_model_config_alias(raw_key)
+        if not alias or raw_value is None or isinstance(raw_value, (dict, list)):
+            continue
+        parsed_value = str(raw_value).strip()
+        if not parsed_value:
+            continue
+        if alias == "apiKey" and _agent_proxy_secret_name_from_ref(parsed_value):
+            parsed["apiKeyRef"] = parsed_value
+        else:
+            parsed[alias] = parsed_value
+
+    for nested_key in ("agent_proxy", "config", "modelConfig", "model_config"):
+        nested = _continue_model_config_from_mapping(value.get(nested_key))
+        if nested:
+            parsed = {**nested, **parsed}
+
+    models = value.get("models")
+    nested_model = _continue_model_config_from_mapping(models)
+    if nested_model:
+        parsed = {**parsed, **nested_model}
+
+    relevant = {"provider", "model", "apiBase", "apiKey", "apiKeyRef"}
+    return parsed if relevant.intersection(parsed) else {}
+
+
+def _continue_model_config_yaml_candidates(text: str) -> list[str]:
+    stripped = text.strip()
+    candidates: list[str] = []
+    for match in re.finditer(r"```(?:yaml|yml)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL):
+        block = textwrap.dedent(match.group(1)).strip()
+        if block:
+            candidates.append(block)
+    if stripped:
+        candidates.extend([stripped, textwrap.dedent(stripped).strip()])
+
+    block_lines: list[str] = []
+    collecting = False
+    key_line_pattern = re.compile(r"^\s*(?:-\s*)?[A-Za-z][A-Za-z0-9_]*\s*:")
+    for line in text.splitlines():
+        if key_line_pattern.match(line):
+            collecting = True
+            block_lines.append(line)
+        elif collecting and (not line.strip() or line.startswith((" ", "\t"))):
+            block_lines.append(line)
+        elif collecting:
+            break
+    block = textwrap.dedent("\n".join(block_lines)).strip()
+    if block:
+        candidates.append(block)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen and len(candidate) <= 20000:
+            seen.add(candidate)
+            unique.append(candidate)
+    return unique
+
+
+def _continue_model_config_from_text(text: str) -> dict[str, str]:
+    if not text.strip():
+        return {}
+    for candidate in _continue_model_config_yaml_candidates(text):
+        if yaml is None:
+            break
+        try:
+            loaded = yaml.safe_load(candidate)
+        except Exception:
+            continue
+        parsed = _continue_model_config_from_mapping(loaded)
+        if parsed:
+            return parsed
+
+    fallback: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.match(r"^\s*(?:-\s*)?([A-Za-z][A-Za-z0-9_]*):\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        alias = _continue_model_config_alias(match.group(1))
+        if not alias:
+            continue
+        value = match.group(2).strip().strip("\"'")
+        if not value:
+            continue
+        if alias == "apiKey" and _agent_proxy_secret_name_from_ref(value):
+            fallback["apiKeyRef"] = value
+        else:
+            fallback[alias] = value
+    relevant = {"provider", "model", "apiBase", "apiKey", "apiKeyRef"}
+    return fallback if relevant.intersection(fallback) else {}
+
+
+def _continue_model_config_from_payload_text(payload: dict[str, Any]) -> dict[str, str]:
+    text_parts: list[str] = []
+    for field in ("input", "text", "content", "configuration", "configText", "config_text"):
+        value = payload.get(field)
+        if isinstance(value, str):
+            text_parts.append(value)
+    messages = payload.get("messages", [])
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_parts.append(str(item.get("text", "")))
+    for text in text_parts:
+        parsed = _continue_model_config_from_text(text)
+        if parsed:
+            return parsed
+    return {}
+
+
+def _continue_model_config_safe_summary(config: dict[str, str]) -> dict[str, Any]:
+    api_key_ref = str(config.get("apiKeyRef", config.get("api_key_ref", "")) or "")
+    api_key_secret_name = str(
+        config.get("apiKeySecretName", config.get("api_key_secret_name", "")) or ""
+    )
+    secret_name = _agent_proxy_secret_name_from_ref(api_key_ref) or api_key_secret_name
+    if not secret_name and config.get("provider"):
+        secret_name = _continue_default_api_key_secret_name(str(config.get("provider", "")))
+    api_key_state = "provided" if config.get("apiKey") else "secret_ref" if api_key_ref else "not_provided"
+    return {
+        "provider": str(config.get("provider", "")),
+        "model": str(config.get("model", "")),
+        "apiBase": str(config.get("apiBase", config.get("api_base", ""))),
+        "apiType": str(config.get("apiType", config.get("api_type", ""))),
+        "apiVersion_configured": bool(config.get("apiVersion", config.get("api_version", ""))),
+        "apiKey": api_key_state,
+        "apiKeySecretName": secret_name,
+    }
+
+
+def _continue_model_fallback_menu_lines(
+    detected_default: dict[str, Any], parsed_summary: dict[str, Any]
+) -> list[str]:
+    if parsed_summary:
+        return [
+            "Type one option number:",
+            "[1] configure parsed model - send this same YAML or JSON to /v1/model-fallback/configure",
+            "[2] skip - do not write Continue config now",
+            "[3] token - set MCP_HTTP_BEARER_TOKEN separately for Continue MCP access",
+        ]
+
+    default_model = str(detected_default.get("model", "") or "").strip()
+    default_file = str(detected_default.get("file", "") or "").strip()
+    if default_model:
+        default_option = (
+            f"[2] use default - keep {default_model}"
+            + (f" from {default_file}" if default_file else "")
+        )
+        recommendation = f"If unsure, type `2` to keep {default_model}."
+    else:
+        default_option = "[2] use default - unavailable; no real model profile was found"
+        recommendation = "If unsure, type `4` and paste provider/model/apiBase YAML."
+
+    return [
+        "Type one option number:",
+        "[1] skip - do not set MCP_HTTP_BEARER_TOKEN right now",
+        default_option,
+        "[3] token - paste the MCP_HTTP_BEARER_TOKEN value",
+        "[4] custom - paste provider/model/apiBase YAML",
+        recommendation,
+    ]
+
+
+def _continue_model_fallback_selection_lines(
+    selection: str,
+    detected_default: dict[str, Any],
+    parsed_summary: dict[str, Any],
+) -> list[str]:
+    default_model = str(detected_default.get("model", "") or "").strip()
+    default_file = str(detected_default.get("file", "") or "").strip()
+    if parsed_summary and selection == "1":
+        return [
+            "**Selected Option**",
+            "- [1] configure parsed model",
+            "- Send the same YAML or JSON to `/v1/model-fallback/configure` with mutate-scoped MCP auth.",
+            "- Provider keys are handled as Continue secrets and are not printed back.",
+        ]
+    if selection == "1":
+        return [
+            "**Selected Option**",
+            "- [1] skip",
+            "- I will not ask for `MCP_HTTP_BEARER_TOKEN` right now.",
+            "- You can still choose `[2]` later to keep the detected default model.",
+        ]
+    if selection == "2":
+        if default_model:
+            return [
+                "**Selected Option**",
+                f"- [2] use default: `{default_model}`",
+                f"- Model profile: `{default_file or 'already configured'}`",
+                "- Next: reload Continue or restart the client so it picks up the default profile.",
+            ]
+        return [
+            "**Selected Option**",
+            "- [2] use default",
+            "- No usable default model profile is available. Choose `[4]` and paste provider/model/apiBase YAML.",
+        ]
+    if selection == "3":
+        return [
+            "**Selected Option**",
+            "- [3] token",
+            "- Paste only the MCP server token for `MCP_HTTP_BEARER_TOKEN`.",
+            "- Do not paste an Azure/OpenAI provider API key for this option.",
+        ]
+    if selection == "4":
+        return [
+            "**Selected Option**",
+            "- [4] custom",
+            "- Paste YAML with `provider`, `model`, and `apiBase`.",
+            "- Optional fields: `apiType`, `apiVersion`, `apiKeyRef`, `apiKeySecretName`, `proxy`, `caBundlePath`.",
+        ]
+    return []
+
+
 def _continue_model_fallback_content(
     status: dict[str, Any], payload: dict[str, Any]
 ) -> str:
@@ -32656,6 +32953,9 @@ def _continue_model_fallback_content(
         if isinstance(messages, list)
         else 0
     )
+    parsed_config = _continue_model_config_from_payload_text(payload)
+    parsed_summary = _continue_model_config_safe_summary(parsed_config) if parsed_config else {}
+    selected_option = _continue_model_fallback_selected_option(payload)
     if detected_default:
         default_label = " ".join(
             part
@@ -32691,32 +32991,67 @@ def _continue_model_fallback_content(
         marker in user_text
         for marker in ["skip", "mcp_http_bearer_token", "bearer", "token"]
     )
-    if user_request_count >= 5:
+    if selected_option:
+        next_step = "I recognized your menu choice."
+        configure_hint = "No further menu input is required for this response."
+    elif parsed_summary:
         next_step = (
-            "I won't ask more setup questions. Set the MCP_HTTP_BEARER_TOKEN secret, "
-            "then use the detected default or send model details to /v1/model-fallback/configure."
+            "I parsed the model details. Choose option 1 to write that config "
+            "through the protected configure endpoint."
+        )
+        configure_hint = (
+            "Keep MCP_HTTP_BEARER_TOKEN configured separately for Continue MCP "
+            "access; provider apiKey input is handled as a Continue secret."
+        )
+    elif user_request_count >= 5:
+        next_step = (
+            "I won't ask more setup questions repeatedly. Choose an option from "
+            "the menu below."
         )
     elif not token_handled:
-        next_step = (
-            "First, paste the MCP token for Continue's MCP_HTTP_BEARER_TOKEN "
-            "secret, or type skip."
-        )
+        next_step = "Choose an option from the menu below."
     elif detected_default:
-        next_step = (
-            f"Next, reply use default to keep {detected_default.get('model')}, "
-            "or send a different model and endpoint."
-        )
+        next_step = "Choose an option from the menu below."
     else:
-        next_step = "Next, send the provider, model, and apiBase you want Continue to use."
-    return "\n".join(
-        [
-            "I can set up Continue. I am not the real coding model yet.",
-            found,
-            next_step,
-            configure_hint,
-            mutation_note,
-        ]
+        next_step = "Choose an option from the menu below."
+    menu_lines = _continue_model_fallback_menu_lines(detected_default, parsed_summary)
+    lines = [
+        "**Continue Setup**",
+        "",
+        "**Status**",
+        "- I can set up Continue. I am not the real coding model yet.",
+        f"- {found}",
+        f"- {mutation_note}",
+    ]
+    if parsed_summary:
+        lines.extend(
+            [
+                "",
+                "**Parsed Model Input**",
+                f"- provider: {parsed_summary.get('provider') or 'missing'}",
+                f"- model: {parsed_summary.get('model') or 'missing'}",
+                f"- apiBase: {'configured' if parsed_summary.get('apiBase') else 'missing'}",
+                f"- apiType: {parsed_summary.get('apiType') or 'default'}",
+                (
+                    f"- apiVersion: {'configured' if parsed_summary.get('apiVersion_configured') else 'missing'}"
+                ),
+                (
+                    f"- apiKey: {parsed_summary.get('apiKey')}; "
+                    f"secret name: {parsed_summary.get('apiKeySecretName') or 'not set'}"
+                ),
+            ]
+        )
+        if parsed_summary.get("apiKey") == "provided":
+            lines.append("- I will not print the raw apiKey back in this response.")
+    selection_lines = _continue_model_fallback_selection_lines(
+        selected_option, detected_default, parsed_summary
     )
+    if selection_lines:
+        lines.extend(["", *selection_lines])
+    lines.extend(["", "**Next Step**", f"- {next_step}", f"- {configure_hint}"])
+    if not selected_option:
+        lines.extend(["", "**Menu**", "```text", *menu_lines, "```"])
+    return "\n".join(lines)
 
 
 def _continue_model_fallback_stream(
@@ -32761,18 +33096,22 @@ def _continue_default_api_key_secret_name(provider: str) -> str:
 
 
 def _continue_model_config_payload(payload: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
-    provider = str(payload.get("provider", "model-fallback")).strip().lower()
-    model = str(payload.get("model", "model-fallback")).strip()
-    api_base = str(payload.get("apiBase", payload.get("api_base", ""))).strip()
-    api_type = str(payload.get("apiType", payload.get("api_type", ""))).strip().lower()
-    api_version = str(payload.get("apiVersion", payload.get("api_version", ""))).strip()
-    api_key = str(payload.get("apiKey", payload.get("api_key", ""))).strip()
+    parsed_payload = _continue_model_config_from_payload_text(payload)
+    effective_payload = {**parsed_payload, **payload}
+    provider = str(effective_payload.get("provider", "model-fallback")).strip().lower()
+    model = str(effective_payload.get("model", "model-fallback")).strip()
+    api_base = str(effective_payload.get("apiBase", effective_payload.get("api_base", ""))).strip()
+    api_type = str(effective_payload.get("apiType", effective_payload.get("api_type", ""))).strip().lower()
+    api_version = str(effective_payload.get("apiVersion", effective_payload.get("api_version", ""))).strip()
+    api_key = str(effective_payload.get("apiKey", effective_payload.get("api_key", ""))).strip()
     api_key_secret_name = str(
-        payload.get("apiKeySecretName", payload.get("api_key_secret_name", ""))
+        effective_payload.get("apiKeySecretName", effective_payload.get("api_key_secret_name", ""))
     ).strip()
-    api_key_ref = str(payload.get("apiKeyRef", payload.get("api_key_ref", ""))).strip()
-    proxy = str(payload.get("proxy", "")).strip()
-    ca_bundle_path = str(payload.get("caBundlePath", payload.get("ca_bundle_path", ""))).strip()
+    api_key_ref = str(effective_payload.get("apiKeyRef", effective_payload.get("api_key_ref", ""))).strip()
+    proxy = str(effective_payload.get("proxy", "")).strip()
+    ca_bundle_path = str(
+        effective_payload.get("caBundlePath", effective_payload.get("ca_bundle_path", ""))
+    ).strip()
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", provider):
         return None, "provider must be a non-empty provider id such as azure, openai, ollama, or model-fallback"
     if not model:
@@ -32860,6 +33199,12 @@ async def continue_model_fallback_chat_completions(request):
         error, status = _agent_proxy_error_payload(reason, trace_id=trace_id, status_code=400)
         return JSONResponse(error, status_code=status)
     status_payload = _continue_model_fallback_status()
+    parsed_config = _continue_model_config_from_payload_text(payload)
+    if parsed_config:
+        status_payload = {
+            **status_payload,
+            "parsed_request_config": _continue_model_config_safe_summary(parsed_config),
+        }
     content = _continue_model_fallback_content(status_payload, payload)
     route = {
         "schema": "continue_model_fallback.routing.v1",
@@ -32916,8 +33261,10 @@ async def continue_model_fallback_configure(request):
         payload = await request.json()
     except Exception:
         return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
+    if isinstance(payload, str):
+        payload = {"input": payload}
     if not isinstance(payload, dict):
-        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+        return JSONResponse({"error": "request body must be a JSON object or string"}, status_code=400)
     config, reason = _continue_model_config_payload(payload)
     if config is None:
         return JSONResponse({"error": reason}, status_code=400)

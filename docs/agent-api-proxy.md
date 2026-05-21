@@ -42,6 +42,24 @@ agent_proxy:
 
 Existing `MCP_AGENT_PROXY_*` environment variables remain supported and override the YAML values when present. Provider API keys are never stored raw in YAML; keyed providers use a Continue secret reference such as `${{ secrets.AZURE_OPENAI_API_KEY }}` and route to fallback until that secret is usable.
 
+## Model fallback configuration input
+
+The Model Fallback assistant returns readable Markdown sections rather than a single paragraph. It renders the numbered choices in a fenced `text` block, with options such as `[1] skip`, `[2] use default`, `[3] token`, and `[4] custom` so users can reply with a single option number. Numeric replies are recognized by the fallback assistant and produce a selected-option response instead of repeating the menu. It also recognizes pasted Continue-style YAML or simple `key: value` input in chat and in `POST /v1/model-fallback/configure`.
+
+Accepted fields include `provider`, `model`, `apiBase`, `apiType`, `apiVersion`, `apiKey`, `apiKeyRef`, `apiKeySecretName`, `proxy`, and `caBundlePath`. A pasted list item works:
+
+```yaml
+- name: Azure OpenAI API Example
+  provider: azure
+  model: models-gpt-5
+  apiBase: https://azure.example/api
+  apiType: azure
+  apiVersion: 2024-12-01-preview
+  apiKey: "${{ secrets.AZURE_API_KEY }}"
+```
+
+Raw `apiKey` values are accepted only as configure input for the mutation-gated secret path. Assistant responses and dry-run file payloads report the key as present but do not print it back; written provider configs store a Continue secret reference while `.continue/.env` holds the local secret value.
+
 ## Minimal local/offline configuration
 
 ```bash

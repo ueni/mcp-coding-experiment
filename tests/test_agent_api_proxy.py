@@ -880,15 +880,74 @@ class AgentAPIProxyTest(ServerToolsTestBase):
 
         self.assertIn("qwen2.5-coder:1.5b", content)
         self.assertIn("I'll use that by default", content)
-        self.assertIn("First, paste the MCP token", content)
+        self.assertIn("**Menu**", content)
+        self.assertIn("```text", content)
+        self.assertIn("Type one option number:", content)
+        self.assertIn("[1] skip - do not set MCP_HTTP_BEARER_TOKEN right now", content)
+        self.assertIn("[2] use default - keep qwen2.5-coder:1.5b", content)
+        self.assertIn("If unsure, type `2`", content)
         self.assertNotIn("def ", content)
-        self.assertEqual(1, content.count("First,"))
         self.assertLessEqual(content.count("?"), 1)
         self.assertEqual(
             "qwen2.5-coder:1.5b",
             payload["model_fallback"]["detected_default"]["model"],
         )
         self.assertEqual(1, len(payload["model_fallback"]["local_profiles"]))
+
+    def test_model_fallback_menu_option_two_selects_default(self):
+        self.write_repo_text(
+            ".continue/model-routing.yaml",
+            "schema: v1\n"
+            "router:\n"
+            "  model: qwen2.5-coder:1.5b\n"
+            "  file: .continue/models/coding-qwen2.5-coder-1.5b.yaml\n",
+        )
+        self.write_repo_text(
+            ".continue/models/coding-qwen2.5-coder-1.5b.yaml",
+            "name: coding-qwen2.5-coder-1.5b\n"
+            "version: 0.0.1\n"
+            "schema: v1\n"
+            "models:\n"
+            "  - name: Coding Micro - Qwen2.5 Coder 1.5B\n"
+            "    provider: ollama\n"
+            "    model: qwen2.5-coder:1.5b\n"
+            "    apiBase: http://127.0.0.1:2345\n",
+        )
+        response = asyncio.run(
+            self.server.continue_model_fallback_chat_completions(
+                FakeRequest(
+                    {
+                        "model": "model-fallback",
+                        "messages": [{"role": "user", "content": "2"}],
+                    }
+                )
+            )
+        )
+        content = self.response_json(response)["choices"][0]["message"]["content"]
+
+        self.assertIn("**Selected Option**", content)
+        self.assertIn("[2] use default: `qwen2.5-coder:1.5b`", content)
+        self.assertIn("reload Continue", content)
+        self.assertNotIn("Type one option number:", content)
+
+    def test_model_fallback_menu_option_three_prompts_for_mcp_token(self):
+        response = asyncio.run(
+            self.server.continue_model_fallback_chat_completions(
+                FakeRequest(
+                    {
+                        "model": "model-fallback",
+                        "messages": [{"role": "user", "content": "3"}],
+                    }
+                )
+            )
+        )
+        content = self.response_json(response)["choices"][0]["message"]["content"]
+
+        self.assertIn("**Selected Option**", content)
+        self.assertIn("[3] token", content)
+        self.assertIn("MCP_HTTP_BEARER_TOKEN", content)
+        self.assertIn("Do not paste an Azure/OpenAI provider API key", content)
+        self.assertNotIn("Type one option number:", content)
 
     def test_model_fallback_stops_asking_after_five_user_requests(self):
         response = asyncio.run(
@@ -912,6 +971,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn("I won't ask more setup questions", content)
         self.assertNotIn("First, paste", content)
         self.assertNotIn("Next, send", content)
+        self.assertIn("Type one option number:", content)
 
     def test_model_fallback_chat_streams_for_continue_ui(self):
         response = asyncio.run(
@@ -948,6 +1008,47 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn("I can set up Continue", content)
         self.assertIn("MCP_HTTP_BEARER_TOKEN", content)
         self.assertIn("not the real coding model", content)
+
+    def test_model_fallback_chat_parses_pasted_key_value_config_without_echoing_secret(self):
+        secret = self.provider_secret_value()
+        config_text = (
+            "- name: Azure OpenAI API Example\n"
+            "  provider: azure\n"
+            "  model: models-gpt-5\n"
+            "  apiBase: https://azure.example/api\n"
+            "  apiType: azure\n"
+            "  apiVersion: 2024-12-01-preview\n"
+            f"  apiKey: {secret}\n"
+        )
+        response = asyncio.run(
+            self.server.continue_model_fallback_chat_completions(
+                FakeRequest(
+                    {
+                        "model": "model-fallback",
+                        "messages": [{"role": "user", "content": config_text}],
+                    }
+                )
+            )
+        )
+        payload = self.response_json(response)
+        content = payload["choices"][0]["message"]["content"]
+        response_text = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("**Parsed Model Input**", content)
+        self.assertIn("provider: azure", content)
+        self.assertIn("model: models-gpt-5", content)
+        self.assertIn("apiKey: provided", content)
+        self.assertIn("I will not print the raw apiKey", content)
+        self.assertEqual(
+            "provided",
+            payload["model_fallback"]["parsed_request_config"]["apiKey"],
+        )
+        self.assertEqual(
+            "AZURE_API_KEY",
+            payload["model_fallback"]["parsed_request_config"]["apiKeySecretName"],
+        )
+        self.assertNotIn(secret, response_text)
 
     def test_model_fallback_configure_requires_mutate_scope_in_http_context(self):
         self.server.ALLOW_MUTATIONS = True
@@ -1031,6 +1132,47 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual("written", payload["status"])
         self.assertTrue((self.repo_path / ".continue/model-routing.yaml").exists())
 
+    def test_model_fallback_configure_accepts_pasted_key_value_config(self):
+        self.server.ALLOW_MUTATIONS = True
+        secret = self.provider_secret_value()
+        response = asyncio.run(
+            self.server.continue_model_fallback_configure(
+                FakeRequest(
+                    "- name: Azure OpenAI API Example\n"
+                    "  provider: azure\n"
+                    "  model: models-gpt-5\n"
+                    "  apiBase: https://azure.example/api\n"
+                    "  apiType: azure\n"
+                    "  apiVersion: 2024-12-01-preview\n"
+                    f"  apiKey: {secret}\n"
+                )
+            )
+        )
+        payload = self.response_json(response)
+        response_text = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual("written", payload["status"])
+        self.assertEqual("azure", payload["provider"])
+        self.assertEqual("models-gpt-5", payload["model"])
+        profile_text = (self.repo_path / ".continue/models/coding-openai-compatible.yaml").read_text(
+            encoding="utf-8"
+        )
+        agent_proxy_text = (self.repo_path / ".codebase-tooling-mcp/agent-proxy.yaml").read_text(
+            encoding="utf-8"
+        )
+        secret_text = (self.repo_path / ".continue/.env").read_text(encoding="utf-8")
+
+        self.assertIn("provider: openai", profile_text)
+        self.assertIn("model: models-gpt-5", profile_text)
+        self.assertIn("apiBase: https://azure.example/api", profile_text)
+        self.assertIn("provider: azure", agent_proxy_text)
+        self.assertIn("apiType: azure", agent_proxy_text)
+        self.assertIn("apiVersion: 2024-12-01-preview", agent_proxy_text)
+        self.assertIn(f"AZURE_API_KEY={secret}", secret_text)
+        self.assertNotIn(secret, profile_text)
+        self.assertNotIn(secret, agent_proxy_text)
+        self.assertNotIn(secret, response_text)
 
     def test_model_fallback_configure_reports_needs_secret_for_keyed_provider(self):
         response = asyncio.run(
@@ -1137,4 +1279,3 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertIn(f"OPENAI_API_KEY={self.provider_secret_value()}", secret_text)
         self.assertNotIn(self.provider_secret_value(), agent_proxy_text)
         self.assertNotIn(self.provider_secret_value(), response_text)
-
