@@ -244,6 +244,13 @@ class BuildDownloadCacheTests(unittest.TestCase):
             self.assertEqual(cache_file.read_text(encoding="utf-8").strip(), "complete")
             self.assertFalse((cache_file.parent / "artifact.bin.part").exists())
 
+    def test_dockerfile_uses_outer_resume_attempts_for_large_downloads(self):
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+        self.assertIn("ARG BUILD_CACHE_DOWNLOAD_ATTEMPTS=48", dockerfile)
+        self.assertIn("ARG BUILD_CACHE_DOWNLOAD_RETRIES=0", dockerfile)
+        self.assertIn("ARG BUILD_CACHE_DOWNLOAD_RETRY_DELAY_SECONDS=2", dockerfile)
+
     def test_dockerfile_cache_contract_survives_first_line_change(self):
         original = subprocess.run(
             [sys.executable, str(CHECK_SCRIPT), "--compact"],
