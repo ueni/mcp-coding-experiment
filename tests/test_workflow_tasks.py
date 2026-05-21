@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tests.server_test_support import ServerToolsTestBase
@@ -374,6 +375,313 @@ class WorkflowTaskTests(ServerToolsTestBase):
                 for item in fake_session.notifications
             )
         )
+
+    def test_streamable_http_event_store_replays_last_event_id_for_same_workflow_task_stream(self):
+        store = self.server._BoundedWorkflowTaskEventStore(max_events=10, retention_seconds=3600)
+        msg_a1 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 10}))
+        msg_a2 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 30}))
+        msg_b = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 20}))
+
+        async def _exercise():
+            token = self.server._STREAMABLE_HTTP_SESSION_ID.set("session-a")
+            try:
+                priming_event = await store.store_event("stream-a", None)
+                with self.server._WORKFLOW_TASK_LOCK:
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-a"] = "task-a"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-b"] = "task-b"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID["stream-a"] = "session-a"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID["stream-b"] = "session-a"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-a"] = time.monotonic()
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-b"] = time.monotonic()
+                event_a1 = await store.store_event("stream-a", msg_a1)
+                await store.store_event("stream-b", msg_b)
+                event_a2 = await store.store_event("stream-a", msg_a2)
+
+                replayed = []
+                replayed_after_priming = []
+
+                async def send(event_message):
+                    replayed.append(event_message)
+
+                async def send_after_priming(event_message):
+                    replayed_after_priming.append(event_message)
+
+                stream_id = await store.replay_events_after(event_a1, send)
+                priming_stream_id = await store.replay_events_after(priming_event, send_after_priming)
+                return stream_id, event_a1, event_a2, replayed, priming_stream_id, replayed_after_priming
+            finally:
+                self.server._STREAMABLE_HTTP_SESSION_ID.reset(token)
+
+        try:
+            stream_id, event_a1, event_a2, replayed, priming_stream_id, replayed_after_priming = asyncio.run(_exercise())
+        finally:
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-b", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop("stream-b", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-b", None)
+
+        self.assertEqual(stream_id, "stream-a")
+        self.assertEqual([item.event_id for item in replayed], [event_a2])
+        self.assertIs(replayed[0].message, msg_a2)
+        self.assertEqual(priming_stream_id, "stream-a")
+        self.assertEqual([item.event_id for item in replayed_after_priming], [event_a1, event_a2])
+
+    def test_streamable_http_event_store_blocks_cross_session_or_cross_stream_replay(self):
+        store = self.server._BoundedWorkflowTaskEventStore(max_events=10, retention_seconds=3600)
+        msg_a1 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 10}))
+        msg_a2 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 30}))
+        msg_b = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 20}))
+        msg_other_session = SimpleNamespace(
+            root=SimpleNamespace(method="notifications/progress", params={"progress": 40})
+        )
+
+        async def _exercise():
+            token = self.server._STREAMABLE_HTTP_SESSION_ID.set("session-a")
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-a"] = "task-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-b"] = "task-b"
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID["stream-a"] = "session-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID["stream-b"] = "session-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-a"] = time.monotonic()
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-b"] = time.monotonic()
+            try:
+                event_a1 = await store.store_event("stream-a", msg_a1)
+                event_b = await store.store_event("stream-b", msg_b)
+                await store.store_event("stream-a", msg_a2)
+                self.server._STREAMABLE_HTTP_SESSION_ID.reset(token)
+                token = self.server._STREAMABLE_HTTP_SESSION_ID.set("session-b")
+                replay_from_other_session_same_mapping = []
+
+                async def send_other_session_same_mapping(event_message):
+                    replay_from_other_session_same_mapping.append(event_message)
+
+                other_session_same_mapping = await store.replay_events_after(
+                    event_a1,
+                    send_other_session_same_mapping,
+                )
+                with self.server._WORKFLOW_TASK_LOCK:
+                    # Simulate the same request-stream identifier being reused by a
+                    # different MCP session/task before a stale Last-Event-ID is replayed.
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-a"] = "task-c"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID["stream-a"] = "session-b"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-a"] = time.monotonic()
+                event_c = await store.store_event("stream-a", msg_other_session)
+
+                replay_from_stale_session = []
+                replay_from_cross_stream = []
+                replay_from_current_session = []
+
+                async def send_stale(event_message):
+                    replay_from_stale_session.append(event_message)
+
+                async def send_cross_stream(event_message):
+                    replay_from_cross_stream.append(event_message)
+
+                async def send_current(event_message):
+                    replay_from_current_session.append(event_message)
+
+                stale_stream = await store.replay_events_after(event_a1, send_stale)
+                cross_stream = await store.replay_events_after(event_b, send_cross_stream)
+                current_stream = await store.replay_events_after(event_c, send_current)
+                return (
+                    other_session_same_mapping,
+                    stale_stream,
+                    cross_stream,
+                    current_stream,
+                    replay_from_other_session_same_mapping,
+                    replay_from_stale_session,
+                    replay_from_cross_stream,
+                    replay_from_current_session,
+                )
+            finally:
+                self.server._STREAMABLE_HTTP_SESSION_ID.reset(token)
+
+        try:
+            (
+                other_session_same_mapping,
+                stale_stream,
+                cross_stream,
+                current_stream,
+                replay_from_other_session_same_mapping,
+                replay_from_stale_session,
+                replay_from_cross_stream,
+                replay_from_current_session,
+            ) = asyncio.run(_exercise())
+        finally:
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-b", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop("stream-b", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-b", None)
+
+        self.assertIsNone(other_session_same_mapping)
+        self.assertEqual(replay_from_other_session_same_mapping, [])
+        self.assertIsNone(stale_stream)
+        self.assertEqual(replay_from_stale_session, [])
+        self.assertIsNone(cross_stream)
+        self.assertEqual(replay_from_cross_stream, [])
+        self.assertEqual(current_stream, "stream-a")
+        self.assertEqual(replay_from_current_session, [])
+
+    def test_streamable_http_transport_blocks_last_event_id_across_mcp_sessions_with_same_request_id(self):
+        store = self.server._BoundedWorkflowTaskEventStore(max_events=10, retention_seconds=3600)
+        request_id = "jsonrpc-request-42"
+        msg_a1 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 10}))
+        msg_a2 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 30}))
+        observed_sessions = []
+        session_a_event_ids = []
+        replayed_into_session_b = []
+        replay_result = {"stream_id": "not-run"}
+
+        async def _http_request(session_id, payload, app, *, last_event_id=""):
+            body = json.dumps(payload).encode("utf-8")
+            consumed = False
+            messages = []
+            headers = [
+                (b"content-type", b"application/json"),
+                (b"mcp-session-id", session_id.encode("latin-1")),
+            ]
+            if last_event_id:
+                headers.append((b"last-event-id", last_event_id.encode("latin-1")))
+            scope = {
+                "type": "http",
+                "path": "/mcp",
+                "method": "POST",
+                "headers": headers,
+                "client": ("127.0.0.1", 12345),
+            }
+
+            async def receive():
+                nonlocal consumed
+                if consumed:
+                    return {"type": "http.disconnect"}
+                consumed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            async def send(message):
+                messages.append(message)
+
+            await self.server.MCPHTTPAuthMiddleware(app)(scope, receive, send)
+            return messages
+
+        async def session_a_app(_scope, receive, send):
+            request = await receive()
+            jsonrpc_id = str(json.loads(request.get("body", b"{}").decode("utf-8"))["id"])
+            observed_sessions.append(self.server._streamable_http_current_session_id())
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID[jsonrpc_id] = "task-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID[jsonrpc_id] = "session-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[jsonrpc_id] = time.monotonic()
+            await store.store_event(jsonrpc_id, None)
+            session_a_event_ids.append(await store.store_event(jsonrpc_id, msg_a1))
+            session_a_event_ids.append(await store.store_event(jsonrpc_id, msg_a2))
+            response = self.server.JSONResponse({"ok": True})
+            await response(_scope, receive, send)
+
+        async def session_b_replay_app(scope, receive, send):
+            request = await receive()
+            jsonrpc_id = str(json.loads(request.get("body", b"{}").decode("utf-8"))["id"])
+            observed_sessions.append(self.server._streamable_http_current_session_id())
+            with self.server._WORKFLOW_TASK_LOCK:
+                # A different MCP session legitimately reuses the same JSON-RPC
+                # request id before presenting session A's stale Last-Event-ID.
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID[jsonrpc_id] = "task-b"
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID[jsonrpc_id] = "session-b"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[jsonrpc_id] = time.monotonic()
+            last_event_id = ""
+            for name, value in scope.get("headers", []):
+                if bytes(name).lower() == b"last-event-id":
+                    last_event_id = bytes(value).decode("latin-1")
+            replay_result["stream_id"] = await store.replay_events_after(
+                last_event_id,
+                replayed_into_session_b.append,
+            )
+            response = self.server.JSONResponse({"ok": True})
+            await response(scope, receive, send)
+
+        orig_auth_mode = self.server.MCP_HTTP_AUTH_MODE
+        try:
+            self.server.MCP_HTTP_AUTH_MODE = "disabled"
+            asyncio.run(
+                _http_request(
+                    "session-a",
+                    {"jsonrpc": "2.0", "id": request_id, "method": "tools/call"},
+                    session_a_app,
+                )
+            )
+            asyncio.run(
+                _http_request(
+                    "session-b",
+                    {"jsonrpc": "2.0", "id": request_id, "method": "tools/call"},
+                    session_b_replay_app,
+                    last_event_id=session_a_event_ids[0],
+                )
+            )
+        finally:
+            self.server.MCP_HTTP_AUTH_MODE = orig_auth_mode
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
+
+        self.assertEqual(observed_sessions, ["session-a", "session-b"])
+        self.assertIsNone(replay_result["stream_id"])
+        self.assertEqual(replayed_into_session_b, [])
+
+    def test_streamable_http_event_store_bounds_retention_and_skips_unscoped_messages(self):
+        store = self.server._BoundedWorkflowTaskEventStore(max_events=2, retention_seconds=3600)
+        raw_unscoped = SimpleNamespace(root=SimpleNamespace(result={"stdout": "raw output"}))
+        msg1 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 10}))
+        msg2 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 20}))
+        msg3 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 30}))
+
+        async def _exercise():
+            token = self.server._STREAMABLE_HTTP_SESSION_ID.set("session-a")
+            try:
+                await store.store_event("stream-raw", raw_unscoped)
+                with self.server._WORKFLOW_TASK_LOCK:
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID["stream-a"] = "task-a"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID["stream-a"] = "session-a"
+                    self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT["stream-a"] = time.monotonic()
+                old_event = await store.store_event("stream-a", msg1)
+                kept_event = await store.store_event("stream-a", msg2)
+                newest_event = await store.store_event("stream-a", msg3)
+
+                replay_from_old = []
+                replay_from_kept = []
+
+                async def send_old(event_message):
+                    replay_from_old.append(event_message)
+
+                async def send_kept(event_message):
+                    replay_from_kept.append(event_message)
+
+                old_stream = await store.replay_events_after(old_event, send_old)
+                kept_stream = await store.replay_events_after(kept_event, send_kept)
+                return old_stream, kept_stream, newest_event, replay_from_old, replay_from_kept, store.stats()
+            finally:
+                self.server._STREAMABLE_HTTP_SESSION_ID.reset(token)
+
+        try:
+            old_stream, kept_stream, newest_event, replay_from_old, replay_from_kept, stats = asyncio.run(_exercise())
+        finally:
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop("stream-a", None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop("stream-a", None)
+
+        self.assertIsNone(old_stream)
+        self.assertEqual(replay_from_old, [])
+        self.assertEqual(kept_stream, "stream-a")
+        self.assertEqual([item.event_id for item in replay_from_kept], [newest_event])
+        self.assertEqual(stats["events"], 2)
+        self.assertEqual(stats["sessions"], 1)
+        self.assertEqual(stats["tasks"], 1)
 
     def test_workflow_task_cancel_unknown_task_raises_without_persisting_status(self):
         with self.assertRaises(FileNotFoundError):

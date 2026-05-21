@@ -111,6 +111,7 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
 
 from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
+from mcp.server.streamable_http import EventMessage, EventStore
 from pydantic import Field, RootModel
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
@@ -169,6 +170,15 @@ MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW = os.getenv(
 MCP_HTTP_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_REQUESTS", "120")))
 MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60")))
 MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TIMEOUT_SECONDS", "120")))
+MCP_STREAM_REPLAY_MAX_EVENTS = max(1, int(os.getenv("MCP_STREAM_REPLAY_MAX_EVENTS", "200")))
+MCP_STREAM_REPLAY_RETENTION_SECONDS = max(
+    60,
+    int(os.getenv("MCP_STREAM_REPLAY_RETENTION_SECONDS", "86400")),
+)
+MCP_STREAM_REPLAY_RETRY_INTERVAL_MS = max(
+    250,
+    int(os.getenv("MCP_STREAM_REPLAY_RETRY_INTERVAL_MS", "1000")),
+)
 MCP_AUDIT_LOG_FILE = Path(
     os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
 )
@@ -1284,9 +1294,175 @@ TASK_RETRIEVAL_CODE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".go", ".java", ".js", ".jsx", ".py", ".rb", ".rs", ".sh", ".ts", ".tsx"
 }
 TASK_RETRIEVAL_DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".odt", ".ods", ".odp"}
+_STREAMABLE_HTTP_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "streamable_http_session_id",
+    default="",
+)
+
+
+def _streamable_http_current_session_id() -> str:
+    return str(_STREAMABLE_HTTP_SESSION_ID.get() or "")
+
+
+def _streamable_http_session_id_from_scope(scope: dict[str, Any]) -> str:
+    expected = b"mcp-session-id"
+    values: list[str] = []
+    for raw_name, raw_value in scope.get("headers", []) or []:
+        try:
+            name = bytes(raw_name).lower()
+        except Exception:
+            continue
+        if name != expected:
+            continue
+        try:
+            value = bytes(raw_value).decode("latin-1").strip()
+        except Exception:
+            value = str(raw_value or "").strip()
+        if value:
+            values.append(value)
+    return values[-1] if values else ""
+
+
+class _BoundedWorkflowTaskEventStore(EventStore):
+    """Bounded MCP Streamable HTTP replay store for workflow-task events.
+
+    The MCP SDK owns the SSE framing and `Last-Event-ID` handling. This store is
+    intentionally narrower than a generic JSON-RPC journal: it retains priming
+    markers and messages on request streams currently mapped to a `workflow_task`
+    id, so replay cannot retain unrelated tool output. Stored records are bounded
+    by count and age; replay is scoped to the currently retained request-stream
+    task mapping plus the original stream/task event scope.
+    """
+
+    def __init__(self, *, max_events: int, retention_seconds: int) -> None:
+        self.max_events = max(1, int(max_events))
+        self.retention_seconds = max(1, int(retention_seconds))
+        self._lock = threading.RLock()
+        self._events: list[dict[str, Any]] = []
+        self._seq = 0
+
+    def _workflow_task_scope_for_stream(self, stream_id: str) -> tuple[str, str]:
+        with _WORKFLOW_TASK_LOCK:
+            _workflow_task_prune_request_mappings_locked()
+            return (
+                str(_WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(stream_id) or ""),
+                str(_WORKFLOW_TASK_REQUEST_TO_SESSION_ID.get(stream_id) or ""),
+            )
+
+    def _scope_for(self, session_id: str, stream_id: str, task_id: str) -> str:
+        return hashlib.sha256(f"{session_id}\0{stream_id}\0{task_id}".encode("utf-8")).hexdigest()[:24]
+
+    def _message_is_replayable(self, stream_id: str, message: Any) -> tuple[bool, str, str]:
+        current_session_id = _streamable_http_current_session_id()
+        if message is None:
+            return bool(current_session_id), "", current_session_id
+        task_id, mapped_session_id = self._workflow_task_scope_for_stream(stream_id)
+        session_id = mapped_session_id or current_session_id
+        if not task_id or not session_id:
+            return False, "", ""
+        # Progress notifications carry coarse lifecycle state for the task. The
+        # initial workflow_task response on the same mapped request stream is
+        # also redacted before persistence by the workflow_task implementation.
+        return True, task_id, session_id
+
+    def _prune_locked(self, now: float) -> None:
+        cutoff = now - self.retention_seconds
+        self._events = [row for row in self._events if float(row.get("stored_at", 0.0)) >= cutoff]
+        if len(self._events) > self.max_events:
+            self._events = self._events[-self.max_events :]
+
+    async def store_event(self, stream_id: str, message: Any | None) -> str:
+        replayable, task_id, session_id = self._message_is_replayable(str(stream_id), message)
+        with self._lock:
+            self._seq += 1
+            event_id = f"wft-{self._seq:020d}-{uuid.uuid4().hex[:16]}"
+            if replayable:
+                now = time.monotonic()
+                stream_id_text = str(stream_id)
+                scope = self._scope_for(session_id, stream_id_text, task_id)
+                if task_id:
+                    for row in self._events:
+                        if (
+                            row.get("stream_id") == stream_id_text
+                            and row.get("session_id") == session_id
+                            and not row.get("task_id")
+                        ):
+                            row["task_id"] = task_id
+                            row["scope"] = scope
+                self._events.append(
+                    {
+                        "event_id": event_id,
+                        "session_id": session_id,
+                        "stream_id": stream_id_text,
+                        "task_id": task_id,
+                        "scope": scope,
+                        "message": message,
+                        "stored_at": now,
+                    }
+                )
+                self._prune_locked(now)
+            return event_id
+
+    async def replay_events_after(self, last_event_id: str, send_callback: Any) -> str | None:
+        with self._lock:
+            self._prune_locked(time.monotonic())
+            start = next(
+                (index for index, row in enumerate(self._events) if row.get("event_id") == last_event_id),
+                None,
+            )
+            if start is None:
+                return None
+            anchor = self._events[start]
+            session_id = str(anchor.get("session_id") or "")
+            stream_id = str(anchor.get("stream_id") or "")
+            scope = str(anchor.get("scope") or "")
+            task_id = str(anchor.get("task_id") or "")
+            if not session_id or not stream_id or not task_id or not scope:
+                return None
+            if _streamable_http_current_session_id() != session_id:
+                return None
+            current_task_id, current_session_id = self._workflow_task_scope_for_stream(stream_id)
+            if current_task_id != task_id or current_session_id != session_id:
+                return None
+            replay = [
+                row
+                for row in self._events[start + 1 :]
+                if row.get("session_id") == session_id
+                and row.get("stream_id") == stream_id
+                and (not task_id or row.get("scope") == scope)
+            ]
+        for row in replay:
+            message = row.get("message")
+            if message is None:
+                continue
+            await send_callback(EventMessage(message=message, event_id=str(row.get("event_id") or "")))
+        return stream_id or None
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            self._prune_locked(time.monotonic())
+            streams = {str(row.get("stream_id") or "") for row in self._events}
+            sessions = {str(row.get("session_id") or "") for row in self._events if row.get("session_id")}
+            tasks = {str(row.get("task_id") or "") for row in self._events if row.get("task_id")}
+            return {
+                "events": len(self._events),
+                "sessions": len(sessions),
+                "streams": len(streams),
+                "tasks": len(tasks),
+                "max_events": self.max_events,
+                "retention_seconds": self.retention_seconds,
+            }
+
+
+_STREAMABLE_HTTP_EVENT_STORE = _BoundedWorkflowTaskEventStore(
+    max_events=MCP_STREAM_REPLAY_MAX_EVENTS,
+    retention_seconds=MCP_STREAM_REPLAY_RETENTION_SECONDS,
+)
 
 mcp = FastMCP(
     "git-repo-manager",
+    event_store=_STREAMABLE_HTTP_EVENT_STORE,
+    retry_interval=MCP_STREAM_REPLAY_RETRY_INTERVAL_MS,
     instructions=(
         "Expose the compact public MCP v1 surface: `task_router`, read-only inspection helpers "
         "such as `tool_annotations` and `tool_output_contracts`, and schema-backed core tools. "
@@ -11473,6 +11649,9 @@ class MCPHTTPAuthMiddleware:
         )
         token = _HTTP_REQUEST_AUTHORIZED.set(True)
         scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
+        streamable_session_token = _STREAMABLE_HTTP_SESSION_ID.set(
+            _streamable_http_session_id_from_scope(scope)
+        )
         try:
             if path == "/sse":
                 await self.app(scope, receive, send)
@@ -11506,6 +11685,7 @@ class MCPHTTPAuthMiddleware:
             )
             await response(scope, receive, send)
         finally:
+            _STREAMABLE_HTTP_SESSION_ID.reset(streamable_session_token)
             _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
 
@@ -12344,6 +12524,8 @@ _WORKFLOW_TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _WORKFLOW_TASK_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 _WORKFLOW_TASK_PROGRESS_BRIDGES: dict[str, dict[str, Any]] = {}
 _WORKFLOW_TASK_REQUEST_TO_TASK_ID: dict[str, str] = {}
+_WORKFLOW_TASK_REQUEST_TO_SESSION_ID: dict[str, str] = {}
+_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT: dict[str, float] = {}
 _WORKFLOW_TASK_CURRENT_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "workflow_task_current_id",
     default="",
@@ -12426,6 +12608,18 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
         session = getattr(request_context, "session", None)
     if session is None or not hasattr(session, "send_progress_notification"):
         return None
+    session_id = _streamable_http_current_session_id()
+    if not session_id:
+        for source in (request_context, context, session):
+            if source is None:
+                continue
+            for attr in ("mcp_session_id", "session_id"):
+                value = getattr(source, attr, None)
+                if isinstance(value, (str, int)) and str(value):
+                    session_id = str(value)
+                    break
+            if session_id:
+                break
     request_id = getattr(context, "request_id", None)
     if request_id is None and request_context is not None:
         request_id = getattr(request_context, "request_id", None)
@@ -12437,6 +12631,7 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
         loop = None
     return {
         "session": session,
+        "session_id": session_id,
         "progress_token": progress_token,
         "request_id": "" if request_id is None else str(request_id),
         "loop": loop,
@@ -12445,15 +12640,41 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
     }
 
 
+def _workflow_task_prune_request_mappings_locked(now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    cutoff = now - MCP_STREAM_REPLAY_RETENTION_SECONDS
+    stale = [
+        request_id
+        for request_id, updated_at in _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.items()
+        if updated_at < cutoff
+    ]
+    for request_id in stale:
+        _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+        _WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
+        _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
+    max_mappings = max(16, MCP_STREAM_REPLAY_MAX_EVENTS * 2)
+    overflow = len(_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT) - max_mappings
+    if overflow > 0:
+        oldest = sorted(_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.items(), key=lambda item: item[1])[:overflow]
+        for request_id, _updated_at in oldest:
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+            _WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
+
+
 def _workflow_task_register_protocol_bridge(task_id: str) -> None:
     bridge = _workflow_task_context_progress_bridge()
     if bridge is None:
         return
     with _WORKFLOW_TASK_LOCK:
+        _workflow_task_prune_request_mappings_locked()
         _WORKFLOW_TASK_PROGRESS_BRIDGES[task_id] = bridge
         request_id = str(bridge.get("request_id") or "")
+        session_id = str(bridge.get("session_id") or "")
         if request_id:
             _WORKFLOW_TASK_REQUEST_TO_TASK_ID[request_id] = task_id
+            _WORKFLOW_TASK_REQUEST_TO_SESSION_ID[request_id] = session_id
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[request_id] = time.monotonic()
 
 
 def _workflow_task_cleanup_protocol_bridge(task_id: str) -> None:
@@ -12461,7 +12682,8 @@ def _workflow_task_cleanup_protocol_bridge(task_id: str) -> None:
         bridge = _WORKFLOW_TASK_PROGRESS_BRIDGES.pop(task_id, None)
         request_id = str((bridge or {}).get("request_id") or "")
         if request_id and _WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(request_id) == task_id:
-            _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[request_id] = time.monotonic()
+            _workflow_task_prune_request_mappings_locked()
 
 
 def _workflow_task_cleanup_runtime(task_id: str) -> None:
@@ -16615,6 +16837,7 @@ def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
             "subscribers": _sse_subscriber_count(),
             "buffered_events": _sse_recent_event_count(),
         },
+        "streamable_http_replay": _STREAMABLE_HTTP_EVENT_STORE.stats(),
         "ollama": {
             "host_env": ollama_host_env,
             "models_dir_env": os.getenv("OLLAMA_MODELS", ""),
