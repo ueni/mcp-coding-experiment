@@ -130,7 +130,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `agents_context_health`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -151,6 +151,8 @@ Public tools:
 `mcp_threat_model_report` is the offline public governance tool for MCP trust-boundary review. It maps host/client, LLM, server, repository, and external-service boundaries to STRIDE/DREAD-style threats, returns the checked-in deterministic DREAD rubric, links existing controls to risks, analyzes secret-free poisoned-tool fixtures including post-handshake `notifications/tools/list_changed` plus repeated `tools/list` mutations, and can compare a local baseline for high-severity uncovered regressions without exposing secrets or raw external state.
 
 `self_optimization_report` is the direct public tool for the software team's self-optimization loop on this repository. It stays offline/repo-local while aggregating redacted audit events, local spans, task handles, cache metadata, and local Git refs into usage, savings, throughput, bottleneck, and duplicate-suppressed recommendation summaries.
+
+`agents_context_health` is the read-only AGENTS.md context lint report. It checks byte/token budgets, duplicate or stale guidance candidates, risky global instruction signals, instruction categories, and move-to-router/docs suggestions without returning raw AGENTS text, writing artifacts, or using network access.
 
 The following router families are internal orchestration helpers, not public MCP v1 tools. They remain implemented in the server for reuse, direct Python tests, and future composition, but MCP clients do not see them in `list_tools()` and their modes are not part of the v1 annotation coverage contract unless they are exposed through a public tool:
 
