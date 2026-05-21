@@ -227,6 +227,8 @@ ATTESTATION_FIXTURE_HMAC_KEY = b"codebase-tooling-mcp local dsse fixture verifie
 WORKFLOW_LINEAGE_SCHEMA = "workflow_lineage.v1"
 WORKFLOW_LINEAGE_VERIFY_SCHEMA = "workflow_lineage.verify.v1"
 WORKFLOW_LINEAGE_SUFFIX = ".workflow-lineage.json"
+MEMORY_GOVERNANCE_REPORT_SCHEMA = "memory_governance_report.v1"
+MEMORY_GOVERNANCE_POLICY_VERSION = "memory_governance_policy.v1"
 MEMORY_FILE = Path(".codebase-tooling-mcp/memory/context_memory.json")
 MEMORY_STATS_FILE = Path(".codebase-tooling-mcp/memory/memory_stats.json")
 FAILURE_MEMORY_FILE = Path(".codebase-tooling-mcp/memory/failure_memory.json")
@@ -375,6 +377,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "ci_workflow_security_report": {"categories": ["read-only", "governance"]},
     "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
+    "memory_governance_report": {"categories": ["read-only", "governance"]},
     "self_optimization_report": {"categories": ["read-only"]},
     "agents_context_health": {"categories": ["read-only", "governance"]},
     "artifact_provenance": {"categories": ["read-only"]},
@@ -27797,6 +27800,686 @@ def workflow_diagnostics(
     return report
 
 
+
+_MEMORY_GOVERNANCE_STORE_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "store_id": "context_memory",
+        "store_type": "context",
+        "path": MEMORY_FILE,
+        "expected_schema": "context_memory.v1",
+        "expected_policy_version": MEMORY_GOVERNANCE_POLICY_VERSION,
+    },
+    {
+        "store_id": "failure_memory",
+        "store_type": "failure",
+        "path": FAILURE_MEMORY_FILE,
+        "expected_schema": "failure_memory.v1",
+        "expected_policy_version": MEMORY_GOVERNANCE_POLICY_VERSION,
+    },
+    {
+        "store_id": "root_cause_memory",
+        "store_type": "root_cause",
+        "path": ROOT_CAUSE_FILE,
+        "expected_schema": "root_cause_memory.v1",
+        "expected_policy_version": MEMORY_GOVERNANCE_POLICY_VERSION,
+    },
+    {
+        "store_id": "artifact_memory",
+        "store_type": "artifact",
+        "path": ARTIFACT_INDEX_FILE,
+        "expected_schema": "artifact_memory_index.v1",
+        "expected_policy_version": MEMORY_GOVERNANCE_POLICY_VERSION,
+    },
+)
+_MEMORY_GOVERNANCE_SENSITIVE_HINT_RE = re.compile(
+    r"(<redacted(?::[^>]+)?>|\*{3,}|\b(?:password|passwd|secret|token|api[_ -]?key|private key|credential|authorization)\b)",
+    re.IGNORECASE,
+)
+_MEMORY_GOVERNANCE_PROVENANCE_KEYS = {
+    "provenance",
+    "provenance_digest",
+    "source_digest",
+    "prompt_digest",
+    "response_digest",
+    "trace_id",
+    "audit_id",
+    "lineage",
+    "artifact_digest",
+    "sha256",
+}
+_MEMORY_GOVERNANCE_PATH_KEYS = {
+    "path",
+    "paths",
+    "file_path",
+    "file_paths",
+    "artifact_path",
+    "artifact_paths",
+    "manifest_path",
+}
+
+
+def _memory_governance_rel(path: Path) -> str:
+    return str(path).replace("\\", "/")
+
+
+def _memory_governance_hash(value: Any) -> str:
+    data = json.dumps(value, sort_keys=True, ensure_ascii=True, default=str, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _memory_governance_parse_dt(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = _parse_iso_datetime(value.strip())
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _memory_governance_public_timestamp(
+    value: Any,
+    parsed: datetime | None,
+) -> tuple[str | None, bool]:
+    if value in (None, ""):
+        return None, False
+    if not isinstance(value, str):
+        return None, True
+    if not value.strip():
+        return None, False
+    if parsed is None:
+        return None, True
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"), False
+
+
+def _memory_governance_scalar(value: Any) -> str:
+    if isinstance(value, str):
+        return _redact_untrusted_content_excerpt(value, max_chars=120)
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return type(value).__name__
+
+
+def _memory_governance_load_json(rel_path: Path) -> tuple[Path, dict[str, Any] | None, dict[str, Any]]:
+    resolved = _resolve_repo_path(str(rel_path))
+    meta: dict[str, Any] = {
+        "path": _memory_governance_rel(rel_path),
+        "exists": resolved.is_file(),
+        "readable": False,
+        "parse_error": False,
+        "sha256": "",
+        "size_bytes": 0,
+    }
+    if not resolved.is_file():
+        return resolved, None, meta
+    try:
+        meta["size_bytes"] = int(resolved.stat().st_size)
+        meta["sha256"] = _file_sha256(resolved)
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        meta["readable"] = True
+        meta["parse_error"] = True
+        return resolved, None, meta
+    except OSError:
+        return resolved, None, meta
+    meta["readable"] = True
+    if not isinstance(payload, dict):
+        meta["parse_error"] = True
+        return resolved, None, meta
+    return resolved, payload, meta
+
+
+def _memory_governance_extract_entries(store_id: str, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    if store_id == "context_memory":
+        groups = (("entry", "entries"), ("summary", "summaries"), ("decision", "decisions"))
+        for kind, key in groups:
+            values = payload.get(key, [])
+            if isinstance(values, list):
+                for index, value in enumerate(values):
+                    if isinstance(value, dict):
+                        rows.append({"kind": kind, "index": index, "row": value})
+    elif store_id == "failure_memory":
+        values = payload.get("entries", [])
+        if isinstance(values, list):
+            for index, value in enumerate(values):
+                if isinstance(value, dict):
+                    rows.append({"kind": "failure", "index": index, "row": value})
+    elif store_id == "root_cause_memory":
+        values = payload.get("entries", [])
+        if isinstance(values, list):
+            for index, value in enumerate(values):
+                if isinstance(value, dict):
+                    rows.append({"kind": "root_cause", "index": index, "row": value})
+    elif store_id == "artifact_memory":
+        values = payload.get("artifacts", [])
+        if isinstance(values, list):
+            for index, value in enumerate(values):
+                if isinstance(value, dict):
+                    rows.append({"kind": "artifact", "index": index, "row": value})
+    return rows
+
+
+def _memory_governance_task_entries(max_entries: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    task_dir = _resolve_repo_path(str(WORKFLOW_TASKS_DIR))
+    store: dict[str, Any] = {
+        "store_id": "workflow_tasks",
+        "store_type": "task",
+        "path": _memory_governance_rel(WORKFLOW_TASKS_DIR),
+        "exists": task_dir.is_dir(),
+        "readable": task_dir.is_dir(),
+        "parse_error": False,
+        "schema_version": "",
+        "policy_version": "",
+        "expected_schema": "workflow_task.v1",
+        "expected_policy_version": MEMORY_GOVERNANCE_POLICY_VERSION,
+        "entry_count": 0,
+        "sha256": "",
+        "size_bytes": 0,
+        "status": "missing",
+    }
+    if not task_dir.is_dir():
+        return store, []
+    entries: list[dict[str, Any]] = []
+    digest_parts: list[str] = []
+    for path in sorted(task_dir.glob("*.json"), key=lambda item: item.name):
+        if len(entries) >= max_entries:
+            break
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            digest_parts.append(f"{path.name}:{_file_sha256(path)}")
+        except (json.JSONDecodeError, OSError):
+            store["parse_error"] = True
+            continue
+        if isinstance(payload, dict):
+            entries.append({"kind": "workflow_task", "index": len(entries), "row": payload, "file_name": path.name})
+            if not store["schema_version"] and isinstance(payload.get("schema"), str):
+                store["schema_version"] = str(payload.get("schema"))
+            if not store["policy_version"] and isinstance(payload.get("policy_version"), str):
+                store["policy_version"] = str(payload.get("policy_version"))
+    store["entry_count"] = len(entries)
+    store["sha256"] = _memory_governance_hash(digest_parts) if digest_parts else ""
+    store["status"] = "ok" if not store["parse_error"] else "invalid"
+    return store, entries
+
+
+def _memory_governance_find_paths(value: Any, key: str = "", depth: int = 0) -> list[str]:
+    if depth > 4:
+        return []
+    found: list[str] = []
+    key_lower = key.lower()
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            found.extend(_memory_governance_find_paths(child_value, str(child_key), depth + 1))
+    elif isinstance(value, list):
+        for child in value[:50]:
+            found.extend(_memory_governance_find_paths(child, key, depth + 1))
+    elif isinstance(value, str) and key_lower in _MEMORY_GOVERNANCE_PATH_KEYS:
+        text = value.strip()
+        if text and not re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
+            found.append(text)
+    return found
+
+
+def _memory_governance_entry_metadata(
+    store_id: str,
+    item: dict[str, Any],
+    now: datetime,
+    store_schema: str,
+    store_policy: str,
+) -> dict[str, Any]:
+    row = item["row"]
+    kind = str(item.get("kind", "entry"))
+    created = (
+        row.get("created_at")
+        or row.get("captured_at")
+        or row.get("timestamp")
+        or row.get("started_at")
+        or row.get("enqueued_at")
+        or row.get("updated_at")
+    )
+    updated = row.get("updated_at") or row.get("finished_at") or row.get("timestamp") or created
+    expires = row.get("expires_at") or row.get("expires")
+    created_dt = _memory_governance_parse_dt(created)
+    updated_dt = _memory_governance_parse_dt(updated)
+    expires_dt = _memory_governance_parse_dt(expires)
+    public_created, created_redacted = _memory_governance_public_timestamp(created, created_dt)
+    public_updated, updated_redacted = _memory_governance_public_timestamp(updated, updated_dt)
+    public_expires, expires_redacted = _memory_governance_public_timestamp(expires, expires_dt)
+    timestamp_redacted_fields = []
+    if created_redacted:
+        timestamp_redacted_fields.append("created_at")
+    if updated_redacted:
+        timestamp_redacted_fields.append("updated_at")
+    if expires_redacted:
+        timestamp_redacted_fields.append("expires_at")
+    age_days = None
+    if created_dt is not None:
+        age_days = round(max(0.0, (now - created_dt).total_seconds() / 86400.0), 3)
+    confidence = row.get("confidence")
+    confidence_value = confidence if isinstance(confidence, (int, float)) else None
+    schema_version = _memory_governance_scalar(row.get("schema") or row.get("schema_version") or store_schema)
+    policy_version = _memory_governance_scalar(row.get("policy_version") or row.get("memory_policy_version") or store_policy)
+    source = _memory_governance_scalar(row.get("source") or row.get("decided_by") or row.get("backend") or "")
+    identity_seed = {
+        "store_id": store_id,
+        "kind": kind,
+        "index": item.get("index", 0),
+        "namespace": row.get("namespace"),
+        "key": row.get("key") or row.get("focus") or row.get("topic") or row.get("id") or row.get("task_id") or row.get("path"),
+    }
+    tags = row.get("tags") if isinstance(row.get("tags"), list) else []
+    return {
+        "entry_ref": _memory_governance_hash(identity_seed),
+        "store_id": store_id,
+        "kind": kind,
+        "schema_version": schema_version,
+        "policy_version": policy_version,
+        "source": source,
+        "confidence": confidence_value,
+        "created_at": public_created,
+        "updated_at": public_updated,
+        "expires_at": public_expires,
+        "timestamp_redacted_fields": timestamp_redacted_fields,
+        "age_days": age_days,
+        "expired": expires_dt is not None and expires_dt < now,
+        "tag_count": len(tags),
+        "logical_key_hash": _memory_governance_hash(identity_seed),
+        "content_digest": _memory_governance_hash(row),
+        "raw": row,
+        "created_dt": created_dt,
+        "updated_dt": updated_dt,
+    }
+
+
+def _memory_governance_public_entry(meta: dict[str, Any]) -> dict[str, Any]:
+    entry = {
+        "entry_ref": meta["entry_ref"],
+        "store_id": meta["store_id"],
+        "kind": meta["kind"],
+        "schema_version": meta["schema_version"],
+        "policy_version": meta["policy_version"],
+        "source": meta["source"],
+        "confidence": meta["confidence"],
+        "created_at": meta["created_at"],
+        "updated_at": meta["updated_at"],
+        "expires_at": meta["expires_at"],
+        "age_days": meta["age_days"],
+        "expired": meta["expired"],
+        "tag_count": meta["tag_count"],
+        "logical_key_hash": meta["logical_key_hash"],
+        "content_digest": meta["content_digest"],
+    }
+    if meta.get("timestamp_redacted_fields"):
+        entry["timestamp_redactions"] = [
+            {"field": field, "reason": "invalid_or_untrusted_timestamp"}
+            for field in sorted(meta["timestamp_redacted_fields"])
+        ]
+    return entry
+
+
+def _memory_governance_finding(
+    findings: list[dict[str, Any]],
+    *,
+    rule_id: str,
+    severity: str,
+    store_id: str,
+    entry_ref: str = "",
+    recommendation: str,
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    seed = {
+        "rule_id": rule_id,
+        "store_id": store_id,
+        "entry_ref": entry_ref,
+        "evidence": evidence or {},
+    }
+    findings.append(
+        {
+            "finding_id": _memory_governance_hash(seed),
+            "rule_id": rule_id,
+            "severity": severity,
+            "store_id": store_id,
+            "entry_ref": entry_ref,
+            "recommendation": recommendation,
+            "evidence": evidence or {},
+        }
+    )
+
+
+def _memory_governance_required_metadata_findings(
+    findings: list[dict[str, Any]],
+    meta: dict[str, Any],
+) -> None:
+    missing = []
+    if not meta.get("source"):
+        missing.append("source")
+    if meta.get("confidence") is None:
+        missing.append("confidence")
+    row = meta["raw"]
+    if not any(key in row and row.get(key) not in (None, "") for key in _MEMORY_GOVERNANCE_PROVENANCE_KEYS):
+        missing.append("provenance")
+    if missing:
+        _memory_governance_finding(
+            findings,
+            rule_id="missing_admission_metadata",
+            severity="medium",
+            store_id=meta["store_id"],
+            entry_ref=meta["entry_ref"],
+            recommendation="quarantine_before_consolidation",
+            evidence={"missing_fields": sorted(missing)},
+        )
+
+
+def _memory_governance_report_impl(
+    max_entries: int = 1000,
+    stale_days: int = 90,
+    include_entries: bool = True,
+) -> dict[str, Any]:
+    _require_git_repo()
+    if max_entries < 1 or max_entries > 10000:
+        raise ValueError("max_entries must be between 1 and 10000")
+    if stale_days < 1:
+        raise ValueError("stale_days must be >= 1")
+    now = datetime.now(timezone.utc)
+    findings: list[dict[str, Any]] = []
+    stores: list[dict[str, Any]] = []
+    public_entries: list[dict[str, Any]] = []
+    all_meta: list[dict[str, Any]] = []
+
+    for spec in _MEMORY_GOVERNANCE_STORE_SPECS:
+        _resolved, payload, file_meta = _memory_governance_load_json(spec["path"])
+        entries = _memory_governance_extract_entries(str(spec["store_id"]), payload)
+        store = {
+            "store_id": spec["store_id"],
+            "store_type": spec["store_type"],
+            "path": file_meta["path"],
+            "exists": file_meta["exists"],
+            "readable": file_meta["readable"],
+            "parse_error": file_meta["parse_error"],
+            "schema_version": _memory_governance_scalar((payload or {}).get("schema") or (payload or {}).get("schema_version")),
+            "policy_version": _memory_governance_scalar((payload or {}).get("policy_version") or (payload or {}).get("memory_policy_version")),
+            "expected_schema": spec["expected_schema"],
+            "expected_policy_version": spec["expected_policy_version"],
+            "entry_count": len(entries),
+            "sha256": file_meta["sha256"],
+            "size_bytes": file_meta["size_bytes"],
+            "status": "missing" if not file_meta["exists"] else "ok",
+        }
+        if file_meta["parse_error"]:
+            store["status"] = "invalid"
+            _memory_governance_finding(
+                findings,
+                rule_id="invalid_memory_store_json",
+                severity="high",
+                store_id=str(spec["store_id"]),
+                recommendation="quarantine_before_consolidation",
+                evidence={"path": file_meta["path"]},
+            )
+        if entries and not store["schema_version"]:
+            _memory_governance_finding(
+                findings,
+                rule_id="missing_schema_version",
+                severity="medium",
+                store_id=str(spec["store_id"]),
+                recommendation="require_schema_version_before_consolidation",
+                evidence={"expected_schema": spec["expected_schema"]},
+            )
+        if entries and store["schema_version"] and store["schema_version"] != spec["expected_schema"]:
+            _memory_governance_finding(
+                findings,
+                rule_id="schema_version_drift",
+                severity="medium",
+                store_id=str(spec["store_id"]),
+                recommendation="refresh_or_revalidate_before_consolidation",
+                evidence={"expected_schema": spec["expected_schema"], "actual_schema": store["schema_version"]},
+            )
+        if entries and not store["policy_version"]:
+            _memory_governance_finding(
+                findings,
+                rule_id="missing_policy_version",
+                severity="medium",
+                store_id=str(spec["store_id"]),
+                recommendation="require_policy_version_before_consolidation",
+                evidence={"expected_policy_version": spec["expected_policy_version"]},
+            )
+        if entries and store["policy_version"] and store["policy_version"] != spec["expected_policy_version"]:
+            _memory_governance_finding(
+                findings,
+                rule_id="policy_version_drift",
+                severity="medium",
+                store_id=str(spec["store_id"]),
+                recommendation="refresh_or_revalidate_before_consolidation",
+                evidence={"expected_policy_version": spec["expected_policy_version"], "actual_policy_version": store["policy_version"]},
+            )
+        stores.append(store)
+        for item in entries[:max_entries]:
+            meta = _memory_governance_entry_metadata(
+                str(spec["store_id"]),
+                item,
+                now,
+                str(store["schema_version"]),
+                str(store["policy_version"]),
+            )
+            all_meta.append(meta)
+
+    task_store, task_entries = _memory_governance_task_entries(max_entries)
+    stores.append(task_store)
+    for item in task_entries[:max_entries]:
+        meta = _memory_governance_entry_metadata(
+            "workflow_tasks",
+            item,
+            now,
+            str(task_store.get("schema_version") or ""),
+            str(task_store.get("policy_version") or ""),
+        )
+        all_meta.append(meta)
+
+    for meta in all_meta[:max_entries]:
+        if include_entries:
+            public_entries.append(_memory_governance_public_entry(meta))
+        _memory_governance_required_metadata_findings(findings, meta)
+        if meta.get("schema_version") == "":
+            _memory_governance_finding(
+                findings,
+                rule_id="entry_missing_schema_version",
+                severity="low",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="require_schema_version_before_consolidation",
+            )
+        if meta.get("policy_version") == "":
+            _memory_governance_finding(
+                findings,
+                rule_id="entry_missing_policy_version",
+                severity="low",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="require_policy_version_before_consolidation",
+            )
+        if meta.get("policy_version") not in {"", MEMORY_GOVERNANCE_POLICY_VERSION}:
+            _memory_governance_finding(
+                findings,
+                rule_id="entry_policy_version_drift",
+                severity="medium",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="refresh_or_revalidate_before_consolidation",
+                evidence={"expected_policy_version": MEMORY_GOVERNANCE_POLICY_VERSION, "actual_policy_version": meta.get("policy_version")},
+            )
+        if meta.get("timestamp_redacted_fields"):
+            _memory_governance_finding(
+                findings,
+                rule_id="invalid_timestamp_metadata",
+                severity="medium",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="revalidate_or_expire_before_consolidation",
+                evidence={
+                    "fields": sorted(meta["timestamp_redacted_fields"]),
+                    "raw_values_included": False,
+                },
+            )
+        if meta.get("expired"):
+            _memory_governance_finding(
+                findings,
+                rule_id="expired_memory_entry",
+                severity="medium",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="expire_before_consolidation",
+                evidence={"expires_at": meta.get("expires_at", "")},
+            )
+        if isinstance(meta.get("age_days"), (int, float)) and float(meta["age_days"]) > stale_days:
+            _memory_governance_finding(
+                findings,
+                rule_id="stale_memory_entry",
+                severity="medium",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="revalidate_or_expire_before_consolidation",
+                evidence={"age_days": meta["age_days"], "stale_days": stale_days},
+            )
+        row_json = json.dumps(meta["raw"], ensure_ascii=True, sort_keys=True, default=str)
+        if _MEMORY_GOVERNANCE_SENSITIVE_HINT_RE.search(row_json) or SENSITIVE_AUDIT_VALUE_RE.search(row_json):
+            _memory_governance_finding(
+                findings,
+                rule_id="sensitive_admission_risk",
+                severity="high",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="quarantine_before_consolidation",
+                evidence={"detected": True, "raw_content_included": False},
+            )
+        signals = _prompt_injection_signals_for_text(
+            row_json,
+            tool_name="memory_governance_report",
+            input_scope=meta["store_id"],
+            max_evidence=0,
+        )
+        signal_counts = _prompt_injection_signal_counts(signals)
+        if signal_counts.get("detected"):
+            _memory_governance_finding(
+                findings,
+                rule_id="untrusted_content_contamination",
+                severity="high" if signal_counts.get("severity") == "high" else "medium",
+                store_id=meta["store_id"],
+                entry_ref=meta["entry_ref"],
+                recommendation="quarantine_before_consolidation",
+                evidence={"prompt_injection_signal_counts": signal_counts},
+            )
+        for raw_path in _memory_governance_find_paths(meta["raw"]):
+            path_evidence = {"path_hash": _memory_governance_hash(raw_path), "raw_path_included": False}
+            try:
+                candidate = _resolve_repo_path(raw_path)
+            except ValueError:
+                _memory_governance_finding(
+                    findings,
+                    rule_id="path_scope_conflict",
+                    severity="high",
+                    store_id=meta["store_id"],
+                    entry_ref=meta["entry_ref"],
+                    recommendation="quarantine_before_consolidation",
+                    evidence={**path_evidence, "reason": "outside_repo_boundary"},
+                )
+                continue
+            if not candidate.exists():
+                _memory_governance_finding(
+                    findings,
+                    rule_id="current_repo_path_conflict",
+                    severity="medium",
+                    store_id=meta["store_id"],
+                    entry_ref=meta["entry_ref"],
+                    recommendation="revalidate_or_expire_before_consolidation",
+                    evidence={**path_evidence, "exists": False},
+                )
+
+    duplicate_groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for meta in all_meta[:max_entries]:
+        row = meta["raw"]
+        logical = row.get("key") or row.get("focus") or row.get("topic") or row.get("id") or row.get("task_id")
+        namespace = row.get("namespace") or meta["store_id"]
+        if logical:
+            duplicate_groups.setdefault((meta["store_id"], str(namespace), str(logical)), []).append(meta)
+    for group in duplicate_groups.values():
+        if len(group) < 2:
+            continue
+        digests = sorted({str(item["content_digest"]) for item in group})
+        _memory_governance_finding(
+            findings,
+            rule_id="conflicting_duplicate_memory_fact" if len(digests) > 1 else "duplicate_memory_fact",
+            severity="medium" if len(digests) > 1 else "low",
+            store_id=str(group[0]["store_id"]),
+            recommendation="review_duplicate_before_consolidation",
+            evidence={
+                "entry_refs": sorted(str(item["entry_ref"]) for item in group),
+                "distinct_content_digest_count": len(digests),
+                "raw_content_included": False,
+            },
+        )
+
+    findings.sort(key=lambda item: (item["severity"], item["rule_id"], item["store_id"], item.get("entry_ref", "")))
+    for store in stores:
+        store_findings = [item for item in findings if item.get("store_id") == store.get("store_id")]
+        if store.get("status") == "missing":
+            continue
+        store["finding_count"] = len(store_findings)
+        store["status"] = "findings" if store_findings else store.get("status", "ok")
+    severity_counts: dict[str, int] = {}
+    recommendation_counts: dict[str, int] = {}
+    rule_counts: dict[str, int] = {}
+    for finding in findings:
+        severity_counts[str(finding["severity"])] = severity_counts.get(str(finding["severity"]), 0) + 1
+        recommendation_counts[str(finding["recommendation"])] = recommendation_counts.get(str(finding["recommendation"]), 0) + 1
+        rule_counts[str(finding["rule_id"])] = rule_counts.get(str(finding["rule_id"]), 0) + 1
+    status = "clean" if not findings else ("quarantine_recommended" if any(f["recommendation"] == "quarantine_before_consolidation" for f in findings) else "review_recommended")
+    report: dict[str, Any] = {
+        "schema": MEMORY_GOVERNANCE_REPORT_SCHEMA,
+        "generated_at": _now_iso(),
+        "read_only": True,
+        "advisory_only": True,
+        "policy_version": MEMORY_GOVERNANCE_POLICY_VERSION,
+        "inputs": {"max_entries": max_entries, "stale_days": stale_days, "include_entries": include_entries},
+        "summary": {
+            "status": status,
+            "ok": not findings,
+            "store_count": len(stores),
+            "existing_store_count": sum(1 for store in stores if store.get("exists")),
+            "entry_count": len(all_meta[:max_entries]),
+            "finding_count": len(findings),
+            "by_severity": dict(sorted(severity_counts.items())),
+            "by_rule": dict(sorted(rule_counts.items())),
+            "by_recommendation": dict(sorted(recommendation_counts.items())),
+            "quarantine_recommended_count": recommendation_counts.get("quarantine_before_consolidation", 0),
+            "expiry_recommended_count": sum(
+                count for rec, count in recommendation_counts.items() if "expire" in rec
+            ),
+            "timestamp_redacted_field_count": sum(
+                len(meta.get("timestamp_redacted_fields", [])) for meta in all_meta[:max_entries]
+            ),
+            "raw_memory_content_included": False,
+        },
+        "stores": stores,
+        "findings": findings,
+        "security": {
+            "redaction": "report contains store metadata, hashes, counts, safe timestamps, and redacted scalar metadata only",
+            "invalid_timestamp_values_included": False,
+            "raw_memory_content_included": False,
+            "host_absolute_paths_included": False,
+            "mutates_memory": False,
+        },
+    }
+    if include_entries:
+        report["entries"] = public_entries
+    return report
+
 def _governance_report_impl(
     start_time: str = "",
     end_time: str = "",
@@ -27857,6 +28540,7 @@ def _governance_report_impl(
         "agents_context_health": summarize_agents_context_health(
             analyze_agents_context(REPO_PATH)
         ),
+        "memory_governance": _memory_governance_report_impl(max_entries=1000, stale_days=90, include_entries=False)["summary"],
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),
@@ -28322,6 +29006,31 @@ def governance_report(
         _otel_set_result_attributes(span, result)
         return result
 
+
+
+@mcp.tool()
+def memory_governance_report(
+    max_entries: int = 1000,
+    stale_days: int = 90,
+    include_entries: bool = True,
+) -> dict[str, Any]:
+    """Inventory repository memory stores and flag consolidation governance risks without mutating memory."""
+    arguments = {
+        "max_entries": max_entries,
+        "stale_days": stale_days,
+        "include_entries": include_entries,
+    }
+    with _otel_span(
+        "mcp.tool.memory_governance_report",
+        _otel_tool_attributes("memory_governance_report", arguments),
+    ) as span:
+        result = _memory_governance_report_impl(
+            max_entries=max_entries,
+            stale_days=stale_days,
+            include_entries=include_entries,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
 
 @mcp.tool()
 def workflow_lineage(mode: str = "verify", manifest_path: str = "") -> dict[str, Any]:
