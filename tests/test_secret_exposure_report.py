@@ -122,11 +122,25 @@ class SecretExposureReportTests(ServerToolsTestBase):
         report = self.server.secret_exposure_report(paths=[str(outside)], baseline_ref="HEAD")
 
         self.assertEqual(report["summary"]["finding_count"], 0)
+        self.assertEqual(report["inputs"]["paths"], ["<redacted:outside_repo>"])
         self.assertEqual(report["skipped"], [{"path": "<redacted:outside_repo>", "reason": "outside_repo_boundary"}])
         self.assertTrue(report["security"]["repo_boundary_enforced"])
         self.assertFalse(report["security"]["host_absolute_paths_exposed"])
         self.assertNotIn(str(outside), json.dumps(report, sort_keys=True))
         self._assert_report_is_redacted(report, raw_value)
+
+    def test_outside_repository_paths_are_redacted_in_exports(self):
+        raw_value = self._fake_openai_key()
+        outside = self.repo_path.parent / "outside-export-secret.txt"
+        outside.write_text(raw_value + "\n", encoding="utf-8")
+
+        report = self.server.secret_exposure_report(paths=[str(outside)], baseline_ref="HEAD", export=True)
+
+        exported = (self.repo_path / report["exports"]["json"]).read_text(encoding="utf-8")
+        self.assertEqual(report["inputs"]["paths"], ["<redacted:outside_repo>"])
+        self.assertNotIn(str(outside), exported)
+        self.assertNotIn(raw_value, exported)
+        self.assertFalse(report["security"]["host_absolute_paths_exposed"])
 
     def test_exports_are_redacted_and_linked(self):
         raw_value = self._fake_openai_key()

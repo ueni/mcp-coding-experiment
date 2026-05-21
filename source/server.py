@@ -13833,6 +13833,18 @@ def _secret_exposure_scan_text(text: str, rel_path: str, *, source: str) -> list
     return findings
 
 
+def _secret_exposure_public_input_paths(paths: list[str] | None) -> list[str]:
+    raw_paths = paths or ["."]
+    public_paths: list[str] = []
+    for raw in raw_paths:
+        try:
+            path = _resolve_repo_path(str(raw or "."))
+            public_paths.append(str(path.relative_to(REPO_PATH)).replace("\\", "/") or ".")
+        except ValueError:
+            public_paths.append("<redacted:outside_repo>")
+    return public_paths
+
+
 def _secret_exposure_normalize_paths(paths: list[str] | None) -> tuple[list[Path], list[dict[str, Any]]]:
     skipped: list[dict[str, Any]] = []
     raw_paths = paths or ["."]
@@ -13843,8 +13855,9 @@ def _secret_exposure_normalize_paths(paths: list[str] | None) -> tuple[list[Path
         except ValueError:
             skipped.append({"path": "<redacted:outside_repo>", "reason": "outside_repo_boundary"})
             continue
+        rel = str(path.relative_to(REPO_PATH)).replace("\\", "/") or "."
         if not path.exists():
-            skipped.append({"path": str(Path(str(raw)).as_posix()), "reason": "missing"})
+            skipped.append({"path": rel, "reason": "missing"})
             continue
         resolved.append(path)
     return resolved, skipped
@@ -14165,7 +14178,7 @@ def _secret_exposure_report_impl(
         "gate": gate,
         "findings": findings,
         "inputs": {
-            "paths": paths or ["."],
+            "paths": _secret_exposure_public_input_paths(paths),
             "include_globs": include_globs or [],
             "exclude_globs": exclude_globs or [],
             "allowlist_path": allowlist_meta.get("path", ""),
