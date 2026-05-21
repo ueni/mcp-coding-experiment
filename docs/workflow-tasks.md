@@ -32,11 +32,12 @@ For Streamable HTTP clients, the server enables the MCP SDK's resumable SSE path
 for this workflow-task progress slice. Keep the `Mcp-Session-Id` returned by the
 server and, after a disconnect, reconnect to the same MCP stream with
 `Last-Event-ID` set to the last received SSE `id`. The replay journal is local,
-bounded, and scoped to the original workflow task request stream; it retains
-priming markers plus redacted workflow-task lifecycle/progress messages, not raw
-prompts, bearer tokens, stdout/stderr, or host paths. If the event id has expired
-or the current SDK/client path cannot resume the stream, keep the task running
-and call `task_status(task_id="task-...")` to recover the latest persisted state.
+bounded, and scoped to the original MCP session plus workflow task request
+stream; it retains priming markers plus redacted workflow-task
+lifecycle/progress messages, not raw prompts, bearer tokens, stdout/stderr, or
+host paths. If the event id has expired, belongs to a different MCP session, or
+the current SDK/client path cannot resume the stream, keep the task running and
+call `task_status(task_id="task-...")` to recover the latest persisted state.
 
 Cancel a running task with:
 

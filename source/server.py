@@ -1294,6 +1294,33 @@ TASK_RETRIEVAL_CODE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".go", ".java", ".js", ".jsx", ".py", ".rb", ".rs", ".sh", ".ts", ".tsx"
 }
 TASK_RETRIEVAL_DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".odt", ".ods", ".odp"}
+_STREAMABLE_HTTP_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "streamable_http_session_id",
+    default="",
+)
+
+
+def _streamable_http_current_session_id() -> str:
+    return str(_STREAMABLE_HTTP_SESSION_ID.get() or "")
+
+
+def _streamable_http_session_id_from_scope(scope: dict[str, Any]) -> str:
+    expected = b"mcp-session-id"
+    values: list[str] = []
+    for raw_name, raw_value in scope.get("headers", []) or []:
+        try:
+            name = bytes(raw_name).lower()
+        except Exception:
+            continue
+        if name != expected:
+            continue
+        try:
+            value = bytes(raw_value).decode("latin-1").strip()
+        except Exception:
+            value = str(raw_value or "").strip()
+        if value:
+            values.append(value)
+    return values[-1] if values else ""
 
 
 class _BoundedWorkflowTaskEventStore(EventStore):
@@ -1314,24 +1341,29 @@ class _BoundedWorkflowTaskEventStore(EventStore):
         self._events: list[dict[str, Any]] = []
         self._seq = 0
 
-    def _workflow_task_id_for_stream(self, stream_id: str) -> str:
+    def _workflow_task_scope_for_stream(self, stream_id: str) -> tuple[str, str]:
         with _WORKFLOW_TASK_LOCK:
             _workflow_task_prune_request_mappings_locked()
-            return str(_WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(stream_id) or "")
+            return (
+                str(_WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(stream_id) or ""),
+                str(_WORKFLOW_TASK_REQUEST_TO_SESSION_ID.get(stream_id) or ""),
+            )
 
-    def _scope_for(self, stream_id: str, task_id: str) -> str:
-        return hashlib.sha256(f"{stream_id}\0{task_id}".encode("utf-8")).hexdigest()[:24]
+    def _scope_for(self, session_id: str, stream_id: str, task_id: str) -> str:
+        return hashlib.sha256(f"{session_id}\0{stream_id}\0{task_id}".encode("utf-8")).hexdigest()[:24]
 
-    def _message_is_replayable(self, stream_id: str, message: Any) -> tuple[bool, str]:
+    def _message_is_replayable(self, stream_id: str, message: Any) -> tuple[bool, str, str]:
+        current_session_id = _streamable_http_current_session_id()
         if message is None:
-            return True, ""
-        task_id = self._workflow_task_id_for_stream(stream_id)
-        if not task_id:
-            return False, ""
+            return bool(current_session_id), "", current_session_id
+        task_id, mapped_session_id = self._workflow_task_scope_for_stream(stream_id)
+        session_id = mapped_session_id or current_session_id
+        if not task_id or not session_id:
+            return False, "", ""
         # Progress notifications carry coarse lifecycle state for the task. The
         # initial workflow_task response on the same mapped request stream is
         # also redacted before persistence by the workflow_task implementation.
-        return True, task_id
+        return True, task_id, session_id
 
     def _prune_locked(self, now: float) -> None:
         cutoff = now - self.retention_seconds
@@ -1340,22 +1372,27 @@ class _BoundedWorkflowTaskEventStore(EventStore):
             self._events = self._events[-self.max_events :]
 
     async def store_event(self, stream_id: str, message: Any | None) -> str:
-        replayable, task_id = self._message_is_replayable(str(stream_id), message)
+        replayable, task_id, session_id = self._message_is_replayable(str(stream_id), message)
         with self._lock:
             self._seq += 1
             event_id = f"wft-{self._seq:020d}-{uuid.uuid4().hex[:16]}"
             if replayable:
                 now = time.monotonic()
                 stream_id_text = str(stream_id)
-                scope = self._scope_for(stream_id_text, task_id)
+                scope = self._scope_for(session_id, stream_id_text, task_id)
                 if task_id:
                     for row in self._events:
-                        if row.get("stream_id") == stream_id_text and not row.get("task_id"):
+                        if (
+                            row.get("stream_id") == stream_id_text
+                            and row.get("session_id") == session_id
+                            and not row.get("task_id")
+                        ):
                             row["task_id"] = task_id
                             row["scope"] = scope
                 self._events.append(
                     {
                         "event_id": event_id,
+                        "session_id": session_id,
                         "stream_id": stream_id_text,
                         "task_id": task_id,
                         "scope": scope,
@@ -1376,17 +1413,22 @@ class _BoundedWorkflowTaskEventStore(EventStore):
             if start is None:
                 return None
             anchor = self._events[start]
+            session_id = str(anchor.get("session_id") or "")
             stream_id = str(anchor.get("stream_id") or "")
             scope = str(anchor.get("scope") or "")
             task_id = str(anchor.get("task_id") or "")
-            if not stream_id or not task_id or not scope:
+            if not session_id or not stream_id or not task_id or not scope:
                 return None
-            if self._workflow_task_id_for_stream(stream_id) != task_id:
+            if _streamable_http_current_session_id() != session_id:
+                return None
+            current_task_id, current_session_id = self._workflow_task_scope_for_stream(stream_id)
+            if current_task_id != task_id or current_session_id != session_id:
                 return None
             replay = [
                 row
                 for row in self._events[start + 1 :]
-                if row.get("stream_id") == stream_id
+                if row.get("session_id") == session_id
+                and row.get("stream_id") == stream_id
                 and (not task_id or row.get("scope") == scope)
             ]
         for row in replay:
@@ -1400,9 +1442,11 @@ class _BoundedWorkflowTaskEventStore(EventStore):
         with self._lock:
             self._prune_locked(time.monotonic())
             streams = {str(row.get("stream_id") or "") for row in self._events}
+            sessions = {str(row.get("session_id") or "") for row in self._events if row.get("session_id")}
             tasks = {str(row.get("task_id") or "") for row in self._events if row.get("task_id")}
             return {
                 "events": len(self._events),
+                "sessions": len(sessions),
                 "streams": len(streams),
                 "tasks": len(tasks),
                 "max_events": self.max_events,
@@ -11605,6 +11649,9 @@ class MCPHTTPAuthMiddleware:
         )
         token = _HTTP_REQUEST_AUTHORIZED.set(True)
         scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
+        streamable_session_token = _STREAMABLE_HTTP_SESSION_ID.set(
+            _streamable_http_session_id_from_scope(scope)
+        )
         try:
             if path == "/sse":
                 await self.app(scope, receive, send)
@@ -11638,6 +11685,7 @@ class MCPHTTPAuthMiddleware:
             )
             await response(scope, receive, send)
         finally:
+            _STREAMABLE_HTTP_SESSION_ID.reset(streamable_session_token)
             _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
 
@@ -12476,6 +12524,7 @@ _WORKFLOW_TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _WORKFLOW_TASK_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 _WORKFLOW_TASK_PROGRESS_BRIDGES: dict[str, dict[str, Any]] = {}
 _WORKFLOW_TASK_REQUEST_TO_TASK_ID: dict[str, str] = {}
+_WORKFLOW_TASK_REQUEST_TO_SESSION_ID: dict[str, str] = {}
 _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT: dict[str, float] = {}
 _WORKFLOW_TASK_CURRENT_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "workflow_task_current_id",
@@ -12559,6 +12608,18 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
         session = getattr(request_context, "session", None)
     if session is None or not hasattr(session, "send_progress_notification"):
         return None
+    session_id = _streamable_http_current_session_id()
+    if not session_id:
+        for source in (request_context, context, session):
+            if source is None:
+                continue
+            for attr in ("mcp_session_id", "session_id"):
+                value = getattr(source, attr, None)
+                if isinstance(value, (str, int)) and str(value):
+                    session_id = str(value)
+                    break
+            if session_id:
+                break
     request_id = getattr(context, "request_id", None)
     if request_id is None and request_context is not None:
         request_id = getattr(request_context, "request_id", None)
@@ -12570,6 +12631,7 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
         loop = None
     return {
         "session": session,
+        "session_id": session_id,
         "progress_token": progress_token,
         "request_id": "" if request_id is None else str(request_id),
         "loop": loop,
@@ -12588,6 +12650,7 @@ def _workflow_task_prune_request_mappings_locked(now: float | None = None) -> No
     ]
     for request_id in stale:
         _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+        _WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
         _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
     max_mappings = max(16, MCP_STREAM_REPLAY_MAX_EVENTS * 2)
     overflow = len(_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT) - max_mappings
@@ -12595,6 +12658,7 @@ def _workflow_task_prune_request_mappings_locked(now: float | None = None) -> No
         oldest = sorted(_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.items(), key=lambda item: item[1])[:overflow]
         for request_id, _updated_at in oldest:
             _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+            _WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
             _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
 
 
@@ -12606,8 +12670,10 @@ def _workflow_task_register_protocol_bridge(task_id: str) -> None:
         _workflow_task_prune_request_mappings_locked()
         _WORKFLOW_TASK_PROGRESS_BRIDGES[task_id] = bridge
         request_id = str(bridge.get("request_id") or "")
+        session_id = str(bridge.get("session_id") or "")
         if request_id:
             _WORKFLOW_TASK_REQUEST_TO_TASK_ID[request_id] = task_id
+            _WORKFLOW_TASK_REQUEST_TO_SESSION_ID[request_id] = session_id
             _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[request_id] = time.monotonic()
 
 
