@@ -67,8 +67,8 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "dependency_security_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "vulnerabilities", "advisory", "gate", "exports", "resource_links"),
     "ci_workflow_security_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "findings", "workflows", "exports"),
     "mcp_threat_model_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "dread_rubric", "threats", "findings", "exports"),
-    "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "exports", "resource_links"),
-    "self_optimization_report": ("schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "security"),
+    "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "agents_context_health", "exports", "resource_links"),
+    "self_optimization_report": ("schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "agents_context_health", "security"),
     "agents_context_health": ("schema", "read_only", "advisory_only", "target", "budget", "summary", "instruction_categories", "duplicate_guidance", "stale_guidance", "risky_global_instructions", "move_candidates", "safety"),
     "artifact_provenance": ("schema", "provenance_schema", "attestation_schema", "artifact_count", "ok", "checks"),
     "workflow_diagnostics": ("schema", "ok", "critical_step_candidate", "failure_category", "evidence", "safe_next_actions", "redactions_applied"),
@@ -550,7 +550,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "governance_report": _object_schema(
-        ["schema", "report_id", "generated_at", "audit", "governance_hooks", "exports"],
+        ["schema", "report_id", "generated_at", "audit", "governance_hooks", "agents_context_health", "exports"],
         {
             "schema": {"type": "string", "const": "governance_report.v1"},
             "report_id": {"type": "string"},
@@ -562,6 +562,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "governance_hooks": {"type": "object"},
             "ci_workflow_security": {"type": "object"},
             "untrusted_content_signals": {"type": "object"},
+            "agents_context_health": {"type": "object"},
             "snapshots": {"type": "object"},
             "security": {"type": "object"},
             "exports": {"type": "object"},
@@ -572,7 +573,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "self_optimization_report": _object_schema(
-        ["schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "security"],
+        ["schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "agents_context_health", "security"],
         {
             "schema": {"type": "string", "const": "self_optimization_report.v1"},
             "report_id": {"type": "string"},
@@ -585,6 +586,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "caveats": {"type": "array", "items": {"type": "string"}},
             "bottlenecks": {"type": "array", "items": {"type": "object"}},
             "optimization_candidates": {"type": "array", "items": {"type": "object"}},
+            "agents_context_health": {"type": "object"},
             "github_issue_gate": {"type": "object"},
             "patch_survivorship": {"type": "object"},
             "usage_guidance": {"type": "object"},

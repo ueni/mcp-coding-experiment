@@ -112,7 +112,7 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
 from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field, RootModel
-from source.agents_context_health import analyze_agents_context
+from source.agents_context_health import analyze_agents_context, summarize_agents_context_health
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
     TOOL_OUTPUT_SCHEMAS,
@@ -6849,6 +6849,9 @@ def _self_optimization_report_impl(
             "recommended_call": "self_optimization_report(window_hours=168, export=true)",
             "issue_creation_policy": "GitHub issue create/update is off by default. Use github_issue_update_mode='dry_run' to inspect high-confidence actions or 'apply' with explicit repository/token configuration and mutation permission.",
         },
+        "agents_context_health": summarize_agents_context_health(
+            analyze_agents_context(REPO_PATH)
+        ),
         "security": {
             "offline_capable": True,
             "network_used": False,
@@ -27851,6 +27854,9 @@ def _governance_report_impl(
         "governance_hooks": _governance_result_store_summary(),
         "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
+        "agents_context_health": summarize_agents_context_health(
+            analyze_agents_context(REPO_PATH)
+        ),
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),

@@ -2460,7 +2460,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:ed4374ba8470ae325c7844ac7e32dea05c4f9edb03be9790e267770a67e63a02",
+      "digest": "sha256:000f83aeb42b220c031408b2b02469ffbd32c64875726689c09cf98adeb6590d",
       "metadata": {
         "documentation": [
           {
@@ -2519,6 +2519,9 @@
             "additionalProperties": true,
             "properties": {
               "_meta": {
+                "type": "object"
+              },
+              "agents_context_health": {
                 "type": "object"
               },
               "audit": {
@@ -2637,6 +2640,7 @@
               "generated_at",
               "audit",
               "governance_hooks",
+              "agents_context_health",
               "exports"
             ],
             "type": "object"
@@ -2700,6 +2704,9 @@
               "_meta": {
                 "type": "object"
               },
+              "agents_context_health": {
+                "type": "object"
+              },
               "audit": {
                 "type": "object"
               },
@@ -2816,6 +2823,7 @@
               "generated_at",
               "audit",
               "governance_hooks",
+              "agents_context_health",
               "exports"
             ],
             "type": "object"
@@ -2827,6 +2835,7 @@
             "generated_at",
             "audit",
             "governance_hooks",
+            "agents_context_health",
             "exports",
             "resource_links"
           ],
@@ -7123,7 +7132,7 @@
       "name": "runtime_state"
     },
     {
-      "digest": "sha256:b8fd65a658150d88d36ce0ae2012eca44b1583128e5e95953bf82c44c4720a6d",
+      "digest": "sha256:fc3b6a1a38e0f3a883089e8aa4980616f51e6f20122010c30975060626ac0a47",
       "metadata": {
         "documentation": [
           {
@@ -7240,6 +7249,9 @@
               "_meta": {
                 "type": "object"
               },
+              "agents_context_health": {
+                "type": "object"
+              },
               "bottlenecks": {
                 "items": {
                   "type": "object"
@@ -7370,6 +7382,7 @@
               "summary",
               "metrics",
               "optimization_candidates",
+              "agents_context_health",
               "security"
             ],
             "type": "object"
@@ -7431,6 +7444,9 @@
               "_meta": {
                 "type": "object"
               },
+              "agents_context_health": {
+                "type": "object"
+              },
               "bottlenecks": {
                 "items": {
                   "type": "object"
@@ -7561,6 +7577,7 @@
               "summary",
               "metrics",
               "optimization_candidates",
+              "agents_context_health",
               "security"
             ],
             "type": "object"
@@ -7574,6 +7591,7 @@
             "summary",
             "metrics",
             "optimization_candidates",
+            "agents_context_health",
             "security"
           ],
           "tool": "self_optimization_report"
@@ -10956,5 +10974,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:21d4e8ffb5fac200d4ca2adb8d8f8a48ab80f786a972eebb627c7475a81317d4"
+  "whole_catalog_digest": "sha256:72c4e0b4e9d0e5962e333ce15d7b26a815a11300275c9b7e29272b81ee1916cf"
 }

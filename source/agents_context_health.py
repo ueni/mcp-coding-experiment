@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 REPORT_SCHEMA = "agents_context_health.v1"
+SUMMARY_SCHEMA = "agents_context_health.summary.v1"
 DEFAULT_AGENTS_PATH = "AGENTS.md"
 DEFAULT_TOKEN_BUDGET = 1600
 DEFAULT_BYTE_BUDGET = 6000
@@ -285,6 +286,77 @@ def analyze_agents_context(
         "move_candidates": move_candidates[:MAX_FINDINGS],
         "findings": findings[:MAX_FINDINGS],
         "safety": _safety_metadata(),
+    }
+
+
+def summarize_agents_context_health(report: dict[str, Any], *, max_categories: int = 8) -> dict[str, Any]:
+    """Return a compact schema-tagged AGENTS context-health summary.
+
+    The summary is safe to embed in broader governance reports: it preserves only
+    aggregate counts, budget metadata, repository-relative target metadata, and
+    safety flags. It intentionally excludes findings and line hashes so broader
+    reports do not echo AGENTS.md content or stable content fingerprints.
+    """
+
+    budget = report.get("budget", {}) if isinstance(report.get("budget"), dict) else {}
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    target = report.get("target", {}) if isinstance(report.get("target"), dict) else {}
+    safety = report.get("safety", {}) if isinstance(report.get("safety"), dict) else {}
+    categories = report.get("instruction_categories", [])
+    if not isinstance(categories, list):
+        categories = []
+
+    return {
+        "schema": SUMMARY_SCHEMA,
+        "source_schema": report.get("schema", REPORT_SCHEMA),
+        "advisory_only": bool(report.get("advisory_only", True)),
+        "target": {
+            "path": str(target.get("path", DEFAULT_AGENTS_PATH)),
+            "exists": bool(target.get("exists", False)),
+            "repo_boundary_enforced": bool(target.get("repo_boundary_enforced", True)),
+        },
+        "budget": {
+            "bytes": int(budget.get("bytes", 0) or 0),
+            "estimated_tokens": int(budget.get("estimated_tokens", 0) or 0),
+            "byte_budget": int(budget.get("byte_budget", DEFAULT_BYTE_BUDGET) or DEFAULT_BYTE_BUDGET),
+            "token_budget": int(budget.get("token_budget", DEFAULT_TOKEN_BUDGET) or DEFAULT_TOKEN_BUDGET),
+            "remaining_bytes": int(budget.get("remaining_bytes", 0) or 0),
+            "remaining_tokens": int(budget.get("remaining_tokens", 0) or 0),
+            "status": str(budget.get("status", "unknown")),
+        },
+        "summary": {
+            "ok": bool(summary.get("ok", False)),
+            "status": str(summary.get("status", "unknown")),
+            "line_count": int(summary.get("line_count", 0) or 0),
+            "finding_count": int(summary.get("finding_count", 0) or 0),
+            "severity_counts": dict(summary.get("severity_counts", {}) or {}),
+            "category_count": int(summary.get("category_count", len(categories)) or 0),
+        },
+        "instruction_categories": [
+            {
+                "category": str(row.get("category", "unknown")),
+                "line_count": int(row.get("line_count", 0) or 0),
+                "bullet_count": int(row.get("bullet_count", 0) or 0),
+                "estimated_tokens": int(row.get("estimated_tokens", 0) or 0),
+            }
+            for row in categories[:max_categories]
+            if isinstance(row, dict)
+        ],
+        "finding_counts": {
+            "duplicates": len(report.get("duplicate_guidance", []) if isinstance(report.get("duplicate_guidance"), list) else []),
+            "stale": len(report.get("stale_guidance", []) if isinstance(report.get("stale_guidance"), list) else []),
+            "risky_global_instructions": len(report.get("risky_global_instructions", []) if isinstance(report.get("risky_global_instructions"), list) else []),
+            "move_candidates": len(report.get("move_candidates", []) if isinstance(report.get("move_candidates"), list) else []),
+        },
+        "safety": {
+            "no_network": bool(safety.get("no_network", True)),
+            "no_upload": bool(safety.get("no_upload", True)),
+            "read_only": bool(safety.get("read_only", True)),
+            "repo_boundary_enforced": bool(safety.get("repo_boundary_enforced", True)),
+            "content_excerpts_included": bool(safety.get("content_excerpts_included", False)),
+            "contains_file_content": bool(safety.get("contains_file_content", False)),
+            "redacted": bool(safety.get("redacted", True)),
+        },
     }
 
 
