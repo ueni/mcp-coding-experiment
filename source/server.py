@@ -1303,8 +1303,8 @@ class _BoundedWorkflowTaskEventStore(EventStore):
     intentionally narrower than a generic JSON-RPC journal: it retains priming
     markers and messages on request streams currently mapped to a `workflow_task`
     id, so replay cannot retain unrelated tool output. Stored records are bounded
-    by count and age; replay is scoped to the same stream/task as the original
-    event id.
+    by count and age; replay is scoped to the currently retained request-stream
+    task mapping plus the original stream/task event scope.
     """
 
     def __init__(self, *, max_events: int, retention_seconds: int) -> None:
@@ -1379,6 +1379,10 @@ class _BoundedWorkflowTaskEventStore(EventStore):
             stream_id = str(anchor.get("stream_id") or "")
             scope = str(anchor.get("scope") or "")
             task_id = str(anchor.get("task_id") or "")
+            if not stream_id or not task_id or not scope:
+                return None
+            if self._workflow_task_id_for_stream(stream_id) != task_id:
+                return None
             replay = [
                 row
                 for row in self._events[start + 1 :]
