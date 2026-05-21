@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 33,
+  "tool_count": 34,
   "tools": [
     {
       "digest": "sha256:dfaa3c9983cb8279b2f3e5494e332605321a2b3ddd3064bbcfd26f29967957c4",
@@ -2178,7 +2178,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:ed4374ba8470ae325c7844ac7e32dea05c4f9edb03be9790e267770a67e63a02",
+      "digest": "sha256:d1d6f06bb8a773a88c1d47f03bcb82bd452f1ad9264ed365c162b9a5493ec0a4",
       "metadata": {
         "documentation": [
           {
@@ -2333,6 +2333,9 @@
                 "const": "governance_report.v1",
                 "type": "string"
               },
+              "secret_exposure": {
+                "type": "object"
+              },
               "security": {
                 "type": "object"
               },
@@ -2406,6 +2409,7 @@
             "workflow_diagnostics",
             "tool_catalog_integrity",
             "ci_workflow_security",
+            "secret_exposure",
             "untrusted_content_signals",
             "lineage",
             "provenance",
@@ -2511,6 +2515,9 @@
               "schema": {
                 "const": "governance_report.v1",
                 "type": "string"
+              },
+              "secret_exposure": {
+                "type": "object"
               },
               "security": {
                 "type": "object"
@@ -4694,7 +4701,7 @@
       "name": "model_assisted_summary"
     },
     {
-      "digest": "sha256:7fba51a3ab994cf6bbb84677b51fa5ef989a5b68cd58bac3090c383a13afa163",
+      "digest": "sha256:eac1572c05cae9872eb311ce9a73db336b7e7efa622ed991cf866f599a305847",
       "metadata": {
         "documentation": [
           {
@@ -4807,6 +4814,22 @@
                 "default": "",
                 "title": "Rollback Snapshot Id",
                 "type": "string"
+              },
+              "secret_exposure": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Secret Exposure"
               },
               "selected_tests": {
                 "anyOf": [
@@ -5758,7 +5781,7 @@
       "name": "read_snippet"
     },
     {
-      "digest": "sha256:a1cd38f78792d1b3309fd10c5647faadae54f3f15ec6da1b20befd6ca678e06c",
+      "digest": "sha256:3612f570c0d30dbf85c43e0da86601993400b63519a90e6580a058a8b4c70680",
       "metadata": {
         "documentation": [
           {
@@ -5814,6 +5837,11 @@
               "run_risk_check": {
                 "default": true,
                 "title": "Run Risk Check",
+                "type": "boolean"
+              },
+              "run_secret_exposure_check": {
+                "default": true,
+                "title": "Run Secret Exposure Check",
                 "type": "boolean"
               },
               "run_security_check": {
@@ -6839,6 +6867,473 @@
         }
       },
       "name": "runtime_state"
+    },
+    {
+      "digest": "sha256:d57a642e6027fb6d2db572510dee219da9e64685d515ebde0291686a30689b3f",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Secret exposure report",
+            "path": "docs/secret-exposure-report.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Build an offline, read-only redacted repository secret exposure report.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "allowlist_path": {
+                "default": "",
+                "title": "Allowlist Path",
+                "type": "string"
+              },
+              "baseline_ref": {
+                "default": "HEAD",
+                "title": "Baseline Ref",
+                "type": "string"
+              },
+              "block_on_high_confidence_new": {
+                "default": true,
+                "title": "Block On High Confidence New",
+                "type": "boolean"
+              },
+              "exclude_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Exclude Globs"
+              },
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              },
+              "include_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Include Globs"
+              },
+              "max_file_bytes": {
+                "default": 1048576,
+                "title": "Max File Bytes",
+                "type": "integer"
+              },
+              "paths": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Paths"
+              }
+            },
+            "title": "secret_exposure_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "secret_exposure_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "allowlist": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "gate": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "rules": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "secret_exposure_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "skipped": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "clean",
+                  "findings",
+                  "blocked",
+                  "skipped"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "gate",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "inputs",
+            "rules",
+            "allowlist",
+            "skipped",
+            "security",
+            "resource_links",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "allowlist": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "gate": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "rules": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "secret_exposure_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "skipped": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "clean",
+                  "findings",
+                  "blocked",
+                  "skipped"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "gate",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "status",
+            "ok",
+            "summary",
+            "findings",
+            "gate",
+            "exports"
+          ],
+          "tool": "secret_exposure_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "secret_exposure_report"
+        }
+      },
+      "name": "secret_exposure_report"
     },
     {
       "digest": "sha256:b8fd65a658150d88d36ce0ae2012eca44b1583128e5e95953bf82c44c4720a6d",
@@ -10674,5 +11169,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:e8b8ac89770a456a912fb1b6e235681c782ab58ea1f95f44019bcc81bc3dcb20"
+  "whole_catalog_digest": "sha256:72290ec930a8b83a448984c2fea255e4e8762d591972e816f9bf5191eeaf897c"
 }

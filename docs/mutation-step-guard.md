@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT
 
 `mutation_step_guard` is a deterministic, read-only final checkpoint before a planned workspace mutation. It is intended to run immediately before write/delete/git/workspace-transaction operations and never executes the planned mutation.
 
-Inputs summarize the planned mutating tool/mode, normalized argument summary, declared intent, target files, expected diff shape, rollback or snapshot id, selected tests or impact-gate status, recent `interaction_invariant_audit` summary, and freshness/context metadata.
+Inputs summarize the planned mutating tool/mode, normalized argument summary, declared intent, target files, expected diff shape, rollback or snapshot id, selected tests or impact-gate status, recent `interaction_invariant_audit` summary, optional `secret_exposure_report` evidence, and freshness/context metadata.
 
 Outputs include:
 
@@ -18,7 +18,7 @@ Outputs include:
 - `targeted_reflection_checklist`: concise checks the agent should perform before mutating.
 - `safe_next_actions`: deterministic next steps for the selected decision.
 
-The guard is conservative: unsafe repository escapes or secret-like paths are denied; stale context, missing snapshots, missing/stale tests, and unclear intent produce a blocking precondition decision; scoped low-risk edits with fresh context, clear invariant-audit status, expected diff shape, and test evidence can return `allow`.
+The guard is conservative: unsafe repository escapes, secret-like paths, or in-scope high-confidence newly introduced secrets from `secret_exposure_report` are denied; stale context, missing snapshots, missing/stale tests, and unclear intent produce a blocking precondition decision; scoped low-risk edits with fresh context, clear invariant-audit status, expected diff shape, clean secret-exposure evidence, and test evidence can return `allow`.
 
 Example low-risk call shape:
 
