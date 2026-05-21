@@ -528,6 +528,111 @@ class WorkflowTaskTests(ServerToolsTestBase):
         self.assertEqual(current_stream, "stream-a")
         self.assertEqual(replay_from_current_session, [])
 
+    def test_streamable_http_transport_blocks_last_event_id_across_mcp_sessions_with_same_request_id(self):
+        store = self.server._BoundedWorkflowTaskEventStore(max_events=10, retention_seconds=3600)
+        request_id = "jsonrpc-request-42"
+        msg_a1 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 10}))
+        msg_a2 = SimpleNamespace(root=SimpleNamespace(method="notifications/progress", params={"progress": 30}))
+        observed_sessions = []
+        session_a_event_ids = []
+        replayed_into_session_b = []
+        replay_result = {"stream_id": "not-run"}
+
+        async def _http_request(session_id, payload, app, *, last_event_id=""):
+            body = json.dumps(payload).encode("utf-8")
+            consumed = False
+            messages = []
+            headers = [
+                (b"content-type", b"application/json"),
+                (b"mcp-session-id", session_id.encode("latin-1")),
+            ]
+            if last_event_id:
+                headers.append((b"last-event-id", last_event_id.encode("latin-1")))
+            scope = {
+                "type": "http",
+                "path": "/mcp",
+                "method": "POST",
+                "headers": headers,
+                "client": ("127.0.0.1", 12345),
+            }
+
+            async def receive():
+                nonlocal consumed
+                if consumed:
+                    return {"type": "http.disconnect"}
+                consumed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            async def send(message):
+                messages.append(message)
+
+            await self.server.MCPHTTPAuthMiddleware(app)(scope, receive, send)
+            return messages
+
+        async def session_a_app(_scope, receive, send):
+            request = await receive()
+            jsonrpc_id = str(json.loads(request.get("body", b"{}").decode("utf-8"))["id"])
+            observed_sessions.append(self.server._streamable_http_current_session_id())
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID[jsonrpc_id] = "task-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID[jsonrpc_id] = "session-a"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[jsonrpc_id] = time.monotonic()
+            await store.store_event(jsonrpc_id, None)
+            session_a_event_ids.append(await store.store_event(jsonrpc_id, msg_a1))
+            session_a_event_ids.append(await store.store_event(jsonrpc_id, msg_a2))
+            response = self.server.JSONResponse({"ok": True})
+            await response(_scope, receive, send)
+
+        async def session_b_replay_app(scope, receive, send):
+            request = await receive()
+            jsonrpc_id = str(json.loads(request.get("body", b"{}").decode("utf-8"))["id"])
+            observed_sessions.append(self.server._streamable_http_current_session_id())
+            with self.server._WORKFLOW_TASK_LOCK:
+                # A different MCP session legitimately reuses the same JSON-RPC
+                # request id before presenting session A's stale Last-Event-ID.
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID[jsonrpc_id] = "task-b"
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID[jsonrpc_id] = "session-b"
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[jsonrpc_id] = time.monotonic()
+            last_event_id = ""
+            for name, value in scope.get("headers", []):
+                if bytes(name).lower() == b"last-event-id":
+                    last_event_id = bytes(value).decode("latin-1")
+            replay_result["stream_id"] = await store.replay_events_after(
+                last_event_id,
+                replayed_into_session_b.append,
+            )
+            response = self.server.JSONResponse({"ok": True})
+            await response(scope, receive, send)
+
+        orig_auth_mode = self.server.MCP_HTTP_AUTH_MODE
+        try:
+            self.server.MCP_HTTP_AUTH_MODE = "disabled"
+            asyncio.run(
+                _http_request(
+                    "session-a",
+                    {"jsonrpc": "2.0", "id": request_id, "method": "tools/call"},
+                    session_a_app,
+                )
+            )
+            asyncio.run(
+                _http_request(
+                    "session-b",
+                    {"jsonrpc": "2.0", "id": request_id, "method": "tools/call"},
+                    session_b_replay_app,
+                    last_event_id=session_a_event_ids[0],
+                )
+            )
+        finally:
+            self.server.MCP_HTTP_AUTH_MODE = orig_auth_mode
+            with self.server._WORKFLOW_TASK_LOCK:
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
+                self.server._WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
+
+        self.assertEqual(observed_sessions, ["session-a", "session-b"])
+        self.assertIsNone(replay_result["stream_id"])
+        self.assertEqual(replayed_into_session_b, [])
+
     def test_streamable_http_event_store_bounds_retention_and_skips_unscoped_messages(self):
         store = self.server._BoundedWorkflowTaskEventStore(max_events=2, retention_seconds=3600)
         raw_unscoped = SimpleNamespace(root=SimpleNamespace(result={"stdout": "raw output"}))
