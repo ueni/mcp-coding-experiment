@@ -43,6 +43,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "secret_exposure_report",
                 "mcp_threat_model_report",
                 "governance_report",
+                "memory_governance_report",
                 "self_optimization_report",
                 "artifact_provenance",
                 "workflow_diagnostics",

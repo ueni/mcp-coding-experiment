@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT
 
 - [MCP Registry server.json readiness](./mcp-registry-readiness.md) - checked-in official-registry metadata, OCI ownership marker, local dry-run validation, and maintainer-gated publishing path.
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting plus first-slice `workflow_lineage.v1` manifests for MCP policy and tool-gate decisions.
+- [Memory governance report](./memory-governance-report.md) - read-only repository memory inventory, consolidation findings, and redacted quarantine/expiry recommendations.
 - [MCP threat-model regression report](./mcp-threat-model-report.md) - offline STRIDE/DREAD report for MCP tool-poisoning controls, fixtures, and high-severity uncovered regressions.
 - [GitHub Actions workflow security report](./ci-workflow-security.md) - offline read-only workflow posture checks for permissions, action refs, risky triggers, runners, Docker/secrets/artifacts, and suppressions.
 - [Secret exposure report](./secret-exposure-report.md) - offline read-only redacted repository/diff secret exposure scanning with allowlist and gate evidence.
@@ -48,6 +49,7 @@ This index lists documentation ownership and status.
 - [Release Notes and Documentation Policy](./release-notes-policy.md) (`docs/release-notes-policy.md`) - Status: `canonical`
 - [Docker resource monitoring](./resource-monitoring.md) (`docs/resource-monitoring.md`) - Status: `operational verification`
 - [MCP Output Schemas](./mcp-output-schemas.md) (`docs/mcp-output-schemas.md`) - Status: `canonical`
+- [Memory governance report](./memory-governance-report.md) (`docs/memory-governance-report.md`) - Status: `prototype`
 - [Dependency security report](./dependency-security.md) (`docs/dependency-security.md`) - Status: `prototype`
 - [GitHub Actions workflow security report](./ci-workflow-security.md) (`docs/ci-workflow-security.md`) - Status: `prototype`
 - [Secret exposure report](./secret-exposure-report.md) (`docs/secret-exposure-report.md`) - Status: `prototype`
