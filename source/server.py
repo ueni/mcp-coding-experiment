@@ -111,6 +111,7 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
 
 from mcp import types as mcp_types
 from mcp.server.fastmcp import FastMCP
+from mcp.server.streamable_http import EventMessage, EventStore
 from pydantic import Field, RootModel
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
@@ -169,6 +170,15 @@ MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS_RAW = os.getenv(
 MCP_HTTP_RATE_LIMIT_REQUESTS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_REQUESTS", "120")))
 MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.getenv("MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60")))
 MCP_HTTP_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MCP_HTTP_REQUEST_TIMEOUT_SECONDS", "120")))
+MCP_STREAM_REPLAY_MAX_EVENTS = max(1, int(os.getenv("MCP_STREAM_REPLAY_MAX_EVENTS", "200")))
+MCP_STREAM_REPLAY_RETENTION_SECONDS = max(
+    60,
+    int(os.getenv("MCP_STREAM_REPLAY_RETENTION_SECONDS", "86400")),
+)
+MCP_STREAM_REPLAY_RETRY_INTERVAL_MS = max(
+    250,
+    int(os.getenv("MCP_STREAM_REPLAY_RETRY_INTERVAL_MS", "1000")),
+)
 MCP_AUDIT_LOG_FILE = Path(
     os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
 )
@@ -244,6 +254,9 @@ DEPENDENCY_SECURITY_REPORT_PREFIX = "dependency-security-report"
 DEPENDENCY_SECURITY_REPORT_SCHEMA = "dependency_security_report.v1"
 CI_WORKFLOW_SECURITY_REPORT_PREFIX = "ci-workflow-security-report"
 CI_WORKFLOW_SECURITY_REPORT_SCHEMA = "ci_workflow_security_report.v1"
+SECRET_EXPOSURE_REPORT_PREFIX = "secret-exposure-report"
+SECRET_EXPOSURE_REPORT_SCHEMA = "secret_exposure_report.v1"
+SECRET_EXPOSURE_DEFAULT_ALLOWLIST = Path(".codebase-tooling-mcp/secret-exposure-allowlist.json")
 MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
 MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
 MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
@@ -374,6 +387,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "release_readiness": {"categories": ["read-only"]},
     "dependency_security_report": {"categories": ["read-only"]},
     "ci_workflow_security_report": {"categories": ["read-only", "governance"]},
+    "secret_exposure_report": {"categories": ["read-only", "governance"]},
     "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
@@ -1287,9 +1301,175 @@ TASK_RETRIEVAL_CODE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".go", ".java", ".js", ".jsx", ".py", ".rb", ".rs", ".sh", ".ts", ".tsx"
 }
 TASK_RETRIEVAL_DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".odt", ".ods", ".odp"}
+_STREAMABLE_HTTP_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "streamable_http_session_id",
+    default="",
+)
+
+
+def _streamable_http_current_session_id() -> str:
+    return str(_STREAMABLE_HTTP_SESSION_ID.get() or "")
+
+
+def _streamable_http_session_id_from_scope(scope: dict[str, Any]) -> str:
+    expected = b"mcp-session-id"
+    values: list[str] = []
+    for raw_name, raw_value in scope.get("headers", []) or []:
+        try:
+            name = bytes(raw_name).lower()
+        except Exception:
+            continue
+        if name != expected:
+            continue
+        try:
+            value = bytes(raw_value).decode("latin-1").strip()
+        except Exception:
+            value = str(raw_value or "").strip()
+        if value:
+            values.append(value)
+    return values[-1] if values else ""
+
+
+class _BoundedWorkflowTaskEventStore(EventStore):
+    """Bounded MCP Streamable HTTP replay store for workflow-task events.
+
+    The MCP SDK owns the SSE framing and `Last-Event-ID` handling. This store is
+    intentionally narrower than a generic JSON-RPC journal: it retains priming
+    markers and messages on request streams currently mapped to a `workflow_task`
+    id, so replay cannot retain unrelated tool output. Stored records are bounded
+    by count and age; replay is scoped to the currently retained request-stream
+    task mapping plus the original stream/task event scope.
+    """
+
+    def __init__(self, *, max_events: int, retention_seconds: int) -> None:
+        self.max_events = max(1, int(max_events))
+        self.retention_seconds = max(1, int(retention_seconds))
+        self._lock = threading.RLock()
+        self._events: list[dict[str, Any]] = []
+        self._seq = 0
+
+    def _workflow_task_scope_for_stream(self, stream_id: str) -> tuple[str, str]:
+        with _WORKFLOW_TASK_LOCK:
+            _workflow_task_prune_request_mappings_locked()
+            return (
+                str(_WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(stream_id) or ""),
+                str(_WORKFLOW_TASK_REQUEST_TO_SESSION_ID.get(stream_id) or ""),
+            )
+
+    def _scope_for(self, session_id: str, stream_id: str, task_id: str) -> str:
+        return hashlib.sha256(f"{session_id}\0{stream_id}\0{task_id}".encode("utf-8")).hexdigest()[:24]
+
+    def _message_is_replayable(self, stream_id: str, message: Any) -> tuple[bool, str, str]:
+        current_session_id = _streamable_http_current_session_id()
+        if message is None:
+            return bool(current_session_id), "", current_session_id
+        task_id, mapped_session_id = self._workflow_task_scope_for_stream(stream_id)
+        session_id = mapped_session_id or current_session_id
+        if not task_id or not session_id:
+            return False, "", ""
+        # Progress notifications carry coarse lifecycle state for the task. The
+        # initial workflow_task response on the same mapped request stream is
+        # also redacted before persistence by the workflow_task implementation.
+        return True, task_id, session_id
+
+    def _prune_locked(self, now: float) -> None:
+        cutoff = now - self.retention_seconds
+        self._events = [row for row in self._events if float(row.get("stored_at", 0.0)) >= cutoff]
+        if len(self._events) > self.max_events:
+            self._events = self._events[-self.max_events :]
+
+    async def store_event(self, stream_id: str, message: Any | None) -> str:
+        replayable, task_id, session_id = self._message_is_replayable(str(stream_id), message)
+        with self._lock:
+            self._seq += 1
+            event_id = f"wft-{self._seq:020d}-{uuid.uuid4().hex[:16]}"
+            if replayable:
+                now = time.monotonic()
+                stream_id_text = str(stream_id)
+                scope = self._scope_for(session_id, stream_id_text, task_id)
+                if task_id:
+                    for row in self._events:
+                        if (
+                            row.get("stream_id") == stream_id_text
+                            and row.get("session_id") == session_id
+                            and not row.get("task_id")
+                        ):
+                            row["task_id"] = task_id
+                            row["scope"] = scope
+                self._events.append(
+                    {
+                        "event_id": event_id,
+                        "session_id": session_id,
+                        "stream_id": stream_id_text,
+                        "task_id": task_id,
+                        "scope": scope,
+                        "message": message,
+                        "stored_at": now,
+                    }
+                )
+                self._prune_locked(now)
+            return event_id
+
+    async def replay_events_after(self, last_event_id: str, send_callback: Any) -> str | None:
+        with self._lock:
+            self._prune_locked(time.monotonic())
+            start = next(
+                (index for index, row in enumerate(self._events) if row.get("event_id") == last_event_id),
+                None,
+            )
+            if start is None:
+                return None
+            anchor = self._events[start]
+            session_id = str(anchor.get("session_id") or "")
+            stream_id = str(anchor.get("stream_id") or "")
+            scope = str(anchor.get("scope") or "")
+            task_id = str(anchor.get("task_id") or "")
+            if not session_id or not stream_id or not task_id or not scope:
+                return None
+            if _streamable_http_current_session_id() != session_id:
+                return None
+            current_task_id, current_session_id = self._workflow_task_scope_for_stream(stream_id)
+            if current_task_id != task_id or current_session_id != session_id:
+                return None
+            replay = [
+                row
+                for row in self._events[start + 1 :]
+                if row.get("session_id") == session_id
+                and row.get("stream_id") == stream_id
+                and (not task_id or row.get("scope") == scope)
+            ]
+        for row in replay:
+            message = row.get("message")
+            if message is None:
+                continue
+            await send_callback(EventMessage(message=message, event_id=str(row.get("event_id") or "")))
+        return stream_id or None
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            self._prune_locked(time.monotonic())
+            streams = {str(row.get("stream_id") or "") for row in self._events}
+            sessions = {str(row.get("session_id") or "") for row in self._events if row.get("session_id")}
+            tasks = {str(row.get("task_id") or "") for row in self._events if row.get("task_id")}
+            return {
+                "events": len(self._events),
+                "sessions": len(sessions),
+                "streams": len(streams),
+                "tasks": len(tasks),
+                "max_events": self.max_events,
+                "retention_seconds": self.retention_seconds,
+            }
+
+
+_STREAMABLE_HTTP_EVENT_STORE = _BoundedWorkflowTaskEventStore(
+    max_events=MCP_STREAM_REPLAY_MAX_EVENTS,
+    retention_seconds=MCP_STREAM_REPLAY_RETENTION_SECONDS,
+)
 
 mcp = FastMCP(
     "git-repo-manager",
+    event_store=_STREAMABLE_HTTP_EVENT_STORE,
+    retry_interval=MCP_STREAM_REPLAY_RETRY_INTERVAL_MS,
     instructions=(
         "Expose the compact public MCP v1 surface: `task_router`, read-only inspection helpers "
         "such as `tool_annotations` and `tool_output_contracts`, and schema-backed core tools. "
@@ -9864,6 +10044,7 @@ def _governance_workflow_lineage_plan_inputs(
             "workflow_diagnostics": "workflow_diagnostics.summary.v1",
             "artifact_provenance": PROVENANCE_SCHEMA,
             "ci_workflow_security_report": CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
+            "secret_exposure_report": SECRET_EXPOSURE_REPORT_SCHEMA,
             "execution_mode": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
         },
     }
@@ -11700,6 +11881,9 @@ class MCPHTTPAuthMiddleware:
         )
         token = _HTTP_REQUEST_AUTHORIZED.set(True)
         scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
+        streamable_session_token = _STREAMABLE_HTTP_SESSION_ID.set(
+            _streamable_http_session_id_from_scope(scope)
+        )
         try:
             if path == "/sse":
                 await self.app(scope, receive, send)
@@ -11733,6 +11917,7 @@ class MCPHTTPAuthMiddleware:
             )
             await response(scope, receive, send)
         finally:
+            _STREAMABLE_HTTP_SESSION_ID.reset(streamable_session_token)
             _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
 
@@ -12571,6 +12756,8 @@ _WORKFLOW_TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _WORKFLOW_TASK_PROCESSES: dict[str, subprocess.Popen[str]] = {}
 _WORKFLOW_TASK_PROGRESS_BRIDGES: dict[str, dict[str, Any]] = {}
 _WORKFLOW_TASK_REQUEST_TO_TASK_ID: dict[str, str] = {}
+_WORKFLOW_TASK_REQUEST_TO_SESSION_ID: dict[str, str] = {}
+_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT: dict[str, float] = {}
 _WORKFLOW_TASK_CURRENT_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "workflow_task_current_id",
     default="",
@@ -12653,6 +12840,18 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
         session = getattr(request_context, "session", None)
     if session is None or not hasattr(session, "send_progress_notification"):
         return None
+    session_id = _streamable_http_current_session_id()
+    if not session_id:
+        for source in (request_context, context, session):
+            if source is None:
+                continue
+            for attr in ("mcp_session_id", "session_id"):
+                value = getattr(source, attr, None)
+                if isinstance(value, (str, int)) and str(value):
+                    session_id = str(value)
+                    break
+            if session_id:
+                break
     request_id = getattr(context, "request_id", None)
     if request_id is None and request_context is not None:
         request_id = getattr(request_context, "request_id", None)
@@ -12664,6 +12863,7 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
         loop = None
     return {
         "session": session,
+        "session_id": session_id,
         "progress_token": progress_token,
         "request_id": "" if request_id is None else str(request_id),
         "loop": loop,
@@ -12672,15 +12872,41 @@ def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
     }
 
 
+def _workflow_task_prune_request_mappings_locked(now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    cutoff = now - MCP_STREAM_REPLAY_RETENTION_SECONDS
+    stale = [
+        request_id
+        for request_id, updated_at in _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.items()
+        if updated_at < cutoff
+    ]
+    for request_id in stale:
+        _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+        _WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
+        _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
+    max_mappings = max(16, MCP_STREAM_REPLAY_MAX_EVENTS * 2)
+    overflow = len(_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT) - max_mappings
+    if overflow > 0:
+        oldest = sorted(_WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.items(), key=lambda item: item[1])[:overflow]
+        for request_id, _updated_at in oldest:
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+            _WORKFLOW_TASK_REQUEST_TO_SESSION_ID.pop(request_id, None)
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT.pop(request_id, None)
+
+
 def _workflow_task_register_protocol_bridge(task_id: str) -> None:
     bridge = _workflow_task_context_progress_bridge()
     if bridge is None:
         return
     with _WORKFLOW_TASK_LOCK:
+        _workflow_task_prune_request_mappings_locked()
         _WORKFLOW_TASK_PROGRESS_BRIDGES[task_id] = bridge
         request_id = str(bridge.get("request_id") or "")
+        session_id = str(bridge.get("session_id") or "")
         if request_id:
             _WORKFLOW_TASK_REQUEST_TO_TASK_ID[request_id] = task_id
+            _WORKFLOW_TASK_REQUEST_TO_SESSION_ID[request_id] = session_id
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[request_id] = time.monotonic()
 
 
 def _workflow_task_cleanup_protocol_bridge(task_id: str) -> None:
@@ -12688,7 +12914,8 @@ def _workflow_task_cleanup_protocol_bridge(task_id: str) -> None:
         bridge = _WORKFLOW_TASK_PROGRESS_BRIDGES.pop(task_id, None)
         request_id = str((bridge or {}).get("request_id") or "")
         if request_id and _WORKFLOW_TASK_REQUEST_TO_TASK_ID.get(request_id) == task_id:
-            _WORKFLOW_TASK_REQUEST_TO_TASK_ID.pop(request_id, None)
+            _WORKFLOW_TASK_REQUEST_TO_TASK_ID_AT[request_id] = time.monotonic()
+            _workflow_task_prune_request_mappings_locked()
 
 
 def _workflow_task_cleanup_runtime(task_id: str) -> None:
@@ -13920,6 +14147,581 @@ def _iter_candidate_files(
 def _read_lines(path: Path, encoding: str = "utf-8") -> list[str]:
     return path.read_text(encoding=encoding, errors="replace").splitlines()
 
+
+
+
+SECRET_EXPOSURE_MAX_FINDINGS = 1000
+SECRET_EXPOSURE_DEFAULT_EXCLUDE_GLOBS = [
+    ".git/**",
+    "**/.git/**",
+    "__pycache__/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    ".venv/**",
+    "**/.venv/**",
+    "node_modules/**",
+    "**/node_modules/**",
+]
+
+
+def _secret_exposure_rules() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "github_personal_access_token",
+            "match_class": "token",
+            "severity": "high",
+            "confidence": "high",
+            "regex": re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+        },
+        {
+            "id": "openai_api_key",
+            "match_class": "api_key",
+            "severity": "high",
+            "confidence": "high",
+            "regex": re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{20,}\b"),
+        },
+        {
+            "id": "aws_access_key_id",
+            "match_class": "api_key",
+            "severity": "high",
+            "confidence": "high",
+            "regex": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+        },
+        {
+            "id": "private_key_marker",
+            "match_class": "private_key",
+            "severity": "high",
+            "confidence": "high",
+            "regex": re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----"),
+        },
+        {
+            "id": "connection_string_with_credentials",
+            "match_class": "connection_string",
+            "severity": "high",
+            "confidence": "high",
+            "regex": re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s:/?#]+:[^\s@/]+@", re.IGNORECASE),
+        },
+        {
+            "id": "bearer_token_literal",
+            "match_class": "token",
+            "severity": "medium",
+            "confidence": "medium",
+            "regex": re.compile(r"\bBearer\s+([A-Za-z0-9._~+/-]{24,})\b", re.IGNORECASE),
+        },
+        {
+            "id": "generic_secret_assignment",
+            "match_class": "generic_secret",
+            "severity": "medium",
+            "confidence": "medium",
+            "regex": re.compile(r"\b(?:api[_-]?key|token|secret|password|passwd|pwd)\b\s*[:=]\s*[\"']?([A-Za-z0-9_./+=-]{24,})", re.IGNORECASE),
+            "min_unique_chars": 8,
+        },
+    ]
+
+
+def _secret_exposure_rule_public(rule: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(rule.get("id", "")),
+        "match_class": str(rule.get("match_class", "")),
+        "severity": str(rule.get("severity", "")),
+        "confidence": str(rule.get("confidence", "")),
+        "local_pattern_only": True,
+    }
+
+
+def _secret_exposure_match_value(match: re.Match[str]) -> str:
+    groups = [group for group in match.groups() if group]
+    return groups[-1] if groups else match.group(0)
+
+
+def _secret_exposure_fingerprint(rule_id: str, value: str) -> str:
+    digest = hashlib.sha256(
+        ("secret_exposure_report.v1\n" + rule_id + "\n" + value).encode("utf-8", errors="replace")
+    ).hexdigest()
+    return f"secretfp_sha256:{digest[:24]}"
+
+
+def _secret_exposure_redacted_remediation(finding: dict[str, Any]) -> str:
+    if finding.get("confidence") == "high":
+        return (
+            "Treat as exposed: revoke or rotate the credential, remove it from the repository "
+            "and history where applicable, and replace it with an environment or secret-manager reference."
+        )
+    return "Review locally; if real, rotate and replace with a non-secret reference."
+
+
+def _secret_exposure_scan_text(text: str, rel_path: str, *, source: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    rules = _secret_exposure_rules()
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if len(line) > 20000:
+            continue
+        for rule in rules:
+            regex = rule.get("regex")
+            if not hasattr(regex, "finditer"):
+                continue
+            for match in regex.finditer(line):
+                value = _secret_exposure_match_value(match)
+                min_unique = int(rule.get("min_unique_chars", 0) or 0)
+                if min_unique and len(set(value)) < min_unique:
+                    continue
+                finding = {
+                    "schema": "secret_exposure_finding.v1",
+                    "rule_id": str(rule.get("id", "")),
+                    "path": rel_path,
+                    "line_start": line_number,
+                    "line_end": line_number,
+                    "match_class": str(rule.get("match_class", "")),
+                    "severity": str(rule.get("severity", "medium")),
+                    "confidence": str(rule.get("confidence", "medium")),
+                    "fingerprint": _secret_exposure_fingerprint(str(rule.get("id", "")), value),
+                    "source": source,
+                }
+                finding["remediation"] = _secret_exposure_redacted_remediation(finding)
+                findings.append(finding)
+    return findings
+
+
+def _secret_exposure_public_input_paths(paths: list[str] | None) -> list[str]:
+    raw_paths = paths or ["."]
+    public_paths: list[str] = []
+    for raw in raw_paths:
+        try:
+            path = _resolve_repo_path(str(raw or "."))
+            public_paths.append(str(path.relative_to(REPO_PATH)).replace("\\", "/") or ".")
+        except ValueError:
+            public_paths.append("<redacted:outside_repo>")
+    return public_paths
+
+
+def _secret_exposure_normalize_paths(paths: list[str] | None) -> tuple[list[Path], list[dict[str, Any]]]:
+    skipped: list[dict[str, Any]] = []
+    raw_paths = paths or ["."]
+    resolved: list[Path] = []
+    for raw in raw_paths[:100]:
+        try:
+            path = _resolve_repo_path(str(raw or "."))
+        except ValueError:
+            skipped.append({"path": "<redacted:outside_repo>", "reason": "outside_repo_boundary"})
+            continue
+        rel = str(path.relative_to(REPO_PATH)).replace("\\", "/") or "."
+        if not path.exists():
+            skipped.append({"path": rel, "reason": "missing"})
+            continue
+        resolved.append(path)
+    return resolved, skipped
+
+
+def _secret_exposure_file_candidates(
+    paths: list[str] | None,
+    *,
+    include_globs: list[str] | None,
+    exclude_globs: list[str] | None,
+    max_file_bytes: int,
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    roots, skipped = _secret_exposure_normalize_paths(paths)
+    exclude = list(SECRET_EXPOSURE_DEFAULT_EXCLUDE_GLOBS) + list(exclude_globs or [])
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        iterable: Iterable[Path]
+        if root.is_file():
+            iterable = [root]
+        else:
+            found: list[Path] = []
+            for dirpath, dirnames, filenames in os.walk(root):
+                base = Path(dirpath)
+                safe_dirnames: list[str] = []
+                for dirname in sorted(d for d in dirnames if d != ".git"):
+                    directory = base / dirname
+                    if directory.is_symlink():
+                        rel_dir = str(directory.relative_to(REPO_PATH)).replace("\\", "/")
+                        try:
+                            directory.resolve().relative_to(REPO_PATH)
+                        except (OSError, RuntimeError, ValueError):
+                            skipped.append({"path": rel_dir, "reason": "outside_repo_boundary"})
+                        continue
+                    safe_dirnames.append(dirname)
+                dirnames[:] = safe_dirnames
+                for name in sorted(filenames):
+                    found.append(base / name)
+            iterable = found
+        for path in iterable:
+            rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
+            try:
+                path.resolve().relative_to(REPO_PATH)
+            except (OSError, RuntimeError, ValueError):
+                skipped.append({"path": rel, "reason": "outside_repo_boundary"})
+                continue
+            if not path.is_file():
+                continue
+            if rel in seen:
+                continue
+            if not _allowed_by_globs(rel, include_globs, exclude):
+                skipped.append({"path": rel, "reason": "excluded_by_glob"})
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                skipped.append({"path": rel, "reason": "stat_error"})
+                continue
+            if size > max_file_bytes:
+                skipped.append({"path": rel, "reason": "large_file", "size_bytes": size})
+                continue
+            if _is_likely_binary(path, max_file_bytes=max_file_bytes):
+                skipped.append({"path": rel, "reason": "binary_or_unreadable"})
+                continue
+            candidates.append(path)
+            seen.add(rel)
+    candidates.sort(key=lambda item: str(item.relative_to(REPO_PATH)))
+    return candidates, skipped[:1000]
+
+
+def _secret_exposure_load_allowlist(allowlist_path: str) -> tuple[list[Any], dict[str, Any]]:
+    rel = allowlist_path.strip() or str(SECRET_EXPOSURE_DEFAULT_ALLOWLIST)
+    meta: dict[str, Any] = {"path": rel, "exists": False, "entry_count": 0, "status": "absent"}
+    try:
+        path = _resolve_repo_path(rel)
+    except ValueError:
+        meta.update({"path": "<redacted:outside_repo>", "status": "outside_repo_boundary"})
+        return [], meta
+    if not path.exists():
+        return [], meta
+    meta["exists"] = True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        meta.update({"status": "parse-error", "error": exc.__class__.__name__})
+        return [], meta
+    entries: list[Any]
+    if isinstance(payload, dict):
+        entries = []
+        for key in ("allowlist", "findings", "entries"):
+            if isinstance(payload.get(key), list):
+                entries.extend(payload[key])
+        if isinstance(payload.get("fingerprints"), list):
+            entries.extend(str(item) for item in payload["fingerprints"])
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        entries = []
+    meta.update({"status": "loaded", "entry_count": len(entries)})
+    return entries[:5000], meta
+
+
+def _secret_exposure_allowlist_matches(finding: dict[str, Any], entries: list[Any]) -> bool:
+    for entry in entries:
+        if isinstance(entry, str):
+            if entry == finding.get("fingerprint"):
+                return True
+            continue
+        if not isinstance(entry, dict):
+            continue
+        fingerprint = str(entry.get("fingerprint", ""))
+        if fingerprint and fingerprint != finding.get("fingerprint"):
+            continue
+        rule_id = str(entry.get("rule_id", ""))
+        if rule_id and rule_id != finding.get("rule_id"):
+            continue
+        path = str(entry.get("path", ""))
+        if path and path != finding.get("path"):
+            continue
+        line = entry.get("line") or entry.get("line_start")
+        if line not in (None, ""):
+            try:
+                line_value = int(line)
+            except (TypeError, ValueError):
+                continue
+            if line_value != int(finding.get("line_start", 0)):
+                continue
+        if fingerprint or rule_id or path:
+            return True
+    return False
+
+
+def _secret_exposure_git_blob_text(ref: str, rel_path: str) -> str | None:
+    if not ref.strip():
+        return None
+    result = _git("show", f"{ref}:{rel_path}", check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _secret_exposure_diff_added_fingerprints(base_ref: str, paths: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    meta = {"available": False, "base_ref": base_ref, "added_fingerprint_count": 0, "reason": "not_requested"}
+    if not base_ref.strip() or not paths:
+        return {}, meta
+    args = ["diff", "--unified=0", base_ref, "--", *paths]
+    result = _git(*args, check=False)
+    if result.returncode != 0:
+        meta.update({"reason": "git_diff_unavailable"})
+        return {}, meta
+    current_path = ""
+    current_line = 0
+    fps: dict[str, dict[str, Any]] = {}
+    for raw in result.stdout.splitlines():
+        if raw.startswith("+++ b/"):
+            current_path = raw[6:]
+            continue
+        if raw.startswith("@@"):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
+            current_line = int(match.group(1)) if match else 0
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            line = raw[1:]
+            for finding in _secret_exposure_scan_text(line, current_path, source="git_diff_added_line"):
+                fp = str(finding.get("fingerprint", ""))
+                fps[fp] = {"path": current_path, "line_start": current_line, "rule_id": finding.get("rule_id")}
+            current_line += 1
+        elif current_line:
+            current_line += 1
+    meta.update({"available": True, "reason": "ok", "added_fingerprint_count": len(fps)})
+    return fps, meta
+
+
+def _secret_exposure_mark_introduction(
+    findings: list[dict[str, Any]],
+    *,
+    baseline_fingerprints: set[str],
+    baseline_available: bool,
+    diff_fingerprints: dict[str, dict[str, Any]],
+) -> None:
+    for finding in findings:
+        fp = str(finding.get("fingerprint", ""))
+        new_in_diff = fp in diff_fingerprints
+        finding["new_in_diff"] = bool(new_in_diff)
+        if not baseline_available:
+            finding["introduction"] = "unknown"
+        elif new_in_diff or fp not in baseline_fingerprints:
+            finding["introduction"] = "new"
+        else:
+            finding["introduction"] = "baseline"
+
+
+def _secret_exposure_summary(findings: list[dict[str, Any]], skipped: list[dict[str, Any]], suppressed_count: int) -> dict[str, Any]:
+    by_severity: dict[str, int] = {}
+    by_confidence: dict[str, int] = {}
+    new_count = 0
+    new_high = 0
+    baseline_count = 0
+    for finding in findings:
+        sev = str(finding.get("severity", "unknown"))
+        conf = str(finding.get("confidence", "unknown"))
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+        by_confidence[conf] = by_confidence.get(conf, 0) + 1
+        if finding.get("introduction") == "new" or finding.get("new_in_diff"):
+            new_count += 1
+            if sev == "high" and conf == "high":
+                new_high += 1
+        elif finding.get("introduction") == "baseline":
+            baseline_count += 1
+    return {
+        "finding_count": len(findings),
+        "new_finding_count": new_count,
+        "new_high_confidence_count": new_high,
+        "baseline_finding_count": baseline_count,
+        "suppressed_count": suppressed_count,
+        "skipped_count": len(skipped),
+        "by_severity": dict(sorted(by_severity.items())),
+        "by_confidence": dict(sorted(by_confidence.items())),
+    }
+
+
+def _secret_exposure_gate(summary: dict[str, Any], block_on_high_confidence_new: bool) -> dict[str, Any]:
+    count = int(summary.get("new_high_confidence_count", 0) or 0)
+    would_block = bool(block_on_high_confidence_new and count > 0)
+    return {
+        "would_block": would_block,
+        "blocking_enabled": block_on_high_confidence_new,
+        "reason": "high_confidence_new_secret" if would_block else "no_high_confidence_new_secret_blocker",
+        "remediation": "Rotate/revoke, remove from history where appropriate, and rerun secret_exposure_report before release or mutation." if would_block else "No blocking high-confidence newly introduced secret was found by the local pattern set.",
+    }
+
+
+def _write_secret_exposure_report_exports(report: dict[str, Any]) -> dict[str, str]:
+    report_id = str(report.get("report_id", SECRET_EXPOSURE_REPORT_PREFIX))
+    json_rel = str((REPORTS_DIR / report_id).with_suffix(".json"))
+    md_rel = str((REPORTS_DIR / report_id).with_suffix(".md"))
+    json_path = _resolve_repo_path(json_rel)
+    md_path = _resolve_repo_path(md_rel)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    md = [
+        f"# Secret exposure report {report_id}",
+        "",
+        "This local/offline report contains only redacted finding metadata and stable fingerprints; it does not embed raw secret values.",
+        "",
+        f"- Status: `{report.get('status', '')}`",
+        f"- Findings: {summary.get('finding_count', 0)}",
+        f"- Newly introduced high-confidence findings: {summary.get('new_high_confidence_count', 0)}",
+        f"- Suppressed by allowlist: {summary.get('suppressed_count', 0)}",
+        "",
+        "If a high-confidence finding is real, rotate/revoke the credential and remove it from repository history where appropriate.",
+    ]
+    md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
+    return {"json": json_rel, "markdown": md_rel}
+
+
+def _secret_exposure_report_impl(
+    paths: list[str] | None = None,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    allowlist_path: str = "",
+    baseline_ref: str = "HEAD",
+    max_file_bytes: int = 1048576,
+    export: bool = False,
+    block_on_high_confidence_new: bool = True,
+) -> dict[str, Any]:
+    _require_git_repo()
+    if max_file_bytes < 1024:
+        raise ValueError("max_file_bytes must be >= 1024")
+    if max_file_bytes > 10 * 1024 * 1024:
+        raise ValueError("max_file_bytes must be <= 10485760")
+    candidates, skipped = _secret_exposure_file_candidates(
+        paths,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        max_file_bytes=max_file_bytes,
+    )
+    raw_findings: list[dict[str, Any]] = []
+    baseline_fingerprints: set[str] = set()
+    baseline_available = bool(baseline_ref.strip())
+    for path in candidates:
+        rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            skipped.append({"path": rel, "reason": "read_error"})
+            continue
+        raw_findings.extend(_secret_exposure_scan_text(text, rel, source="working_tree"))
+        baseline_text = _secret_exposure_git_blob_text(baseline_ref, rel)
+        if baseline_text is None:
+            continue
+        for finding in _secret_exposure_scan_text(baseline_text, rel, source="baseline_ref"):
+            baseline_fingerprints.add(str(finding.get("fingerprint", "")))
+    if baseline_ref.strip() and not baseline_fingerprints and candidates:
+        baseline_available = _git("rev-parse", "--verify", baseline_ref, check=False).returncode == 0
+    candidate_rels = [str(path.relative_to(REPO_PATH)).replace("\\", "/") for path in candidates]
+    diff_fps, diff_meta = _secret_exposure_diff_added_fingerprints(baseline_ref, candidate_rels)
+    _secret_exposure_mark_introduction(
+        raw_findings,
+        baseline_fingerprints=baseline_fingerprints,
+        baseline_available=baseline_available,
+        diff_fingerprints=diff_fps,
+    )
+    allowlist_entries, allowlist_meta = _secret_exposure_load_allowlist(
+        allowlist_path or str(SECRET_EXPOSURE_DEFAULT_ALLOWLIST)
+    )
+    findings: list[dict[str, Any]] = []
+    suppressed = 0
+    for finding in raw_findings:
+        if _secret_exposure_allowlist_matches(finding, allowlist_entries):
+            suppressed += 1
+            continue
+        findings.append(finding)
+    findings = sorted(findings, key=lambda row: (str(row.get("path", "")), int(row.get("line_start", 0)), str(row.get("rule_id", ""))))[:SECRET_EXPOSURE_MAX_FINDINGS]
+    generated_at = _now_iso()
+    summary = _secret_exposure_summary(findings, skipped, suppressed)
+    gate = _secret_exposure_gate(summary, block_on_high_confidence_new)
+    status = "blocked" if gate.get("would_block") else "findings" if findings else "clean"
+    report_seed = json.dumps(
+        {"generated_at": generated_at, "summary": summary, "baseline_ref": baseline_ref, "paths": candidate_rels},
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    report_id = f"{SECRET_EXPOSURE_REPORT_PREFIX}-{_now_stamp()}-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}"
+    report: dict[str, Any] = {
+        "schema": SECRET_EXPOSURE_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "read_only": True,
+        "status": status,
+        "ok": not bool(gate.get("would_block", False)),
+        "summary": summary,
+        "gate": gate,
+        "findings": findings,
+        "inputs": {
+            "paths": _secret_exposure_public_input_paths(paths),
+            "include_globs": include_globs or [],
+            "exclude_globs": exclude_globs or [],
+            "allowlist_path": allowlist_meta.get("path", ""),
+            "baseline_ref": baseline_ref,
+            "max_file_bytes": max_file_bytes,
+            "block_on_high_confidence_new": block_on_high_confidence_new,
+        },
+        "rules": [_secret_exposure_rule_public(rule) for rule in _secret_exposure_rules()],
+        "allowlist": {**allowlist_meta, "suppressed_count": suppressed},
+        "baseline": {
+            "available": baseline_available,
+            "baseline_ref": baseline_ref,
+            "baseline_fingerprint_count": len(baseline_fingerprints),
+            "diff": diff_meta,
+        },
+        "skipped": skipped[:1000],
+        "security": {
+            "read_only": True,
+            "network_used": False,
+            "repo_boundary_enforced": True,
+            "raw_secret_values_returned": False,
+            "raw_file_lines_returned": False,
+            "host_absolute_paths_exposed": False,
+            "redaction": "findings include rule ids, repository-relative paths, line numbers, confidence/severity, and stable redacted fingerprints only",
+            "limitations": "offline conservative patterns only; not a replacement for GitHub Secret Scanning or provider-side credential validation",
+        },
+        "exports": {},
+        "resource_links": [],
+        "_meta": _artifact_meta([]),
+    }
+    if export:
+        report["exports"] = _write_secret_exposure_report_exports(report)
+        links = [
+            _artifact_resource_link(
+                title="Secret exposure report JSON",
+                rel_path=report["exports"]["json"],
+                mime_type="application/json",
+                created_at=generated_at,
+                redacted=True,
+                safety_note="JSON export contains only redacted secret exposure metadata and fingerprints.",
+            ),
+            _artifact_resource_link(
+                title="Secret exposure report Markdown",
+                rel_path=report["exports"]["markdown"],
+                mime_type="text/markdown",
+                created_at=generated_at,
+                redacted=True,
+                safety_note="Markdown export contains aggregate secret exposure status only.",
+            ),
+        ]
+        report["resource_links"] = links
+        report["_meta"] = _artifact_meta(links)
+        # Rewrite JSON once resource links are known.
+        _resolve_repo_path(report["exports"]["json"]).write_text(
+            json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+    return report
+
+
+def _secret_exposure_compact(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    gate = report.get("gate", {}) if isinstance(report.get("gate"), dict) else {}
+    return {
+        "schema": report.get("schema", SECRET_EXPOSURE_REPORT_SCHEMA),
+        "report_id": report.get("report_id", ""),
+        "generated_at": report.get("generated_at", ""),
+        "status": report.get("status", ""),
+        "ok": bool(report.get("ok", True)),
+        "summary": {
+            "finding_count": summary.get("finding_count", 0),
+            "new_finding_count": summary.get("new_finding_count", 0),
+            "new_high_confidence_count": summary.get("new_high_confidence_count", 0),
+            "suppressed_count": summary.get("suppressed_count", 0),
+            "skipped_count": summary.get("skipped_count", 0),
+        },
+        "gate": {"would_block": bool(gate.get("would_block", False)), "reason": gate.get("reason", "")},
+    }
 
 def _truncate_with_flag(text: str, max_chars: int) -> tuple[str, bool]:
     if max_chars < 1:
@@ -16842,6 +17644,7 @@ def _runtime_state_payload(include_ollama_probe: bool = True) -> dict[str, Any]:
             "subscribers": _sse_subscriber_count(),
             "buffered_events": _sse_recent_event_count(),
         },
+        "streamable_http_replay": _STREAMABLE_HTTP_EVENT_STORE.stats(),
         "ollama": {
             "host_env": ollama_host_env,
             "models_dir_env": os.getenv("OLLAMA_MODELS", ""),
@@ -27542,6 +28345,68 @@ def _mutation_guard_is_mutating(planned_tool: str, mode: str, categories: list[s
     return False
 
 
+
+
+def _mutation_guard_secret_exposure_status(
+    secret_exposure: dict[str, Any] | str | None,
+    target_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    report = _mutation_guard_object(secret_exposure)
+    if not report:
+        return {"present": False, "would_block": False, "new_high_confidence_count": 0, "in_scope_findings": [], "reasons": []}
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    gate = report.get("gate", {}) if isinstance(report.get("gate"), dict) else {}
+    target_paths = [str(row.get("path", "")) for row in target_rows]
+    broad = any(row.get("broad") for row in target_rows) or not target_paths
+
+    def in_scope(path: str) -> bool:
+        if broad:
+            return True
+        for target in target_paths:
+            if not target or target == ".":
+                return True
+            if path == target or path.startswith(target.rstrip("/") + "/") or target.startswith(path.rstrip("/") + "/"):
+                return True
+        return False
+
+    report_has_path_evidence = isinstance(report.get("findings"), list)
+    findings = report.get("findings") if report_has_path_evidence else []
+    in_scope_findings = [
+        {
+            "rule_id": item.get("rule_id", ""),
+            "path": item.get("path", ""),
+            "line_start": item.get("line_start", 0),
+            "severity": item.get("severity", ""),
+            "confidence": item.get("confidence", ""),
+            "fingerprint": item.get("fingerprint", ""),
+            "introduction": item.get("introduction", ""),
+        }
+        for item in findings
+        if isinstance(item, dict)
+        and in_scope(str(item.get("path", "")))
+        and (item.get("new_in_diff") or item.get("introduction") == "new")
+        and item.get("severity") == "high"
+        and item.get("confidence") == "high"
+    ]
+    summary_count = int(summary.get("new_high_confidence_count", 0) or 0)
+    if report_has_path_evidence:
+        would_block = bool(in_scope_findings)
+    else:
+        # Compact summaries do not carry per-finding paths. Stay conservative for
+        # broad mutations, but do not turn an out-of-scope full report into a
+        # blocker solely because its aggregate count is non-zero.
+        would_block = bool(gate.get("would_block", False) and (broad or summary_count > 0))
+    reasons = ["high_confidence_new_secret_in_scope"] if would_block else []
+    return {
+        "present": True,
+        "would_block": would_block,
+        "new_high_confidence_count": len(in_scope_findings) if report_has_path_evidence else summary_count,
+        "in_scope_findings": in_scope_findings[:25],
+        "reasons": reasons,
+        "report_id": report.get("report_id", ""),
+        "status": report.get("status", ""),
+    }
+
 def _mutation_guard_choose_decision(flags: dict[str, bool]) -> str:
     for decision in (
         "deny",
@@ -27569,6 +28434,7 @@ def mutation_step_guard(
     impact_gate: dict[str, Any] | str | None = None,
     invariant_audit_summary: dict[str, Any] | str | None = None,
     context_metadata: dict[str, Any] | None = None,
+    secret_exposure: dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     """Read-only final checkpoint before a planned workspace/git mutation."""
     normalized_tool = planned_tool.strip().lower()
@@ -27605,6 +28471,7 @@ def mutation_step_guard(
         or diff_summary["high_churn"]
         or normalized_tool in MUTATION_STEP_GUARD_HUMAN_APPROVAL_TOOLS
     )
+    secret_exposure_status = _mutation_guard_secret_exposure_status(secret_exposure, target_rows)
 
     missing: list[dict[str, Any]] = []
 
@@ -27616,6 +28483,8 @@ def mutation_step_guard(
         deny_reasons.append("target_outside_repo")
     if secret_targets:
         deny_reasons.append("secret_or_credential_path")
+    if secret_exposure_status.get("would_block"):
+        deny_reasons.append("high_confidence_new_secret_in_scope")
     if destructive_mode and any(path in {".", "", "<outside_repo>"} for path in broad_targets + outside_targets):
         deny_reasons.append("destructive_broad_target")
     if not normalized_tool:
@@ -27639,6 +28508,8 @@ def mutation_step_guard(
     if not tests_status["ok"]:
         for reason in tests_status["reasons"]:
             add_missing("selected_tests_or_impact_gate", str(reason))
+    if secret_exposure_status.get("would_block"):
+        add_missing("secret_exposure", "remediate high-confidence newly introduced secret findings before mutation")
 
     risk_reasons = []
     if high_risk_mutation:
@@ -27653,6 +28524,8 @@ def mutation_step_guard(
         risk_reasons.append("context_not_fresh")
     if not tests_status["ok"]:
         risk_reasons.append("tests_missing_or_stale")
+    if secret_exposure_status.get("would_block"):
+        risk_reasons.append("secret_exposure_blocker")
     if deny_reasons:
         risk_reasons.extend(deny_reasons)
     risk_score = min(100, 10 + 20 * len(risk_reasons) + (20 if high_risk_mutation else 0))
@@ -27693,7 +28566,7 @@ def mutation_step_guard(
         "needs_snapshot": ["Create or record a rollback snapshot/reference, then rerun mutation_step_guard."],
         "needs_tests": ["Run test_impact_map/change_impact_gate or select focused tests for the changed files, then rerun mutation_step_guard."],
         "needs_human_approval": ["Ask for explicit human approval or narrow the mutation scope before executing the high-risk step."],
-        "deny": ["Do not execute the planned mutation; narrow targets to repository-safe non-secret paths and re-plan."],
+        "deny": ["Do not execute the planned mutation; narrow targets to repository-safe non-secret paths, remediate any secret_exposure_report blockers, and re-plan."],
     }
     return {
         "schema": "mutation_step_guard.v1",
@@ -27722,6 +28595,7 @@ def mutation_step_guard(
             "tests": tests_status,
             "invariant_audit": invariant_status,
             "context": context_status,
+            "secret_exposure": secret_exposure_status,
         },
         "security": {
             "records_inputs": False,
@@ -28743,10 +29617,13 @@ def _governance_report_impl(
         "memory_governance": _memory_governance_report_impl(max_entries=1000, stale_days=90, include_entries=False)["summary"],
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
+        "secret_exposure": _secret_exposure_compact(
+            _secret_exposure_report_impl(paths=["."], baseline_ref=base_ref, export=False, block_on_high_confidence_new=True)
+        ),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),
         "snapshots": _governance_snapshot_references(),
         "security": {
-            "redaction": "audit events, untrusted-content signal counts, and report summaries are redacted/aggregate-only",
+            "redaction": "audit events, untrusted-content signal counts, secret-exposure evidence, and report summaries are redacted/aggregate-only",
             "repo_boundary_enforced": public_audit_meta.get("source") != "outside_repo_boundary",
             "external_integrations": "out_of_scope",
         },
@@ -29147,6 +30024,46 @@ def self_optimization_report(
             github_issue_update_mode=github_issue_update_mode,
             github_repository=github_repository,
             github_token_env=github_token_env,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
+def secret_exposure_report(
+    paths: list[str] | None = None,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    allowlist_path: str = "",
+    baseline_ref: str = "HEAD",
+    max_file_bytes: int = 1048576,
+    export: bool = False,
+    block_on_high_confidence_new: bool = True,
+) -> dict[str, Any]:
+    """Build an offline, read-only redacted repository secret exposure report."""
+    arguments = {
+        "paths": paths or ["."],
+        "include_globs": include_globs or [],
+        "exclude_globs": exclude_globs or [],
+        "allowlist_path": allowlist_path,
+        "baseline_ref": baseline_ref,
+        "max_file_bytes": max_file_bytes,
+        "export": export,
+        "block_on_high_confidence_new": block_on_high_confidence_new,
+    }
+    with _otel_span(
+        "mcp.tool.secret_exposure_report",
+        _otel_tool_attributes("secret_exposure_report", arguments),
+    ) as span:
+        result = _secret_exposure_report_impl(
+            paths=paths,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            allowlist_path=allowlist_path,
+            baseline_ref=baseline_ref,
+            max_file_bytes=max_file_bytes,
+            export=export,
+            block_on_high_confidence_new=block_on_high_confidence_new,
         )
         _otel_set_result_attributes(span, result)
         return result
@@ -29590,6 +30507,7 @@ def release_readiness(
     run_security_check: bool = True,
     run_dependency_security_check: bool = True,
     run_ci_workflow_security_check: bool = True,
+    run_secret_exposure_check: bool = True,
     run_license_check: bool = True,
     run_risk_check: bool = True,
     run_impact_check: bool = True,
@@ -29719,6 +30637,32 @@ def release_readiness(
             }
             result["ok"] = False
 
+    if run_secret_exposure_check:
+        try:
+            secret_report = secret_exposure_report(
+                paths=["."],
+                baseline_ref=base_ref,
+                export=False,
+                block_on_high_confidence_new=True,
+            )
+            secret_summary = secret_report.get("summary", {}) if isinstance(secret_report.get("summary"), dict) else {}
+            secret_gate = secret_report.get("gate", {}) if isinstance(secret_report.get("gate"), dict) else {}
+            result["checks"]["secret_exposure"] = {
+                "ok": not bool(secret_gate.get("would_block", False)),
+                "status": secret_report.get("status", ""),
+                "finding_count": secret_summary.get("finding_count", 0),
+                "new_finding_count": secret_summary.get("new_finding_count", 0),
+                "new_high_confidence_count": secret_summary.get("new_high_confidence_count", 0),
+                "suppressed_count": secret_summary.get("suppressed_count", 0),
+                "blocking_enabled": secret_gate.get("blocking_enabled", True),
+                "warning": bool(secret_summary.get("finding_count", 0)) and not bool(secret_gate.get("would_block", False)),
+                "warning_reason": "baseline or medium-confidence local secret-exposure findings need review" if secret_summary.get("finding_count", 0) else "",
+            }
+            if secret_gate.get("would_block", False):
+                result["ok"] = False
+        except Exception as exc:
+            result["checks"]["secret_exposure"] = {"ok": True, "status": "skipped", "warning": True, "warning_reason": str(exc)}
+
     if run_license_check:
         try:
             license_out = license_monitor(
@@ -29805,6 +30749,9 @@ def release_readiness(
                         "high_count",
                         "medium_count",
                         "suppressed_finding_count",
+                        "new_finding_count",
+                        "new_high_confidence_count",
+                        "suppressed_count",
                         "blocking_enabled",
                         "selected_count",
                         "needs_docs_update",

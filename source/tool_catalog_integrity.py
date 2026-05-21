@@ -89,6 +89,10 @@ _DOC_REFS_BY_TOOL: dict[str, tuple[dict[str, str], ...]] = {
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Dependency security report", "path": "docs/dependency-security.md"},
     ),
+    "secret_exposure_report": (
+        {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
+        {"label": "Secret exposure report", "path": "docs/secret-exposure-report.md"},
+    ),
     "self_optimization_report": (
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Self-optimization efficiency report", "path": "docs/self-optimization-report.md"},
