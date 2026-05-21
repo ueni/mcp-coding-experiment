@@ -2155,6 +2155,9 @@ class ServerToolsTest(ServerToolsTestBase):
             for rel_path in out["provenance"]["sidecars"].values()
         )
         exported_and_returned = "\n".join(payloads)
+        allowed_sarif_schema_uri = "https://json.schemastore.org/sarif-2.1.0.json"
+        self.assertIn(allowed_sarif_schema_uri, exported_and_returned)
+        leak_scan_payload = exported_and_returned.replace(allowed_sarif_schema_uri, "")
 
         for leaked_fragment in (
             "https://",
@@ -2173,7 +2176,7 @@ class ServerToolsTest(ServerToolsTestBase):
             "/home/alice/other",
             str(self.repo_path),
         ):
-            self.assertNotIn(leaked_fragment, exported_and_returned)
+            self.assertNotIn(leaked_fragment, leak_scan_payload)
         self.assertIn("<redacted:url>", exported_and_returned)
         self.assertIn("<redacted:vcs_ref>", exported_and_returned)
         self.assertIn("<redacted:absolute_path>", exported_and_returned)
