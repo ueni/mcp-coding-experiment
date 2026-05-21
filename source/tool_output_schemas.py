@@ -93,7 +93,7 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "release_readiness": ("started_at", "finished_at", "mcp_apps"),
     "tool_catalog_integrity": ("read_only", "baseline.per_tool", "current.per_tool", "drift.changed[].metadata_diff", "lint.findings"),
     "dependency_security_report": ("inputs", "skipped", "warnings", "security", "provenance", "_meta"),
-    "ci_workflow_security_report": ("findings_by_severity", "suppressed_findings", "suppressions", "config", "action_uses", "security", "resource_links", "_meta"),
+    "ci_workflow_security_report": ("findings_by_severity", "suppressed_findings", "suppressions", "config", "action_uses", "security", "resource_links", "provenance", "_meta"),
     "mcp_threat_model_report": ("controls", "baseline", "fixtures", "security", "resource_links", "_meta"),
     "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "untrusted_content_signals", "lineage", "provenance", "compressed_observation", "_meta"),
     "self_optimization_report": ("sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "patch_survivorship", "_meta"),

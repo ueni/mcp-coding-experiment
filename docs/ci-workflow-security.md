@@ -38,4 +38,34 @@ action_ref_allowlist:
 
 Suppressions must include a rule id, rationale, and unexpired `expires` date. Optional `path`, `line`, and `contains` fields narrow a suppression match. Action allowlists only suppress mutable action-ref findings; broader risk exceptions should use suppressions with rationale and expiry.
 
+## SARIF export
+
+With `export=true`, the workflow also writes a local SARIF 2.1.0 artifact:
+
+- `.codebase-tooling-mcp/reports/ci-workflow-security-report-*.sarif`
+- an adjacent `mcp_artifact_provenance.v1` sidecar for the SARIF artifact
+
+The SARIF export is offline/no-upload by default. It contains stable rule IDs, repository-relative locations, deterministic partial fingerprints based on redacted rule/path/line context, and `artifact_resource_link.v1` metadata in the tool result. Clean reports export a SARIF run with zero results.
+
+Uploading that SARIF to GitHub Code Scanning is intentionally outside the MCP server and must be an explicit CI choice. A GitHub Actions job can opt in by generating the local SARIF first, then uploading only that artifact with `security-events: write` permission and a pinned upload action, for example:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - name: Generate local CI workflow SARIF
+    run: |
+      # Replace with the repository-maintained command that calls
+      # ci_workflow_security_report(export=true) and writes this SARIF path.
+      ./scripts/generate-ci-workflow-sarif
+  - name: Upload SARIF to GitHub Code Scanning
+    uses: github/codeql-action/upload-sarif@<full-length commit SHA>
+    with:
+      sarif_file: .codebase-tooling-mcp/reports/ci-workflow-security-report.sarif
+```
+
+Keep this upload step out of local/default workflows unless maintainers have explicitly opted into publishing SARIF findings to GitHub.
+
 `governance_report` embeds a compact `ci_workflow_security` section. `release_readiness` runs the check inline and reports workflow posture separately from dependency-security freshness.

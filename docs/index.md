@@ -9,8 +9,8 @@ SPDX-License-Identifier: MIT
 - [MCP Registry server.json readiness](./mcp-registry-readiness.md) - checked-in official-registry metadata, OCI ownership marker, local dry-run validation, and maintainer-gated publishing path.
 - [Governance report workflow](./governance-report.md) - read-only audit/export reporting plus first-slice `workflow_lineage.v1` manifests for MCP policy and tool-gate decisions.
 - [MCP threat-model regression report](./mcp-threat-model-report.md) - offline STRIDE/DREAD report for MCP tool-poisoning controls, fixtures, and high-severity uncovered regressions.
-- [GitHub Actions workflow security report](./ci-workflow-security.md) - offline read-only workflow posture checks for permissions, action refs, risky triggers, runners, Docker/secrets/artifacts, and suppressions.
-- [Dependency security report](./dependency-security.md) - read-only dependency inventory, SBOM export, and vulnerability-gate evidence with offline/caller-provided advisory sources.
+- [GitHub Actions workflow security report](./ci-workflow-security.md) - offline read-only workflow posture checks for permissions, action refs, risky triggers, runners, Docker/secrets/artifacts, suppressions, and local no-upload SARIF export.
+- [Dependency security report](./dependency-security.md) - read-only dependency inventory, SBOM/SARIF export, and vulnerability-gate evidence with offline/caller-provided advisory sources.
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) - checked-in public MCP tool-catalog digests, drift diffs, and advisory metadata lint for rug-pull detection.
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) - deterministic read-only ToolFuzz-style runtime checks for public tool contracts, error paths, and redaction invariants.
 - [Workflow lineage manifests](./workflow-lineage.md) - deterministic redacted plan identity, lineage graph, artifact digests, and read-only drift verification for replayable MCP executions.
