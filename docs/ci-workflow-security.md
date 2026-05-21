@@ -38,4 +38,10 @@ action_ref_allowlist:
 
 Suppressions must include a rule id, rationale, and unexpired `expires` date. Optional `path`, `line`, and `contains` fields narrow a suppression match. Action allowlists only suppress mutable action-ref findings; broader risk exceptions should use suppressions with rationale and expiry.
 
+## SARIF export
+
+With `export=true`, the workflow writes JSON, Markdown, and SARIF 2.1.0 artifacts under `.codebase-tooling-mcp/reports/`, each with an adjacent `mcp_artifact_provenance.v1` sidecar. Clean workflow reports still write a SARIF run with zero results so downstream jobs can distinguish "checked clean" from "no artifact".
+
+SARIF results use stable `ci-workflow-security/<rule-id>` rule IDs, repository-relative `artifactLocation.uri` values, severity-to-level mapping, rule help text, and deterministic partial fingerprints derived from redacted rule/path/line evidence. The export is offline-only: it does not upload to GitHub code scanning, use network access, include host absolute paths, expose bearer tokens, reveal secret names/values, or persist raw prompts/transcripts. Maintainers who want code-scanning alerts can upload the generated `.sarif` from a separate GitHub Actions workflow using GitHub's `upload-sarif` action.
+
 `governance_report` embeds a compact `ci_workflow_security` section. `release_readiness` runs the check inline and reports workflow posture separately from dependency-security freshness.

@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+import json
+
 from tests.server_test_support import ServerToolsTestBase
 
 
@@ -148,3 +150,65 @@ jobs:
         self.assertIn("secrets.<redacted>", excerpts)
         self.assertNotIn("MY_TOKEN", excerpts)
         self.assertNotIn("/home/user", excerpts)
+
+    def test_export_writes_sarif_with_relative_locations_and_provenance(self):
+        self.write_repo_text(
+            ".github/workflows/secrets.yml",
+            """name: Secrets
+on: [push]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ secrets.MY_TOKEN }}" >/home/user/token.txt
+""",
+        )
+
+        report = self.server._ci_workflow_security_report_impl(export=True)
+        sarif_rel = report["exports"]["sarif"]
+        sarif = json.loads((self.repo_path / sarif_rel).read_text(encoding="utf-8"))
+        run = sarif["runs"][0]
+        results = run["results"]
+
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertIn("ci-workflow-security/secret-reference", {rule["id"] for rule in run["tool"]["driver"]["rules"]})
+        self.assertTrue(any(result["ruleId"] == "ci-workflow-security/secret-reference" for result in results))
+        location = results[0]["locations"][0]["physicalLocation"]
+        self.assertEqual(location["artifactLocation"]["uri"], ".github/workflows/secrets.yml")
+        self.assertGreaterEqual(location["region"]["startLine"], 1)
+        fingerprint = results[0]["partialFingerprints"]["codebase-tooling-mcp/redacted-rule-path-line-v1"]
+        regenerated = self.server._ci_workflow_sarif({**report, "report_id": "different-report-id"})
+        self.assertEqual(
+            fingerprint,
+            regenerated["runs"][0]["results"][0]["partialFingerprints"]["codebase-tooling-mcp/redacted-rule-path-line-v1"],
+        )
+        exported = json.dumps(sarif, sort_keys=True)
+        self.assertNotIn("MY_TOKEN", exported)
+        self.assertNotIn("/home/user", exported)
+        self.assertNotIn(str(self.repo_path), exported)
+        self.assertTrue(self.server.artifact_provenance(artifact_path=sarif_rel)["ok"])
+
+    def test_clean_export_writes_zero_result_sarif(self):
+        self.write_repo_text(
+            ".github/workflows/ci.yml",
+            f"""name: CI
+on: [push]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{FULL_SHA}
+      - run: python -m pytest
+""",
+        )
+
+        report = self.server._ci_workflow_security_report_impl(export=True)
+        sarif = json.loads((self.repo_path / report["exports"]["sarif"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(report["status"], "clean")
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertEqual(sarif["runs"][0]["results"], [])
