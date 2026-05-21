@@ -2059,6 +2059,9 @@ class ServerToolsTest(ServerToolsTestBase):
             (self.repo_path / out["exports"]["sarif"]).read_text(encoding="utf-8")
         )
         sarif_result = sarif["runs"][0]["results"][0]
+        self.assertEqual(
+            sarif["$schema"], "https://json.schemastore.org/sarif-2.1.0.json"
+        )
         self.assertEqual(sarif["version"], "2.1.0")
         self.assertEqual(sarif_result["ruleId"], "dependency-vulnerability/GHSA-test-vuln")
         self.assertEqual(

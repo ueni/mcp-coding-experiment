@@ -182,6 +182,9 @@ jobs:
             if result["ruleId"] == "missing-top-level-permissions"
         )
 
+        self.assertEqual(
+            sarif["$schema"], "https://json.schemastore.org/sarif-2.1.0.json"
+        )
         self.assertEqual(sarif["version"], "2.1.0")
         self.assertTrue(run["tool"]["driver"]["rules"])
         self.assertTrue(run["results"])

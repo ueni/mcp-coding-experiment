@@ -41,4 +41,6 @@ With `export=true`, the workflow writes:
 
 Artifacts are linked through `artifact_resource_link.v1` and use repository-relative `repo://file/...` URIs. The SBOM is CycloneDX-compatible JSON generated from declared or caller-provided dependency metadata. The SARIF 2.1.0 export is offline/no-upload by default and maps vulnerability findings with repository-relative source locations plus deterministic partial fingerprints based on redacted package/rule/path/line context. Unsupported, option, VCS, URL, and direct-reference requirement lines are reported with safe diagnostics only; credentials, URLs, and host absolute paths are redacted before return or export.
 
+If maintainers want GitHub Code Scanning ingestion, add a separate, explicit GitHub Actions upload step outside the MCP server after local SARIF generation. Use least-privilege `security-events: write`, pin the upload action by full commit SHA, and keep the upload out of default local/offline workflows unless publishing findings to GitHub is intended.
+
 `release_readiness` includes a compact non-blocking `dependency_security` check, and `governance_report` summarizes the latest exported dependency security report when present.

@@ -8695,6 +8695,7 @@ def _sarif_document(
         ),
     )
     return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [
             {
