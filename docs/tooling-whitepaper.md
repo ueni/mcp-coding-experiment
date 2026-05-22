@@ -150,7 +150,7 @@ Public tools:
 
 `mcp_threat_model_report` is the offline public governance tool for MCP trust-boundary review. It maps host/client, LLM, server, repository, and external-service boundaries to STRIDE/DREAD-style threats, returns the checked-in deterministic DREAD rubric, links existing controls to risks, analyzes secret-free poisoned-tool fixtures including post-handshake `notifications/tools/list_changed` plus repeated `tools/list` mutations, and can compare a local baseline for high-severity uncovered regressions without exposing secrets or raw external state.
 
-`self_optimization_report` is the direct public tool for the software team's self-optimization loop on this repository. It stays offline/repo-local while aggregating redacted audit events, local spans, task handles, cache metadata, and local Git refs into usage, savings, throughput, bottleneck, and duplicate-suppressed recommendation summaries.
+`self_optimization_report` is the direct public tool for the software team's self-optimization loop on this repository. It stays offline/repo-local while aggregating redacted audit events, local spans, task handles, cache metadata, and local Git refs into usage, savings, throughput, bottleneck, duplicate-suppressed recommendation, and advisory optimization-integrity summaries. The nested `optimization_integrity_report` checks suspicious proxy wins before efficiency metrics are reused for optimization issues or release-gate policy.
 
 `agents_context_health` is the read-only AGENTS.md context lint report. It checks byte/token budgets, duplicate or stale guidance candidates, risky global instruction signals, instruction categories, and move-to-router/docs suggestions without returning raw AGENTS text, writing artifacts, or using network access.
 

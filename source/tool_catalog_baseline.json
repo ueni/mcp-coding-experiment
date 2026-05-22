@@ -7868,7 +7868,7 @@
       "name": "secret_exposure_report"
     },
     {
-      "digest": "sha256:fc3b6a1a38e0f3a883089e8aa4980616f51e6f20122010c30975060626ac0a47",
+      "digest": "sha256:6f60e0bd083f5173770b84b3bef5bddea33901c15a24683c75235b96ca77901d",
       "metadata": {
         "documentation": [
           {
@@ -8021,6 +8021,9 @@
                 },
                 "type": "array"
               },
+              "optimization_integrity_report": {
+                "type": "object"
+              },
               "patch_survivorship": {
                 "type": "object"
               },
@@ -8118,6 +8121,7 @@
               "summary",
               "metrics",
               "optimization_candidates",
+              "optimization_integrity_report",
               "agents_context_health",
               "security"
             ],
@@ -8172,6 +8176,7 @@
             "caveats",
             "github_issue_gate",
             "patch_survivorship",
+            "optimization_candidates[].anti_gaming",
             "_meta"
           ],
           "outputSchema": {
@@ -8215,6 +8220,9 @@
                   "type": "object"
                 },
                 "type": "array"
+              },
+              "optimization_integrity_report": {
+                "type": "object"
               },
               "patch_survivorship": {
                 "type": "object"
@@ -8313,6 +8321,7 @@
               "summary",
               "metrics",
               "optimization_candidates",
+              "optimization_integrity_report",
               "agents_context_health",
               "security"
             ],
@@ -8327,6 +8336,7 @@
             "summary",
             "metrics",
             "optimization_candidates",
+            "optimization_integrity_report",
             "agents_context_health",
             "security"
           ],
@@ -11710,5 +11720,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:4835f8fe3fa7159024f5ab82db4c7089fb41efb60cd689ead5d2f8fbefc82f3f"
+  "whole_catalog_digest": "sha256:1da634208730cba9c6a1d239ac28686d20d3504a268c0cc86a84898c72b2d659"
 }
