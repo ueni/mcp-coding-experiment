@@ -19,6 +19,12 @@ ARG INSTALL_SENTENCE_TRANSFORMERS=false
 ARG MCP_USE_LOCKED_DEPS=false
 ARG MCP_BUILD_OFFLINE=false
 ARG MCP_REFRESH_BUILD_DOWNLOAD_CACHE=false
+# Large vendor downloads (notably the Ollama Linux bundle) can be reset by the
+# CDN after a small chunk. Prefer many fresh resumable curl invocations over
+# curl's internal retry loop so each retry re-reads the preserved .part size.
+ARG BUILD_CACHE_DOWNLOAD_ATTEMPTS=48
+ARG BUILD_CACHE_DOWNLOAD_RETRIES=0
+ARG BUILD_CACHE_DOWNLOAD_RETRY_DELAY_SECONDS=2
 ARG RUNTIME_IMAGE_VERSION_COMPATIBILITY=0
 ARG RUNTIME_IMAGE_VERSION_FEATURE=0
 ARG RUNTIME_IMAGE_VERSION_BUGFIX=0
