@@ -28,10 +28,14 @@ class WorkflowReminderTests(ServerToolsTestBase):
         self.assertFalse(out["security"]["grants_permission"])
 
     def test_workspace_transaction_write_step_does_not_suppress_rollback_reminder(self):
-        out = self.server.workflow_reminder(
-            task_summary="Patch one source file; create rollback/snapshot before mutation.",
-            intended_next_action={"tool": "apply_unified_diff", "mode": "apply", "mutates": True},
-            recent_steps=[
+        generic_write_result = self.server.workspace_transaction(
+            mode="write",
+            path="src/generic-write.txt",
+            content="draft\n",
+        )
+
+        cases = (
+            [
                 {
                     "tool": "workspace_transaction",
                     "mode": "write",
@@ -39,12 +43,21 @@ class WorkflowReminderTests(ServerToolsTestBase):
                     "status": "wrote draft changes",
                 }
             ],
+            [generic_write_result],
+            [{"tool": "workspace_transaction", **generic_write_result}],
         )
+        for recent_steps in cases:
+            with self.subTest(recent_steps_shape=sorted(recent_steps[0].keys())):
+                out = self.server.workflow_reminder(
+                    task_summary="Patch one source file; create rollback/snapshot before mutation.",
+                    intended_next_action={"tool": "apply_unified_diff", "mode": "apply", "mutates": True},
+                    recent_steps=recent_steps,
+                )
 
-        self.assertTrue(out["emitted"])
-        self.assertEqual(out["trigger"], "missing_rollback_before_mutation")
-        self.assertEqual(out["required_next_gate"]["tool"], "state_snapshot")
-        self.assertFalse(out["evidence"]["suppression"])
+                self.assertTrue(out["emitted"])
+                self.assertEqual(out["trigger"], "missing_rollback_before_mutation")
+                self.assertEqual(out["required_next_gate"]["tool"], "state_snapshot")
+                self.assertFalse(out["evidence"]["suppression"])
 
     def test_stale_or_missing_tests_before_readiness_points_to_change_impact(self):
         out = self.server.workflow_reminder(
