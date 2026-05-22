@@ -23,7 +23,7 @@ build_cache_download() {
   local cache_path="$1"
   local download_url="$2"
   local label="${3:-${cache_path}}"
-  local tmp_path retries retry_delay retry_max_time
+  local tmp_path retries retry_delay retry_max_time attempts attempt curl_status
 
   if [ -z "${cache_path}" ] || [ -z "${download_url}" ]; then
     build_cache_fail "cache path and download URL are required"
@@ -44,22 +44,31 @@ build_cache_download() {
   retries="${BUILD_CACHE_DOWNLOAD_RETRIES:-12}"
   retry_delay="${BUILD_CACHE_DOWNLOAD_RETRY_DELAY_SECONDS:-5}"
   retry_max_time="${BUILD_CACHE_DOWNLOAD_RETRY_MAX_TIME_SECONDS:-1800}"
+  attempts="${BUILD_CACHE_DOWNLOAD_ATTEMPTS:-3}"
   tmp_path="${cache_path}.part"
   if build_cache_bool "${MCP_REFRESH_BUILD_DOWNLOAD_CACHE:-false}"; then
     rm -f "${cache_path}" "${tmp_path}"
   fi
 
-  if curl --fail --location --retry "${retries}" --retry-all-errors --retry-delay "${retry_delay}" \
-    --retry-max-time "${retry_max_time}" --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
-    --continue-at - --http1.1 \
-    "${download_url}" \
-    -o "${tmp_path}"; then
-    mv "${tmp_path}" "${cache_path}"
-  else
-    local curl_status=$?
-    echo "build-download-cache: failed to download ${label}; preserved partial at ${tmp_path}" >&2
-    return "${curl_status}"
-  fi
+  for attempt in $(seq 1 "${attempts}"); do
+    if curl --fail --location --retry "${retries}" --retry-all-errors --retry-delay "${retry_delay}" \
+      --retry-max-time "${retry_max_time}" --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
+      --continue-at - --http1.1 \
+      "${download_url}" \
+      -o "${tmp_path}"; then
+      mv "${tmp_path}" "${cache_path}"
+      return 0
+    else
+      curl_status=$?
+    fi
+    if [ "${attempt}" -lt "${attempts}" ]; then
+      echo "build-download-cache: ${label} download attempt ${attempt}/${attempts} failed with curl exit ${curl_status}; retrying with preserved partial at ${tmp_path}" >&2
+      sleep "${retry_delay}"
+    fi
+  done
+
+  echo "build-download-cache: failed to download ${label}; preserved partial at ${tmp_path}" >&2
+  return "${curl_status}"
 }
 
 build_cache_url_exists() {
