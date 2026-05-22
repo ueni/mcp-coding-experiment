@@ -247,6 +247,124 @@ class BuildDownloadCacheTests(unittest.TestCase):
             self.assertEqual(cache_file.read_text(encoding="utf-8").strip(), "complete")
             self.assertFalse((cache_file.parent / "artifact.bin.part").exists())
 
+    def test_pip_download_failure_does_not_mark_complete_or_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            requirements = tmp_path / "requirements.lock"
+            requirements.write_text("missing-wheel==1.0 --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8")
+            install_marker = tmp_path / "pip-install-called"
+            helper_bin = tmp_path / "bin"
+            helper_bin.mkdir()
+            (helper_bin / "python").symlink_to(sys.executable)
+            fake_python = tmp_path / "python"
+            fake_python.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env bash
+                    if [ "$1" = "-" ]; then
+                      cat >/dev/null
+                      echo py313-test
+                      exit 0
+                    fi
+                    if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "download" ]; then
+                      exit 44
+                    fi
+                    if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "install" ]; then
+                      touch {install_marker}
+                      exit 0
+                    fi
+                    exit 64
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+
+            proc = self._run_helper(
+                f"build_cache_pip_install {fake_python} runtime {requirements} true",
+                env={
+                    "MCP_BUILD_PIP_WHEELHOUSE_ROOT": str(tmp_path / "wheelhouse"),
+                    "PATH": f"{helper_bin}:{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(proc.returncode, 44, proc.stderr)
+            self.assertIn("failed to populate pip wheelhouse", proc.stderr)
+            self.assertFalse(install_marker.exists(), "install must not run after pip download fails")
+            self.assertFalse(list((tmp_path / "wheelhouse").glob("**/.complete")))
+
+    def test_corrupt_cached_pip_wheelhouse_rebuilds_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            requirements = tmp_path / "requirements.lock"
+            requirements.write_text("cached-wheel==1.0 --hash=sha256:" + "1" * 64 + "\n", encoding="utf-8")
+            download_count = tmp_path / "download-count"
+            install_count = tmp_path / "install-count"
+            helper_bin = tmp_path / "bin"
+            helper_bin.mkdir()
+            (helper_bin / "python").symlink_to(sys.executable)
+            fake_python = tmp_path / "python"
+            fake_python.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env bash
+                    if [ "$1" = "-" ]; then
+                      cat >/dev/null
+                      echo py313-test
+                      exit 0
+                    fi
+                    if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "download" ]; then
+                      count=0
+                      [ -f {download_count} ] && count="$(cat {download_count})"
+                      count=$((count + 1))
+                      echo "$count" > {download_count}
+                      out=""
+                      while [ "$#" -gt 0 ]; do
+                        if [ "$1" = "-d" ]; then
+                          out="$2"
+                          shift 2
+                        else
+                          shift
+                        fi
+                      done
+                      echo wheel >"$out/cached-wheel-1.0-py3-none-any.whl"
+                      exit 0
+                    fi
+                    if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "install" ]; then
+                      count=0
+                      [ -f {install_count} ] && count="$(cat {install_count})"
+                      count=$((count + 1))
+                      echo "$count" > {install_count}
+                      [ "$count" -eq 1 ] && exit 45
+                      exit 0
+                    fi
+                    exit 64
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+
+            proc = self._run_helper(
+                textwrap.dedent(
+                    f"""\
+                    wheelhouse="$MCP_BUILD_PIP_WHEELHOUSE_ROOT/runtime-locked-$(build_cache_python_tag {fake_python})-$(build_cache_requirement_digest {requirements})"
+                    mkdir -p "$wheelhouse"
+                    touch "$wheelhouse/.complete"
+                    build_cache_pip_install {fake_python} runtime {requirements} true
+                    """
+                ),
+                env={
+                    "MCP_BUILD_PIP_WHEELHOUSE_ROOT": str(tmp_path / "wheelhouse"),
+                    "PATH": f"{helper_bin}:{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("cached pip wheelhouse for runtime failed install; rebuilding once", proc.stderr)
+            self.assertEqual(download_count.read_text(encoding="utf-8").strip(), "1")
+            self.assertEqual(install_count.read_text(encoding="utf-8").strip(), "2")
+
     def test_dockerfile_cache_contract_survives_first_line_change(self):
         original = subprocess.run(
             [sys.executable, str(CHECK_SCRIPT), "--compact"],
