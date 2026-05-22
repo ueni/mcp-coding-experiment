@@ -32042,10 +32042,29 @@ def _workflow_reminder_has_snapshot_evidence(
     last_gate_results: dict[str, Any] | list[dict[str, Any]] | None,
 ) -> bool:
     blob = _workflow_reminder_blob(recent_steps, _workflow_reminder_last_gate_blob(last_gate_results))
+    missing_terms = (
+        "missing_snapshot",
+        "needs_snapshot",
+        "rollback_snapshot_id_present\": false",
+        "snapshot_present\": false",
+    )
+    if any(term in blob for term in missing_terms):
+        return False
+    if _workflow_policy_has_snapshot_gate(recent_steps):
+        return True
     if "rollback_snapshot_id_present\": true" in blob or "snapshot_present\": true" in blob:
         return True
-    return any(term in blob for term in ("state_snapshot.v1", "state_snapshot", "workspace_transaction", "rollback evidence", "snapshot id")) and not any(
-        term in blob for term in ("missing_snapshot", "needs_snapshot", "rollback_snapshot_id_present\": false")
+    explicit_snapshot_terms = (
+        "state_snapshot.v1",
+        "state_snapshot",
+        "rollback evidence",
+        "snapshot id",
+        "rollback snapshot id",
+    )
+    if any(term in blob for term in explicit_snapshot_terms):
+        return True
+    return "mutation_step_guard" in blob and any(
+        term in blob for term in ("rollback_snapshot_id", "snapshot_present", "rollback evidence", "snapshot id")
     )
 
 

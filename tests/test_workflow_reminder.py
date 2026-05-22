@@ -27,6 +27,25 @@ class WorkflowReminderTests(ServerToolsTestBase):
         self.assertIn("rollback", {item["id"] for item in out["remembered_constraints"]})
         self.assertFalse(out["security"]["grants_permission"])
 
+    def test_workspace_transaction_write_step_does_not_suppress_rollback_reminder(self):
+        out = self.server.workflow_reminder(
+            task_summary="Patch one source file; create rollback/snapshot before mutation.",
+            intended_next_action={"tool": "apply_unified_diff", "mode": "apply", "mutates": True},
+            recent_steps=[
+                {
+                    "tool": "workspace_transaction",
+                    "mode": "write",
+                    "success": True,
+                    "status": "wrote draft changes",
+                }
+            ],
+        )
+
+        self.assertTrue(out["emitted"])
+        self.assertEqual(out["trigger"], "missing_rollback_before_mutation")
+        self.assertEqual(out["required_next_gate"]["tool"], "state_snapshot")
+        self.assertFalse(out["evidence"]["suppression"])
+
     def test_stale_or_missing_tests_before_readiness_points_to_change_impact(self):
         out = self.server.workflow_reminder(
             task_summary="Run tests before release readiness.",
