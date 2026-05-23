@@ -30740,74 +30740,126 @@ def _agent_quality_delta_git_show(ref: str, path: str) -> str:
     return shown.stdout
 
 
-def _agent_quality_delta_changed_files(base_ref: str, head_ref: str) -> list[dict[str, Any]]:
-    status_rows: dict[str, str] = {}
-    status_out = _git("diff", "--name-status", f"{base_ref}...{head_ref}", "--", ".").stdout
+def _agent_quality_delta_status_rows(base_ref: str, head_ref: str) -> dict[str, str]:
+    status_out = _git(
+        "diff",
+        "--name-status",
+        f"{base_ref}...{head_ref}",
+        "--",
+        ".",
+    ).stdout
+    rows: dict[str, str] = {}
     for raw_line in status_out.splitlines():
-        if not raw_line.strip():
-            continue
         parts = raw_line.split("\t")
-        status = parts[0]
         path = parts[-1] if len(parts) > 1 else ""
         if path:
-            status_rows[path] = status
+            rows[path] = parts[0]
+    return rows
 
-    files: list[dict[str, Any]] = []
-    numstat = _git("diff", "--numstat", f"{base_ref}...{head_ref}", "--", ".").stdout
-    for raw_line in numstat.splitlines():
-        parts = raw_line.split("\t")
-        if len(parts) < 3:
-            continue
-        added_raw, deleted_raw, path = parts[0], parts[1], parts[-1]
-        try:
-            added = int(added_raw)
-            deleted = int(deleted_raw)
-            binary = False
-        except ValueError:
-            added = 0
-            deleted = 0
-            binary = True
-        language = "python" if path.endswith(".py") else "text"
-        files.append(
-            {
-                "path": path,
-                "status": status_rows.get(path, "M"),
-                "language": language,
-                "added_lines": added,
-                "deleted_lines": deleted,
-                "churn_lines": added + deleted,
-                "binary": binary,
-            }
-        )
+
+def _agent_quality_delta_language(path: str) -> str:
+    return "python" if path.endswith(".py") else "text"
+
+
+def _agent_quality_delta_numstat_row(
+    raw_line: str,
+    status_rows: dict[str, str],
+) -> dict[str, Any] | None:
+    parts = raw_line.split("\t")
+    if len(parts) < 3:
+        return None
+    added_raw, deleted_raw, path = parts[0], parts[1], parts[-1]
+    try:
+        added = int(added_raw)
+        deleted = int(deleted_raw)
+        binary = False
+    except ValueError:
+        added = 0
+        deleted = 0
+        binary = True
+    return {
+        "path": path,
+        "status": status_rows.get(path, "M"),
+        "language": _agent_quality_delta_language(path),
+        "added_lines": added,
+        "deleted_lines": deleted,
+        "churn_lines": added + deleted,
+        "binary": binary,
+    }
+
+
+def _agent_quality_delta_changed_files(base_ref: str, head_ref: str) -> list[dict[str, Any]]:
+    status_rows = _agent_quality_delta_status_rows(base_ref, head_ref)
+    numstat = _git(
+        "diff",
+        "--numstat",
+        f"{base_ref}...{head_ref}",
+        "--",
+        ".",
+    ).stdout
+    files = [
+        row
+        for raw_line in numstat.splitlines()
+        if (row := _agent_quality_delta_numstat_row(raw_line, status_rows))
+    ]
     return sorted(files, key=lambda item: item["path"])
 
 
-def _agent_quality_delta_hunks(base_ref: str, head_ref: str, path: str) -> dict[str, list[int]]:
-    diff = _git("diff", "--unified=0", f"{base_ref}...{head_ref}", "--", path, check=False).stdout
+def _agent_quality_delta_hunk_match(line: str) -> re.Match[str] | None:
+    if not line.startswith("@@"):
+        return None
+    return re.search(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+
+
+def _agent_quality_delta_add_range(lines: set[int], start: int, count: int) -> None:
+    if count:
+        lines.update(range(start, start + count))
+
+
+def _agent_quality_delta_hunks(
+    base_ref: str,
+    head_ref: str,
+    path: str,
+) -> dict[str, list[int]]:
+    diff = _git(
+        "diff",
+        "--unified=0",
+        f"{base_ref}...{head_ref}",
+        "--",
+        path,
+        check=False,
+    ).stdout
     base_lines: set[int] = set()
     head_lines: set[int] = set()
     for line in diff.splitlines():
-        if not line.startswith("@@"):
-            continue
-        match = re.search(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        match = _agent_quality_delta_hunk_match(line)
         if not match:
             continue
-        old_start = int(match.group(1))
-        old_count = int(match.group(2) or "1")
-        new_start = int(match.group(3))
-        new_count = int(match.group(4) or "1")
-        if old_count:
-            base_lines.update(range(old_start, old_start + old_count))
-        if new_count:
-            head_lines.update(range(new_start, new_start + new_count))
+        _agent_quality_delta_add_range(
+            base_lines,
+            int(match.group(1)),
+            int(match.group(2) or "1"),
+        )
+        _agent_quality_delta_add_range(
+            head_lines,
+            int(match.group(3)),
+            int(match.group(4) or "1"),
+        )
     return {"base": sorted(base_lines), "head": sorted(head_lines)}
 
 
 def _agent_quality_delta_added_lines(base_ref: str, head_ref: str, path: str) -> list[str]:
-    diff = _git("diff", "--unified=0", f"{base_ref}...{head_ref}", "--", path, check=False).stdout
+    diff = _git(
+        "diff",
+        "--unified=0",
+        f"{base_ref}...{head_ref}",
+        "--",
+        path,
+        check=False,
+    ).stdout
     added: list[str] = []
     for line in diff.splitlines():
-        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+        if line.startswith(("+++", "---", "@@")):
             continue
         if line.startswith("+"):
             added.append(line[1:])
@@ -30828,24 +30880,48 @@ def _agent_quality_delta_intersects(start: int, end: int, lines: set[int]) -> bo
     return any(start <= line <= end for line in lines)
 
 
+def _agent_quality_delta_cyclomatic_increment(node: ast.AST) -> int:
+    branch_nodes = (
+        ast.If,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.Try,
+        ast.ExceptHandler,
+        ast.IfExp,
+        ast.Assert,
+    )
+    if isinstance(node, branch_nodes):
+        return 1
+    if isinstance(node, ast.BoolOp):
+        return max(1, len(getattr(node, "values", [])) - 1)
+    if isinstance(node, ast.Match):
+        return max(1, len(getattr(node, "cases", [])))
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        return len(getattr(node, "generators", []))
+    return 0
+
+
 def _agent_quality_delta_cyclomatic(node: ast.AST) -> int:
-    score = 1
-    branch_nodes = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.ExceptHandler, ast.IfExp, ast.Assert)
-    for child in ast.walk(node):
-        if isinstance(child, branch_nodes):
-            score += 1
-        elif isinstance(child, ast.BoolOp):
-            score += max(1, len(getattr(child, "values", [])) - 1)
-        elif isinstance(child, ast.Match):
-            score += max(1, len(getattr(child, "cases", [])))
-        elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            score += len(getattr(child, "generators", []))
-    return score
+    return 1 + sum(
+        _agent_quality_delta_cyclomatic_increment(child) for child in ast.walk(node)
+    )
 
 
 def _agent_quality_delta_cognitive(node: ast.AST, nesting: int = 0) -> int:
     score = 0
-    nesting_nodes = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.ExceptHandler, ast.With, ast.AsyncWith, ast.IfExp, ast.Match)
+    nesting_nodes = (
+        ast.If,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.Try,
+        ast.ExceptHandler,
+        ast.With,
+        ast.AsyncWith,
+        ast.IfExp,
+        ast.Match,
+    )
     for child in ast.iter_child_nodes(node):
         if isinstance(child, nesting_nodes):
             score += 1 + nesting
@@ -30858,78 +30934,170 @@ def _agent_quality_delta_cognitive(node: ast.AST, nesting: int = 0) -> int:
     return score
 
 
-def _agent_quality_delta_python_functions(source_text: str) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    if not source_text.strip():
-        return {}, []
-    try:
-        tree = ast.parse(source_text)
-    except SyntaxError as exc:
-        return {}, [
-            {
-                "severity": "high",
-                "category": "correctness",
-                "rule_id": "python/syntax-error",
-                "line": int(exc.lineno or 0),
-                "message": "Python syntax error detected",
-            }
-        ]
+def _agent_quality_delta_syntax_error(exc: SyntaxError) -> list[dict[str, Any]]:
+    return [
+        {
+            "severity": "high",
+            "category": "correctness",
+            "rule_id": "python/syntax-error",
+            "line": int(exc.lineno or 0),
+            "message": "Python syntax error detected",
+        }
+    ]
 
-    ranges = _agent_quality_delta_function_ranges(tree)
+
+def _agent_quality_delta_parse_python(
+    source_text: str,
+) -> tuple[ast.AST | None, list[dict[str, Any]]]:
+    if not source_text.strip():
+        return None, []
+    try:
+        return ast.parse(source_text), []
+    except SyntaxError as exc:
+        return None, _agent_quality_delta_syntax_error(exc)
+
+
+def _agent_quality_delta_parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
     parents: dict[ast.AST, ast.AST] = {}
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
+    return parents
 
-    def qualified_name(node: ast.AST) -> str:
-        names: list[str] = []
-        cur: ast.AST | None = node
-        while cur is not None:
-            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                names.append(str(getattr(cur, "name", "")))
-            cur = parents.get(cur)
-        return ".".join(reversed([name for name in names if name]))
 
+def _agent_quality_delta_qualified_name(
+    node: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+) -> str:
+    names: list[str] = []
+    cur: ast.AST | None = node
+    while cur is not None:
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(str(getattr(cur, "name", "")))
+        cur = parents.get(cur)
+    return ".".join(reversed([name for name in names if name]))
+
+
+def _agent_quality_delta_function_row(
+    name: str,
+    node: ast.AST,
+    start: int,
+    end: int,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "start_line": start,
+        "end_line": end,
+        "line_count": max(0, end - start + 1),
+        "cyclomatic": _agent_quality_delta_cyclomatic(node),
+        "cognitive": _agent_quality_delta_cognitive(node),
+    }
+
+
+def _agent_quality_delta_python_functions(
+    source_text: str,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    tree, errors = _agent_quality_delta_parse_python(source_text)
+    if tree is None:
+        return {}, errors
+    parents = _agent_quality_delta_parent_map(tree)
+    ranges = _agent_quality_delta_function_ranges(tree)
     functions: dict[str, dict[str, Any]] = {}
-    for node, (start, end) in ranges.items():
-        name = qualified_name(node)
-        functions[name] = {
-            "name": name,
-            "start_line": start,
-            "end_line": end,
-            "line_count": max(0, end - start + 1),
-            "cyclomatic": _agent_quality_delta_cyclomatic(node),
-            "cognitive": _agent_quality_delta_cognitive(node),
-        }
+    for node, bounds in ranges.items():
+        name = _agent_quality_delta_qualified_name(node, parents)
+        functions[name] = _agent_quality_delta_function_row(name, node, *bounds)
     return functions, []
+
+
+def _agent_quality_delta_eval_exec_finding(
+    node: ast.AST,
+    line: int,
+) -> dict[str, Any] | None:
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        return None
+    if node.func.id not in {"eval", "exec"}:
+        return None
+    return {
+        "severity": "high",
+        "category": "security",
+        "rule_id": f"python/{node.func.id}",
+        "line": line,
+    }
+
+
+def _agent_quality_delta_ast_node_findings(node: ast.AST) -> list[dict[str, Any]]:
+    line = int(getattr(node, "lineno", 0) or 0)
+    if isinstance(node, ast.ExceptHandler) and node.type is None:
+        return [
+            {
+                "severity": "medium",
+                "category": "reliability",
+                "rule_id": "python/bare-except",
+                "line": line,
+            }
+        ]
+    if finding := _agent_quality_delta_eval_exec_finding(node, line):
+        return [finding]
+    if isinstance(node, ast.Global):
+        return [
+            {
+                "severity": "low",
+                "category": "maintainability",
+                "rule_id": "python/global-statement",
+                "line": line,
+            }
+        ]
+    return []
+
+
+def _agent_quality_delta_line_findings(line: str, idx: int) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    stripped = line.strip().lower()
+    if len(line) > 120:
+        findings.append(
+            {
+                "severity": "low",
+                "category": "style",
+                "rule_id": "python/long-line",
+                "line": idx,
+            }
+        )
+    if "todo" in stripped or "fixme" in stripped:
+        findings.append(
+            {
+                "severity": "low",
+                "category": "maintainability",
+                "rule_id": "python/todo-comment",
+                "line": idx,
+            }
+        )
+    return findings
 
 
 def _agent_quality_delta_fallback_findings(path: str, source_text: str) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     _functions, syntax_findings = _agent_quality_delta_python_functions(source_text)
-    findings.extend(syntax_findings)
     if syntax_findings:
-        return findings
-    try:
-        tree = ast.parse(source_text or "\n")
-    except SyntaxError:
-        return findings
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ExceptHandler) and node.type is None:
-            findings.append({"severity": "medium", "category": "reliability", "rule_id": "python/bare-except", "line": int(getattr(node, "lineno", 0) or 0)})
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"}:
-            findings.append({"severity": "high", "category": "security", "rule_id": f"python/{node.func.id}", "line": int(getattr(node, "lineno", 0) or 0)})
-        if isinstance(node, ast.Global):
-            findings.append({"severity": "low", "category": "maintainability", "rule_id": "python/global-statement", "line": int(getattr(node, "lineno", 0) or 0)})
+        return syntax_findings
+    tree, _errors = _agent_quality_delta_parse_python(source_text or "\n")
+    if tree is not None:
+        for node in ast.walk(tree):
+            findings.extend(_agent_quality_delta_ast_node_findings(node))
     for idx, line in enumerate(source_text.splitlines(), start=1):
-        stripped = line.strip().lower()
-        if len(line) > 120:
-            findings.append({"severity": "low", "category": "style", "rule_id": "python/long-line", "line": idx})
-        if "todo" in stripped or "fixme" in stripped:
-            findings.append({"severity": "low", "category": "maintainability", "rule_id": "python/todo-comment", "line": idx})
-    return sorted(findings, key=lambda item: (item.get("severity", ""), item.get("category", ""), item.get("rule_id", ""), item.get("line", 0), path))
+        findings.extend(_agent_quality_delta_line_findings(line, idx))
+    return sorted(
+        findings,
+        key=lambda item: (
+            item.get("severity", ""),
+            item.get("category", ""),
+            item.get("rule_id", ""),
+            item.get("line", 0),
+            path,
+        ),
+    )
 
 
-def _agent_quality_delta_ruff_findings(root: Path) -> list[dict[str, Any]] | None:
+def _agent_quality_delta_ruff_rows(root: Path) -> list[dict[str, Any]] | None:
     if not shutil.which("ruff"):
         return None
     proc = subprocess.run(
@@ -30943,68 +31111,171 @@ def _agent_quality_delta_ruff_findings(root: Path) -> list[dict[str, Any]] | Non
         rows = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError:
         return None
-    findings: list[dict[str, Any]] = []
-    for row in rows if isinstance(rows, list) else []:
-        code = str(row.get("code") or "ruff")
-        location = row.get("location", {}) if isinstance(row.get("location"), dict) else {}
-        severity = "high" if code.startswith("F") else "medium" if code[:1] in {"E", "B", "S"} else "low"
-        category = "security" if code.startswith("S") else "correctness" if code.startswith(("F", "E")) else "maintainability"
-        filename = str(row.get("filename") or "")
-        findings.append(
-            {
-                "severity": severity,
-                "category": category,
-                "rule_id": f"ruff/{code}",
-                "line": int(location.get("row") or 0),
-                "path": filename,
-            }
+    return rows if isinstance(rows, list) else []
+
+
+def _agent_quality_delta_ruff_severity(code: str) -> str:
+    if code.startswith("F"):
+        return "high"
+    if code[:1] in {"E", "B", "S"}:
+        return "medium"
+    return "low"
+
+
+def _agent_quality_delta_ruff_category(code: str) -> str:
+    if code.startswith("S"):
+        return "security"
+    if code.startswith(("F", "E")):
+        return "correctness"
+    return "maintainability"
+
+
+def _agent_quality_delta_ruff_finding(row: dict[str, Any]) -> dict[str, Any]:
+    code = str(row.get("code") or "ruff")
+    location = row.get("location", {})
+    if not isinstance(location, dict):
+        location = {}
+    return {
+        "severity": _agent_quality_delta_ruff_severity(code),
+        "category": _agent_quality_delta_ruff_category(code),
+        "rule_id": f"ruff/{code}",
+        "line": int(location.get("row") or 0),
+        "path": str(row.get("filename") or ""),
+    }
+
+
+def _agent_quality_delta_ruff_findings(root: Path) -> list[dict[str, Any]] | None:
+    rows = _agent_quality_delta_ruff_rows(root)
+    if rows is None:
+        return None
+    findings = [_agent_quality_delta_ruff_finding(row) for row in rows]
+    return sorted(
+        findings,
+        key=lambda item: (
+            item.get("path", ""),
+            item.get("rule_id", ""),
+            item.get("line", 0),
+        ),
+    )
+
+
+def _agent_quality_delta_write_side_sources(
+    side_root: Path,
+    side: str,
+    python_paths: list[str],
+    contents: dict[str, dict[str, str]],
+) -> None:
+    for path in python_paths:
+        target = side_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents[path][side], encoding="utf-8")
+
+
+def _agent_quality_delta_normalize_ruff_paths(
+    side_root: Path,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in rows:
+        raw_path = Path(str(item.get("path", "")))
+        try:
+            rel_path = raw_path.relative_to(side_root)
+        except ValueError:
+            rel_path = raw_path
+        row = {k: v for k, v in item.items() if k != "path"}
+        row["path"] = str(rel_path)
+        normalized.append(row)
+    return normalized
+
+
+def _agent_quality_delta_ruff_side_findings(
+    side_root: Path,
+    side: str,
+    python_paths: list[str],
+    contents: dict[str, dict[str, str]],
+) -> list[dict[str, Any]] | None:
+    _agent_quality_delta_write_side_sources(side_root, side, python_paths, contents)
+    ruff_findings = _agent_quality_delta_ruff_findings(side_root)
+    if ruff_findings is None:
+        return None
+    return _agent_quality_delta_normalize_ruff_paths(side_root, ruff_findings)
+
+
+def _agent_quality_delta_empty_findings() -> dict[str, list[dict[str, Any]]]:
+    return {"base": [], "head": []}
+
+
+def _agent_quality_delta_collect_ruff_sides(
+    tmp: Path,
+    python_paths: list[str],
+    contents: dict[str, dict[str, str]],
+) -> tuple[bool, dict[str, list[dict[str, Any]]]]:
+    findings = _agent_quality_delta_empty_findings()
+    for side in ("base", "head"):
+        side_findings = _agent_quality_delta_ruff_side_findings(
+            tmp / side,
+            side,
+            python_paths,
+            contents,
         )
-    return sorted(findings, key=lambda item: (item.get("path", ""), item.get("rule_id", ""), item.get("line", 0)))
+        if side_findings is None:
+            return False, _agent_quality_delta_empty_findings()
+        findings[side] = side_findings
+    return True, findings
+
+
+def _agent_quality_delta_try_ruff_findings(
+    python_paths: list[str],
+    contents: dict[str, dict[str, str]],
+) -> tuple[bool, dict[str, list[dict[str, Any]]]]:
+    if not python_paths or not shutil.which("ruff"):
+        return False, _agent_quality_delta_empty_findings()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        return _agent_quality_delta_collect_ruff_sides(
+            Path(tmp_dir),
+            python_paths,
+            contents,
+        )
+
+
+def _agent_quality_delta_fallback_static_findings(
+    python_paths: list[str],
+    contents: dict[str, dict[str, str]],
+) -> dict[str, list[dict[str, Any]]]:
+    findings: dict[str, list[dict[str, Any]]] = {"base": [], "head": []}
+    for path in python_paths:
+        for side in ("base", "head"):
+            for item in _agent_quality_delta_fallback_findings(path, contents[path][side]):
+                row = dict(item)
+                row["path"] = path
+                findings[side].append(row)
+    for side in ("base", "head"):
+        findings[side].sort(
+            key=lambda item: (
+                item.get("path", ""),
+                item.get("rule_id", ""),
+                item.get("line", 0),
+            )
+        )
+    return findings
 
 
 def _agent_quality_delta_static_findings(
     changed_files: list[dict[str, Any]],
     contents: dict[str, dict[str, str]],
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
-    tools = [{"name": "fallback_python_heuristics", "available": True, "used": True}]
-    findings = {"base": [], "head": []}
-    python_paths = [row["path"] for row in changed_files if row.get("language") == "python" and not row.get("binary")]
-    ruff_used = False
-    if python_paths and shutil.which("ruff"):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp = Path(tmp_dir)
-            for side in ("base", "head"):
-                side_root = tmp / side
-                for path in python_paths:
-                    target = side_root / path
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(contents[path][side], encoding="utf-8")
-                ruff_findings = _agent_quality_delta_ruff_findings(side_root)
-                if ruff_findings is None:
-                    break
-                normalized: list[dict[str, Any]] = []
-                for item in ruff_findings:
-                    raw_path = Path(str(item.get("path", "")))
-                    try:
-                        rel_path = raw_path.relative_to(side_root)
-                    except ValueError:
-                        rel_path = raw_path
-                    row = {k: v for k, v in item.items() if k != "path"}
-                    row["path"] = str(rel_path)
-                    normalized.append(row)
-                findings[side] = normalized
-            else:
-                ruff_used = True
-    tools.append({"name": "ruff", "available": bool(shutil.which("ruff")), "used": ruff_used})
+    python_paths = [
+        row["path"]
+        for row in changed_files
+        if row.get("language") == "python" and not row.get("binary")
+    ]
+    ruff_used, findings = _agent_quality_delta_try_ruff_findings(python_paths, contents)
     if not ruff_used:
-        for path in python_paths:
-            for side in ("base", "head"):
-                for item in _agent_quality_delta_fallback_findings(path, contents[path][side]):
-                    row = dict(item)
-                    row["path"] = path
-                    findings[side].append(row)
-        for side in ("base", "head"):
-            findings[side].sort(key=lambda item: (item.get("path", ""), item.get("rule_id", ""), item.get("line", 0)))
+        findings = _agent_quality_delta_fallback_static_findings(python_paths, contents)
+    tools = [
+        {"name": "fallback_python_heuristics", "available": True, "used": not ruff_used},
+        {"name": "ruff", "available": bool(shutil.which("ruff")), "used": ruff_used},
+    ]
     return findings, tools
 
 
@@ -31016,9 +31287,113 @@ def _agent_quality_delta_count_findings(findings: list[dict[str, Any]], key: str
     return dict(sorted(counts.items()))
 
 
-def _agent_quality_delta_delta_counts(base_counts: dict[str, int], head_counts: dict[str, int]) -> dict[str, int]:
+def _agent_quality_delta_delta_counts(
+    base_counts: dict[str, int],
+    head_counts: dict[str, int],
+) -> dict[str, int]:
     keys = sorted(set(base_counts) | set(head_counts))
     return {key: head_counts.get(key, 0) - base_counts.get(key, 0) for key in keys}
+
+
+def _agent_quality_delta_function_touched(
+    function: dict[str, Any],
+    changed_lines: set[int],
+) -> bool:
+    if not function:
+        return False
+    return _agent_quality_delta_intersects(
+        int(function.get("start_line", 0)),
+        int(function.get("end_line", 0)),
+        changed_lines,
+    )
+
+
+def _agent_quality_delta_metric_block(function: dict[str, Any]) -> dict[str, int]:
+    return {
+        "cyclomatic": int(function.get("cyclomatic", 0)),
+        "cognitive": int(function.get("cognitive", 0)),
+        "line_count": int(function.get("line_count", 0)),
+    }
+
+
+def _agent_quality_delta_function_status(
+    base: dict[str, Any],
+    head: dict[str, Any],
+) -> str:
+    if not base:
+        return "added"
+    if not head:
+        return "deleted"
+    return "modified"
+
+
+def _agent_quality_delta_complexity_row(
+    path: str,
+    name: str,
+    base: dict[str, Any],
+    head: dict[str, Any],
+) -> dict[str, Any]:
+    base_metrics = _agent_quality_delta_metric_block(base)
+    head_metrics = _agent_quality_delta_metric_block(head)
+    return {
+        "path": path,
+        "function": name,
+        "status": _agent_quality_delta_function_status(base, head),
+        "base": base_metrics,
+        "head": head_metrics,
+        "delta": {
+            key: head_metrics[key] - base_metrics[key]
+            for key in ("cyclomatic", "cognitive", "line_count")
+        },
+    }
+
+
+def _agent_quality_delta_should_report_function(
+    name: str,
+    base_funcs: dict[str, dict[str, Any]],
+    head_funcs: dict[str, dict[str, Any]],
+    base_changed: set[int],
+    head_changed: set[int],
+) -> bool:
+    base = base_funcs.get(name, {})
+    head = head_funcs.get(name, {})
+    if name not in base_funcs or name not in head_funcs:
+        return True
+    return _agent_quality_delta_function_touched(
+        base,
+        base_changed,
+    ) or _agent_quality_delta_function_touched(head, head_changed)
+
+
+def _agent_quality_delta_file_complexity(
+    file_row: dict[str, Any],
+    contents: dict[str, dict[str, str]],
+    changed_ranges: dict[str, dict[str, list[int]]],
+) -> list[dict[str, Any]]:
+    path = str(file_row.get("path", ""))
+    base_funcs, _base_errors = _agent_quality_delta_python_functions(contents[path]["base"])
+    head_funcs, _head_errors = _agent_quality_delta_python_functions(contents[path]["head"])
+    changed = changed_ranges.get(path, {})
+    base_changed = set(changed.get("base", []))
+    head_changed = set(changed.get("head", []))
+    rows: list[dict[str, Any]] = []
+    for name in sorted(set(base_funcs) | set(head_funcs)):
+        if _agent_quality_delta_should_report_function(
+            name,
+            base_funcs,
+            head_funcs,
+            base_changed,
+            head_changed,
+        ):
+            rows.append(
+                _agent_quality_delta_complexity_row(
+                    path,
+                    name,
+                    base_funcs.get(name, {}),
+                    head_funcs.get(name, {}),
+                )
+            )
+    return rows
 
 
 def _agent_quality_delta_complexity(
@@ -31028,85 +31403,172 @@ def _agent_quality_delta_complexity(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for file_row in changed_files:
-        path = str(file_row.get("path", ""))
-        if file_row.get("language") != "python" or file_row.get("binary"):
-            continue
-        base_funcs, _base_errors = _agent_quality_delta_python_functions(contents[path]["base"])
-        head_funcs, _head_errors = _agent_quality_delta_python_functions(contents[path]["head"])
-        base_changed = set(changed_ranges.get(path, {}).get("base", []))
-        head_changed = set(changed_ranges.get(path, {}).get("head", []))
-        for name in sorted(set(base_funcs) | set(head_funcs)):
-            base = base_funcs.get(name, {})
-            head = head_funcs.get(name, {})
-            base_touched = bool(base) and _agent_quality_delta_intersects(int(base.get("start_line", 0)), int(base.get("end_line", 0)), base_changed)
-            head_touched = bool(head) and _agent_quality_delta_intersects(int(head.get("start_line", 0)), int(head.get("end_line", 0)), head_changed)
-            if not (base_touched or head_touched or name not in base_funcs or name not in head_funcs):
-                continue
-            rows.append(
-                {
-                    "path": path,
-                    "function": name,
-                    "status": "added" if name not in base_funcs else "deleted" if name not in head_funcs else "modified",
-                    "base": {"cyclomatic": int(base.get("cyclomatic", 0)), "cognitive": int(base.get("cognitive", 0)), "line_count": int(base.get("line_count", 0))},
-                    "head": {"cyclomatic": int(head.get("cyclomatic", 0)), "cognitive": int(head.get("cognitive", 0)), "line_count": int(head.get("line_count", 0))},
-                    "delta": {
-                        "cyclomatic": int(head.get("cyclomatic", 0)) - int(base.get("cyclomatic", 0)),
-                        "cognitive": int(head.get("cognitive", 0)) - int(base.get("cognitive", 0)),
-                        "line_count": int(head.get("line_count", 0)) - int(base.get("line_count", 0)),
-                    },
-                }
-            )
+        if file_row.get("language") == "python" and not file_row.get("binary"):
+            rows.extend(_agent_quality_delta_file_complexity(file_row, contents, changed_ranges))
     return rows
+
+
+def _agent_quality_delta_is_large_growth(
+    head_lines: int,
+    line_delta: int,
+    large_function_delta: int,
+) -> bool:
+    return head_lines >= 80 or line_delta >= large_function_delta
+
+
+def _agent_quality_delta_growth_severity(head_lines: int) -> str:
+    return "medium" if head_lines >= 80 else "low"
+
+
+def _agent_quality_delta_growth_hint(
+    row: dict[str, Any],
+    large_function_delta: int,
+) -> dict[str, Any] | None:
+    head = row.get("head", {}) if isinstance(row.get("head"), dict) else {}
+    delta = row.get("delta", {}) if isinstance(row.get("delta"), dict) else {}
+    head_lines = int(head.get("line_count", 0) or 0)
+    line_delta = int(delta.get("line_count", 0) or 0)
+    if not _agent_quality_delta_is_large_growth(head_lines, line_delta, large_function_delta):
+        return None
+    return {
+        "type": "large_function_growth",
+        "severity": _agent_quality_delta_growth_severity(head_lines),
+        "path": row.get("path", ""),
+        "function": row.get("function", ""),
+        "head_line_count": head_lines,
+        "line_count_delta": line_delta,
+    }
 
 
 def _agent_quality_delta_growth_hints(
     complexity_rows: list[dict[str, Any]],
     large_function_delta: int,
 ) -> list[dict[str, Any]]:
-    hints: list[dict[str, Any]] = []
-    for row in complexity_rows:
-        head = row.get("head", {}) if isinstance(row.get("head"), dict) else {}
-        delta = row.get("delta", {}) if isinstance(row.get("delta"), dict) else {}
-        head_lines = int(head.get("line_count", 0) or 0)
-        line_delta = int(delta.get("line_count", 0) or 0)
-        if head_lines >= 80 or line_delta >= large_function_delta:
-            hints.append(
-                {
-                    "type": "large_function_growth",
-                    "severity": "medium" if head_lines >= 80 else "low",
-                    "path": row.get("path", ""),
-                    "function": row.get("function", ""),
-                    "head_line_count": head_lines,
-                    "line_count_delta": line_delta,
-                }
-            )
-    return hints
+    return [
+        hint
+        for row in complexity_rows
+        if (hint := _agent_quality_delta_growth_hint(row, large_function_delta))
+    ]
 
 
-def _agent_quality_delta_duplication_hints(base_ref: str, head_ref: str, changed_files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _agent_quality_delta_added_line_counts(
+    base_ref: str,
+    head_ref: str,
+    path: str,
+) -> dict[str, int]:
+    seen: dict[str, int] = {}
+    for line in _agent_quality_delta_added_lines(base_ref, head_ref, path):
+        normalized = re.sub(r"\s+", " ", line.strip())
+        if len(normalized) >= 12 and not normalized.startswith("#"):
+            seen[normalized] = seen.get(normalized, 0) + 1
+    return seen
+
+
+def _agent_quality_delta_duplicate_hint(
+    path: str,
+    normalized: str,
+    count: int,
+) -> dict[str, Any]:
+    return {
+        "type": "added_duplicate_line",
+        "severity": "low" if count == 3 else "medium",
+        "path": path,
+        "repeat_count": count,
+        "fingerprint": "sha256:"
+        + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def _agent_quality_delta_duplication_hints(
+    base_ref: str,
+    head_ref: str,
+    changed_files: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     hints: list[dict[str, Any]] = []
     for file_row in changed_files:
         path = str(file_row.get("path", ""))
         if file_row.get("binary") or file_row.get("language") != "python":
             continue
-        seen: dict[str, int] = {}
-        for line in _agent_quality_delta_added_lines(base_ref, head_ref, path):
-            normalized = re.sub(r"\s+", " ", line.strip())
-            if len(normalized) < 12 or normalized.startswith("#"):
-                continue
-            seen[normalized] = seen.get(normalized, 0) + 1
-        for normalized, count in sorted(seen.items()):
-            if count >= 3:
-                hints.append(
-                    {
-                        "type": "added_duplicate_line",
-                        "severity": "low" if count == 3 else "medium",
-                        "path": path,
-                        "repeat_count": count,
-                        "fingerprint": "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16],
-                    }
-                )
+        seen = _agent_quality_delta_added_line_counts(base_ref, head_ref, path)
+        hints.extend(
+            _agent_quality_delta_duplicate_hint(path, normalized, count)
+            for normalized, count in sorted(seen.items())
+            if count >= 3
+        )
     return hints
+
+
+def _agent_quality_delta_static_policy_reasons(
+    severity_delta: dict[str, int],
+    normalized_delta: dict[str, float],
+    block_per_kloc: float,
+) -> tuple[list[str], list[str]]:
+    high_delta = severity_delta.get("high", 0)
+    high_normalized = normalized_delta.get("high", 0.0)
+    if high_delta > 0 and high_normalized >= block_per_kloc:
+        return ["new high-severity static findings exceed block threshold"], []
+    if high_delta > 0:
+        return [], ["new high-severity static findings need human review"]
+    return [], []
+
+
+def _agent_quality_delta_complexity_policy_reason(
+    row: dict[str, Any],
+    complexity_warn_delta: int,
+    complexity_block_delta: int,
+) -> tuple[str, str] | None:
+    delta = row.get("delta", {}) if isinstance(row.get("delta"), dict) else {}
+    max_delta = max(
+        int(delta.get("cyclomatic", 0) or 0),
+        int(delta.get("cognitive", 0) or 0),
+    )
+    reason = f"{row.get('path')}:{row.get('function')} complexity delta exceeds"
+    if max_delta >= complexity_block_delta:
+        return "block", f"{reason} block threshold"
+    if max_delta >= complexity_warn_delta:
+        return "warn", f"{reason} warn threshold"
+    return None
+
+
+def _agent_quality_delta_complexity_policy_reasons(
+    complexity_rows: list[dict[str, Any]],
+    complexity_warn_delta: int,
+    complexity_block_delta: int,
+) -> tuple[list[str], list[str]]:
+    block_reasons: list[str] = []
+    warn_reasons: list[str] = []
+    for row in complexity_rows:
+        reason = _agent_quality_delta_complexity_policy_reason(
+            row,
+            complexity_warn_delta,
+            complexity_block_delta,
+        )
+        if reason is None:
+            continue
+        bucket, message = reason
+        if bucket == "block":
+            block_reasons.append(message)
+        else:
+            warn_reasons.append(message)
+    return block_reasons, warn_reasons
+
+
+def _agent_quality_delta_positive_normalized(normalized_delta: dict[str, float]) -> float:
+    return max((value for value in normalized_delta.values() if value > 0), default=0.0)
+
+
+def _agent_quality_delta_raw_decision(
+    block_reasons: list[str],
+    warn_reasons: list[str],
+    python_file_count: int,
+) -> str:
+    if block_reasons:
+        return "block"
+    if python_file_count == 0:
+        return "review-only"
+    if warn_reasons:
+        return "warn"
+    return "pass"
 
 
 def _agent_quality_delta_policy_decision(
@@ -31121,27 +31583,32 @@ def _agent_quality_delta_policy_decision(
     maintainer_override: bool,
     python_file_count: int,
 ) -> dict[str, Any]:
-    block_reasons: list[str] = []
-    warn_reasons: list[str] = []
+    block_reasons, warn_reasons = _agent_quality_delta_static_policy_reasons(
+        severity_delta,
+        normalized_delta,
+        block_per_kloc,
+    )
+    complexity_block, complexity_warn = _agent_quality_delta_complexity_policy_reasons(
+        complexity_rows,
+        complexity_warn_delta,
+        complexity_block_delta,
+    )
+    block_reasons.extend(complexity_block)
+    warn_reasons.extend(complexity_warn)
     if python_file_count == 0:
-        warn_reasons.append("review-only: no touched Python files; maintainability delta is advisory for non-Python churn")
-    if severity_delta.get("high", 0) > 0 and normalized_delta.get("high", 0.0) >= block_per_kloc:
-        block_reasons.append("new high-severity static findings exceed block threshold")
-    elif severity_delta.get("high", 0) > 0:
-        warn_reasons.append("new high-severity static findings need human review")
-    for row in complexity_rows:
-        delta = row.get("delta", {}) if isinstance(row.get("delta"), dict) else {}
-        max_delta = max(int(delta.get("cyclomatic", 0) or 0), int(delta.get("cognitive", 0) or 0))
-        if max_delta >= complexity_block_delta:
-            block_reasons.append(f"{row.get('path')}:{row.get('function')} complexity delta exceeds block threshold")
-        elif max_delta >= complexity_warn_delta:
-            warn_reasons.append(f"{row.get('path')}:{row.get('function')} complexity delta exceeds warn threshold")
-    positive_normalized = max((value for value in normalized_delta.values() if value > 0), default=0.0)
-    if positive_normalized >= warn_per_kloc:
+        warn_reasons.append(
+            "review-only: no touched Python files; "
+            "maintainability delta is advisory for non-Python churn"
+        )
+    if _agent_quality_delta_positive_normalized(normalized_delta) >= warn_per_kloc:
         warn_reasons.append("churn-normalized static findings increased")
     if hints:
         warn_reasons.append("duplication or large-function growth hints are present")
-    raw_decision = "block" if block_reasons else "review-only" if python_file_count == 0 else "warn" if warn_reasons else "pass"
+    raw_decision = _agent_quality_delta_raw_decision(
+        block_reasons,
+        warn_reasons,
+        python_file_count,
+    )
     effective_decision = "warn" if raw_decision == "block" and maintainer_override else raw_decision
     return {
         "decision": effective_decision,
@@ -31151,6 +31618,276 @@ def _agent_quality_delta_policy_decision(
         "maintainer_override_applied": bool(maintainer_override and raw_decision == "block"),
         "warn_reasons": sorted(set(warn_reasons)),
         "block_reasons": sorted(set(block_reasons)),
+    }
+
+
+def _agent_quality_delta_contents_and_ranges(
+    base_ref: str,
+    head_ref: str,
+    changed_files: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, list[int]]]]:
+    contents: dict[str, dict[str, str]] = {}
+    changed_ranges: dict[str, dict[str, list[int]]] = {}
+    for row in changed_files:
+        path = str(row.get("path", ""))
+        if path and not row.get("binary"):
+            contents[path] = {
+                "base": _agent_quality_delta_git_show(base_ref, path),
+                "head": _agent_quality_delta_git_show(head_ref, path),
+            }
+            changed_ranges[path] = _agent_quality_delta_hunks(base_ref, head_ref, path)
+    return contents, changed_ranges
+
+
+def _agent_quality_delta_static_summary(
+    static_findings: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    base_by_severity = _agent_quality_delta_count_findings(
+        static_findings["base"],
+        "severity",
+    )
+    head_by_severity = _agent_quality_delta_count_findings(
+        static_findings["head"],
+        "severity",
+    )
+    base_by_category = _agent_quality_delta_count_findings(
+        static_findings["base"],
+        "category",
+    )
+    head_by_category = _agent_quality_delta_count_findings(
+        static_findings["head"],
+        "category",
+    )
+    return {
+        "base_by_severity": base_by_severity,
+        "head_by_severity": head_by_severity,
+        "base_by_category": base_by_category,
+        "head_by_category": head_by_category,
+        "severity_delta": _agent_quality_delta_delta_counts(
+            base_by_severity,
+            head_by_severity,
+        ),
+        "category_delta": _agent_quality_delta_delta_counts(
+            base_by_category,
+            head_by_category,
+        ),
+    }
+
+
+def _agent_quality_delta_normalized_counts(
+    delta_counts: dict[str, int],
+    churn_kloc: float,
+) -> dict[str, float]:
+    return {key: round(max(value, 0) / churn_kloc, 3) for key, value in delta_counts.items()}
+
+
+def _agent_quality_delta_max_delta(
+    complexity_rows: list[dict[str, Any]],
+    key: str,
+) -> int:
+    return max(
+        (int(row.get("delta", {}).get(key, 0) or 0) for row in complexity_rows),
+        default=0,
+    )
+
+
+def _agent_quality_delta_python_file_count(changed_files: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for row in changed_files
+        if row.get("language") == "python" and not row.get("binary")
+    )
+
+
+def _agent_quality_delta_summary(
+    changed_files: list[dict[str, Any]],
+    severity_delta: dict[str, int],
+    complexity_rows: list[dict[str, Any]],
+    duplication_hints: list[dict[str, Any]],
+    growth_hints: list[dict[str, Any]],
+    churn_lines: int,
+) -> dict[str, Any]:
+    return {
+        "changed_file_count": len(changed_files),
+        "python_file_count": _agent_quality_delta_python_file_count(changed_files),
+        "churn_lines": churn_lines,
+        "positive_static_finding_delta": sum(max(value, 0) for value in severity_delta.values()),
+        "max_cognitive_delta": _agent_quality_delta_max_delta(
+            complexity_rows,
+            "cognitive",
+        ),
+        "max_cyclomatic_delta": _agent_quality_delta_max_delta(
+            complexity_rows,
+            "cyclomatic",
+        ),
+        "duplication_hint_count": len(duplication_hints),
+        "large_function_growth_count": len(growth_hints),
+    }
+
+
+def _agent_quality_delta_patch_digest(
+    base_ref: str,
+    head_ref: str,
+    changed_files: list[dict[str, Any]],
+    severity_delta: dict[str, int],
+    category_delta: dict[str, int],
+) -> str:
+    patch_identity = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "changed_files": [
+            {
+                "path": row.get("path"),
+                "added_lines": row.get("added_lines"),
+                "deleted_lines": row.get("deleted_lines"),
+            }
+            for row in changed_files
+        ],
+        "severity_delta": severity_delta,
+        "category_delta": category_delta,
+    }
+    return hashlib.sha256(_canonical_json_bytes(patch_identity)).hexdigest()[:16]
+
+
+def _agent_quality_delta_provenance(
+    base_ref: str,
+    head_ref: str,
+    patch_digest: str,
+) -> dict[str, Any]:
+    return {
+        "schema": AGENT_QUALITY_DELTA_PROVENANCE_SCHEMA,
+        "source": "git_diff",
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "patch_survivorship": {
+            "schema": PATCH_SURVIVORSHIP_REPORT_SCHEMA,
+            "patch_id": f"agent-quality-delta:{patch_digest}",
+            "state": "candidate_delta",
+        },
+        "release_readiness": {
+            "check": "agent_quality_delta",
+            "vocabulary": "release_readiness.check.v1",
+        },
+        "raw_prompt_storage": False,
+        "redaction": {
+            "raw_prompts_stored": False,
+            "finding_messages_bounded": True,
+            "secret_values_stored": False,
+        },
+    }
+
+
+def _agent_quality_delta_sorted_hints(
+    growth_hints: list[dict[str, Any]],
+    duplication_hints: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        growth_hints + duplication_hints,
+        key=lambda item: (
+            item.get("path", ""),
+            item.get("type", ""),
+            item.get("function", ""),
+        ),
+    )
+
+
+def _agent_quality_delta_static_block(
+    static_findings: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    static_summary = _agent_quality_delta_static_summary(static_findings)
+    return {
+        "base": {
+            "by_severity": static_summary["base_by_severity"],
+            "by_category": static_summary["base_by_category"],
+            "finding_count": len(static_findings["base"]),
+        },
+        "head": {
+            "by_severity": static_summary["head_by_severity"],
+            "by_category": static_summary["head_by_category"],
+            "finding_count": len(static_findings["head"]),
+        },
+        "delta": {
+            "by_severity": static_summary["severity_delta"],
+            "by_category": static_summary["category_delta"],
+        },
+        "summary": static_summary,
+    }
+
+
+def _agent_quality_delta_payload(
+    base_ref: str,
+    head_ref: str,
+    changed_files: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    static_findings: dict[str, list[dict[str, Any]]],
+    static_block: dict[str, Any],
+    normalized_by_severity: dict[str, float],
+    normalized_by_category: dict[str, float],
+    churn_lines: int,
+    complexity_rows: list[dict[str, Any]],
+    hints: list[dict[str, Any]],
+    summary: dict[str, Any],
+    policy: dict[str, Any],
+    patch_digest: str,
+) -> dict[str, Any]:
+    return {
+        "schema": AGENT_QUALITY_DELTA_SCHEMA,
+        "read_only": True,
+        "advisory_only": False,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "ok": bool(policy["ok"]),
+        "decision": policy["decision"],
+        "summary": summary,
+        "changed_files": changed_files,
+        "static_analysis": {
+            "tools": tools,
+            "base": static_block["base"],
+            "head": static_block["head"],
+            "delta": static_block["delta"],
+            "normalized_delta_per_kloc": {
+                "by_severity": normalized_by_severity,
+                "by_category": normalized_by_category,
+                "churn_lines": churn_lines,
+            },
+            "findings": {
+                "base": static_findings["base"][:200],
+                "head": static_findings["head"][:200],
+            },
+        },
+        "complexity": {"functions": complexity_rows[:300]},
+        "hints": hints[:200],
+        "policy": {
+            "thresholds": {
+                "warn_per_kloc": AGENT_QUALITY_DELTA_DEFAULT_WARN_PER_KLOC,
+                "block_per_kloc": AGENT_QUALITY_DELTA_DEFAULT_BLOCK_PER_KLOC,
+                "complexity_warn_delta": AGENT_QUALITY_DELTA_DEFAULT_COMPLEXITY_WARN_DELTA,
+                "complexity_block_delta": AGENT_QUALITY_DELTA_DEFAULT_COMPLEXITY_BLOCK_DELTA,
+                "large_function_delta": AGENT_QUALITY_DELTA_DEFAULT_LARGE_FUNCTION_DELTA,
+            },
+            **policy,
+        },
+        "provenance": _agent_quality_delta_provenance(
+            base_ref,
+            head_ref,
+            patch_digest,
+        ),
+    }
+
+
+def _agent_quality_delta_thresholds(
+    warn_per_kloc: float,
+    block_per_kloc: float,
+    complexity_warn_delta: int,
+    complexity_block_delta: int,
+    large_function_delta: int,
+) -> dict[str, Any]:
+    return {
+        "warn_per_kloc": warn_per_kloc,
+        "block_per_kloc": block_per_kloc,
+        "complexity_warn_delta": complexity_warn_delta,
+        "complexity_block_delta": complexity_block_delta,
+        "large_function_delta": large_function_delta,
     }
 
 
@@ -31168,36 +31905,42 @@ def agent_quality_delta(
     """Report deterministic maintainability deltas for changed agent-authored files."""
     _require_git_repo()
     changed_files = _agent_quality_delta_changed_files(base_ref, head_ref)
-    contents: dict[str, dict[str, str]] = {}
-    changed_ranges: dict[str, dict[str, list[int]]] = {}
-    for row in changed_files:
-        path = str(row.get("path", ""))
-        if not path or row.get("binary"):
-            continue
-        contents[path] = {
-            "base": _agent_quality_delta_git_show(base_ref, path),
-            "head": _agent_quality_delta_git_show(head_ref, path),
-        }
-        changed_ranges[path] = _agent_quality_delta_hunks(base_ref, head_ref, path)
-
+    contents, changed_ranges = _agent_quality_delta_contents_and_ranges(
+        base_ref,
+        head_ref,
+        changed_files,
+    )
     static_findings, tools = _agent_quality_delta_static_findings(changed_files, contents)
-    base_by_severity = _agent_quality_delta_count_findings(static_findings["base"], "severity")
-    head_by_severity = _agent_quality_delta_count_findings(static_findings["head"], "severity")
-    base_by_category = _agent_quality_delta_count_findings(static_findings["base"], "category")
-    head_by_category = _agent_quality_delta_count_findings(static_findings["head"], "category")
-    severity_delta = _agent_quality_delta_delta_counts(base_by_severity, head_by_severity)
-    category_delta = _agent_quality_delta_delta_counts(base_by_category, head_by_category)
+    static_block = _agent_quality_delta_static_block(static_findings)
+    static_summary = static_block["summary"]
     churn_lines = sum(int(row.get("churn_lines", 0) or 0) for row in changed_files)
     churn_kloc = max(churn_lines, 1) / 1000.0
-    normalized_by_severity = {key: round(max(value, 0) / churn_kloc, 3) for key, value in severity_delta.items()}
-    normalized_by_category = {key: round(max(value, 0) / churn_kloc, 3) for key, value in category_delta.items()}
-    complexity_rows = _agent_quality_delta_complexity(changed_files, contents, changed_ranges)
+    normalized_by_severity = _agent_quality_delta_normalized_counts(
+        static_summary["severity_delta"],
+        churn_kloc,
+    )
+    normalized_by_category = _agent_quality_delta_normalized_counts(
+        static_summary["category_delta"],
+        churn_kloc,
+    )
+    complexity_rows = _agent_quality_delta_complexity(
+        changed_files,
+        contents,
+        changed_ranges,
+    )
     growth_hints = _agent_quality_delta_growth_hints(complexity_rows, large_function_delta)
     duplication_hints = _agent_quality_delta_duplication_hints(base_ref, head_ref, changed_files)
-    hints = sorted(growth_hints + duplication_hints, key=lambda item: (item.get("path", ""), item.get("type", ""), item.get("function", "")))
-    python_file_count = sum(1 for row in changed_files if row.get("language") == "python" and not row.get("binary"))
+    hints = _agent_quality_delta_sorted_hints(growth_hints, duplication_hints)
+    summary = _agent_quality_delta_summary(
+        changed_files,
+        static_summary["severity_delta"],
+        complexity_rows,
+        duplication_hints,
+        growth_hints,
+        churn_lines,
+    )
     policy = _agent_quality_delta_policy_decision(
-        severity_delta,
+        static_summary["severity_delta"],
         normalized_by_severity,
         complexity_rows,
         hints,
@@ -31206,72 +31949,39 @@ def agent_quality_delta(
         complexity_warn_delta,
         complexity_block_delta,
         maintainer_override,
-        python_file_count,
+        summary["python_file_count"],
     )
-    patch_identity = {
-        "base_ref": base_ref,
-        "head_ref": head_ref,
-        "changed_files": [{"path": row.get("path"), "added_lines": row.get("added_lines"), "deleted_lines": row.get("deleted_lines")} for row in changed_files],
-        "severity_delta": severity_delta,
-        "category_delta": category_delta,
-    }
-    patch_digest = hashlib.sha256(_canonical_json_bytes(patch_identity)).hexdigest()[:16]
-    max_cognitive_delta = max((int(row.get("delta", {}).get("cognitive", 0) or 0) for row in complexity_rows), default=0)
-    max_cyclomatic_delta = max((int(row.get("delta", {}).get("cyclomatic", 0) or 0) for row in complexity_rows), default=0)
-    return {
-        "schema": AGENT_QUALITY_DELTA_SCHEMA,
-        "read_only": True,
-        "advisory_only": False,
-        "base_ref": base_ref,
-        "head_ref": head_ref,
-        "ok": bool(policy["ok"]),
-        "decision": policy["decision"],
-        "summary": {
-            "changed_file_count": len(changed_files),
-            "python_file_count": python_file_count,
-            "churn_lines": churn_lines,
-            "positive_static_finding_delta": sum(max(value, 0) for value in severity_delta.values()),
-            "max_cognitive_delta": max_cognitive_delta,
-            "max_cyclomatic_delta": max_cyclomatic_delta,
-            "duplication_hint_count": len(duplication_hints),
-            "large_function_growth_count": len(growth_hints),
-        },
-        "changed_files": changed_files,
-        "static_analysis": {
-            "tools": tools,
-            "base": {"by_severity": base_by_severity, "by_category": base_by_category, "finding_count": len(static_findings["base"])},
-            "head": {"by_severity": head_by_severity, "by_category": head_by_category, "finding_count": len(static_findings["head"])},
-            "delta": {"by_severity": severity_delta, "by_category": category_delta},
-            "normalized_delta_per_kloc": {"by_severity": normalized_by_severity, "by_category": normalized_by_category, "churn_lines": churn_lines},
-            "findings": {"base": static_findings["base"][:200], "head": static_findings["head"][:200]},
-        },
-        "complexity": {"functions": complexity_rows[:300]},
-        "hints": hints[:200],
-        "policy": {
-            "thresholds": {
-                "warn_per_kloc": warn_per_kloc,
-                "block_per_kloc": block_per_kloc,
-                "complexity_warn_delta": complexity_warn_delta,
-                "complexity_block_delta": complexity_block_delta,
-                "large_function_delta": large_function_delta,
-            },
-            **policy,
-        },
-        "provenance": {
-            "schema": AGENT_QUALITY_DELTA_PROVENANCE_SCHEMA,
-            "source": "git_diff",
-            "base_ref": base_ref,
-            "head_ref": head_ref,
-            "patch_survivorship": {
-                "schema": PATCH_SURVIVORSHIP_REPORT_SCHEMA,
-                "patch_id": f"agent-quality-delta:{patch_digest}",
-                "state": "candidate_delta",
-            },
-            "release_readiness": {"check": "agent_quality_delta", "vocabulary": "release_readiness.check.v1"},
-            "raw_prompt_storage": False,
-            "redaction": {"raw_prompts_stored": False, "finding_messages_bounded": True, "secret_values_stored": False},
-        },
-    }
+    patch_digest = _agent_quality_delta_patch_digest(
+        base_ref,
+        head_ref,
+        changed_files,
+        static_summary["severity_delta"],
+        static_summary["category_delta"],
+    )
+    payload = _agent_quality_delta_payload(
+        base_ref,
+        head_ref,
+        changed_files,
+        tools,
+        static_findings,
+        static_block,
+        normalized_by_severity,
+        normalized_by_category,
+        churn_lines,
+        complexity_rows,
+        hints,
+        summary,
+        policy,
+        patch_digest,
+    )
+    payload["policy"]["thresholds"] = _agent_quality_delta_thresholds(
+        warn_per_kloc,
+        block_per_kloc,
+        complexity_warn_delta,
+        complexity_block_delta,
+        large_function_delta,
+    )
+    return payload
 
 
 def _mcp_apps_dashboard_enabled() -> bool:
@@ -31437,6 +32147,65 @@ def _with_release_readiness_dashboard(result: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(result)
     enriched["mcp_apps"] = _release_readiness_dashboard_payload(result)
     return enriched
+
+
+def _release_readiness_dict_field(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    value = payload.get(key, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _release_readiness_warning_reason(policy: dict[str, Any]) -> str:
+    reasons = policy.get("warn_reasons") or []
+    if not isinstance(reasons, list):
+        return ""
+    return "; ".join(reasons[:3])
+
+
+def _release_readiness_quality_delta_check(quality_delta: dict[str, Any]) -> dict[str, Any]:
+    summary = _release_readiness_dict_field(quality_delta, "summary")
+    policy = _release_readiness_dict_field(quality_delta, "policy")
+    static = _release_readiness_dict_field(quality_delta, "static_analysis")
+    normalized = _release_readiness_dict_field(static, "normalized_delta_per_kloc")
+    decision = quality_delta.get("decision", "")
+    return {
+        "ok": bool(quality_delta.get("ok", False)),
+        "status": decision,
+        "decision": decision,
+        "raw_decision": policy.get("raw_decision", decision),
+        "warning": decision in {"warn", "review-only"},
+        "warning_reason": _release_readiness_warning_reason(policy),
+        "blocking_enabled": True,
+        "maintainer_override_allowed": policy.get("maintainer_override_allowed", True),
+        "maintainer_override_applied": policy.get("maintainer_override_applied", False),
+        "positive_static_finding_delta": summary.get("positive_static_finding_delta", 0),
+        "max_cognitive_delta": summary.get("max_cognitive_delta", 0),
+        "max_cyclomatic_delta": summary.get("max_cyclomatic_delta", 0),
+        "duplication_hint_count": summary.get("duplication_hint_count", 0),
+        "large_function_growth_count": summary.get("large_function_growth_count", 0),
+        "normalized_delta_per_kloc": normalized.get("by_severity", {}),
+        "provenance": quality_delta.get("provenance", {}),
+    }
+
+
+def _release_readiness_agent_quality_delta_check(
+    base_ref: str,
+    head_ref: str,
+    maintainer_override: bool,
+) -> dict[str, Any]:
+    try:
+        quality_delta = agent_quality_delta(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            maintainer_override=maintainer_override,
+        )
+        return _release_readiness_quality_delta_check(quality_delta)
+    except Exception as exc:
+        return {
+            "ok": True,
+            "status": "review-only",
+            "warning": True,
+            "warning_reason": str(exc),
+        }
 
 
 @mcp.tool()
@@ -31609,38 +32378,14 @@ def release_readiness(
             result["checks"]["secret_exposure"] = {"ok": True, "status": "skipped", "warning": True, "warning_reason": str(exc)}
 
     if run_agent_quality_delta_check:
-        try:
-            quality_delta = agent_quality_delta(
-                base_ref=base_ref,
-                head_ref=head_ref,
-                maintainer_override=agent_quality_delta_maintainer_override,
-            )
-            quality_summary = quality_delta.get("summary", {}) if isinstance(quality_delta.get("summary"), dict) else {}
-            quality_policy = quality_delta.get("policy", {}) if isinstance(quality_delta.get("policy"), dict) else {}
-            quality_static = quality_delta.get("static_analysis", {}) if isinstance(quality_delta.get("static_analysis"), dict) else {}
-            normalized = quality_static.get("normalized_delta_per_kloc", {}) if isinstance(quality_static.get("normalized_delta_per_kloc"), dict) else {}
-            result["checks"]["agent_quality_delta"] = {
-                "ok": bool(quality_delta.get("ok", False)),
-                "status": quality_delta.get("decision", ""),
-                "decision": quality_delta.get("decision", ""),
-                "raw_decision": quality_policy.get("raw_decision", quality_delta.get("decision", "")),
-                "warning": quality_delta.get("decision") in {"warn", "review-only"},
-                "warning_reason": "; ".join((quality_policy.get("warn_reasons") or [])[:3]) if isinstance(quality_policy.get("warn_reasons"), list) else "",
-                "blocking_enabled": True,
-                "maintainer_override_allowed": quality_policy.get("maintainer_override_allowed", True),
-                "maintainer_override_applied": quality_policy.get("maintainer_override_applied", False),
-                "positive_static_finding_delta": quality_summary.get("positive_static_finding_delta", 0),
-                "max_cognitive_delta": quality_summary.get("max_cognitive_delta", 0),
-                "max_cyclomatic_delta": quality_summary.get("max_cyclomatic_delta", 0),
-                "duplication_hint_count": quality_summary.get("duplication_hint_count", 0),
-                "large_function_growth_count": quality_summary.get("large_function_growth_count", 0),
-                "normalized_delta_per_kloc": normalized.get("by_severity", {}),
-                "provenance": quality_delta.get("provenance", {}),
-            }
-            if not quality_delta.get("ok", False):
-                result["ok"] = False
-        except Exception as exc:
-            result["checks"]["agent_quality_delta"] = {"ok": True, "status": "review-only", "warning": True, "warning_reason": str(exc)}
+        quality_check = _release_readiness_agent_quality_delta_check(
+            base_ref,
+            head_ref,
+            agent_quality_delta_maintainer_override,
+        )
+        result["checks"]["agent_quality_delta"] = quality_check
+        if not quality_check.get("ok", False):
+            result["ok"] = False
 
     if run_license_check:
         try:
