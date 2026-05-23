@@ -35,6 +35,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workspace_transaction",
                 "policy_simulator",
                 "workflow_policy_plan",
+                "workflow_reminder",
                 "clarification_gate",
                 "release_readiness",
                 "tool_catalog_integrity",
@@ -118,6 +119,11 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                     {"tool": "repo_info", "mode": "read", "args": {}},
                     {"tool": "git_status", "mode": "read", "args": {}},
                 ],
+            ),
+            "workflow_reminder": self.server.workflow_reminder(
+                task_summary="Keep release validation fresh before readiness.",
+                intended_next_action={"tool": "release_readiness", "mode": "release"},
+                last_gate_results={"change_impact_gate": {"ok": True, "selected_tests": ["tests/test_tool_output_schemas.py"]}},
             ),
             "clarification_gate": self.server.clarification_gate(
                 intent="prepare a safe release",
