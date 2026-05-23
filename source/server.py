@@ -15122,6 +15122,7 @@ AGENT_SECURITY_DELTA_DEFAULT_INCLUDE_GLOBS = [
 AGENT_SECURITY_DELTA_DEFAULT_EXCLUDE_GLOBS = [
     ".git/**",
     ".codebase-tooling-mcp/**",
+    "tests/**",
     "**/__pycache__/**",
     "**/.venv/**",
     "**/node_modules/**",

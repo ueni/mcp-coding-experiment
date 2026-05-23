@@ -12,7 +12,7 @@ The report is intentionally conservative. It is designed to catch obvious patch 
 
 ## Scope
 
-The default changed-file pack covers Python source/tests/scripts, common JSON/YAML/TOML configuration, Dockerfiles, GitHub Actions workflows, and devcontainer configuration. Default exclusions skip `.git`, generated MCP report/cache files, Python caches, virtual environments, and `node_modules`.
+The default changed-file pack covers Python source/scripts, common JSON/YAML/TOML configuration, Dockerfiles, GitHub Actions workflows, and devcontainer configuration. Default exclusions skip `.git`, generated MCP report/cache files, test-fixture files, Python caches, virtual environments, and `node_modules`.
 
 Current rules cover:
 
