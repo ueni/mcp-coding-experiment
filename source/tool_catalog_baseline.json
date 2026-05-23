@@ -468,8 +468,315 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 36,
+  "tool_count": 37,
   "tools": [
+    {
+      "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Report deterministic maintainability deltas for changed agent-authored files.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "base_ref": {
+                "default": "HEAD~1",
+                "title": "Base Ref",
+                "type": "string"
+              },
+              "block_per_kloc": {
+                "default": 6.0,
+                "title": "Block Per Kloc",
+                "type": "number"
+              },
+              "complexity_block_delta": {
+                "default": 8,
+                "title": "Complexity Block Delta",
+                "type": "integer"
+              },
+              "complexity_warn_delta": {
+                "default": 3,
+                "title": "Complexity Warn Delta",
+                "type": "integer"
+              },
+              "head_ref": {
+                "default": "HEAD",
+                "title": "Head Ref",
+                "type": "string"
+              },
+              "large_function_delta": {
+                "default": 25,
+                "title": "Large Function Delta",
+                "type": "integer"
+              },
+              "maintainer_override": {
+                "default": false,
+                "title": "Maintainer Override",
+                "type": "boolean"
+              },
+              "warn_per_kloc": {
+                "default": 2.0,
+                "title": "Warn Per Kloc",
+                "type": "number"
+              }
+            },
+            "title": "agent_quality_deltaArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "agent_quality_delta",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "complexity": {
+                "type": "object"
+              },
+              "decision": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block",
+                  "review-only"
+                ],
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "hints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "policy": {
+                "type": "object"
+              },
+              "provenance": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "schema": {
+                "const": "agent_quality_delta.v1",
+                "type": "string"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "static_analysis": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "base_ref",
+              "head_ref",
+              "ok",
+              "decision",
+              "summary",
+              "static_analysis",
+              "complexity",
+              "policy",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "read_only",
+            "advisory_only",
+            "changed_files",
+            "hints",
+            "static_analysis.findings",
+            "provenance.patch_survivorship"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "complexity": {
+                "type": "object"
+              },
+              "decision": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block",
+                  "review-only"
+                ],
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "hints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "policy": {
+                "type": "object"
+              },
+              "provenance": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "schema": {
+                "const": "agent_quality_delta.v1",
+                "type": "string"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "static_analysis": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "base_ref",
+              "head_ref",
+              "ok",
+              "decision",
+              "summary",
+              "static_analysis",
+              "complexity",
+              "policy",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "base_ref",
+            "head_ref",
+            "ok",
+            "decision",
+            "summary",
+            "static_analysis",
+            "complexity",
+            "policy",
+            "provenance"
+          ],
+          "tool": "agent_quality_delta"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "agent_quality_delta"
+        }
+      },
+      "name": "agent_quality_delta"
+    },
     {
       "digest": "sha256:bc3eda387116f1123ad26e3571384764bca9e36126bc04b97ad40cd67314be85",
       "metadata": {
@@ -6313,7 +6620,7 @@
       "name": "read_snippet"
     },
     {
-      "digest": "sha256:3612f570c0d30dbf85c43e0da86601993400b63519a90e6580a058a8b4c70680",
+      "digest": "sha256:8c09915a9ebff652370f86e926c4b0aef382993a4c42139a30f6d1042eabb2d7",
       "metadata": {
         "documentation": [
           {
@@ -6331,6 +6638,11 @@
           "icons": null,
           "input_schema": {
             "properties": {
+              "agent_quality_delta_maintainer_override": {
+                "default": false,
+                "title": "Agent Quality Delta Maintainer Override",
+                "type": "boolean"
+              },
               "base_ref": {
                 "default": "HEAD~1",
                 "title": "Base Ref",
@@ -6340,6 +6652,11 @@
                 "default": "HEAD",
                 "title": "Head Ref",
                 "type": "string"
+              },
+              "run_agent_quality_delta_check": {
+                "default": true,
+                "title": "Run Agent Quality Delta Check",
+                "type": "boolean"
               },
               "run_ci_workflow_security_check": {
                 "default": true,
@@ -11720,5 +12037,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:1da634208730cba9c6a1d239ac28686d20d3504a268c0cc86a84898c72b2d659"
+  "whole_catalog_digest": "sha256:79cd0c692cc3fbce816198902899209e70fca5e4d64bc579d0f7bef98d72449b"
 }

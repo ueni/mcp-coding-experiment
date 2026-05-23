@@ -23,6 +23,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `workflow_policy_plan`
 - `clarification_gate`
 - `release_readiness`
+- `agent_quality_delta`
 - `tool_catalog_integrity`
 - `dependency_security_report`
 - `ci_workflow_security_report`
@@ -181,6 +182,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `workflow_policy_plan` | `schema`, `read_only`, `executed_plan`, `decision`, `ok`, `plan_id`, `blocking_policies`, `required_preconditions`, `findings`, `safe_next_actions` | redacted intent, execution mode, allowed targets, data classification, step count, normalized steps, security metadata |
 | `clarification_gate` | `schema`, `ok_to_continue`, `status`, `missing_fields`, `questions`, `fallback_checklist`, `elicitation` | audit notes, normalized input presence, decision reasons |
 | `release_readiness` | `schema`, `base_ref`, `head_ref`, `ok`, `checks` | timestamps, check-specific detail fields, and optional `mcp_apps` dashboard when `MCP_APPS_DASHBOARD_ENABLED=true` |
+| `agent_quality_delta` | `schema`, `base_ref`, `head_ref`, `ok`, `decision`, `summary`, `static_analysis`, `complexity`, `policy`, `provenance` | changed files, read-only/advisory flags, bounded findings, duplication/large-function hints, and patch-survivorship provenance |
 | `tool_catalog_integrity` | `schema`, `ok`, `status`, `baseline`, `current`, `drift`, `lint`, `security` | `read_only`, per-tool/prompt/resource/discovery digest lists, bounded surface-separated metadata diffs, advisory lint finding details |
 | `dependency_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `components`, `vulnerabilities`, `advisory`, `gate`, `exports`, `resource_links` | `inputs`, skipped/unresolved details, warnings, `security`, `exports.sarif`, optional `exports.sbom`, `provenance` sidecars, and `_meta.artifact_resources` |
 | `ci_workflow_security_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `findings`, `workflows`, `exports` | findings by severity, suppressions, action-use classifications, `exports.sarif`, `resource_links`, `provenance` sidecars, `_meta.artifact_resources`, and redacted evidence |
@@ -202,6 +204,8 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 [`docs/fixtures/mcp-structured-grep-response.json`](./fixtures/mcp-structured-grep-response.json) demonstrates an IDE-style client consuming a structured `grep` quick response while still displaying the fallback text content.
 
 `self_optimization_report.optimization_integrity_report` uses compact schema `optimization_integrity_report.v1` for advisory anti-gaming checks over efficiency/release-gate metrics. It reports suspicious proxy wins from failed/skipped/stale/unknown gates, retries/rework, suppressions, unmapped changed files, missing denominators, low success rate, and patch-survivorship/review pushback; candidates inherit an `anti_gaming` gate before optional GitHub issue automation.
+
+`agent_quality_delta` uses `agent_quality_delta.v1` for a read-only per-change maintainability delta. It compares `base_ref...head_ref`, normalizes static-analysis finding deltas by churn, reports touched Python function complexity deltas plus duplication/large-function hints, and links to release-readiness and `patch_survivorship_report.v1` vocabulary without storing raw prompts.
 
 `self_optimization_report.patch_survivorship` uses compact schema `patch_survivorship_report.v1` for redacted aggregate survivorship data. It reports state counts for proposed/applied/committed/rewritten/reverted/retained patches, aggregations by workflow/tool/execution mode, structured local human-pushback labels only, and correlations to test/security/governance artifacts when those local fields are available. Raw prompts, full private patch text, and private conversation snippets are not included.
 
