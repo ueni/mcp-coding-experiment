@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 36,
+  "tool_count": 37,
   "tools": [
     {
       "digest": "sha256:bc3eda387116f1123ad26e3571384764bca9e36126bc04b97ad40cd67314be85",
@@ -10717,6 +10717,335 @@
       "name": "workflow_policy_plan"
     },
     {
+      "digest": "sha256:93f4744bab42e5156d6e4745289b9e03b89ba5c5f54464b4ef7e58f1ef3a1045",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Workflow reminder packets",
+            "path": "docs/workflow-reminder.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Emit a compact read-only workflow_reminder.v1 packet before high-risk actions.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "intended_next_action": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Intended Next Action"
+              },
+              "known_invariants": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Known Invariants"
+              },
+              "last_gate_results": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Gate Results"
+              },
+              "recent_steps": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Recent Steps"
+              },
+              "task_summary": {
+                "title": "Task Summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task_summary"
+            ],
+            "title": "workflow_reminderArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "workflow_reminder",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "emitted": {
+                "type": "boolean"
+              },
+              "evidence": {
+                "type": "object"
+              },
+              "input_summary": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "remembered_constraints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "reminder_id": {
+                "type": "string"
+              },
+              "required_next_gate": {
+                "type": "object"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_reminder.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "suppress_if_already_satisfied": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "trigger": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "advisory_only",
+              "emitted",
+              "trigger",
+              "remembered_constraints",
+              "required_next_gate",
+              "safe_next_actions",
+              "suppress_if_already_satisfied",
+              "evidence"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "reminder_id",
+            "input_summary",
+            "security"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "emitted": {
+                "type": "boolean"
+              },
+              "evidence": {
+                "type": "object"
+              },
+              "input_summary": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "remembered_constraints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "reminder_id": {
+                "type": "string"
+              },
+              "required_next_gate": {
+                "type": "object"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_reminder.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "suppress_if_already_satisfied": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "trigger": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "advisory_only",
+              "emitted",
+              "trigger",
+              "remembered_constraints",
+              "required_next_gate",
+              "safe_next_actions",
+              "suppress_if_already_satisfied",
+              "evidence"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "advisory_only",
+            "emitted",
+            "trigger",
+            "remembered_constraints",
+            "required_next_gate",
+            "safe_next_actions",
+            "suppress_if_already_satisfied",
+            "evidence"
+          ],
+          "tool": "workflow_reminder"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "workflow_reminder"
+        }
+      },
+      "name": "workflow_reminder"
+    },
+    {
       "digest": "sha256:e199cb762da20e888e714e893250d30a2682801cf05dc33251583fab92795f85",
       "metadata": {
         "documentation": [
@@ -11720,5 +12049,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:1da634208730cba9c6a1d239ac28686d20d3504a268c0cc86a84898c72b2d659"
+  "whole_catalog_digest": "sha256:9c36a3c955693441b0ac183ed96ad9348132fcc92d2544fc850538d64df75ef4"
 }

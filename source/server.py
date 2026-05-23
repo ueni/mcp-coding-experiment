@@ -385,6 +385,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "workflow_policy_plan": {"categories": ["read-only", "governance"]},
+    "workflow_reminder": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
     "dependency_security_report": {"categories": ["read-only"]},
@@ -31689,6 +31690,7 @@ _WORKFLOW_POLICY_READ_TOOLS = {
     "artifact_provenance",
     "workflow_diagnostics",
     "workflow_lineage",
+    "workflow_reminder",
     "interaction_invariant_audit",
     "agents_context_health",
     "test_impact_map",
@@ -32145,6 +32147,398 @@ def workflow_policy_plan(
         allowed_targets=allowed_targets or [],
         data_classification=data_classification,
         planned_steps=planned_steps or [],
+    )
+
+
+
+
+WORKFLOW_REMINDER_SCHEMA = "workflow_reminder.v1"
+_WORKFLOW_REMINDER_GATE_VOCABULARY = (
+    "workflow_policy_plan",
+    "interaction_invariant_audit",
+    "mutation_step_guard",
+    "change_impact_gate",
+    "state_snapshot",
+    "release_readiness",
+    "secret_exposure_report",
+    "workflow_diagnostics",
+)
+_WORKFLOW_REMINDER_INVARIANT_GATES = {
+    "mutation_mode": "mutation_step_guard",
+    "secret_safety": "secret_exposure_report",
+    "validation": "change_impact_gate",
+    "rollback": "state_snapshot",
+    "scope": "workflow_policy_plan",
+    "release_gate": "release_readiness",
+    "client_compatibility": "workflow_policy_plan",
+    "task_intent": "interaction_invariant_audit",
+}
+
+
+def _workflow_reminder_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=True)
+    except TypeError:
+        return str(value)
+
+
+def _workflow_reminder_blob(*values: Any) -> str:
+    return "\n".join(_workflow_reminder_text(value) for value in values if value is not None).lower()
+
+
+def _workflow_reminder_normalize_action(action: dict[str, Any] | str | None) -> dict[str, Any]:
+    if isinstance(action, dict):
+        normalized = _workflow_policy_normalize_step(action, 0)
+        raw = action
+    else:
+        raw_text = str(action or "").strip()
+        tool = ""
+        for candidate in TOOL_SECURITY_METADATA:
+            if candidate in raw_text:
+                tool = candidate
+                break
+        raw = {"tool": tool, "mode": raw_text[:80], "args": {"summary": raw_text}} if raw_text else {"tool": "", "args": {}}
+        normalized = _workflow_policy_normalize_step(raw, 0)
+    normalized["raw_summary"] = _workflow_policy_redact_string(_workflow_reminder_text(raw), max_chars=320)
+    return normalized
+
+
+def _workflow_reminder_normalize_steps(recent_steps: list[dict[str, Any]] | list[str] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(recent_steps or []):
+        step = _workflow_reminder_normalize_action(item if isinstance(item, dict) else str(item))
+        step["index"] = index
+        if isinstance(item, dict):
+            step["success"] = bool(item.get("success", item.get("ok", True)))
+            step["status"] = _workflow_policy_redact_string(str(item.get("status", item.get("decision", ""))), max_chars=80)
+            if item.get("error"):
+                step["error"] = _workflow_policy_redact_string(str(item.get("error")), max_chars=160)
+        else:
+            step["success"] = "failed" not in str(item).lower() and "error" not in str(item).lower()
+            step["status"] = ""
+        normalized.append(step)
+    return normalized[:25]
+
+
+def _workflow_reminder_known_invariants(
+    task_summary: str,
+    known_invariants: list[dict[str, Any]] | list[str] | None,
+) -> list[dict[str, Any]]:
+    notes = []
+    for item in known_invariants or []:
+        notes.append(item if isinstance(item, dict) else {"text": str(item), "role": "known_invariant"})
+    extracted = _interaction_audit_extract_invariants(
+        task_summary,
+        _interaction_audit_normalize_notes(notes),
+    )
+    rows: list[dict[str, Any]] = []
+    for invariant in extracted:
+        invariant_id = str(invariant.get("id", "task_intent"))
+        rows.append(
+            {
+                "id": invariant_id,
+                "description": _workflow_policy_redact_string(str(invariant.get("description", "")), max_chars=180),
+                "severity": _workflow_policy_redact_string(str(invariant.get("severity", "advisory")), max_chars=40),
+                "linked_gate": _WORKFLOW_REMINDER_INVARIANT_GATES.get(invariant_id, "interaction_invariant_audit"),
+                "source": _workflow_policy_redact_string(str(invariant.get("source", "task_summary_or_known_invariants")), max_chars=80),
+                "evidence_terms": [_workflow_policy_redact_string(str(term), max_chars=60) for term in invariant.get("evidence_terms", [])[:4]],
+            }
+        )
+    # Stable de-duplication by invariant id while preserving first evidence.
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row["id"] in seen:
+            continue
+        seen.add(row["id"])
+        deduped.append(row)
+    return deduped[:12]
+
+
+def _workflow_reminder_last_gate_blob(last_gate_results: dict[str, Any] | list[dict[str, Any]] | None) -> str:
+    return _workflow_reminder_blob(_redact_audit_value(last_gate_results or {}))
+
+
+def _workflow_reminder_has_snapshot_evidence(
+    recent_steps: list[dict[str, Any]],
+    last_gate_results: dict[str, Any] | list[dict[str, Any]] | None,
+) -> bool:
+    blob = _workflow_reminder_blob(recent_steps, _workflow_reminder_last_gate_blob(last_gate_results))
+    missing_terms = (
+        "missing_snapshot",
+        "needs_snapshot",
+        "rollback_snapshot_id_present\": false",
+        "snapshot_present\": false",
+    )
+    if any(term in blob for term in missing_terms):
+        return False
+    if _workflow_policy_has_snapshot_gate(recent_steps):
+        return True
+    if "rollback_snapshot_id_present\": true" in blob or "snapshot_present\": true" in blob:
+        return True
+    explicit_snapshot_terms = (
+        "state_snapshot.v1",
+        "state_snapshot",
+        "rollback evidence",
+        "snapshot id",
+        "rollback snapshot id",
+    )
+    if any(term in blob for term in explicit_snapshot_terms):
+        return True
+    return "mutation_step_guard" in blob and any(
+        term in blob for term in ("rollback_snapshot_id", "snapshot_present", "rollback evidence", "snapshot id")
+    )
+
+
+def _workflow_reminder_has_test_evidence(
+    recent_steps: list[dict[str, Any]],
+    last_gate_results: dict[str, Any] | list[dict[str, Any]] | None,
+) -> bool:
+    blob = _workflow_reminder_blob(recent_steps, _workflow_reminder_last_gate_blob(last_gate_results))
+    if any(term in blob for term in ("tests_fresh\": false", "artifact_status\": \"stale", "missing_test_gate", "needs_tests", "skipped tests", "not run tests")):
+        return False
+    return any(term in blob for term in ("change_impact_gate", "impact_tests", "selected_tests", "self_test", "pytest", "release_readiness.v1"))
+
+
+def _workflow_reminder_has_secret_evidence(
+    last_gate_results: dict[str, Any] | list[dict[str, Any]] | None,
+) -> bool:
+    blob = _workflow_reminder_last_gate_blob(last_gate_results)
+    return "secret_exposure_report" in blob and not any(term in blob for term in ("blocked", "would_block\": true", "high_confidence_new_secret"))
+
+
+def _workflow_reminder_has_policy_scope_evidence(
+    last_gate_results: dict[str, Any] | list[dict[str, Any]] | None,
+) -> bool:
+    blob = _workflow_reminder_last_gate_blob(last_gate_results)
+    return "workflow_policy_plan" in blob and "scope_creep" not in blob and ("ok\": true" in blob or "decision\": \"allow" in blob)
+
+
+def _workflow_reminder_is_mutation(action: dict[str, Any]) -> bool:
+    blob = _workflow_reminder_blob(
+        action.get("tool"),
+        action.get("mode"),
+        action.get("risk_category"),
+        action.get("raw_summary"),
+        action.get("categories"),
+    )
+    return bool(action.get("mutates")) or any(cat in MUTATION_TOOL_CATEGORIES or cat == "destructive" for cat in action.get("categories", [])) or any(
+        term in blob for term in ("apply_unified_diff", "write", "delete", "move", "commit", "push", "mutation", "mutate", "edit", "patch")
+    )
+
+
+def _workflow_reminder_is_readiness(action: dict[str, Any]) -> bool:
+    blob = _workflow_reminder_blob(action)
+    return any(term in blob for term in ("release_readiness", "release", "ready", "readiness", "publish", "ship"))
+
+
+def _workflow_reminder_is_secret_sensitive(action: dict[str, Any], task_summary: str, invariants: list[dict[str, Any]]) -> bool:
+    blob = _workflow_reminder_blob(action, task_summary, invariants)
+    return any(term in blob for term in ("secret", "credential", "token", "authorization", "api_key", "api key", "private key", ".env"))
+
+
+def _workflow_reminder_is_scope_expansion(action: dict[str, Any], task_summary: str, invariants: list[dict[str, Any]]) -> bool:
+    blob = _workflow_reminder_blob(action, task_summary, invariants)
+    target_blob = _workflow_reminder_blob(action.get("targets", []), action.get("raw_summary", ""))
+    if any(term in blob for term in ("scope expansion", "scope_creep", "outside allowed", "out of scope")):
+        return True
+    if "only docs" in blob and any(term in target_blob for term in ("source/", "src/", "tests/")):
+        return True
+    if "only source" in blob and any(term in target_blob for term in ("docs/", "readme")):
+        return True
+    return False
+
+
+def _workflow_reminder_failed_mutation_attempts(recent_steps: list[dict[str, Any]]) -> int:
+    count = 0
+    for step in recent_steps:
+        blob = _workflow_reminder_blob(step)
+        if any(term in blob for term in ("mutation_step_guard", "ok_to_mutate=false", "needs_snapshot", "needs_tests", "mutation disabled", "apply_unified_diff")) and (
+            step.get("success") is False or any(term in blob for term in ("failed", "error", "deny", "needs_snapshot", "needs_tests", "ok_to_mutate=false"))
+        ):
+            count += 1
+    return count
+
+
+def _workflow_reminder_gate(tool: str, reason: str, *, follow_up: str = "") -> dict[str, Any]:
+    gate = {
+        "tool": tool,
+        "reason": reason,
+        "advisory_only": True,
+        "authoritative_gate": tool in _WORKFLOW_REMINDER_GATE_VOCABULARY,
+    }
+    if follow_up:
+        gate["follow_up_gate"] = follow_up
+    return gate
+
+
+def _workflow_reminder_safe_actions(trigger: str) -> list[str]:
+    actions = {
+        "missing_rollback_before_mutation": [
+            "Create or record state_snapshot rollback evidence before the planned mutation.",
+            "Run mutation_step_guard with the snapshot id, target files, selected tests, invariant audit, and fresh context.",
+            "Do not execute the mutation unless the hard gate allows the exact summarized step.",
+        ],
+        "stale_or_missing_tests_before_readiness": [
+            "Run change_impact_gate or selected focused tests before release/readiness claims.",
+            "Rerun release_readiness only after validation evidence is fresh for the current head.",
+            "Report blockers instead of marking the workflow ready when evidence is stale or absent.",
+        ],
+        "secret_sensitive_action": [
+            "Run secret_exposure_report on the relevant repository paths before continuing.",
+            "Keep outputs redacted; do not print credentials, bearer tokens, private keys, or raw secret values.",
+            "Use mutation_step_guard/release_readiness secret-exposure evidence before mutation or release follow-up.",
+        ],
+        "scope_expansion": [
+            "Run workflow_policy_plan with the declared allowed targets and intended next action.",
+            "Use interaction_invariant_audit or clarification_gate before expanding scope.",
+            "Narrow the action back to the approved scope unless explicit scope expansion is approved.",
+        ],
+        "repeated_failed_mutation_attempts": [
+            "Stop retrying the same mutation shape.",
+            "Run workflow_diagnostics to classify the critical failed step and recovery path.",
+            "Refresh invariant, snapshot, test, and scope evidence before another mutation_step_guard attempt.",
+        ],
+        "none": ["Proceed with the read-only/advisory sequence; rerun workflow_reminder if intent, scope, gates, or next action changes."],
+    }
+    return actions.get(trigger, actions["none"])
+
+
+def _workflow_reminder_suppression_conditions(trigger: str) -> list[dict[str, str]]:
+    conditions = {
+        "missing_rollback_before_mutation": [
+            {"gate": "state_snapshot", "evidence": "rollback snapshot/state_snapshot evidence is present for the current mutation boundary"},
+            {"gate": "mutation_step_guard", "evidence": "mutation guard already references that snapshot for the exact planned step"},
+        ],
+        "stale_or_missing_tests_before_readiness": [
+            {"gate": "change_impact_gate", "evidence": "fresh selected-test/change-impact evidence exists for the current head"},
+            {"gate": "release_readiness", "evidence": "readiness was rerun after fresh validation evidence"},
+        ],
+        "secret_sensitive_action": [
+            {"gate": "secret_exposure_report", "evidence": "redacted secret exposure report exists and has no active blocker for this action"},
+        ],
+        "scope_expansion": [
+            {"gate": "workflow_policy_plan", "evidence": "policy plan allows the expanded target/action under the declared scope"},
+        ],
+        "repeated_failed_mutation_attempts": [
+            {"gate": "workflow_diagnostics", "evidence": "diagnostics identified the critical failed step and recovery path"},
+            {"gate": "mutation_step_guard", "evidence": "retry uses fresh invariant, snapshot, test, and scope evidence"},
+        ],
+        "none": [],
+    }
+    return conditions.get(trigger, [])
+
+
+
+def _workflow_reminder_id(payload: dict[str, Any]) -> str:
+    stable = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return "workflow-reminder-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+
+
+def _workflow_reminder_packet(
+    *,
+    task_summary: str,
+    intended_next_action: dict[str, Any] | str | None,
+    recent_steps: list[dict[str, Any]] | list[str] | None,
+    known_invariants: list[dict[str, Any]] | list[str] | None,
+    last_gate_results: dict[str, Any] | list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    summary = _workflow_policy_redact_string(task_summary.strip(), max_chars=240)
+    action = _workflow_reminder_normalize_action(intended_next_action)
+    steps = _workflow_reminder_normalize_steps(recent_steps)
+    constraints = _workflow_reminder_known_invariants(summary, known_invariants)
+    gate_blob = _workflow_reminder_last_gate_blob(last_gate_results)
+
+    candidates: list[tuple[str, dict[str, Any], bool, str]] = []
+    failed_mutations = _workflow_reminder_failed_mutation_attempts(steps)
+    if failed_mutations >= 2:
+        candidates.append(("repeated_failed_mutation_attempts", _workflow_reminder_gate("workflow_diagnostics", "Repeated failed mutation attempts need critical-step diagnosis before retry.", follow_up="mutation_step_guard"), False, f"{failed_mutations} failed mutation attempts"))
+    if _workflow_reminder_is_secret_sensitive(action, summary, constraints):
+        candidates.append(("secret_sensitive_action", _workflow_reminder_gate("secret_exposure_report", "Secret-sensitive paths/actions need redacted exposure evidence before mutation, release, or network follow-up."), _workflow_reminder_has_secret_evidence(last_gate_results), "secret-sensitive term or invariant detected"))
+    if _workflow_reminder_is_scope_expansion(action, summary, constraints):
+        candidates.append(("scope_expansion", _workflow_reminder_gate("workflow_policy_plan", "Intended next action appears to exceed the remembered task scope."), _workflow_reminder_has_policy_scope_evidence(last_gate_results), "scope expansion signal detected"))
+    if _workflow_reminder_is_mutation(action):
+        candidates.append(("missing_rollback_before_mutation", _workflow_reminder_gate("state_snapshot", "Mutation boundary requires rollback evidence before executing tools.", follow_up="mutation_step_guard"), _workflow_reminder_has_snapshot_evidence(steps, last_gate_results), "mutation-capable next action detected"))
+    if _workflow_reminder_is_readiness(action):
+        candidates.append(("stale_or_missing_tests_before_readiness", _workflow_reminder_gate("change_impact_gate", "Readiness claims require fresh validation/change-impact evidence.", follow_up="release_readiness"), _workflow_reminder_has_test_evidence(steps, last_gate_results), "release/readiness next action detected"))
+
+    emission: list[dict[str, Any]] = []
+    suppression: list[dict[str, Any]] = []
+    chosen_trigger = "none"
+    required_next_gate = _workflow_reminder_gate("none", "No reminder trigger was emitted; no additional advisory gate is required.")
+    for trigger, gate, satisfied, reason in candidates:
+        row = {"trigger": trigger, "reason": _workflow_policy_redact_string(reason, max_chars=160), "required_next_gate": gate["tool"]}
+        if satisfied:
+            suppression.append({**row, "satisfied": True, "evidence": "prior gate or rollback/test evidence detected"})
+            continue
+        emission.append({**row, "satisfied": False})
+        if chosen_trigger == "none":
+            chosen_trigger = trigger
+            required_next_gate = gate
+
+    emitted = chosen_trigger != "none"
+    packet_basis = {
+        "schema": WORKFLOW_REMINDER_SCHEMA,
+        "task_digest": hashlib.sha256(summary.encode("utf-8")).hexdigest()[:16],
+        "action": action,
+        "trigger": chosen_trigger,
+        "constraints": constraints,
+        "gates_digest": hashlib.sha256(gate_blob.encode("utf-8")).hexdigest()[:16],
+    }
+    return {
+        "schema": WORKFLOW_REMINDER_SCHEMA,
+        "read_only": True,
+        "advisory_only": True,
+        "emitted": emitted,
+        "reminder_id": _workflow_reminder_id(packet_basis),
+        "trigger": chosen_trigger,
+        "remembered_constraints": constraints,
+        "required_next_gate": required_next_gate,
+        "safe_next_actions": _workflow_reminder_safe_actions(chosen_trigger),
+        "suppress_if_already_satisfied": _workflow_reminder_suppression_conditions(chosen_trigger),
+        "evidence": {
+            "emission": emission[:8],
+            "suppression": suppression[:8],
+            "candidate_triggers": [trigger for trigger, _gate, _satisfied, _reason in candidates],
+            "recent_step_count": len(steps),
+            "gate_vocabulary": list(_WORKFLOW_REMINDER_GATE_VOCABULARY),
+            "redactions_applied": ["sensitive_keys_or_values", "absolute_paths", "urls", "emails"],
+        },
+        "input_summary": {
+            "task_summary_present": bool(summary),
+            "intended_next_action": {key: value for key, value in action.items() if key != "raw_summary"},
+            "known_invariant_count": len(known_invariants or []),
+            "last_gate_results_present": bool(last_gate_results),
+        },
+        "security": {
+            "records_inputs": False,
+            "executes_tools": False,
+            "grants_permission": False,
+            "replaces_authoritative_gates": False,
+            "redacted": True,
+            "external_services_called": False,
+            "persists_artifacts_by_default": False,
+        },
+    }
+
+
+@mcp.tool()
+def workflow_reminder(
+    task_summary: str,
+    intended_next_action: dict[str, Any] | str | None = None,
+    recent_steps: list[dict[str, Any]] | list[str] | None = None,
+    known_invariants: list[dict[str, Any]] | list[str] | None = None,
+    last_gate_results: dict[str, Any] | list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Emit a compact read-only workflow_reminder.v1 packet before high-risk actions."""
+    return _workflow_reminder_packet(
+        task_summary=task_summary,
+        intended_next_action=intended_next_action,
+        recent_steps=recent_steps,
+        known_invariants=known_invariants,
+        last_gate_results=last_gate_results,
     )
 
 
