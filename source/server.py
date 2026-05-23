@@ -388,6 +388,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "workflow_policy_plan": {"categories": ["read-only", "governance"]},
+    "policy_governance_decision": {"categories": ["read-only", "governance"]},
     "workflow_reminder": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
@@ -7545,10 +7546,11 @@ def _governance_result_store_summary() -> dict[str, Any]:
     rows = payload.get("results", {})
     if not isinstance(rows, dict):
         rows = {}
-    wanted = {"policy_simulator", "workflow_policy_plan", "release_readiness", "required_tool_chain"}
+    wanted = {"policy_simulator", "workflow_policy_plan", "policy_governance_decision", "release_readiness", "required_tool_chain"}
     out: dict[str, Any] = {
         "policy_simulator": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "workflow_policy_plan": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
+        "policy_governance_decision": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "release_readiness": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "required_tool_chain": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
     }
@@ -7568,7 +7570,7 @@ def _governance_result_store_summary() -> dict[str, Any]:
         if not latest or created_at >= str(latest.get("created_at", "")):
             details: dict[str, Any] = {}
             if isinstance(value, dict):
-                for key in ("schema", "ok", "decision", "plan_id", "blocking_policies", "required_preconditions", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
+                for key in ("schema", "ok", "decision", "plan_id", "decision_id", "bundle_id", "bundle_version", "matched_rule_ids", "decision_counts", "blocking_policies", "required_preconditions", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
                     if key in value:
                         details[key] = _redact_audit_value(value[key])
             bucket["latest"] = {"result_id": str(rid), "created_at": created_at, "ok": ok, "details": details}
@@ -30781,6 +30783,7 @@ def _governance_report_impl(
         ),
         "governance_hooks": _governance_result_store_summary(),
         "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
+        "policy_governance_decision": _latest_policy_governance_decision_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
         "agents_context_health": summarize_agents_context_health(
             analyze_agents_context(REPO_PATH)
@@ -33327,6 +33330,13 @@ def release_readiness(
         preflight_check["warning_reason"] = "latest workflow policy preflight did not allow the declared sequence"
     result["checks"]["workflow_policy_plan"] = preflight_check
 
+    policy_decision_check = _latest_policy_governance_decision_from_result_store()
+    policy_decision_check["ok"] = policy_decision_check.get("ok", True) if policy_decision_check.get("present") else True
+    if policy_decision_check.get("present") and policy_decision_check.get("decision") != "allow":
+        policy_decision_check["warning"] = True
+        policy_decision_check["warning_reason"] = "latest policy-governance decision did not allow the declared sequence"
+    result["checks"]["policy_governance_decision"] = policy_decision_check
+
     result["finished_at"] = _now_iso()
     if summary_mode == "quick":
         quick_result = {
@@ -33933,6 +33943,7 @@ _WORKFLOW_POLICY_READ_TOOLS = {
     "interaction_invariant_audit",
     "agents_context_health",
     "test_impact_map",
+    "policy_governance_decision",
 }
 _WORKFLOW_POLICY_RELEASE_TOOLS = {
     "release_readiness",
@@ -34386,6 +34397,463 @@ def workflow_policy_plan(
         allowed_targets=allowed_targets or [],
         data_classification=data_classification,
         planned_steps=planned_steps or [],
+    )
+
+
+
+POLICY_GOVERNANCE_BUNDLE_SCHEMA = "mcp_governance_policy_bundle.v1"
+POLICY_GOVERNANCE_DECISION_SCHEMA = "policy_governance_decision.v1"
+POLICY_GOVERNANCE_DEFAULT_BUNDLE = ".config/codebase-tooling-mcp/policies/mcp-governance.example.json"
+_POLICY_GOVERNANCE_ALLOWED_ROOTS = (
+    ".config/codebase-tooling-mcp/policies",
+    ".codebase-tooling-mcp/policies",
+)
+_POLICY_GOVERNANCE_EFFECTS = {"allow", "deny", "requires_approval"}
+_POLICY_GOVERNANCE_DECISION_ORDER = {"allow": 0, "requires_approval": 1, "deny": 2}
+
+
+def _policy_governance_decision_id(payload: dict[str, Any]) -> str:
+    stable = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return "policy-decision-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+
+
+def _policy_governance_bundle_path(policy_bundle_path: str) -> Path:
+    rel_path = (policy_bundle_path or POLICY_GOVERNANCE_DEFAULT_BUNDLE).strip()
+    if not rel_path:
+        rel_path = POLICY_GOVERNANCE_DEFAULT_BUNDLE
+    candidate = _resolve_repo_path(rel_path)
+    rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+    if not any(rel == root or rel.startswith(root + "/") for root in _POLICY_GOVERNANCE_ALLOWED_ROOTS):
+        raise ValueError("policy bundle path must stay under a repository policy directory")
+    return candidate
+
+
+def _policy_governance_bundle_error(code: str, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": code,
+        "message": _workflow_policy_redact_string(message, max_chars=240),
+    }
+
+
+def _policy_governance_load_bundle(policy_bundle_path: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    try:
+        path = _policy_governance_bundle_path(policy_bundle_path)
+    except ValueError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_path_out_of_scope", str(exc))
+    rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, _policy_governance_bundle_error("policy_bundle_missing", f"policy bundle not found: {rel}")
+    except OSError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_unreadable", f"policy bundle could not be read: {rel}: {exc}")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_malformed", f"policy bundle JSON is malformed: {rel}: {exc.msg}")
+    if not isinstance(payload, dict):
+        return None, _policy_governance_bundle_error("policy_bundle_malformed", "policy bundle root must be an object")
+    if payload.get("schema") != POLICY_GOVERNANCE_BUNDLE_SCHEMA:
+        return None, _policy_governance_bundle_error("policy_bundle_unknown_schema", "policy bundle schema is unsupported")
+    bundle_id = str(payload.get("bundle_id", "")).strip()
+    version = str(payload.get("version", "")).strip()
+    trust = payload.get("trust") if isinstance(payload.get("trust"), dict) else {}
+    if not bundle_id or not version:
+        return None, _policy_governance_bundle_error("policy_bundle_missing_metadata", "policy bundle requires bundle_id and version")
+    if trust.get("source") != "repository" or trust.get("reviewed") is not True:
+        return None, _policy_governance_bundle_error("policy_bundle_untrusted", "policy bundle trust metadata must mark a reviewed repository source")
+    rules = payload.get("rules")
+    if not isinstance(rules, list) or not rules:
+        return None, _policy_governance_bundle_error("policy_bundle_missing_rules", "policy bundle requires at least one rule")
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {index} must be an object")
+        rule_id = str(rule.get("id", "")).strip()
+        effect = str(rule.get("effect", "")).strip()
+        if not rule_id or effect not in _POLICY_GOVERNANCE_EFFECTS:
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {index} requires id and allow/deny/requires_approval effect")
+        when = rule.get("when")
+        if when is not None and not isinstance(when, dict):
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {rule_id} when clause must be an object")
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    meta = {
+        "ok": True,
+        "path": rel,
+        "digest": digest,
+        "schema": POLICY_GOVERNANCE_BUNDLE_SCHEMA,
+        "bundle_id": bundle_id,
+        "bundle_version": version,
+        "rule_count": len(rules),
+    }
+    return payload, meta
+
+
+def _policy_governance_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def _policy_governance_bool_matches(expected: Any, actual: bool) -> bool:
+    if expected is None:
+        return True
+    return bool(expected) == actual
+
+
+def _policy_governance_any_match(patterns: list[str], value: str) -> bool:
+    if not patterns:
+        return True
+    lowered = value.lower()
+    return any(fnmatch.fnmatch(lowered, pattern.lower()) for pattern in patterns)
+
+
+def _policy_governance_targets_match(patterns: list[str], targets: list[str]) -> bool:
+    if not patterns:
+        return True
+    if not targets:
+        return any(pattern in {"*", ".", ""} for pattern in patterns)
+    for target in targets:
+        lowered = str(target).lower()
+        for pattern in patterns:
+            candidate = pattern.lower()
+            if fnmatch.fnmatch(lowered, candidate) or lowered.startswith(candidate.rstrip("/") + "/"):
+                return True
+    return False
+
+
+def _policy_governance_step_matches_rule(
+    step: dict[str, Any],
+    rule: dict[str, Any],
+    *,
+    data_classification: str,
+    execution_mode: str,
+) -> bool:
+    when = rule.get("when") if isinstance(rule.get("when"), dict) else {}
+    tool = str(step.get("tool", ""))
+    mode = str(step.get("mode", ""))
+    categories = [str(item) for item in step.get("categories", [])]
+    if not _policy_governance_any_match(_policy_governance_list(when.get("tools")), tool):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("modes")), mode):
+        return False
+    category_any = _policy_governance_list(when.get("categories_any"))
+    if category_any and not any(cat in categories for cat in category_any):
+        return False
+    category_all = _policy_governance_list(when.get("categories_all"))
+    if category_all and not all(cat in categories for cat in category_all):
+        return False
+    if not _policy_governance_bool_matches(when.get("mutates"), bool(step.get("mutates"))):
+        return False
+    if not _policy_governance_bool_matches(when.get("network"), bool(step.get("network"))):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("data_classifications")), data_classification):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("execution_modes")), execution_mode):
+        return False
+    if not _policy_governance_targets_match(_policy_governance_list(when.get("target_globs")), [str(item) for item in step.get("targets", [])]):
+        return False
+    return True
+
+
+def _policy_governance_rule_priority(rule: dict[str, Any]) -> int:
+    try:
+        return int(rule.get("priority", 1000))
+    except (TypeError, ValueError):
+        return 1000
+
+
+def _policy_governance_rule_result(rule: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+    evidence_terms = [
+        _workflow_policy_redact_string(str(item), max_chars=120)
+        for item in _policy_governance_list(rule.get("evidence"))[:8]
+    ]
+    actions = [
+        _workflow_policy_redact_string(str(item), max_chars=180)
+        for item in _policy_governance_list(rule.get("safe_next_actions"))[:6]
+    ]
+    return {
+        "rule_id": _workflow_policy_redact_string(str(rule.get("id", "")), max_chars=120),
+        "effect": str(rule.get("effect", "")),
+        "step_index": int(step.get("index", 0)),
+        "rationale": _workflow_policy_redact_string(str(rule.get("rationale", rule.get("description", ""))), max_chars=240),
+        "evidence": {
+            "terms": evidence_terms,
+            "step": {
+                "tool": _workflow_policy_redact_string(str(step.get("tool", "")), max_chars=120),
+                "mode": _workflow_policy_redact_string(str(step.get("mode", "")), max_chars=80),
+                "categories": [str(item) for item in step.get("categories", [])[:10]],
+                "mutates": bool(step.get("mutates")),
+                "network": bool(step.get("network")),
+                "targets": [str(item) for item in step.get("targets", [])[:10]],
+            },
+        },
+        "safe_next_actions": actions,
+    }
+
+
+def _policy_governance_hard_gate_results(preflight: dict[str, Any], normalized_steps: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    results: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    preflight_decision = str(preflight.get("decision", ""))
+    if preflight_decision in {"deny", "needs_approval", "needs_clarification"}:
+        effect = "deny" if preflight_decision in {"deny", "needs_clarification"} else "requires_approval"
+        results.append(
+            {
+                "rule_id": "hard_gate.workflow_policy_plan",
+                "effect": effect,
+                "step_index": None,
+                "rationale": "Existing workflow_policy_plan preflight remains authoritative for scope, shadow-tool, release, mutation, and dataflow checks.",
+                "evidence": {
+                    "decision": preflight_decision,
+                    "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
+                    "finding_codes": [str(item.get("code", "")) for item in preflight.get("findings", [])[:20] if isinstance(item, dict)],
+                },
+                "safe_next_actions": _workflow_policy_safe_next_actions(preflight_decision, preflight.get("findings", [])),
+            }
+        )
+    if any(bool(step.get("mutates")) for step in normalized_steps) and not ALLOW_MUTATIONS:
+        finding = _workflow_policy_finding(
+            code="allow_mutations_disabled",
+            severity="block",
+            policy="hard_gate.allow_mutations",
+            message="mutation-capable planned steps cannot be allowed while ALLOW_MUTATIONS is false",
+            required_precondition="explicit_mutation_mode",
+        )
+        findings.append(finding)
+        results.append(
+            {
+                "rule_id": "hard_gate.allow_mutations",
+                "effect": "deny",
+                "step_index": None,
+                "rationale": "The policy adapter is read-only and cannot grant mutation permission or bypass ALLOW_MUTATIONS.",
+                "evidence": {"allow_mutations": False, "mutating_step_count": sum(1 for step in normalized_steps if step.get("mutates"))},
+                "safe_next_actions": ["Keep the workflow read-only or obtain explicit operator approval before enabling mutation mode."],
+            }
+        )
+    return results, findings
+
+
+def _policy_governance_counts(rule_results: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"allow": 0, "requires_approval": 0, "deny": 0}
+    for result in rule_results:
+        effect = str(result.get("effect", ""))
+        if effect in counts:
+            counts[effect] += 1
+    return counts
+
+
+def _policy_governance_decision_from_results(rule_results: list[dict[str, Any]]) -> str:
+    if not rule_results:
+        return "deny"
+    decision = "allow"
+    for result in rule_results:
+        effect = str(result.get("effect", ""))
+        if _POLICY_GOVERNANCE_DECISION_ORDER.get(effect, 2) > _POLICY_GOVERNANCE_DECISION_ORDER[decision]:
+            decision = effect
+    return decision
+
+
+def _policy_governance_payload(
+    *,
+    intent: str,
+    planned_steps: list[dict[str, Any]],
+    execution_mode: str,
+    allowed_targets: list[str],
+    data_classification: str,
+    policy_bundle_path: str,
+) -> dict[str, Any]:
+    normalized_execution_mode = _workflow_policy_redact_string(execution_mode or "auto", max_chars=80)
+    normalized_data_classification = _workflow_policy_redact_string(data_classification or "unspecified", max_chars=80).lower()
+    preflight = _workflow_policy_plan_payload(
+        intent=intent,
+        execution_mode=execution_mode,
+        allowed_targets=allowed_targets,
+        data_classification=data_classification,
+        planned_steps=planned_steps,
+    )
+    normalized_steps = preflight.get("steps", []) if isinstance(preflight.get("steps"), list) else []
+    bundle, bundle_meta = _policy_governance_load_bundle(policy_bundle_path)
+    if bundle is None:
+        finding = _workflow_policy_finding(
+            code=str(bundle_meta.get("code", "policy_bundle_invalid")),
+            severity="block",
+            policy="policy_bundle",
+            message=str(bundle_meta.get("message", "policy bundle invalid")),
+        )
+        result = {
+            "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+            "read_only": True,
+            "executed_plan": False,
+            "decision": "deny",
+            "ok": False,
+            "decision_id": _policy_governance_decision_id({"bundle_error": bundle_meta, "preflight_plan_id": preflight.get("plan_id", "")}),
+            "policy_bundle": bundle_meta,
+            "matched_rule_ids": [],
+            "decision_counts": {"allow": 0, "requires_approval": 0, "deny": 1},
+            "rule_results": [],
+            "findings": [finding],
+            "safe_next_actions": ["Fix the repository-local reviewed policy bundle and rerun the policy decision before executing planned tools."],
+            "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
+            "workflow_policy_plan": {"decision": preflight.get("decision"), "plan_id": preflight.get("plan_id"), "ok": preflight.get("ok")},
+            "security": {
+                "redacted": True,
+                "read_only": True,
+                "contains_raw_policy_inputs": False,
+                "contains_file_contents": False,
+                "contains_host_absolute_paths": False,
+                "external_services_called": False,
+                "dynamic_code_loaded": False,
+                "can_grant_mutation_permission": False,
+            },
+        }
+        return result
+
+    rule_results: list[dict[str, Any]] = []
+    rules = sorted(bundle.get("rules", []), key=_policy_governance_rule_priority)
+    for step in normalized_steps:
+        for rule in rules:
+            if _policy_governance_step_matches_rule(
+                step,
+                rule,
+                data_classification=normalized_data_classification,
+                execution_mode=normalized_execution_mode,
+            ):
+                rule_results.append(_policy_governance_rule_result(rule, step))
+    hard_gate_results, hard_gate_findings = _policy_governance_hard_gate_results(preflight, normalized_steps)
+    rule_results.extend(hard_gate_results)
+    findings = list(preflight.get("findings", []))[:25] + hard_gate_findings
+    if not rule_results:
+        findings.append(
+            _workflow_policy_finding(
+                code="policy_no_matching_rule",
+                severity="block",
+                policy="policy_bundle",
+                message="no policy bundle rule matched the declared MCP action sequence",
+            )
+        )
+    decision = _policy_governance_decision_from_results(rule_results)
+    counts = _policy_governance_counts(rule_results)
+    if not rule_results:
+        counts["deny"] = 1
+    safe_next_actions: list[str] = []
+    for result in rule_results:
+        for action in result.get("safe_next_actions", []):
+            if isinstance(action, str) and action not in safe_next_actions:
+                safe_next_actions.append(action)
+    for action in _workflow_policy_safe_next_actions("allow" if decision == "allow" else "deny", findings):
+        if action not in safe_next_actions:
+            safe_next_actions.append(action)
+    basis = {
+        "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+        "bundle_digest": bundle_meta.get("digest", ""),
+        "plan_id": preflight.get("plan_id", ""),
+        "matched_rule_ids": [str(item.get("rule_id", "")) for item in rule_results],
+        "decision": decision,
+    }
+    return {
+        "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+        "read_only": True,
+        "executed_plan": False,
+        "decision": decision,
+        "ok": decision == "allow",
+        "decision_id": _policy_governance_decision_id(basis),
+        "intent": _workflow_policy_redact_string(intent, max_chars=240),
+        "execution_mode": normalized_execution_mode,
+        "data_classification": normalized_data_classification,
+        "step_count": len(normalized_steps),
+        "policy_bundle": bundle_meta,
+        "bundle_id": bundle_meta.get("bundle_id", ""),
+        "bundle_version": bundle_meta.get("bundle_version", ""),
+        "matched_rule_ids": [str(item.get("rule_id", "")) for item in rule_results],
+        "decision_counts": counts,
+        "rule_results": rule_results[:50],
+        "findings": findings,
+        "safe_next_actions": safe_next_actions[:10],
+        "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
+        "workflow_policy_plan": {
+            "schema": preflight.get("schema", ""),
+            "decision": preflight.get("decision", ""),
+            "ok": bool(preflight.get("ok", False)),
+            "plan_id": preflight.get("plan_id", ""),
+            "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
+            "required_preconditions": _redact_audit_value(preflight.get("required_preconditions", [])),
+        },
+        "security": {
+            "redacted": True,
+            "read_only": True,
+            "contains_raw_policy_inputs": False,
+            "contains_file_contents": False,
+            "contains_host_absolute_paths": False,
+            "external_services_called": False,
+            "dynamic_code_loaded": False,
+            "agent_authored_runtime_policy_mutation": False,
+            "can_grant_mutation_permission": False,
+        },
+    }
+
+
+def _latest_policy_governance_decision_from_result_store() -> dict[str, Any]:
+    payload = _result_store_load()
+    rows = payload.get("results", {})
+    if not isinstance(rows, dict):
+        return {"present": False, "required": False}
+    latest: dict[str, Any] | None = None
+    counts = {"allow": 0, "requires_approval": 0, "deny": 0}
+    total = 0
+    for rid, row in rows.items():
+        if not isinstance(row, dict) or row.get("tool") != "policy_governance_decision":
+            continue
+        value = row.get("value")
+        if not isinstance(value, dict) or value.get("schema") != POLICY_GOVERNANCE_DECISION_SCHEMA:
+            continue
+        total += 1
+        decision = str(value.get("decision", ""))
+        if decision in counts:
+            counts[decision] += 1
+        created_at = str(row.get("created_at", ""))
+        entry = {
+            "present": True,
+            "required": False,
+            "result_id": str(rid),
+            "created_at": created_at,
+            "schema": str(value.get("schema", "")),
+            "decision": decision,
+            "ok": bool(value.get("ok", False)),
+            "decision_id": str(value.get("decision_id", "")),
+            "bundle_id": str(value.get("bundle_id", "")),
+            "bundle_version": str(value.get("bundle_version", "")),
+            "matched_rule_ids": [str(item) for item in value.get("matched_rule_ids", [])[:20]],
+            "decision_counts": dict(counts),
+            "total_count": total,
+        }
+        if latest is None or created_at >= str(latest.get("created_at", "")):
+            latest = entry
+    if latest:
+        latest["decision_counts"] = counts
+        latest["total_count"] = total
+        return latest
+    return {"present": False, "required": False}
+
+
+@mcp.tool()
+def policy_governance_decision(
+    intent: str,
+    planned_steps: list[dict[str, Any]],
+    execution_mode: str = "auto",
+    allowed_targets: list[str] | None = None,
+    data_classification: str = "unspecified",
+    policy_bundle_path: str = POLICY_GOVERNANCE_DEFAULT_BUNDLE,
+) -> dict[str, Any]:
+    """Evaluate declared MCP tool steps against a reviewed repo-local policy bundle without executing them."""
+    return _policy_governance_payload(
+        intent=intent,
+        planned_steps=planned_steps or [],
+        execution_mode=execution_mode,
+        allowed_targets=allowed_targets or [],
+        data_classification=data_classification,
+        policy_bundle_path=policy_bundle_path,
     )
 
 
