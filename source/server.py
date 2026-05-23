@@ -34573,6 +34573,7 @@ def _policy_governance_rule_result(rule: dict[str, Any], step: dict[str, Any]) -
         _workflow_policy_redact_string(str(item), max_chars=180)
         for item in _policy_governance_list(rule.get("safe_next_actions"))[:6]
     ]
+    targets = [str(item) for item in step.get("targets", []) if str(item).strip()]
     return {
         "rule_id": _workflow_policy_redact_string(str(rule.get("id", "")), max_chars=120),
         "effect": str(rule.get("effect", "")),
@@ -34586,7 +34587,8 @@ def _policy_governance_rule_result(rule: dict[str, Any], step: dict[str, Any]) -
                 "categories": [str(item) for item in step.get("categories", [])[:10]],
                 "mutates": bool(step.get("mutates")),
                 "network": bool(step.get("network")),
-                "targets": [str(item) for item in step.get("targets", [])[:10]],
+                "target_count": len(targets),
+                "targets_redacted": bool(targets),
             },
         },
         "safe_next_actions": actions,
