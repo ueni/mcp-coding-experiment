@@ -39,6 +39,8 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "dependency_security_report",
     "ci_workflow_security_report",
     "secret_exposure_report",
+    "agent_security_delta",
+    "agent_security_delta_report",
     "mcp_threat_model_report",
     "governance_report",
     "memory_governance_report",
@@ -73,6 +75,8 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "dependency_security_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "vulnerabilities", "advisory", "gate", "exports", "resource_links"),
     "ci_workflow_security_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "findings", "workflows", "exports"),
     "secret_exposure_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "findings", "gate", "exports"),
+    "agent_security_delta": ("schema", "report_id", "generated_at", "base_ref", "head_ref", "status", "ok", "summary", "findings", "gate", "exports"),
+    "agent_security_delta_report": ("schema", "report_id", "generated_at", "base_ref", "head_ref", "status", "ok", "summary", "findings", "gate", "exports"),
     "mcp_threat_model_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "dread_rubric", "threats", "findings", "exports"),
     "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "agents_context_health", "exports", "resource_links"),
     "memory_governance_report": ("schema", "generated_at", "read_only", "policy_version", "summary", "stores", "findings", "security"),
@@ -107,8 +111,10 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "dependency_security_report": ("inputs", "skipped", "warnings", "security", "provenance", "_meta"),
     "ci_workflow_security_report": ("findings_by_severity", "suppressed_findings", "suppressions", "config", "action_uses", "security", "resource_links", "provenance", "_meta"),
     "secret_exposure_report": ("inputs", "rules", "allowlist", "skipped", "security", "resource_links", "_meta"),
+    "agent_security_delta": ("read_only", "changed_files", "skipped", "security", "resource_links", "provenance", "_meta"),
+    "agent_security_delta_report": ("read_only", "changed_files", "skipped", "security", "resource_links", "provenance", "_meta"),
     "mcp_threat_model_report": ("controls", "baseline", "fixtures", "security", "resource_links", "_meta"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "secret_exposure", "untrusted_content_signals", "memory_governance", "lineage", "provenance", "compressed_observation", "_meta"),
+    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "agent_security_delta", "secret_exposure", "untrusted_content_signals", "memory_governance", "lineage", "provenance", "compressed_observation", "_meta"),
     "memory_governance_report": ("inputs", "entries", "advisory_only"),
     "self_optimization_report": ("sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "patch_survivorship", "optimization_candidates[].anti_gaming", "_meta"),
     "agents_context_health": ("findings", "summary.severity_counts", "budget.remaining_bytes", "budget.remaining_tokens"),
@@ -598,6 +604,29 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "_meta": {"type": "object"},
         },
     ),
+    "agent_security_delta_report": _object_schema(
+        ["schema", "report_id", "generated_at", "base_ref", "head_ref", "status", "ok", "summary", "findings", "gate", "exports"],
+        {
+            "schema": {"type": "string", "const": "agent_security_delta_report.v1"},
+            "report_id": {"type": "string"},
+            "generated_at": {"type": "string"},
+            "read_only": {"type": "boolean", "const": True},
+            "base_ref": {"type": "string"},
+            "head_ref": {"type": "string"},
+            "status": {"type": "string", "enum": ["pass", "warn", "block"]},
+            "ok": {"type": "boolean"},
+            "summary": {"type": "object"},
+            "changed_files": {"type": "array", "items": {"type": "string"}},
+            "findings": {"type": "array", "items": {"type": "object"}},
+            "skipped": {"type": "array", "items": {"type": "object"}},
+            "gate": {"type": "object"},
+            "security": {"type": "object"},
+            "exports": {"type": "object"},
+            "provenance": {"type": "object"},
+            "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
+            "_meta": {"type": "object"},
+        },
+    ),
     "mcp_threat_model_report": _object_schema(
         ["schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "dread_rubric", "threats", "findings", "exports"],
         {
@@ -634,6 +663,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "workflow_diagnostics": {"type": "object"},
             "governance_hooks": {"type": "object"},
             "ci_workflow_security": {"type": "object"},
+            "agent_security_delta": {"type": "object"},
             "secret_exposure": {"type": "object"},
             "untrusted_content_signals": {"type": "object"},
             "agents_context_health": {"type": "object"},
@@ -792,6 +822,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
 }
+
+TOOL_OUTPUT_SCHEMAS["agent_security_delta"] = TOOL_OUTPUT_SCHEMAS["agent_security_delta_report"]
 
 
 def tool_output_contract(tool_name: str) -> dict[str, Any]:

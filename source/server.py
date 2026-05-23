@@ -260,6 +260,8 @@ MCP_SARIF_EXPORT_SCHEMA = "mcp_sarif_export.v1"
 SECRET_EXPOSURE_REPORT_PREFIX = "secret-exposure-report"
 SECRET_EXPOSURE_REPORT_SCHEMA = "secret_exposure_report.v1"
 SECRET_EXPOSURE_DEFAULT_ALLOWLIST = Path(".codebase-tooling-mcp/secret-exposure-allowlist.json")
+AGENT_SECURITY_DELTA_REPORT_PREFIX = "agent-security-delta-report"
+AGENT_SECURITY_DELTA_REPORT_SCHEMA = "agent_security_delta_report.v1"
 MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
 MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
 MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
@@ -393,6 +395,8 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "dependency_security_report": {"categories": ["read-only"]},
     "ci_workflow_security_report": {"categories": ["read-only", "governance"]},
     "secret_exposure_report": {"categories": ["read-only", "governance"]},
+    "agent_security_delta": {"categories": ["read-only", "governance"]},
+    "agent_security_delta_report": {"categories": ["read-only", "governance"]},
     "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
@@ -9578,6 +9582,7 @@ def _ci_workflow_security_report_impl(path: str = ".", export: bool = False) -> 
         _write_ci_workflow_security_report_exports(report)
     return report
 
+
 MCP_THREAT_MODEL_COMPONENTS: tuple[dict[str, Any], ...] = (
     {"id": "mcp_host", "name": "MCP Host", "trust_zone": "client_runtime", "assets": ["user intent", "tool-call approvals", "visible tool metadata"]},
     {"id": "mcp_client", "name": "MCP Client", "trust_zone": "client_runtime", "assets": ["tool list", "parameter forms", "model-visible tool descriptions"]},
@@ -10237,6 +10242,21 @@ def _governance_markdown(report: dict[str, Any]) -> str:
                 f"- High findings: {by_severity.get('high', 0)}",
             ]
         )
+    agent_delta = report.get("agent_security_delta", {}) if isinstance(report.get("agent_security_delta"), dict) else {}
+    if agent_delta:
+        delta_summary = agent_delta.get("summary", {}) if isinstance(agent_delta.get("summary"), dict) else {}
+        delta_gate = agent_delta.get("gate", {}) if isinstance(agent_delta.get("gate"), dict) else {}
+        lines.extend(
+            [
+                "",
+                "## Agent security delta",
+                f"- Status: `{agent_delta.get('status', 'unknown')}`",
+                f"- OK: {agent_delta.get('ok', False)}",
+                f"- New findings: {delta_summary.get('new_finding_count', 0)}",
+                f"- Removed findings: {delta_summary.get('removed_finding_count', 0)}",
+                f"- Gate: `{delta_gate.get('status', 'unknown')}`",
+            ]
+        )
     snapshots = report.get("snapshots", {}) if isinstance(report.get("snapshots"), dict) else {}
     lines.extend(["", "## Snapshot / rollback references", f"- Snapshot references: {snapshots.get('count', 0)}"])
     lineage = report.get("lineage", {}) if isinstance(report.get("lineage"), dict) else {}
@@ -10408,6 +10428,7 @@ def _governance_workflow_lineage_plan_inputs(
             "artifact_provenance": PROVENANCE_SCHEMA,
             "ci_workflow_security_report": CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
             "secret_exposure_report": SECRET_EXPOSURE_REPORT_SCHEMA,
+            "agent_security_delta_report": AGENT_SECURITY_DELTA_REPORT_SCHEMA,
             "execution_mode": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
         },
     }
@@ -15084,6 +15105,774 @@ def _secret_exposure_compact(report: dict[str, Any]) -> dict[str, Any]:
             "skipped_count": summary.get("skipped_count", 0),
         },
         "gate": {"would_block": bool(gate.get("would_block", False)), "reason": gate.get("reason", "")},
+    }
+
+
+AGENT_SECURITY_DELTA_DEFAULT_INCLUDE_GLOBS = [
+    "*.py",
+    "source/**/*.py",
+    "scripts/**/*.py",
+    "*.toml",
+    "*.json",
+    "*.yaml",
+    "*.yml",
+    ".github/**/*.yml",
+    ".github/**/*.yaml",
+    ".devcontainer/**/*.json",
+    "Dockerfile",
+    "**/Dockerfile",
+]
+AGENT_SECURITY_DELTA_DEFAULT_EXCLUDE_GLOBS = [
+    ".git/**",
+    ".codebase-tooling-mcp/**",
+    "tests/**",
+    "**/__pycache__/**",
+    "**/.venv/**",
+    "**/node_modules/**",
+]
+AGENT_SECURITY_DELTA_SEVERITY_RANK = {
+    "info": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
+AGENT_SECURITY_DELTA_WORKTREE_REFS = {"", "WORKTREE", "working-tree", "working_tree"}
+
+
+def _agent_security_delta_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {
+        "json": str(base.with_suffix(".json")),
+        "markdown": str(base.with_suffix(".md")),
+        "sarif": str(base.with_suffix(".sarif")),
+    }
+
+
+def _agent_security_delta_normalize_severity(value: str, *, default: str) -> str:
+    severity = str(value or default).strip().lower()
+    if severity not in AGENT_SECURITY_DELTA_SEVERITY_RANK:
+        raise ValueError("severity threshold must be one of: info, low, medium, high, critical")
+    return severity
+
+
+def _agent_security_delta_at_or_above(severity: str, threshold: str) -> bool:
+    return AGENT_SECURITY_DELTA_SEVERITY_RANK.get(severity, -1) >= AGENT_SECURITY_DELTA_SEVERITY_RANK.get(threshold, 99)
+
+
+def _agent_security_delta_redact_evidence(text: str, *, max_chars: int = 240) -> str:
+    redacted = _redact_audit_string(str(text or ""))
+    redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", redacted)
+    redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:absolute_path>", redacted)
+    return _trim_text(redacted.strip(), max_chars=max_chars)
+
+
+def _agent_security_delta_fingerprint(rule_id: str, rel_path: str, evidence: str) -> str:
+    normalized = re.sub(r"\s+", " ", evidence).strip().lower()
+    payload = f"{AGENT_SECURITY_DELTA_REPORT_SCHEMA}\n{rule_id}\n{rel_path}\n{normalized}"
+    digest = hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+    return f"agentsecfp_sha256:{digest[:24]}"
+
+
+def _agent_security_delta_finding(
+    *,
+    rule_id: str,
+    rel_path: str,
+    line: int,
+    severity: str,
+    confidence: str,
+    cwe: str,
+    category: str,
+    title: str,
+    message: str,
+    evidence: str,
+    source: str,
+) -> dict[str, Any]:
+    excerpt = _agent_security_delta_redact_evidence(evidence)
+    return {
+        "schema": "agent_security_delta_finding.v1",
+        "id": _agent_security_delta_fingerprint(rule_id, rel_path, excerpt),
+        "rule_id": rule_id,
+        "path": rel_path,
+        "line_start": max(1, int(line or 1)),
+        "line_end": max(1, int(line or 1)),
+        "severity": severity,
+        "confidence": confidence,
+        "cwe": cwe,
+        "category": category,
+        "title": title,
+        "message": message,
+        "fingerprint": _agent_security_delta_fingerprint(rule_id, rel_path, excerpt),
+        "evidence": {"redacted_excerpt": excerpt, "raw_returned": False},
+        "workflow_gate": "agent_patch_security_delta",
+        "source": source,
+    }
+
+
+def _agent_security_delta_function_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _agent_security_delta_function_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _agent_security_delta_arg_text(node: ast.AST) -> str:
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return node.__class__.__name__
+
+
+class _AgentSecurityDeltaPythonVisitor(ast.NodeVisitor):
+    def __init__(self, rel_path: str, lines: list[str], source: str) -> None:
+        self.rel_path = rel_path
+        self.lines = lines
+        self.source = source
+        self.findings: list[dict[str, Any]] = []
+
+    def _line(self, line_no: int) -> str:
+        if 1 <= line_no <= len(self.lines):
+            return self.lines[line_no - 1]
+        return ""
+
+    def _add(self, **kwargs: Any) -> None:
+        self.findings.append(
+            _agent_security_delta_finding(
+                rel_path=self.rel_path,
+                source=self.source,
+                evidence=self._line(int(kwargs.get("line", 1))),
+                **kwargs,
+            )
+        )
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        name = _agent_security_delta_function_name(node.func)
+        lname = name.lower()
+        if lname in {"os.system", "os.popen"}:
+            self._add(
+                rule_id="python-unsafe-shell-command",
+                line=getattr(node, "lineno", 1),
+                severity="high",
+                confidence="high",
+                cwe="CWE-78",
+                category="command_injection",
+                title="Unsafe shell command execution",
+                message="Direct shell execution can turn agent-added string construction into command injection.",
+            )
+        if lname.startswith("subprocess.") and any(
+            kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+            for kw in node.keywords
+        ):
+            self._add(
+                rule_id="python-subprocess-shell-true",
+                line=getattr(node, "lineno", 1),
+                severity="high",
+                confidence="high",
+                cwe="CWE-78",
+                category="command_injection",
+                title="subprocess call uses shell=True",
+                message="subprocess with shell=True is injection-prone when arguments can contain user or tool-controlled text.",
+            )
+        if lname == "tempfile.mktemp" or lname.endswith(".mktemp"):
+            self._add(
+                rule_id="python-weak-tempfile-mktemp",
+                line=getattr(node, "lineno", 1),
+                severity="medium",
+                confidence="high",
+                cwe="CWE-377",
+                category="weak_temporary_file",
+                title="Weak temporary-file creation",
+                message="tempfile.mktemp creates race-prone paths; use mkstemp or NamedTemporaryFile with safe ownership.",
+            )
+        if lname in {"yaml.load", "yml.load"} and not any(
+            kw.arg == "Loader" and "SafeLoader" in _agent_security_delta_arg_text(kw.value)
+            for kw in node.keywords
+        ):
+            self._add(
+                rule_id="python-unsafe-yaml-load",
+                line=getattr(node, "lineno", 1),
+                severity="high",
+                confidence="medium",
+                cwe="CWE-502",
+                category="unsafe_deserialization",
+                title="Unsafe YAML deserialization",
+                message="yaml.load without SafeLoader can deserialize attacker-controlled objects.",
+            )
+        if lname in {"pickle.load", "pickle.loads", "dill.load", "dill.loads"}:
+            self._add(
+                rule_id="python-unsafe-pickle-load",
+                line=getattr(node, "lineno", 1),
+                severity="high",
+                confidence="medium",
+                cwe="CWE-502",
+                category="unsafe_deserialization",
+                title="Unsafe pickle-style deserialization",
+                message="pickle and similar deserializers can execute code when input is attacker-controlled.",
+            )
+        if lname in {"eval", "exec"}:
+            self._add(
+                rule_id="python-dynamic-code-execution",
+                line=getattr(node, "lineno", 1),
+                severity="high",
+                confidence="medium",
+                cwe="CWE-94",
+                category="code_injection",
+                title="Dynamic code execution",
+                message="eval/exec introduced by a patch is rarely safe around repository, HTTP, or MCP inputs.",
+            )
+        if lname.endswith(".execute") or lname.endswith(".executemany") or lname == "execute":
+            if node.args:
+                query = node.args[0]
+                dynamic = isinstance(query, (ast.JoinedStr, ast.BinOp)) or (
+                    isinstance(query, ast.Call)
+                    and _agent_security_delta_function_name(query.func).endswith(".format")
+                )
+                if dynamic:
+                    self._add(
+                        rule_id="python-sql-string-construction",
+                        line=getattr(node, "lineno", 1),
+                        severity="high",
+                        confidence="medium",
+                        cwe="CWE-89",
+                        category="injection",
+                        title="Dynamic SQL string construction",
+                        message="SQL passed through f-strings, concatenation, percent formatting, or format() should be replaced by parameters.",
+                    )
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self._check_surface_auth(node)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        self._check_surface_auth(node)
+        self.generic_visit(node)
+
+    def _check_surface_auth(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        decorators = [_agent_security_delta_arg_text(item) for item in node.decorator_list]
+        route_decorators = [
+            item
+            for item in decorators
+            if re.search(r"\b(app|router|blueprint|api)\.(route|get|post|put|patch|delete)\b", item)
+        ]
+        if not route_decorators:
+            return
+        body_text = "\n".join(
+            self.lines[max(0, getattr(node, "lineno", 1) - 1) : max(getattr(node, "end_lineno", getattr(node, "lineno", 1)), getattr(node, "lineno", 1))]
+        ).lower()
+        auth_tokens = ("auth", "login_required", "permission", "authorize", "require_user", "depends(")
+        if not any(token in body_text for token in auth_tokens):
+            self._add(
+                rule_id="python-http-surface-missing-auth-check",
+                line=getattr(node, "lineno", 1),
+                severity="high",
+                confidence="medium",
+                cwe="CWE-306",
+                category="missing_authentication",
+                title="New HTTP surface lacks an obvious auth check",
+                message="Route handlers added by agents should show an authentication or authorization guard before accessing repository or user data.",
+            )
+
+
+def _agent_security_delta_scan_python(text: str, rel_path: str, *, source: str) -> list[dict[str, Any]]:
+    lines = text.splitlines()
+    findings: list[dict[str, Any]] = []
+    try:
+        tree = ast.parse(text or "\n", filename=rel_path)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        visitor = _AgentSecurityDeltaPythonVisitor(rel_path, lines, source)
+        visitor.visit(tree)
+        findings.extend(visitor.findings)
+    for line_no, line in enumerate(lines, start=1):
+        lowered = line.lower()
+        if re.search(r"\b(send_file|open|Path)\s*\([^\n]*(request\.(args|form|json)|input\s*\()", line):
+            findings.append(
+                _agent_security_delta_finding(
+                    rule_id="python-user-controlled-path-use",
+                    rel_path=rel_path,
+                    line=line_no,
+                    severity="high",
+                    confidence="medium",
+                    cwe="CWE-22",
+                    category="path_traversal",
+                    title="User-controlled path reaches file access",
+                    message="File access from request/input data needs canonicalization and repository-boundary checks.",
+                    evidence=line,
+                    source=source,
+                )
+            )
+        if "/tmp/" in lowered and re.search(r"\b(open|write_text|Path)\s*\(", line):
+            findings.append(
+                _agent_security_delta_finding(
+                    rule_id="python-hardcoded-shared-temp-path",
+                    rel_path=rel_path,
+                    line=line_no,
+                    severity="medium",
+                    confidence="medium",
+                    cwe="CWE-377",
+                    category="weak_temporary_file",
+                    title="Hard-coded shared temporary path",
+                    message="Shared /tmp paths can be race-prone; use tempfile APIs with secure ownership and cleanup.",
+                    evidence=line,
+                    source=source,
+                )
+            )
+    return findings
+
+
+def _agent_security_delta_scan_config(text: str, rel_path: str, *, source: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        lowered = line.lower()
+        if re.search(r"privileged\s*[:=]\s*true", lowered):
+            findings.append(
+                _agent_security_delta_finding(
+                    rule_id="config-privileged-container",
+                    rel_path=rel_path,
+                    line=line_no,
+                    severity="high",
+                    confidence="high",
+                    cwe="CWE-250",
+                    category="overbroad_execution_privilege",
+                    title="Privileged container setting",
+                    message="Privileged containers expand host/container escape impact and should not be introduced by default.",
+                    evidence=line,
+                    source=source,
+                )
+            )
+        if "/var/run/docker.sock" in lowered or "docker.sock" in lowered:
+            findings.append(
+                _agent_security_delta_finding(
+                    rule_id="config-docker-socket-mount",
+                    rel_path=rel_path,
+                    line=line_no,
+                    severity="high",
+                    confidence="high",
+                    cwe="CWE-250",
+                    category="overbroad_file_access",
+                    title="Docker socket exposure",
+                    message="Mounting the host Docker socket grants broad host control and needs explicit sandbox justification.",
+                    evidence=line,
+                    source=source,
+                )
+            )
+        if re.search(r"network[_-]?mode\s*[:=]\s*[\"']?host", lowered):
+            findings.append(
+                _agent_security_delta_finding(
+                    rule_id="config-host-network-mode",
+                    rel_path=rel_path,
+                    line=line_no,
+                    severity="medium",
+                    confidence="high",
+                    cwe="CWE-200",
+                    category="network_boundary_bypass",
+                    title="Host network mode enabled",
+                    message="Host networking bypasses container network isolation and should be opt-in with rationale.",
+                    evidence=line,
+                    source=source,
+                )
+            )
+        if "sys_admin" in lowered or "cap_add" in lowered and "admin" in lowered:
+            findings.append(
+                _agent_security_delta_finding(
+                    rule_id="config-broad-linux-capability",
+                    rel_path=rel_path,
+                    line=line_no,
+                    severity="medium",
+                    confidence="medium",
+                    cwe="CWE-250",
+                    category="overbroad_execution_privilege",
+                    title="Broad Linux capability added",
+                    message="Capabilities such as SYS_ADMIN are privileged and should not be added by default.",
+                    evidence=line,
+                    source=source,
+                )
+            )
+    return findings
+
+
+def _agent_security_delta_scan_text(text: str, rel_path: str, *, source: str) -> list[dict[str, Any]]:
+    suffix = Path(rel_path).suffix.lower()
+    name = Path(rel_path).name.lower()
+    findings: list[dict[str, Any]] = []
+    if suffix == ".py":
+        findings.extend(_agent_security_delta_scan_python(text, rel_path, source=source))
+    if suffix in {".json", ".yaml", ".yml", ".toml"} or name == "dockerfile":
+        findings.extend(_agent_security_delta_scan_config(text, rel_path, source=source))
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for finding in findings:
+        fp = str(finding.get("fingerprint", ""))
+        if fp in seen:
+            continue
+        seen.add(fp)
+        unique.append(finding)
+    return unique
+
+
+def _agent_security_delta_candidate_path(rel_path: str, include_globs: list[str] | None, exclude_globs: list[str] | None) -> bool:
+    rel = rel_path.replace("\\", "/").lstrip("/")
+    include = include_globs or AGENT_SECURITY_DELTA_DEFAULT_INCLUDE_GLOBS
+    exclude = AGENT_SECURITY_DELTA_DEFAULT_EXCLUDE_GLOBS + list(exclude_globs or [])
+    return _allowed_by_globs(rel, include, exclude)
+
+
+def _agent_security_delta_git_blob(ref: str, rel_path: str) -> str | None:
+    if not ref.strip():
+        return None
+    result = _git("show", f"{ref}:{rel_path}", check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _agent_security_delta_current_text(rel_path: str, head_ref: str) -> str | None:
+    if str(head_ref or "").strip() in AGENT_SECURITY_DELTA_WORKTREE_REFS:
+        path = _resolve_repo_path(rel_path)
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            if path.stat().st_size > 2 * 1024 * 1024 or _is_likely_binary(path, max_file_bytes=2 * 1024 * 1024):
+                return None
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+    return _agent_security_delta_git_blob(head_ref, rel_path)
+
+
+def _agent_security_delta_changed_paths(
+    base_ref: str,
+    head_ref: str,
+    *,
+    include_globs: list[str] | None,
+    exclude_globs: list[str] | None,
+) -> tuple[list[str], dict[str, Any]]:
+    meta: dict[str, Any] = {"base_ref": base_ref, "head_ref": head_ref, "mode": "git_diff", "available": False, "changed_count": 0}
+    candidates: set[str] = set()
+    diff_args = ["diff", "--name-only", f"{base_ref}...{head_ref}"]
+    if str(head_ref or "").strip() in AGENT_SECURITY_DELTA_WORKTREE_REFS:
+        diff_args = ["diff", "--name-only", base_ref]
+    result = _git(*diff_args, "--", ".", check=False)
+    if result.returncode != 0 and "..." in " ".join(diff_args):
+        result = _git("diff", "--name-only", base_ref, head_ref, "--", ".", check=False)
+    if result.returncode == 0:
+        meta.update({"available": True, "reason": "ok"})
+        candidates.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    else:
+        meta.update({"reason": "git_diff_unavailable", "error": _agent_security_delta_redact_evidence(result.stderr)})
+    if str(head_ref or "").strip() in AGENT_SECURITY_DELTA_WORKTREE_REFS:
+        other = _git("ls-files", "--others", "--exclude-standard", check=False)
+        if other.returncode == 0:
+            candidates.update(line.strip() for line in other.stdout.splitlines() if line.strip())
+    filtered = sorted(
+        rel for rel in candidates
+        if _agent_security_delta_candidate_path(rel, include_globs, exclude_globs)
+    )[:500]
+    meta["changed_count"] = len(filtered)
+    return filtered, meta
+
+
+def _agent_security_delta_summary(findings: list[dict[str, Any]], removed_findings: list[dict[str, Any]]) -> dict[str, Any]:
+    by_severity = {severity: 0 for severity in ("critical", "high", "medium", "low", "info")}
+    by_category: dict[str, int] = {}
+    by_introduction = {"new": 0, "pre_existing": 0, "unknown": 0, "removed": len(removed_findings)}
+    for finding in findings:
+        severity = str(finding.get("severity", "info"))
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        category = str(finding.get("category", "unknown"))
+        by_category[category] = by_category.get(category, 0) + 1
+        intro = str(finding.get("introduction", "unknown"))
+        by_introduction[intro] = by_introduction.get(intro, 0) + 1
+    return {
+        "finding_count": len(findings),
+        "new_finding_count": by_introduction.get("new", 0),
+        "pre_existing_finding_count": by_introduction.get("pre_existing", 0),
+        "unknown_finding_count": by_introduction.get("unknown", 0),
+        "removed_finding_count": len(removed_findings),
+        "by_severity": {key: value for key, value in by_severity.items() if value},
+        "by_category": dict(sorted(by_category.items())),
+        "by_introduction": by_introduction,
+    }
+
+
+def _agent_security_delta_gate(
+    findings: list[dict[str, Any]],
+    *,
+    block_on_severity: str,
+    warn_on_severity: str,
+) -> dict[str, Any]:
+    blocking = [
+        finding for finding in findings
+        if str(finding.get("introduction")) in {"new", "unknown"}
+        and _agent_security_delta_at_or_above(str(finding.get("severity", "info")), block_on_severity)
+    ]
+    warnings = [
+        finding for finding in findings
+        if _agent_security_delta_at_or_above(str(finding.get("severity", "info")), warn_on_severity)
+    ]
+    return {
+        "status": "block" if blocking else "warn" if warnings else "pass",
+        "would_block": bool(blocking),
+        "blocking_enabled": True,
+        "block_on_severity": block_on_severity,
+        "warn_on_severity": warn_on_severity,
+        "blocking_new_finding_count": len(blocking),
+        "warning_finding_count": len(warnings),
+        "reason": "new_or_unknown_findings_at_block_threshold" if blocking else "findings_at_warn_threshold" if warnings else "no_findings_at_warn_threshold",
+    }
+
+
+def _agent_security_delta_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    gate = report.get("gate", {}) if isinstance(report.get("gate"), dict) else {}
+    lines = [
+        f"# Agent security delta report {report.get('report_id', '')}",
+        "",
+        "This local/offline report compares security heuristics for changed files between base and head. Evidence is redacted and repository-relative only.",
+        "",
+        f"- Status: `{report.get('status', '')}`",
+        f"- OK: {report.get('ok', False)}",
+        f"- New findings: {summary.get('new_finding_count', 0)}",
+        f"- Pre-existing findings: {summary.get('pre_existing_finding_count', 0)}",
+        f"- Removed findings: {summary.get('removed_finding_count', 0)}",
+        f"- Gate: `{gate.get('status', '')}` (block on `{gate.get('block_on_severity', '')}`, warn on `{gate.get('warn_on_severity', '')}`)",
+        "",
+        "## Findings",
+    ]
+    findings = report.get("findings", []) if isinstance(report.get("findings"), list) else []
+    if findings:
+        for finding in findings[:100]:
+            lines.append(
+                f"- `{finding.get('severity')}` `{finding.get('rule_id')}` `{finding.get('introduction')}` "
+                f"{finding.get('path')}:{finding.get('line_start')} - {finding.get('title')}"
+            )
+    else:
+        lines.append("- None")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _agent_security_delta_sarif_results(report: dict[str, Any]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    findings = report.get("findings", []) if isinstance(report.get("findings"), list) else []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        result = _sarif_result_from_finding(
+            source="agent_security_delta_report",
+            finding=finding,
+            rule_id=str(finding.get("rule_id") or "agent-security-delta-finding"),
+            severity=finding.get("severity", "warning"),
+            title=finding.get("title") or finding.get("rule_id"),
+            message=finding.get("message") or finding.get("title") or finding.get("rule_id"),
+            path=finding.get("path"),
+            line=finding.get("line_start"),
+            tags=["agent-security-delta", str(finding.get("category", "security")), str(finding.get("cwe", ""))],
+            confidence=str(finding.get("confidence") or "medium"),
+            fingerprint_extra={"introduction": finding.get("introduction", ""), "fingerprint": finding.get("fingerprint", "")},
+        )
+        if result:
+            results.append(result)
+    return results
+
+
+def _write_agent_security_delta_report_exports(report: dict[str, Any]) -> dict[str, Any]:
+    paths = _agent_security_delta_report_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    sarif_rel = str(_resolve_repo_path(paths["sarif"]).relative_to(REPO_PATH))
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    exports = {
+        "json": str(json_path.relative_to(REPO_PATH)),
+        "markdown": str(md_path.relative_to(REPO_PATH)),
+        "sarif": sarif_rel,
+    }
+    report["exports"] = exports
+    _write_sarif_export(
+        tool_name="agent_security_delta_report",
+        report=report,
+        sarif_rel=sarif_rel,
+        results=_agent_security_delta_sarif_results(report),
+    )
+    provenance_sidecars = _write_artifact_provenance_sidecars(
+        tool_name="agent_security_delta_report",
+        artifact_paths=[sarif_rel],
+        inputs=report.get("inputs", {}),
+        git_state=_git_state_for_provenance(),
+        artifact_schemas={sarif_rel: MCP_SARIF_EXPORT_SCHEMA},
+    )
+    report["provenance"] = {"schema": PROVENANCE_SCHEMA, "sidecars": provenance_sidecars}
+    report["resource_links"] = [
+        _artifact_resource_link(
+            title="Agent security delta report JSON",
+            rel_path=exports["json"],
+            mime_type="application/json",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="JSON export contains repository-relative paths and redacted heuristic evidence only.",
+        ),
+        _artifact_resource_link(
+            title="Agent security delta report Markdown",
+            rel_path=exports["markdown"],
+            mime_type="text/markdown",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="Markdown export summarizes agent patch security-delta findings without raw file contents.",
+        ),
+        _artifact_resource_link(
+            title="Agent security delta report SARIF",
+            rel_path=exports["sarif"],
+            mime_type="application/sarif+json",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="SARIF export is generated offline from redacted findings; no upload or network access is performed.",
+        ),
+    ]
+    report["_meta"] = _artifact_meta(report["resource_links"])
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(_agent_security_delta_markdown(report), encoding="utf-8")
+    return exports
+
+
+def _agent_security_delta_report_impl(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    block_on_severity: str = "high",
+    warn_on_severity: str = "medium",
+    export: bool = False,
+) -> dict[str, Any]:
+    _require_git_repo()
+    block_threshold = _agent_security_delta_normalize_severity(block_on_severity, default="high")
+    warn_threshold = _agent_security_delta_normalize_severity(warn_on_severity, default="medium")
+    changed_paths, diff_meta = _agent_security_delta_changed_paths(
+        base_ref,
+        head_ref,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+    )
+    current_findings: list[dict[str, Any]] = []
+    baseline_findings: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for rel in changed_paths:
+        baseline_text = _agent_security_delta_git_blob(base_ref, rel)
+        if baseline_text is not None:
+            baseline_findings.extend(_agent_security_delta_scan_text(baseline_text, rel, source="base_ref"))
+        current_text = _agent_security_delta_current_text(rel, head_ref)
+        if current_text is None:
+            if baseline_text is None:
+                skipped.append({"path": rel, "reason": "unreadable_or_binary"})
+            continue
+        current_findings.extend(_agent_security_delta_scan_text(current_text, rel, source="head_ref"))
+    baseline_by_fp = {str(f.get("fingerprint", "")): f for f in baseline_findings}
+    current_by_fp = {str(f.get("fingerprint", "")): f for f in current_findings}
+    active: list[dict[str, Any]] = []
+    for finding in current_findings:
+        fp = str(finding.get("fingerprint", ""))
+        finding["introduction"] = "pre_existing" if fp in baseline_by_fp else "new" if baseline_by_fp or diff_meta.get("available") else "unknown"
+        active.append(finding)
+    removed: list[dict[str, Any]] = []
+    for fp, finding in baseline_by_fp.items():
+        if fp not in current_by_fp:
+            removed_finding = dict(finding)
+            removed_finding["introduction"] = "removed"
+            removed.append(removed_finding)
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    active.sort(key=lambda row: (severity_order.get(str(row.get("severity", "info")), 99), str(row.get("path", "")), int(row.get("line_start", 0)), str(row.get("rule_id", ""))))
+    removed.sort(key=lambda row: (str(row.get("path", "")), int(row.get("line_start", 0)), str(row.get("rule_id", ""))))
+    summary = _agent_security_delta_summary(active, removed)
+    gate = _agent_security_delta_gate(active, block_on_severity=block_threshold, warn_on_severity=warn_threshold)
+    status = str(gate.get("status", "pass"))
+    generated_at = _now_iso()
+    report_seed = json.dumps(
+        {"generated_at": generated_at, "base_ref": base_ref, "head_ref": head_ref, "summary": summary, "changed_paths": changed_paths},
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    report_id = f"{AGENT_SECURITY_DELTA_REPORT_PREFIX}-{_now_stamp()}-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}"
+    report: dict[str, Any] = {
+        "schema": AGENT_SECURITY_DELTA_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "read_only": True,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "status": status,
+        "ok": not bool(gate.get("would_block", False)),
+        "summary": summary,
+        "gate": gate,
+        "findings": active,
+        "removed_findings": removed[:200],
+        "inputs": {
+            "base_ref": base_ref,
+            "head_ref": head_ref,
+            "include_globs": include_globs or AGENT_SECURITY_DELTA_DEFAULT_INCLUDE_GLOBS,
+            "exclude_globs": AGENT_SECURITY_DELTA_DEFAULT_EXCLUDE_GLOBS + list(exclude_globs or []),
+            "block_on_severity": block_threshold,
+            "warn_on_severity": warn_threshold,
+        },
+        "changed_files": changed_paths,
+        "diff": diff_meta,
+        "skipped": skipped[:200],
+        "rules": [
+            {"id": "python-subprocess-shell-true", "cwe": "CWE-78", "category": "command_injection", "severity": "high"},
+            {"id": "python-unsafe-shell-command", "cwe": "CWE-78", "category": "command_injection", "severity": "high"},
+            {"id": "python-user-controlled-path-use", "cwe": "CWE-22", "category": "path_traversal", "severity": "high"},
+            {"id": "python-weak-tempfile-mktemp", "cwe": "CWE-377", "category": "weak_temporary_file", "severity": "medium"},
+            {"id": "python-sql-string-construction", "cwe": "CWE-89", "category": "injection", "severity": "high"},
+            {"id": "python-http-surface-missing-auth-check", "cwe": "CWE-306", "category": "missing_authentication", "severity": "high"},
+            {"id": "python-unsafe-yaml-load", "cwe": "CWE-502", "category": "unsafe_deserialization", "severity": "high"},
+            {"id": "config-privileged-container", "cwe": "CWE-250", "category": "overbroad_execution_privilege", "severity": "high"},
+            {"id": "config-docker-socket-mount", "cwe": "CWE-250", "category": "overbroad_file_access", "severity": "high"},
+        ],
+        "security": {
+            "read_only": True,
+            "network_access": False,
+            "auto_fix": False,
+            "repo_boundary_enforced": True,
+            "redacted_evidence": True,
+            "raw_file_contents_returned": False,
+            "host_absolute_paths_exposed": False,
+            "limitations": "Lightweight deterministic heuristics only; use as an agent patch regression pack, not as proof of absence of vulnerabilities.",
+        },
+        "exports": {},
+        "resource_links": [],
+        "_meta": _artifact_meta([]),
+    }
+    if export:
+        _write_agent_security_delta_report_exports(report)
+    return report
+
+
+def _agent_security_delta_compact(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    gate = report.get("gate", {}) if isinstance(report.get("gate"), dict) else {}
+    return {
+        "schema": report.get("schema", AGENT_SECURITY_DELTA_REPORT_SCHEMA),
+        "report_id": report.get("report_id", ""),
+        "generated_at": report.get("generated_at", ""),
+        "status": report.get("status", ""),
+        "ok": bool(report.get("ok", True)),
+        "summary": {
+            "finding_count": summary.get("finding_count", 0),
+            "new_finding_count": summary.get("new_finding_count", 0),
+            "pre_existing_finding_count": summary.get("pre_existing_finding_count", 0),
+            "removed_finding_count": summary.get("removed_finding_count", 0),
+            "by_severity": summary.get("by_severity", {}),
+        },
+        "gate": {
+            "status": gate.get("status", "pass"),
+            "would_block": bool(gate.get("would_block", False)),
+            "block_on_severity": gate.get("block_on_severity", ""),
+            "warn_on_severity": gate.get("warn_on_severity", ""),
+            "blocking_new_finding_count": gate.get("blocking_new_finding_count", 0),
+            "warning_finding_count": gate.get("warning_finding_count", 0),
+        },
     }
 
 def _truncate_with_flag(text: str, max_chars: int) -> tuple[str, bool]:
@@ -29999,13 +30788,16 @@ def _governance_report_impl(
         "memory_governance": _memory_governance_report_impl(max_entries=1000, stale_days=90, include_entries=False)["summary"],
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
+        "agent_security_delta": _agent_security_delta_compact(
+            _agent_security_delta_report_impl(base_ref=base_ref, head_ref=head_ref, export=False)
+        ),
         "secret_exposure": _secret_exposure_compact(
             _secret_exposure_report_impl(paths=["."], baseline_ref=base_ref, export=False, block_on_high_confidence_new=True)
         ),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),
         "snapshots": _governance_snapshot_references(),
         "security": {
-            "redaction": "audit events, untrusted-content signal counts, secret-exposure evidence, and report summaries are redacted/aggregate-only",
+            "redaction": "audit events, untrusted-content signal counts, agent-security-delta/secret-exposure evidence, and report summaries are redacted/aggregate-only",
             "repo_boundary_enforced": public_audit_meta.get("source") != "outside_repo_boundary",
             "external_integrations": "out_of_scope",
         },
@@ -30449,6 +31241,65 @@ def secret_exposure_report(
         )
         _otel_set_result_attributes(span, result)
         return result
+
+
+@mcp.tool()
+def agent_security_delta_report(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    block_on_severity: str = "high",
+    warn_on_severity: str = "medium",
+    export: bool = False,
+) -> dict[str, Any]:
+    """Build a local, read-only security regression delta report for agent-generated feature changes."""
+    arguments = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "include_globs": include_globs or [],
+        "exclude_globs": exclude_globs or [],
+        "block_on_severity": block_on_severity,
+        "warn_on_severity": warn_on_severity,
+        "export": export,
+    }
+    with _otel_span(
+        "mcp.tool.agent_security_delta_report",
+        _otel_tool_attributes("agent_security_delta_report", arguments),
+    ) as span:
+        result = _agent_security_delta_report_impl(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            block_on_severity=block_on_severity,
+            warn_on_severity=warn_on_severity,
+            export=export,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
+def agent_security_delta(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    block_on_severity: str = "high",
+    warn_on_severity: str = "medium",
+    export: bool = False,
+) -> dict[str, Any]:
+    """Alias for agent_security_delta_report."""
+    return agent_security_delta_report(
+        base_ref=base_ref,
+        head_ref=head_ref,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        block_on_severity=block_on_severity,
+        warn_on_severity=warn_on_severity,
+        export=export,
+    )
 
 
 @mcp.tool()
@@ -32069,7 +32920,7 @@ def _release_readiness_dashboard_payload(result: dict[str, Any]) -> dict[str, An
     groups: list[dict[str, Any]] = []
     for title, names in (
         ("Release gate", ("tests", "impact_tests")),
-        ("Policy and compliance", ("docs", "security", "dependency_security", "license")),
+        ("Policy and compliance", ("docs", "security", "dependency_security", "agent_security_delta", "license")),
         ("Risk and governance", ("risk", "agent_quality_delta", "governance_report")),
     ):
         items = [
@@ -32220,6 +33071,7 @@ def release_readiness(
     run_security_check: bool = True,
     run_dependency_security_check: bool = True,
     run_ci_workflow_security_check: bool = True,
+    run_agent_security_delta_check: bool = True,
     run_secret_exposure_check: bool = True,
     run_agent_quality_delta_check: bool = True,
     agent_quality_delta_maintainer_override: bool = False,
@@ -32352,6 +33204,37 @@ def release_readiness(
             }
             result["ok"] = False
 
+    if run_agent_security_delta_check:
+        try:
+            agent_delta = agent_security_delta_report(
+                base_ref=base_ref,
+                head_ref=head_ref,
+                export=False,
+                block_on_severity="high",
+                warn_on_severity="medium",
+            )
+            agent_summary = agent_delta.get("summary", {}) if isinstance(agent_delta.get("summary"), dict) else {}
+            agent_gate = agent_delta.get("gate", {}) if isinstance(agent_delta.get("gate"), dict) else {}
+            by_severity = agent_summary.get("by_severity", {}) if isinstance(agent_summary.get("by_severity"), dict) else {}
+            result["checks"]["agent_security_delta"] = {
+                "ok": not bool(agent_gate.get("would_block", False)),
+                "status": agent_delta.get("status", ""),
+                "finding_count": agent_summary.get("finding_count", 0),
+                "new_finding_count": agent_summary.get("new_finding_count", 0),
+                "pre_existing_finding_count": agent_summary.get("pre_existing_finding_count", 0),
+                "removed_finding_count": agent_summary.get("removed_finding_count", 0),
+                "high_count": by_severity.get("high", 0),
+                "medium_count": by_severity.get("medium", 0),
+                "blocking_enabled": agent_gate.get("blocking_enabled", True),
+                "warning": agent_gate.get("status") == "warn",
+                "warning_reason": "agent-introduced security-delta findings need review" if agent_gate.get("status") == "warn" else "",
+            }
+            if agent_gate.get("would_block", False):
+                result["ok"] = False
+        except Exception as exc:
+            result["checks"]["agent_security_delta"] = {"ok": False, "status": "scanner-unavailable", "error": str(exc)}
+            result["ok"] = False
+
     if run_secret_exposure_check:
         try:
             secret_report = secret_exposure_report(
@@ -32471,6 +33354,8 @@ def release_readiness(
                         "skipped_count",
                         "advisory_status",
                         "checked_workflow_count",
+                        "pre_existing_finding_count",
+                        "removed_finding_count",
                         "high_count",
                         "medium_count",
                         "suppressed_finding_count",
