@@ -791,6 +791,77 @@ index 0000000..257cc56
         self.assertNotIn("hello world", journal_text)
         self.assertNotIn("hello replay", journal_text)
 
+    def test_mutation_replay_guard_failed_original_duplicate_stays_failed(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+
+        with self._authorized_http_tool_context(
+            session_id="failed-replay",
+            idempotency_key="bad-patch",
+        ):
+            first = self.server.apply_unified_diff(
+                diff_text="not a patch",
+                check_only=False,
+            )
+            duplicate = self.server.apply_unified_diff(
+                diff_text="not a patch",
+                check_only=False,
+            )
+
+        self.assertFalse(first["ok"])
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertFalse(duplicate["ok"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["replay_guard"]["original_status"], "failed")
+        self.assertEqual(
+            duplicate["error"],
+            "original mutating request did not complete successfully",
+        )
+        events = [
+            event
+            for event in self._audit_events()
+            if event["tool_name"] == "mutation_replay_guard"
+        ]
+        self.assertFalse(events[-1]["success"])
+        self.assertEqual(
+            events[-1]["arguments"]["replay_guard"]["decision"],
+            "duplicate_suppressed",
+        )
+
+    def test_mutation_replay_guard_pending_original_duplicate_stays_failed(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+
+        with self._authorized_http_tool_context(
+            session_id="pending-replay",
+            idempotency_key="pending-write",
+        ):
+            categories = self.server._require_tool_security_gate(
+                "workspace_transaction",
+                {"mode": "write", "path": "pending.txt", "content": "hello"},
+            )
+            first_guard = self.server._mutation_replay_guard_begin(
+                "workspace_transaction",
+                {"mode": "write", "path": "pending.txt", "content": "hello"},
+                categories,
+            )
+            duplicate_guard = self.server._mutation_replay_guard_begin(
+                "workspace_transaction",
+                {"mode": "write", "path": "pending.txt", "content": "hello"},
+                categories,
+            )
+
+        self.assertTrue(first_guard["enabled"])
+        self.assertFalse(first_guard.get("duplicate", False))
+        self.assertTrue(duplicate_guard["duplicate"])
+        duplicate = duplicate_guard["response"]
+        self.assertFalse(duplicate["ok"])
+        self.assertEqual(duplicate["replay_guard"]["original_status"], "started")
+        self.assertEqual(
+            duplicate["error"],
+            "original mutating request did not complete successfully",
+        )
+
     def test_mutation_replay_guard_denies_key_reuse_with_different_digest(self):
         self.server.ALLOW_MUTATIONS = True
         self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True

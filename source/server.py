@@ -12339,20 +12339,25 @@ def _mutation_replay_guard_audit_event(decision: str, entry: dict[str, Any], *, 
 
 
 def _mutation_replay_duplicate_response(entry: dict[str, Any]) -> dict[str, Any]:
-    return {
+    original_status = str(entry.get("status", "") or "")
+    original_applied = original_status == "applied"
+    response = {
         "schema": "mutation_replay_guard.duplicate.v1",
-        "ok": True,
+        "ok": original_applied,
         "duplicate": True,
         "replay_guard": {
             "decision": "duplicate_suppressed",
             "guard_id": entry.get("guard_id", ""),
             "tool_name": entry.get("tool_name", ""),
             "mode": entry.get("mode", ""),
-            "original_status": entry.get("status", ""),
+            "original_status": original_status,
             "original_created_at": entry.get("created_at", ""),
             "result_digest": entry.get("result_digest", ""),
         },
     }
+    if not original_applied:
+        response["error"] = "original mutating request did not complete successfully"
+    return response
 
 
 def _mutation_replay_guard_begin(tool_name: str, arguments: dict[str, Any], categories: list[str]) -> dict[str, Any]:
@@ -12393,10 +12398,24 @@ def _mutation_replay_guard_begin(tool_name: str, arguments: dict[str, Any], cate
                 entry["last_seen_at"] = now
                 entry["duplicate_count"] = int(entry.get("duplicate_count", 0)) + 1
                 entry["status"] = entry.get("status") or "started"
-                _mutation_replay_guard_audit_event("duplicate_suppressed", entry)
+                original_applied = entry.get("status") == "applied"
+                _mutation_replay_guard_audit_event(
+                    "duplicate_suppressed",
+                    entry,
+                    success=original_applied,
+                    reason=(
+                        "duplicate_suppressed"
+                        if original_applied
+                        else "duplicate suppressed; original mutation did not complete successfully"
+                    ),
+                )
                 journal["entries"] = entries
                 _mutation_replay_save_journal(journal)
-                return {"enabled": True, "duplicate": True, "response": _mutation_replay_duplicate_response(entry)}
+                return {
+                    "enabled": True,
+                    "duplicate": True,
+                    "response": _mutation_replay_duplicate_response(entry),
+                }
         entry = {
             "guard_id": uuid.uuid4().hex[:16],
             "tool_name": tool_name,
@@ -12558,8 +12577,10 @@ def _run_with_tool_security_audit(
         if guard.get("duplicate"):
             result = guard.get("response")
             _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.response.ok", True)
-            span.set_attribute("mcp.mutation_replay_guard.decision", "duplicate_suppressed")
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
             return result
         try:
             result = action()
