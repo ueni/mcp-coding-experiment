@@ -38,6 +38,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workflow_reminder",
                 "clarification_gate",
                 "release_readiness",
+                "agent_quality_delta",
                 "tool_catalog_integrity",
                 "dependency_security_report",
                 "ci_workflow_security_report",

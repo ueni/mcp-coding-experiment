@@ -3552,7 +3552,7 @@ class ServerToolsTest(ServerToolsTestBase):
 
     def test_task_router_coding_sandbox_lifecycle(self):
         base_venv = self.repo_path / ".codebase-tooling-mcp" / "base-venv"
-        subprocess.run(["python", "-m", "venv", str(base_venv)], check=True)
+        subprocess.run([sys.executable, "-m", "venv", str(base_venv)], check=True)
         python_bin = base_venv / "bin" / "python"
 
         with patch.object(self.server, "CODING_VENV_PYTHON", str(python_bin)):
