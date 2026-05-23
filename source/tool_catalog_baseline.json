@@ -468,8 +468,932 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 36,
+  "tool_count": 38,
   "tools": [
+    {
+      "digest": "sha256:035d6dd18b94ff9034d2ea4875e27a3ce1ef6e65c01a88cfdabc37a0495dc20c",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Alias for agent_security_delta_report.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "base_ref": {
+                "default": "HEAD~1",
+                "title": "Base Ref",
+                "type": "string"
+              },
+              "block_on_severity": {
+                "default": "high",
+                "title": "Block On Severity",
+                "type": "string"
+              },
+              "exclude_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Exclude Globs"
+              },
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              },
+              "head_ref": {
+                "default": "HEAD",
+                "title": "Head Ref",
+                "type": "string"
+              },
+              "include_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Include Globs"
+              },
+              "warn_on_severity": {
+                "default": "medium",
+                "title": "Warn On Severity",
+                "type": "string"
+              }
+            },
+            "title": "agent_security_deltaArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "agent_security_delta",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "gate": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "provenance": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "agent_security_delta_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "skipped": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "base_ref",
+              "head_ref",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "gate",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "read_only",
+            "changed_files",
+            "skipped",
+            "security",
+            "resource_links",
+            "provenance",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "gate": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "provenance": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "agent_security_delta_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "skipped": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "base_ref",
+              "head_ref",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "gate",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "base_ref",
+            "head_ref",
+            "status",
+            "ok",
+            "summary",
+            "findings",
+            "gate",
+            "exports"
+          ],
+          "tool": "agent_security_delta"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "agent_security_delta"
+        }
+      },
+      "name": "agent_security_delta"
+    },
+    {
+      "digest": "sha256:83a7398e68715e96d941331c783ea7aaf1bebb86d18441e161a4ee52c85080a8",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Build a local, read-only security regression delta report for agent-generated feature changes.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "base_ref": {
+                "default": "HEAD~1",
+                "title": "Base Ref",
+                "type": "string"
+              },
+              "block_on_severity": {
+                "default": "high",
+                "title": "Block On Severity",
+                "type": "string"
+              },
+              "exclude_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Exclude Globs"
+              },
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              },
+              "head_ref": {
+                "default": "HEAD",
+                "title": "Head Ref",
+                "type": "string"
+              },
+              "include_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Include Globs"
+              },
+              "warn_on_severity": {
+                "default": "medium",
+                "title": "Warn On Severity",
+                "type": "string"
+              }
+            },
+            "title": "agent_security_delta_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "agent_security_delta_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "gate": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "provenance": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "agent_security_delta_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "skipped": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "base_ref",
+              "head_ref",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "gate",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "read_only",
+            "changed_files",
+            "skipped",
+            "security",
+            "resource_links",
+            "provenance",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "gate": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "provenance": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "agent_security_delta_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "skipped": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "base_ref",
+              "head_ref",
+              "status",
+              "ok",
+              "summary",
+              "findings",
+              "gate",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "base_ref",
+            "head_ref",
+            "status",
+            "ok",
+            "summary",
+            "findings",
+            "gate",
+            "exports"
+          ],
+          "tool": "agent_security_delta_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "agent_security_delta_report"
+        }
+      },
+      "name": "agent_security_delta_report"
+    },
     {
       "digest": "sha256:bc3eda387116f1123ad26e3571384764bca9e36126bc04b97ad40cd67314be85",
       "metadata": {
@@ -2461,7 +3385,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:f97e0c31806ca3e938f08973fb53e34d974d2b8632a9ada57f579d8fa3d987b4",
+      "digest": "sha256:90e896594dbd13fee276a374c986e9ac0828cdb6a964f1c5b94a15666c5408ac",
       "metadata": {
         "documentation": [
           {
@@ -2520,6 +3444,9 @@
             "additionalProperties": true,
             "properties": {
               "_meta": {
+                "type": "object"
+              },
+              "agent_security_delta": {
                 "type": "object"
               },
               "agents_context_health": {
@@ -2696,6 +3623,7 @@
             "workflow_diagnostics",
             "tool_catalog_integrity",
             "ci_workflow_security",
+            "agent_security_delta",
             "secret_exposure",
             "untrusted_content_signals",
             "memory_governance",
@@ -2708,6 +3636,9 @@
             "additionalProperties": true,
             "properties": {
               "_meta": {
+                "type": "object"
+              },
+              "agent_security_delta": {
                 "type": "object"
               },
               "agents_context_health": {
@@ -6313,7 +7244,7 @@
       "name": "read_snippet"
     },
     {
-      "digest": "sha256:3612f570c0d30dbf85c43e0da86601993400b63519a90e6580a058a8b4c70680",
+      "digest": "sha256:1bcbfbe394062de81821f4279176d68fa05a2d296d43e203d51fd963693d55b5",
       "metadata": {
         "documentation": [
           {
@@ -6340,6 +7271,11 @@
                 "default": "HEAD",
                 "title": "Head Ref",
                 "type": "string"
+              },
+              "run_agent_security_delta_check": {
+                "default": true,
+                "title": "Run Agent Security Delta Check",
+                "type": "boolean"
               },
               "run_ci_workflow_security_check": {
                 "default": true,
@@ -11720,5 +12656,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:1da634208730cba9c6a1d239ac28686d20d3504a268c0cc86a84898c72b2d659"
+  "whole_catalog_digest": "sha256:a4f9d17708783a7ce263d173bca7bddaa41e2bc50fb47a5fc5b566a51eb0cbb2"
 }
