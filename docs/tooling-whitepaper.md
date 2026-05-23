@@ -130,7 +130,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `agents_context_health`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `agents_context_health`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`, `workflow_reminder`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -143,6 +143,8 @@ Public tools:
 `model_assisted_summary` is a disabled-by-default MCP Sampling adapter for bounded summary/classification/workflow-selection use cases. It requires client-declared sampling support plus repository-relative redacted context, enforces path/byte/token budgets, records approval/denial digests and metadata instead of raw prompts, and treats generated text as advisory only.
 
 `mutation_step_guard` is a read-only final checkpoint before planned workspace/git mutations. It takes declared intent, target files, expected diff shape, rollback/snapshot evidence, tests or impact-gate status, invariant-audit status, and freshness metadata, then returns `allow`, a concrete missing-precondition decision, `needs_human_approval`, or `deny` without executing the mutation.
+
+`workflow_reminder` is a read-only advisory risk-reminder packet for instruction fade-out risk before high-risk planned actions. It emits `workflow_reminder.v1` with remembered constraints, an existing required next gate, safe next actions, suppress-if-satisfied evidence, and redacted emission/suppression evidence without granting permission or replacing hard gates.
 
 `policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
 
@@ -259,6 +261,7 @@ Restore:
 - Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
 - First-slice replay lineage for `governance_report` via redacted `workflow_lineage.v1` manifests and read-only `workflow_lineage(mode="verify")` drift reports.
 - Multi-turn invariant checks from `interaction_invariant_audit` before mutation or readiness summaries, without storing conversation snippets by default.
+- Event-triggered reminders from `workflow_reminder` before missing rollback, stale-test readiness, secret-sensitive, scope-expansion, or repeated-failed-mutation risk boundaries.
 - Required artifact/report presence, including `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json` when the impact-map workflow is used.
 - Unmapped changed files and coverage gaps that require manual review or new tests.
 

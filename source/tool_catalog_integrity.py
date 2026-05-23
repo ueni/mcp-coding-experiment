@@ -85,6 +85,10 @@ _DOC_REFS_BY_TOOL: dict[str, tuple[dict[str, str], ...]] = {
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Workflow diagnostics", "path": "docs/workflow-diagnostics.md"},
     ),
+    "workflow_reminder": (
+        {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
+        {"label": "Workflow reminder packets", "path": "docs/workflow-reminder.md"},
+    ),
     "dependency_security_report": (
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Dependency security report", "path": "docs/dependency-security.md"},
