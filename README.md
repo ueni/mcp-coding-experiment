@@ -83,6 +83,8 @@ Prefer exact HTTPS origins for tunnels. Avoid `*` except for a short local diagn
 
 When a client sends `MCP-Protocol-Version`, the server accepts only configured supported versions and rejects malformed or unsupported values with `400` before tool execution. The default supported versions are `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`; override with `MCP_HTTP_SUPPORTED_PROTOCOL_VERSIONS` only when intentionally narrowing or extending client compatibility. Missing protocol-version headers are accepted for legacy/fallback clients. `MCP-Session-Id` is session continuity only; it never replaces `Authorization: Bearer ...`.
 
+HTTP mutation replay protection is opt-in and disabled by default for existing clients. Set `MCP_MUTATION_REPLAY_GUARD_ENABLED=true` to maintain a bounded, repository-local idempotency journal for mutation-capable MCP tool calls identified from `TOOL_SECURITY_METADATA` (for example `workspace_transaction` write/apply/delete modes). When enabled for an authorized HTTP session, exact duplicate mutating calls are suppressed instead of re-executed, and reuse of the same `Idempotency-Key` (or tool metadata `idempotency_key`) for a different mutating digest fails closed. The journal stores redacted digests, session/tool metadata, timestamps, decisions, and compact result references only; it does not persist raw file contents, bearer tokens, environment values, absolute host paths, or unredacted tool arguments. Bound it with `MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES`, `MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS`, and optionally `MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE`.
+
 ### 4) Verify health endpoint
 
 ```bash

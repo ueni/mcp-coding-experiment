@@ -181,6 +181,23 @@ MCP_STREAM_REPLAY_RETRY_INTERVAL_MS = max(
     250,
     int(os.getenv("MCP_STREAM_REPLAY_RETRY_INTERVAL_MS", "1000")),
 )
+MCP_MUTATION_REPLAY_GUARD_ENABLED = os.getenv(
+    "MCP_MUTATION_REPLAY_GUARD_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE = Path(
+    os.getenv(
+        "MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE",
+        ".codebase-tooling-mcp/audit/mutation_replay_journal.json",
+    )
+)
+MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES = max(
+    1,
+    int(os.getenv("MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES", "1000")),
+)
+MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS = max(
+    1,
+    int(os.getenv("MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS", "86400")),
+)
 MCP_AUDIT_LOG_FILE = Path(
     os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
 )
@@ -521,6 +538,9 @@ _HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.Cont
 )
 _HTTP_REQUEST_GRANTED_SCOPES: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
     "http_request_granted_scopes", default=None
+)
+_HTTP_IDEMPOTENCY_KEY: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "http_idempotency_key", default=""
 )
 _OTEL_CURRENT_SPAN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "mcp_otel_current_span_id", default=""
@@ -2021,6 +2041,19 @@ def _redact_audit_value(value: Any, depth: int = 0) -> Any:
             elif key_lower in {"contains_secrets", "records_secrets", "secrets_exposed"} and isinstance(item, bool):
                 redacted[key_str] = item
             elif SENSITIVE_AUDIT_KEY_RE.search(key_str):
+                redacted[key_str] = "<redacted>"
+            elif key_lower in {
+                "content",
+                "diff_text",
+                "replacement",
+                "patch",
+                "patch_text",
+                "new_content",
+                "old_content",
+                "stdin",
+                "env",
+                "environment",
+            }:
                 redacted[key_str] = "<redacted>"
             else:
                 redacted[key_str] = _redact_audit_value(item, depth + 1)
@@ -4195,6 +4228,13 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     sensitive_count = 0
     mutation_gate_failures = 0
     http_auth_denials = 0
+    mutation_replay_guard = {
+        "event_count": 0,
+        "recorded_count": 0,
+        "duplicate_suppressed_count": 0,
+        "conflict_count": 0,
+        "by_decision": {},
+    }
     clarification_gate = {
         "event_count": 0,
         "ok_to_continue_count": 0,
@@ -4237,6 +4277,20 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             mutation_gate_failures += 1
         if "http session not authorized" in reason_lower or "bearer token" in reason_lower or "not authorized" in reason_lower:
             http_auth_denials += 1
+        if tool == "mutation_replay_guard":
+            mutation_replay_guard["event_count"] += 1
+            args = event.get("arguments", {}) if isinstance(event.get("arguments"), dict) else {}
+            guard_args = args.get("replay_guard", {}) if isinstance(args.get("replay_guard"), dict) else {}
+            decision = str(guard_args.get("decision") or reason or "unknown")
+            by_decision = mutation_replay_guard["by_decision"]
+            if isinstance(by_decision, dict):
+                by_decision[decision] = int(by_decision.get(decision, 0)) + 1
+            if decision == "recorded":
+                mutation_replay_guard["recorded_count"] += 1
+            elif decision == "duplicate_suppressed":
+                mutation_replay_guard["duplicate_suppressed_count"] += 1
+            elif decision == "idempotency_key_conflict":
+                mutation_replay_guard["conflict_count"] += 1
         if tool == "clarification_gate":
             clarification_gate["event_count"] += 1
             args = event.get("arguments", {}) if isinstance(event.get("arguments"), dict) else {}
@@ -4276,6 +4330,12 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             "mode": "hash_chain_over_redacted_events",
             "event_count": len(events),
             "chain_head": chain_head,
+        },
+        "mutation_replay_guard": {
+            **mutation_replay_guard,
+            "by_decision": dict(sorted(mutation_replay_guard["by_decision"].items()))
+            if isinstance(mutation_replay_guard.get("by_decision"), dict)
+            else {},
         },
         "clarification_gate": {
             **clarification_gate,
@@ -12032,6 +12092,379 @@ def _http_request_granted_scopes_for_tools() -> frozenset[str]:
     return scopes
 
 
+_MUTATION_REPLAY_JOURNAL_SCHEMA = "mutation_replay_journal.v1"
+_MUTATION_REPLAY_LOCK = threading.RLock()
+_MUTATION_REPLAY_CONTENT_KEYS = {
+    "content",
+    "diff_text",
+    "replacement",
+    "patch",
+    "patch_text",
+    "new_content",
+    "old_content",
+    "stdin",
+    "stdout",
+    "stderr",
+    "env",
+    "environment",
+}
+_MUTATION_REPLAY_PATH_KEYS = {
+    "path",
+    "paths",
+    "file",
+    "files",
+    "target",
+    "targets",
+    "source",
+    "source_path",
+    "destination",
+    "directory",
+    "directories",
+}
+
+
+def _mutation_replay_guard_enabled() -> bool:
+    return bool(MCP_MUTATION_REPLAY_GUARD_ENABLED)
+
+
+def _mutation_replay_journal_path() -> Path:
+    configured = MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE
+    if configured.is_absolute():
+        resolved = configured.resolve()
+        try:
+            resolved.relative_to(REPO_PATH)
+        except ValueError as exc:
+            raise PermissionError("mutation replay journal must stay inside the repository") from exc
+        return resolved
+    return _resolve_repo_path(str(configured))
+
+
+def _mutation_replay_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _mutation_replay_parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _mutation_replay_load_journal() -> dict[str, Any]:
+    path = _mutation_replay_journal_path()
+    if not path.exists():
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    if not isinstance(payload, dict):
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": [e for e in entries if isinstance(e, dict)]}
+
+
+def _mutation_replay_prune_entries(entries: list[dict[str, Any]], *, now: datetime | None = None) -> list[dict[str, Any]]:
+    now_dt = now or datetime.now(timezone.utc)
+    cutoff = now_dt - timedelta(seconds=MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS)
+    retained: list[dict[str, Any]] = []
+    for entry in entries:
+        created = _mutation_replay_parse_ts(entry.get("created_at"))
+        if created is not None and created < cutoff:
+            continue
+        retained.append(entry)
+    if len(retained) > MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES:
+        retained = retained[-MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES :]
+    return retained
+
+
+def _mutation_replay_save_journal(payload: dict[str, Any]) -> None:
+    path = _mutation_replay_journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    safe_payload = {
+        "schema": _MUTATION_REPLAY_JOURNAL_SCHEMA,
+        "updated_at": _mutation_replay_now_iso(),
+        "bounds": {
+            "max_entries": MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES,
+            "ttl_seconds": MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS,
+        },
+        "entries": entries,
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(safe_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _mutation_replay_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _mutation_replay_normalize_path(value: Any) -> str:
+    text = str(value or "").replace("\x00", " ").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if text.startswith("/") or re.match(r"^[A-Za-z]:/", text):
+        return "<redacted:absolute-path>"
+    while text.startswith("./"):
+        text = text[2:]
+    return _redact_audit_string(text.strip("/") or ".")[:160]
+
+
+def _mutation_replay_extract_targets(value: Any, *, parent_key: str = "") -> list[str]:
+    targets: list[str] = []
+    key = parent_key.lower()
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            targets.extend(_mutation_replay_extract_targets(item_value, parent_key=str(item_key)))
+    elif isinstance(value, list):
+        for item in value:
+            targets.extend(_mutation_replay_extract_targets(item, parent_key=parent_key))
+    elif key in _MUTATION_REPLAY_PATH_KEYS:
+        target = _mutation_replay_normalize_path(value)
+        if target:
+            targets.append(target)
+    return list(dict.fromkeys(targets))[:25]
+
+
+def _mutation_replay_digest_value(value: Any, *, parent_key: str = "", depth: int = 0) -> Any:
+    key = parent_key.lower()
+    if depth > 8:
+        return {"type": type(value).__name__, "truncated": True}
+    if SENSITIVE_AUDIT_KEY_RE.search(key):
+        return {"type": type(value).__name__, "redacted": True}
+    if key in _MUTATION_REPLAY_CONTENT_KEYS:
+        raw = str(value) if value is not None else ""
+        return {"type": type(value).__name__, "length": len(raw), "sha256": _mutation_replay_hash(raw)}
+    if isinstance(value, dict):
+        return {
+            str(k): _mutation_replay_digest_value(v, parent_key=str(k), depth=depth + 1)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if str(k) not in {"idempotency_key", "idempotencyKey", "request_metadata", "_meta"}
+        }
+    if isinstance(value, (list, tuple)):
+        return [_mutation_replay_digest_value(item, parent_key=parent_key, depth=depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        if key in _MUTATION_REPLAY_PATH_KEYS:
+            return {"path": _mutation_replay_normalize_path(value)}
+        redacted = _redact_audit_string(value.replace("\x00", " "))
+        if redacted == "<redacted>":
+            return {"type": "str", "redacted": True}
+        return {"type": "str", "length": len(redacted), "sha256": _mutation_replay_hash(redacted)}
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    return {"type": type(value).__name__, "sha256": _mutation_replay_hash(str(value))}
+
+
+def _mutation_replay_idempotency_key(arguments: dict[str, Any]) -> str:
+    header_key = _HTTP_IDEMPOTENCY_KEY.get().strip()
+    if header_key:
+        return header_key
+    for key in ("idempotency_key", "idempotencyKey"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for meta_key in ("_meta", "request_metadata", "metadata"):
+        meta = arguments.get(meta_key)
+        if isinstance(meta, dict):
+            for key in ("idempotency_key", "idempotencyKey", "idempotency-key"):
+                value = meta.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return ""
+
+
+def _mutation_replay_session_scope() -> tuple[str, str]:
+    session_id = _streamable_http_current_session_id().strip()
+    if not session_id:
+        session_id = "legacy-http-session"
+    return session_id, _mutation_replay_hash(session_id)[:24]
+
+
+def _mutation_replay_git_head() -> str:
+    try:
+        return _git("rev-parse", "HEAD").stdout.strip()
+    except Exception:
+        return ""
+
+
+def _mutation_replay_digest(tool_name: str, arguments: dict[str, Any], session_hash: str) -> tuple[str, dict[str, Any]]:
+    mode = str(arguments.get("mode", "") or "").strip().lower()
+    git_head = _mutation_replay_git_head()
+    normalized = {
+        "tool": tool_name,
+        "mode": mode,
+        "session": session_hash,
+        "git_head": git_head,
+        "targets": _mutation_replay_extract_targets(arguments),
+        "arguments": _mutation_replay_digest_value(arguments),
+    }
+    canonical = json.dumps(normalized, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return _mutation_replay_hash(canonical), {
+        "mode": mode,
+        "git_head": git_head[:40],
+        "target_paths": normalized["targets"],
+    }
+
+
+def _mutation_replay_guard_audit_event(decision: str, entry: dict[str, Any], *, success: bool = True, reason: str = "") -> None:
+    arguments = {
+        "replay_guard": {
+            "decision": decision,
+            "guard_id": entry.get("guard_id", ""),
+            "tool_name": entry.get("tool_name", ""),
+            "mode": entry.get("mode", ""),
+            "session_hash": entry.get("session_hash", ""),
+            "idempotency_key_hash": entry.get("idempotency_key_hash", ""),
+            "mutation_digest": entry.get("mutation_digest", ""),
+            "status": entry.get("status", ""),
+        }
+    }
+    _append_audit_event(
+        "mutation_replay_guard",
+        ["audit", "write"],
+        success,
+        arguments,
+        reason or decision,
+        required_scope=MCP_SCOPE_MUTATE,
+        granted_scopes=_http_request_granted_scopes_for_tools() if _inside_http_request() else None,
+    )
+
+
+def _mutation_replay_duplicate_response(entry: dict[str, Any]) -> dict[str, Any]:
+    original_status = str(entry.get("status", "") or "")
+    original_applied = original_status == "applied"
+    response = {
+        "schema": "mutation_replay_guard.duplicate.v1",
+        "ok": original_applied,
+        "duplicate": True,
+        "replay_guard": {
+            "decision": "duplicate_suppressed",
+            "guard_id": entry.get("guard_id", ""),
+            "tool_name": entry.get("tool_name", ""),
+            "mode": entry.get("mode", ""),
+            "original_status": original_status,
+            "original_created_at": entry.get("created_at", ""),
+            "result_digest": entry.get("result_digest", ""),
+        },
+    }
+    if not original_applied:
+        response["error"] = "original mutating request did not complete successfully"
+    return response
+
+
+def _mutation_replay_guard_begin(tool_name: str, arguments: dict[str, Any], categories: list[str]) -> dict[str, Any]:
+    if (
+        not _mutation_replay_guard_enabled()
+        or not _inside_http_request()
+        or not MUTATION_TOOL_CATEGORIES.intersection(categories)
+    ):
+        return {"enabled": False}
+    session_id, session_hash = _mutation_replay_session_scope()
+    idempotency_key = _mutation_replay_idempotency_key(arguments)
+    idempotency_key_hash = _mutation_replay_hash(idempotency_key)[:24] if idempotency_key else ""
+    mutation_digest, metadata = _mutation_replay_digest(tool_name, arguments, session_hash)
+    now = _mutation_replay_now_iso()
+    with _MUTATION_REPLAY_LOCK:
+        journal = _mutation_replay_load_journal()
+        entries = _mutation_replay_prune_entries(journal.get("entries", []))
+        for entry in entries:
+            if entry.get("session_hash") != session_hash:
+                continue
+            if idempotency_key_hash and entry.get("idempotency_key_hash") == idempotency_key_hash and entry.get("mutation_digest") != mutation_digest:
+                conflict = {
+                    **entry,
+                    "status": "conflict",
+                    "last_seen_at": now,
+                    "conflicting_digest": mutation_digest,
+                }
+                _mutation_replay_guard_audit_event(
+                    "idempotency_key_conflict",
+                    conflict,
+                    success=False,
+                    reason="idempotency key reused for different mutating digest",
+                )
+                journal["entries"] = entries
+                _mutation_replay_save_journal(journal)
+                raise PermissionError("idempotency key reused for a different mutating request")
+            if entry.get("mutation_digest") == mutation_digest:
+                entry["last_seen_at"] = now
+                entry["duplicate_count"] = int(entry.get("duplicate_count", 0)) + 1
+                entry["status"] = entry.get("status") or "started"
+                original_applied = entry.get("status") == "applied"
+                _mutation_replay_guard_audit_event(
+                    "duplicate_suppressed",
+                    entry,
+                    success=original_applied,
+                    reason=(
+                        "duplicate_suppressed"
+                        if original_applied
+                        else "duplicate suppressed; original mutation did not complete successfully"
+                    ),
+                )
+                journal["entries"] = entries
+                _mutation_replay_save_journal(journal)
+                return {
+                    "enabled": True,
+                    "duplicate": True,
+                    "response": _mutation_replay_duplicate_response(entry),
+                }
+        entry = {
+            "guard_id": uuid.uuid4().hex[:16],
+            "tool_name": tool_name,
+            "mode": metadata.get("mode", ""),
+            "session_hash": session_hash,
+            "idempotency_key_hash": idempotency_key_hash,
+            "mutation_digest": mutation_digest,
+            "git_head": metadata.get("git_head", ""),
+            "target_paths": metadata.get("target_paths", []),
+            "status": "started",
+            "created_at": now,
+            "last_seen_at": now,
+            "duplicate_count": 0,
+        }
+        entries.append(entry)
+        journal["entries"] = _mutation_replay_prune_entries(entries)
+        _mutation_replay_save_journal(journal)
+        _mutation_replay_guard_audit_event("recorded", entry)
+    return {"enabled": True, "entry": entry, "session_id": session_id}
+
+
+def _mutation_replay_guard_finish(guard: dict[str, Any], result: Any, *, error: Exception | None = None) -> None:
+    if not guard.get("enabled") or guard.get("duplicate"):
+        return
+    entry = guard.get("entry")
+    if not isinstance(entry, dict):
+        return
+    result_summary = {
+        "ok": False if error is not None else _tool_result_success(result),
+        "schema": result.get("schema") if isinstance(result, dict) else "",
+        "error_type": type(error).__name__ if error is not None else "",
+    }
+    result_digest = _mutation_replay_hash(
+        json.dumps(_redact_audit_value(result_summary), sort_keys=True, ensure_ascii=True)
+    )[:24]
+    with _MUTATION_REPLAY_LOCK:
+        journal = _mutation_replay_load_journal()
+        entries = _mutation_replay_prune_entries(journal.get("entries", []))
+        for existing in entries:
+            if existing.get("guard_id") == entry.get("guard_id"):
+                existing["status"] = "failed" if error is not None or not result_summary["ok"] else "applied"
+                existing["completed_at"] = _mutation_replay_now_iso()
+                existing["result_digest"] = result_digest
+                existing["result_summary"] = result_summary
+                break
+        journal["entries"] = entries
+        _mutation_replay_save_journal(journal)
+
+
 def _require_tool_security_gate(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
@@ -12127,6 +12560,30 @@ def _tool_result_failure_reason(result: Any) -> str:
     return "tool returned ok=false"
 
 
+def _run_with_mutation_replay_guard(
+    tool_name: str,
+    arguments: dict[str, Any],
+    categories: list[str],
+    action: Callable[[], Any],
+    *,
+    on_duplicate: Callable[[Any], None] | None = None,
+) -> Any:
+    """Run an already-authorized tool action through the HTTP mutation replay guard."""
+    guard = _mutation_replay_guard_begin(tool_name, arguments, categories)
+    if guard.get("duplicate"):
+        result = guard.get("response")
+        if on_duplicate is not None:
+            on_duplicate(result)
+        return result
+    try:
+        result = action()
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, result)
+    return result
+
+
 def _run_with_tool_security_audit(
     tool_name: str,
     arguments: dict[str, Any],
@@ -12140,8 +12597,25 @@ def _run_with_tool_security_audit(
         categories = _require_tool_security_gate(tool_name, arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
+
         try:
-            result = action()
+            result = _run_with_mutation_replay_guard(
+                tool_name,
+                arguments,
+                categories,
+                action,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
             if sensitive:
                 _append_audit_event(
@@ -12156,6 +12630,8 @@ def _run_with_tool_security_audit(
                     ),
                 )
             raise
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if sensitive:
             success = _tool_result_success(result)
@@ -12265,6 +12741,8 @@ class MCPHTTPAuthMiddleware:
         )
         token = _HTTP_REQUEST_AUTHORIZED.set(True)
         scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
+        idempotency_values = _http_header_values(scope, "idempotency-key")
+        idempotency_token = _HTTP_IDEMPOTENCY_KEY.set(idempotency_values[-1] if idempotency_values else "")
         streamable_session_token = _STREAMABLE_HTTP_SESSION_ID.set(
             _streamable_http_session_id_from_scope(scope)
         )
@@ -12302,6 +12780,7 @@ class MCPHTTPAuthMiddleware:
             await response(scope, receive, send)
         finally:
             _STREAMABLE_HTTP_SESSION_ID.reset(streamable_session_token)
+            _HTTP_IDEMPOTENCY_KEY.reset(idempotency_token)
             _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
 
@@ -27935,6 +28414,44 @@ def task_router(
         "sandbox_mode": sandbox_mode,
         "sandbox_action": sandbox_action,
     }
+    replay_args = {
+        "mode": mode,
+        "prompt": prompt,
+        "task": task,
+        "prefix": prefix,
+        "suffix": suffix,
+        "language": language,
+        "texts": texts or [],
+        "query": query,
+        "execution_mode": execution_mode,
+        "candidates": candidates or [],
+        "backend": backend,
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system,
+        "stop": stop or [],
+        "normalize": normalize,
+        "top_k": top_k,
+        "output_profile": output_profile,
+        "offset": offset,
+        "limit": limit,
+        "compress": compress,
+        "store_result": store_result,
+        "memory_session": memory_session,
+        "check_profile": check_profile,
+        "check_target": check_target,
+        "check_timeout_seconds": check_timeout_seconds,
+        "run_checks": run_checks,
+        "packages": packages or [],
+        "pip_upgrade": pip_upgrade,
+        "sandbox_mode": sandbox_mode,
+        "sandbox_id": sandbox_id,
+        "sandbox_action": sandbox_action,
+        "prompts": prompts or [],
+        "max_parallel": max_parallel,
+        "auto_parallel_when_possible": auto_parallel_when_possible,
+    }
     categories = _tool_categories("task_router", audit_args)
     span_attrs = _otel_tool_attributes("task_router", audit_args, categories)
     span_attrs.update(
@@ -27948,8 +28465,19 @@ def task_router(
         categories = _require_tool_security_gate("task_router", audit_args)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
-        try:
-            result = _TASK_ROUTER_SERVICE.route(
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
+
+        def _route_task() -> dict[str, Any]:
+            return _TASK_ROUTER_SERVICE.route(
                 mode=mode,
                 prompt=prompt,
                 task=task,
@@ -27987,10 +28515,21 @@ def task_router(
                 max_parallel=max_parallel,
                 auto_parallel_when_possible=auto_parallel_when_possible,
             )
+
+        try:
+            result = _run_with_mutation_replay_guard(
+                "task_router",
+                replay_args,
+                categories,
+                _route_task,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
             if sensitive:
                 _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
             raise
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if isinstance(result, dict) and isinstance(result.get("execution_mode"), str):
             span.set_attribute("mcp.execution_mode", result["execution_mode"])
@@ -31184,20 +31723,29 @@ def self_optimization_report(
     ) as span:
         categories = _require_tool_security_gate("self_optimization_report", arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
-        result = _self_optimization_report_impl(
-            start_time=start_time,
-            end_time=end_time,
-            window_hours=window_hours,
-            export=export,
-            recommendation_limit=recommendation_limit,
-            include_git=include_git,
-            include_audit=include_audit,
-            include_traces=include_traces,
-            redact_terms=redact_terms,
-            github_issue_metadata=github_issue_metadata,
-            github_issue_update_mode=github_issue_update_mode,
-            github_repository=github_repository,
-            github_token_env=github_token_env,
+
+        def _run_self_optimization_report() -> dict[str, Any]:
+            return _self_optimization_report_impl(
+                start_time=start_time,
+                end_time=end_time,
+                window_hours=window_hours,
+                export=export,
+                recommendation_limit=recommendation_limit,
+                include_git=include_git,
+                include_audit=include_audit,
+                include_traces=include_traces,
+                redact_terms=redact_terms,
+                github_issue_metadata=github_issue_metadata,
+                github_issue_update_mode=github_issue_update_mode,
+                github_repository=github_repository,
+                github_token_env=github_token_env,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "self_optimization_report",
+            arguments,
+            categories,
+            _run_self_optimization_report,
         )
         _otel_set_result_attributes(span, result)
         return result
@@ -31481,7 +32029,27 @@ def workflow_task(
     action = str(action or "start").strip().lower() or "start"
     workflow = str(workflow or "vscode_task_run").strip()
     trace_task_id = task_id.strip()
-    trace_categories = ["read-only"] if action == "status" else _workflow_task_categories(workflow)
+    security_args = {
+        "mode": action,
+        "action": action,
+        "workflow": workflow,
+        "task_id": trace_task_id,
+        "label": label,
+        "tasks_path": tasks_path,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+        "max_retries": max_retries,
+        "restart": restart,
+        "start_time": start_time,
+        "end_time": end_time,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "export": export,
+        "retry_of": retry_of,
+        "cancel_reason": cancel_reason,
+    }
+    trace_categories = _tool_categories("workflow_task", security_args)
     attrs = _otel_tool_attributes(
         "workflow_task",
         {"action": action, "workflow": workflow, "task_id": trace_task_id},
@@ -31498,62 +32066,84 @@ def workflow_task(
         _require_git_repo()
         if action not in {"start", "status", "cancel"}:
             raise ValueError("action must be one of: start, status, cancel")
-        if action == "cancel":
-            _require_mutations()
-            if not task_id:
-                raise ValueError("task_id is required for cancel")
-            result = _cancel_workflow_task(task_id, reason=cancel_reason)
+        categories = _require_tool_security_gate("workflow_task", security_args)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
             _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if action == "status":
-            if not task_id:
-                raise ValueError("task_id is required for status")
-            result = _workflow_task_status_payload(task_id)
-            _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if workflow == "vscode_task_run":
-            _require_mutations()
-            if not label.strip():
-                raise ValueError("label is required for vscode_task_run")
-            if timeout_seconds < 1:
-                raise ValueError("timeout_seconds must be >= 1")
-            args = {
-                "label": label.strip(),
-                "tasks_path": tasks_path,
-                "control_profile": control_profile,
-                "timeout_seconds": timeout_seconds,
-                "max_output_chars": max_output_chars,
-            }
-        elif workflow == "governance_report":
-            args = {
-                "start_time": start_time,
-                "end_time": end_time,
-                "base_ref": base_ref,
-                "head_ref": head_ref,
-                "export": export,
-            }
-        else:
-            raise ValueError(
-                "workflow must be one of: "
-                + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
             )
-        id_args = dict(args)
-        if retry_of:
-            id_args["retry_of"] = retry_of
-        resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
-        span.set_attribute("mcp.workflow.task_id", resolved_task_id)
-        if not trace_task_id:
-            span.set_attribute("mcp.workflow.task_id.generated", True)
-        result = _start_workflow_task(
-            workflow,
-            args,
-            retry_of=retry_of,
-            task_id=task_id,
-            max_retries=max_retries if workflow == "vscode_task_run" else 0,
-            restart=restart,
+
+        def _run_workflow_task() -> dict[str, Any]:
+            if action == "cancel":
+                _require_mutations()
+                if not task_id:
+                    raise ValueError("task_id is required for cancel")
+                result = _cancel_workflow_task(task_id, reason=cancel_reason)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if action == "status":
+                if not task_id:
+                    raise ValueError("task_id is required for status")
+                result = _workflow_task_status_payload(task_id)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if workflow == "vscode_task_run":
+                _require_mutations()
+                if not label.strip():
+                    raise ValueError("label is required for vscode_task_run")
+                if timeout_seconds < 1:
+                    raise ValueError("timeout_seconds must be >= 1")
+                args = {
+                    "label": label.strip(),
+                    "tasks_path": tasks_path,
+                    "control_profile": control_profile,
+                    "timeout_seconds": timeout_seconds,
+                    "max_output_chars": max_output_chars,
+                }
+            elif workflow == "governance_report":
+                args = {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "base_ref": base_ref,
+                    "head_ref": head_ref,
+                    "export": export,
+                }
+            else:
+                raise ValueError(
+                    "workflow must be one of: "
+                    + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+                )
+            id_args = dict(args)
+            if retry_of:
+                id_args["retry_of"] = retry_of
+            resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
+            span.set_attribute("mcp.workflow.task_id", resolved_task_id)
+            if not trace_task_id:
+                span.set_attribute("mcp.workflow.task_id.generated", True)
+            return _start_workflow_task(
+                workflow,
+                args,
+                retry_of=retry_of,
+                task_id=task_id,
+                max_retries=max_retries if workflow == "vscode_task_run" else 0,
+                restart=restart,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "workflow_task",
+            security_args,
+            categories,
+            _run_workflow_task,
+            on_duplicate=_on_duplicate,
         )
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         return result
 
@@ -33780,6 +34370,106 @@ def state_restore(
 
 @mcp.tool()
 def workspace_transaction(
+
+    mode: str = "begin",
+    transaction_id: str = "",
+    label: str = "",
+    changes: list[dict[str, Any]] | None = None,
+    create_dirs: bool = True,
+    delete_metadata: bool = False,
+    snapshot_id: str = "",
+    include_build_dir: bool = False,
+    path: str = "",
+    content: str = "",
+    overwrite: bool = True,
+    encoding: str = "utf-8",
+    pattern: str = "",
+    replacement: str = "",
+    regex: bool = False,
+    case_insensitive: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    max_file_bytes: int = 1048576,
+    max_files: int = 1000,
+    max_replacements: int = 1000,
+    source_path: str = "",
+    destination: str = "",
+    recursive: bool = False,
+    diff_text: str = "",
+    cached: bool = False,
+    idempotency_key: str = "",
+    request_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Strict workspace mutation router for transactional edits, snapshots, and direct file mutations."""
+    arguments = {
+        "mode": mode,
+        "transaction_id": transaction_id,
+        "label": label,
+        "changes": changes,
+        "create_dirs": create_dirs,
+        "delete_metadata": delete_metadata,
+        "snapshot_id": snapshot_id,
+        "include_build_dir": include_build_dir,
+        "path": path,
+        "content": content,
+        "overwrite": overwrite,
+        "encoding": encoding,
+        "pattern": pattern,
+        "replacement": replacement,
+        "regex": regex,
+        "case_insensitive": case_insensitive,
+        "include_globs": include_globs,
+        "exclude_globs": exclude_globs,
+        "include_hidden": include_hidden,
+        "max_file_bytes": max_file_bytes,
+        "max_files": max_files,
+        "max_replacements": max_replacements,
+        "source_path": source_path,
+        "destination": destination,
+        "recursive": recursive,
+        "diff_text": diff_text,
+        "cached": cached,
+        "idempotency_key": idempotency_key,
+        "request_metadata": request_metadata or {},
+    }
+    return _run_with_tool_security_audit(
+        "workspace_transaction",
+        arguments,
+        lambda: _workspace_transaction_impl(
+            mode=mode,
+            transaction_id=transaction_id,
+            label=label,
+            changes=changes,
+            create_dirs=create_dirs,
+            delete_metadata=delete_metadata,
+            snapshot_id=snapshot_id,
+            include_build_dir=include_build_dir,
+            path=path,
+            content=content,
+            overwrite=overwrite,
+            encoding=encoding,
+            pattern=pattern,
+            replacement=replacement,
+            regex=regex,
+            case_insensitive=case_insensitive,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            include_hidden=include_hidden,
+            max_file_bytes=max_file_bytes,
+            max_files=max_files,
+            max_replacements=max_replacements,
+            source_path=source_path,
+            destination=destination,
+            recursive=recursive,
+            diff_text=diff_text,
+            cached=cached,
+        ),
+    )
+
+
+def _workspace_transaction_impl(
+
     mode: str = "begin",
     transaction_id: str = "",
     label: str = "",
@@ -33808,7 +34498,6 @@ def workspace_transaction(
     diff_text: str = "",
     cached: bool = False,
 ) -> dict[str, Any]:
-    """Strict workspace mutation router for transactional edits, snapshots, and direct file mutations."""
     allowed = {
         "begin",
         "apply",
@@ -35755,55 +36444,73 @@ def test_impact_map(
     output_profile: str | None = None,
 ) -> dict[str, Any]:
     """Read or refresh the static Python test impact map and query impacted tests."""
-    _require_git_repo()
-    if max_tests < 1:
-        raise ValueError("max_tests must be >= 1")
-    if max_age_hours < 0:
-        raise ValueError("max_age_hours must be >= 0")
-    profile = _default_output_profile(output_profile)
-    artifact_path = str(TEST_IMPACT_MAP_FILE)
-    if refresh:
-        _require_mutations()
-        payload = _build_test_impact_map_payload()
-        path = _resolve_repo_path(artifact_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        status = "fresh"
-    else:
-        payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+    arguments = {
+        "mode": "refresh" if refresh else "query",
+        "changed_files": changed_files or [],
+        "refresh": refresh,
+        "max_age_hours": max_age_hours,
+        "max_tests": max_tests,
+        "output_profile": output_profile or "",
+    }
+    categories = _require_tool_security_gate("test_impact_map", arguments)
 
-    changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
-    query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
-        "tests": [],
-        "test_details": [],
-        "impacted_sources": [],
-        "unmapped_changed_files": changed if changed and status != "fresh" else [],
-        "coverage_gaps": [],
-        "confidence": 0.0,
-    }
-    result = {
-        "schema": "test_impact_map.query.v1",
-        "artifact_path": artifact_path,
-        "artifact_status": status,
-        "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
-        "changed_files": changed,
-        "selected_tests": query["tests"],
-        "test_details": query["test_details"],
-        "impacted_sources": query["impacted_sources"],
-        "unmapped_changed_files": query["unmapped_changed_files"],
-        "coverage_gaps": query["coverage_gaps"],
-        "confidence": query["confidence"],
-    }
-    if profile == "compact":
-        return {
-            "schema": "test_impact_map.query.compact.v1",
+    def _run_test_impact_map() -> dict[str, Any]:
+        _require_git_repo()
+        if max_tests < 1:
+            raise ValueError("max_tests must be >= 1")
+        if max_age_hours < 0:
+            raise ValueError("max_age_hours must be >= 0")
+        profile = _default_output_profile(output_profile)
+        artifact_path = str(TEST_IMPACT_MAP_FILE)
+        if refresh:
+            _require_mutations()
+            payload = _build_test_impact_map_payload()
+            path = _resolve_repo_path(artifact_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            status = "fresh"
+        else:
+            payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+
+        changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
+        query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
+            "tests": [],
+            "test_details": [],
+            "impacted_sources": [],
+            "unmapped_changed_files": changed if changed and status != "fresh" else [],
+            "coverage_gaps": [],
+            "confidence": 0.0,
+        }
+        result = {
+            "schema": "test_impact_map.query.v1",
+            "artifact_path": artifact_path,
             "artifact_status": status,
-            "test_count": len(query["tests"]),
+            "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
+            "changed_files": changed,
             "selected_tests": query["tests"],
+            "test_details": query["test_details"],
+            "impacted_sources": query["impacted_sources"],
             "unmapped_changed_files": query["unmapped_changed_files"],
+            "coverage_gaps": query["coverage_gaps"],
             "confidence": query["confidence"],
         }
-    return result
+        if profile == "compact":
+            return {
+                "schema": "test_impact_map.query.compact.v1",
+                "artifact_status": status,
+                "test_count": len(query["tests"]),
+                "selected_tests": query["tests"],
+                "unmapped_changed_files": query["unmapped_changed_files"],
+                "confidence": query["confidence"],
+            }
+        return result
+
+    return _run_with_mutation_replay_guard(
+        "test_impact_map",
+        arguments,
+        categories,
+        _run_test_impact_map,
+    )
 
 
 @mcp.tool()
@@ -38958,12 +39665,17 @@ async def continue_model_fallback_configure(request):
     files_for_gate = [str(profile_rel), str(routing_rel), str(agent_proxy_rel)]
     if config.get("api_key"):
         files_for_gate.append(str(secret_rel))
-    _require_tool_security_gate(
+    security_args = {
+        "mode": "write",
+        "files": files_for_gate,
+        "provider": config["provider"],
+        "model": config["model"],
+        "needs_secret": config.get("needs_secret", ""),
+        "has_api_key": bool(config.get("api_key")),
+    }
+    categories = _require_tool_security_gate(
         "continue_model_fallback_configure",
-        {
-            "mode": "write",
-            "files": files_for_gate,
-        },
+        security_args,
         enforce_mutation_permission=False,
     )
     changes = [
@@ -39040,27 +39752,34 @@ async def continue_model_fallback_configure(request):
             status_code=403,
         )
 
-    profile_path = (REPO_PATH / profile_rel).resolve()
-    routing_path = (REPO_PATH / routing_rel).resolve()
-    secret_path = (REPO_PATH / secret_rel).resolve()
-    profile_path.relative_to(REPO_PATH)
-    routing_path.relative_to(REPO_PATH)
-    secret_path.relative_to(REPO_PATH)
-    agent_proxy_path.relative_to(REPO_PATH)
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    routing_path.parent.mkdir(parents=True, exist_ok=True)
-    agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(profile_text, encoding="utf-8")
-    routing_path.write_text(routing_text, encoding="utf-8")
-    agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
-    if config.get("api_key"):
-        _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
-    written_secret_state = _agent_proxy_secret_state(
-        _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+    guard = _mutation_replay_guard_begin(
+        "continue_model_fallback_configure",
+        security_args,
+        categories,
     )
-    written_summary = {**summary, "secret_state": written_secret_state}
-    return JSONResponse(
-        {
+    if guard.get("duplicate"):
+        return JSONResponse(guard.get("response", {}))
+    try:
+        profile_path = (REPO_PATH / profile_rel).resolve()
+        routing_path = (REPO_PATH / routing_rel).resolve()
+        secret_path = (REPO_PATH / secret_rel).resolve()
+        profile_path.relative_to(REPO_PATH)
+        routing_path.relative_to(REPO_PATH)
+        secret_path.relative_to(REPO_PATH)
+        agent_proxy_path.relative_to(REPO_PATH)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        routing_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(profile_text, encoding="utf-8")
+        routing_path.write_text(routing_text, encoding="utf-8")
+        agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
+        if config.get("api_key"):
+            _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
+        written_secret_state = _agent_proxy_secret_state(
+            _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+        )
+        written_summary = {**summary, "secret_state": written_secret_state}
+        response_payload = {
             "schema": "continue_model_fallback.configure.v1",
             "status": "written",
             "summary": written_summary,
@@ -39074,7 +39793,11 @@ async def continue_model_fallback_configure(request):
             "apiBase": config["api_base"],
             "secret_state": written_secret_state,
         }
-    )
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, response_payload)
+    return JSONResponse(response_payload)
 
 
 async def mcp_server_manifest(_request):
