@@ -35,6 +35,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workspace_transaction",
                 "policy_simulator",
                 "workflow_policy_plan",
+                "policy_governance_decision",
                 "workflow_reminder",
                 "clarification_gate",
                 "release_readiness",

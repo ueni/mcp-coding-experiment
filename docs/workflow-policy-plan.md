@@ -45,6 +45,8 @@ The current slice checks:
 
 Network and mutation findings are sequence-level governance findings. Per-tool authorization still remains with the existing MCP auth, mutation, and security gates.
 
+For reviewed repository-local policy bundles on top of this normalized metadata, use the read-only [`policy_governance_decision`](./policy-governance-decision.md) adapter. Its decisions cannot override this preflight or any existing hard gate.
+
 ## Evidence in reports
 
 `governance_report` and `release_readiness` can surface the latest stored `workflow_policy_plan` result from the result-handle store as optional evidence. The preflight itself does not persist artifacts by default.
