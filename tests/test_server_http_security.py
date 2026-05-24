@@ -768,6 +768,39 @@ index 0000000..257cc56
         self.assertIn("recorded", decisions)
         self.assertIn("duplicate_suppressed", decisions)
 
+    def test_mutation_replay_guard_suppresses_duplicate_test_impact_refresh(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        calls = []
+        original_builder = self.server._build_test_impact_map_payload
+
+        def fake_builder():
+            calls.append(len(calls) + 1)
+            return {"schema": "test_impact_map.v1", "generated_at": f"call-{len(calls)}"}
+
+        self.server._build_test_impact_map_payload = fake_builder
+        try:
+            with self._authorized_http_tool_context(
+                session_id="impact-refresh-session",
+                idempotency_key="refresh-impact-map",
+            ):
+                first = self.server.test_impact_map(refresh=True, output_profile="normal")
+                duplicate = self.server.test_impact_map(refresh=True, output_profile="normal")
+        finally:
+            self.server._build_test_impact_map_payload = original_builder
+
+        self.assertEqual(calls, [1])
+        self.assertEqual(first["artifact_status"], "fresh")
+        self.assertEqual(first["generated_at"], "call-1")
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(duplicate["duplicate"])
+        journal = json.loads(
+            (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        )
+        self.assertEqual(journal["entries"][0]["tool_name"], "test_impact_map")
+        self.assertEqual(journal["entries"][0]["mode"], "refresh")
+        self.assertEqual(journal["entries"][0]["duplicate_count"], 1)
+
     def test_mutation_replay_guard_suppresses_duplicate_apply_diff_patch(self):
         self.server.ALLOW_MUTATIONS = True
         self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True

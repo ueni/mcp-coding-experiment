@@ -12560,6 +12560,30 @@ def _tool_result_failure_reason(result: Any) -> str:
     return "tool returned ok=false"
 
 
+def _run_with_mutation_replay_guard(
+    tool_name: str,
+    arguments: dict[str, Any],
+    categories: list[str],
+    action: Callable[[], Any],
+    *,
+    on_duplicate: Callable[[Any], None] | None = None,
+) -> Any:
+    """Run an already-authorized tool action through the HTTP mutation replay guard."""
+    guard = _mutation_replay_guard_begin(tool_name, arguments, categories)
+    if guard.get("duplicate"):
+        result = guard.get("response")
+        if on_duplicate is not None:
+            on_duplicate(result)
+        return result
+    try:
+        result = action()
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, result)
+    return result
+
+
 def _run_with_tool_security_audit(
     tool_name: str,
     arguments: dict[str, Any],
@@ -12573,19 +12597,26 @@ def _run_with_tool_security_audit(
         categories = _require_tool_security_gate(tool_name, arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
-        guard = _mutation_replay_guard_begin(tool_name, arguments, categories)
-        if guard.get("duplicate"):
-            result = guard.get("response")
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
             _otel_set_result_attributes(span, result)
             span.set_attribute("mcp.response.ok", _tool_result_success(result))
             span.set_attribute(
                 "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
             )
-            return result
+
         try:
-            result = action()
+            result = _run_with_mutation_replay_guard(
+                tool_name,
+                arguments,
+                categories,
+                action,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
-            _mutation_replay_guard_finish(guard, None, error=exc)
             if sensitive:
                 _append_audit_event(
                     tool_name,
@@ -12599,7 +12630,8 @@ def _run_with_tool_security_audit(
                     ),
                 )
             raise
-        _mutation_replay_guard_finish(guard, result)
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if sensitive:
             success = _tool_result_success(result)
@@ -28395,8 +28427,19 @@ def task_router(
         categories = _require_tool_security_gate("task_router", audit_args)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
-        try:
-            result = _TASK_ROUTER_SERVICE.route(
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
+
+        def _route_task() -> dict[str, Any]:
+            return _TASK_ROUTER_SERVICE.route(
                 mode=mode,
                 prompt=prompt,
                 task=task,
@@ -28434,10 +28477,21 @@ def task_router(
                 max_parallel=max_parallel,
                 auto_parallel_when_possible=auto_parallel_when_possible,
             )
+
+        try:
+            result = _run_with_mutation_replay_guard(
+                "task_router",
+                audit_args,
+                categories,
+                _route_task,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
             if sensitive:
                 _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
             raise
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if isinstance(result, dict) and isinstance(result.get("execution_mode"), str):
             span.set_attribute("mcp.execution_mode", result["execution_mode"])
@@ -31631,20 +31685,29 @@ def self_optimization_report(
     ) as span:
         categories = _require_tool_security_gate("self_optimization_report", arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
-        result = _self_optimization_report_impl(
-            start_time=start_time,
-            end_time=end_time,
-            window_hours=window_hours,
-            export=export,
-            recommendation_limit=recommendation_limit,
-            include_git=include_git,
-            include_audit=include_audit,
-            include_traces=include_traces,
-            redact_terms=redact_terms,
-            github_issue_metadata=github_issue_metadata,
-            github_issue_update_mode=github_issue_update_mode,
-            github_repository=github_repository,
-            github_token_env=github_token_env,
+
+        def _run_self_optimization_report() -> dict[str, Any]:
+            return _self_optimization_report_impl(
+                start_time=start_time,
+                end_time=end_time,
+                window_hours=window_hours,
+                export=export,
+                recommendation_limit=recommendation_limit,
+                include_git=include_git,
+                include_audit=include_audit,
+                include_traces=include_traces,
+                redact_terms=redact_terms,
+                github_issue_metadata=github_issue_metadata,
+                github_issue_update_mode=github_issue_update_mode,
+                github_repository=github_repository,
+                github_token_env=github_token_env,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "self_optimization_report",
+            arguments,
+            categories,
+            _run_self_optimization_report,
         )
         _otel_set_result_attributes(span, result)
         return result
@@ -31928,7 +31991,27 @@ def workflow_task(
     action = str(action or "start").strip().lower() or "start"
     workflow = str(workflow or "vscode_task_run").strip()
     trace_task_id = task_id.strip()
-    trace_categories = ["read-only"] if action == "status" else _workflow_task_categories(workflow)
+    security_args = {
+        "mode": action,
+        "action": action,
+        "workflow": workflow,
+        "task_id": trace_task_id,
+        "label": label,
+        "tasks_path": tasks_path,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+        "max_retries": max_retries,
+        "restart": restart,
+        "start_time": start_time,
+        "end_time": end_time,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "export": export,
+        "retry_of": retry_of,
+        "cancel_reason": cancel_reason,
+    }
+    trace_categories = _tool_categories("workflow_task", security_args)
     attrs = _otel_tool_attributes(
         "workflow_task",
         {"action": action, "workflow": workflow, "task_id": trace_task_id},
@@ -31945,62 +32028,84 @@ def workflow_task(
         _require_git_repo()
         if action not in {"start", "status", "cancel"}:
             raise ValueError("action must be one of: start, status, cancel")
-        if action == "cancel":
-            _require_mutations()
-            if not task_id:
-                raise ValueError("task_id is required for cancel")
-            result = _cancel_workflow_task(task_id, reason=cancel_reason)
+        categories = _require_tool_security_gate("workflow_task", security_args)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
             _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if action == "status":
-            if not task_id:
-                raise ValueError("task_id is required for status")
-            result = _workflow_task_status_payload(task_id)
-            _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if workflow == "vscode_task_run":
-            _require_mutations()
-            if not label.strip():
-                raise ValueError("label is required for vscode_task_run")
-            if timeout_seconds < 1:
-                raise ValueError("timeout_seconds must be >= 1")
-            args = {
-                "label": label.strip(),
-                "tasks_path": tasks_path,
-                "control_profile": control_profile,
-                "timeout_seconds": timeout_seconds,
-                "max_output_chars": max_output_chars,
-            }
-        elif workflow == "governance_report":
-            args = {
-                "start_time": start_time,
-                "end_time": end_time,
-                "base_ref": base_ref,
-                "head_ref": head_ref,
-                "export": export,
-            }
-        else:
-            raise ValueError(
-                "workflow must be one of: "
-                + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
             )
-        id_args = dict(args)
-        if retry_of:
-            id_args["retry_of"] = retry_of
-        resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
-        span.set_attribute("mcp.workflow.task_id", resolved_task_id)
-        if not trace_task_id:
-            span.set_attribute("mcp.workflow.task_id.generated", True)
-        result = _start_workflow_task(
-            workflow,
-            args,
-            retry_of=retry_of,
-            task_id=task_id,
-            max_retries=max_retries if workflow == "vscode_task_run" else 0,
-            restart=restart,
+
+        def _run_workflow_task() -> dict[str, Any]:
+            if action == "cancel":
+                _require_mutations()
+                if not task_id:
+                    raise ValueError("task_id is required for cancel")
+                result = _cancel_workflow_task(task_id, reason=cancel_reason)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if action == "status":
+                if not task_id:
+                    raise ValueError("task_id is required for status")
+                result = _workflow_task_status_payload(task_id)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if workflow == "vscode_task_run":
+                _require_mutations()
+                if not label.strip():
+                    raise ValueError("label is required for vscode_task_run")
+                if timeout_seconds < 1:
+                    raise ValueError("timeout_seconds must be >= 1")
+                args = {
+                    "label": label.strip(),
+                    "tasks_path": tasks_path,
+                    "control_profile": control_profile,
+                    "timeout_seconds": timeout_seconds,
+                    "max_output_chars": max_output_chars,
+                }
+            elif workflow == "governance_report":
+                args = {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "base_ref": base_ref,
+                    "head_ref": head_ref,
+                    "export": export,
+                }
+            else:
+                raise ValueError(
+                    "workflow must be one of: "
+                    + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+                )
+            id_args = dict(args)
+            if retry_of:
+                id_args["retry_of"] = retry_of
+            resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
+            span.set_attribute("mcp.workflow.task_id", resolved_task_id)
+            if not trace_task_id:
+                span.set_attribute("mcp.workflow.task_id.generated", True)
+            return _start_workflow_task(
+                workflow,
+                args,
+                retry_of=retry_of,
+                task_id=task_id,
+                max_retries=max_retries if workflow == "vscode_task_run" else 0,
+                restart=restart,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "workflow_task",
+            security_args,
+            categories,
+            _run_workflow_task,
+            on_duplicate=_on_duplicate,
         )
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         return result
 
@@ -36301,55 +36406,73 @@ def test_impact_map(
     output_profile: str | None = None,
 ) -> dict[str, Any]:
     """Read or refresh the static Python test impact map and query impacted tests."""
-    _require_git_repo()
-    if max_tests < 1:
-        raise ValueError("max_tests must be >= 1")
-    if max_age_hours < 0:
-        raise ValueError("max_age_hours must be >= 0")
-    profile = _default_output_profile(output_profile)
-    artifact_path = str(TEST_IMPACT_MAP_FILE)
-    if refresh:
-        _require_mutations()
-        payload = _build_test_impact_map_payload()
-        path = _resolve_repo_path(artifact_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        status = "fresh"
-    else:
-        payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+    arguments = {
+        "mode": "refresh" if refresh else "query",
+        "changed_files": changed_files or [],
+        "refresh": refresh,
+        "max_age_hours": max_age_hours,
+        "max_tests": max_tests,
+        "output_profile": output_profile or "",
+    }
+    categories = _require_tool_security_gate("test_impact_map", arguments)
 
-    changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
-    query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
-        "tests": [],
-        "test_details": [],
-        "impacted_sources": [],
-        "unmapped_changed_files": changed if changed and status != "fresh" else [],
-        "coverage_gaps": [],
-        "confidence": 0.0,
-    }
-    result = {
-        "schema": "test_impact_map.query.v1",
-        "artifact_path": artifact_path,
-        "artifact_status": status,
-        "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
-        "changed_files": changed,
-        "selected_tests": query["tests"],
-        "test_details": query["test_details"],
-        "impacted_sources": query["impacted_sources"],
-        "unmapped_changed_files": query["unmapped_changed_files"],
-        "coverage_gaps": query["coverage_gaps"],
-        "confidence": query["confidence"],
-    }
-    if profile == "compact":
-        return {
-            "schema": "test_impact_map.query.compact.v1",
+    def _run_test_impact_map() -> dict[str, Any]:
+        _require_git_repo()
+        if max_tests < 1:
+            raise ValueError("max_tests must be >= 1")
+        if max_age_hours < 0:
+            raise ValueError("max_age_hours must be >= 0")
+        profile = _default_output_profile(output_profile)
+        artifact_path = str(TEST_IMPACT_MAP_FILE)
+        if refresh:
+            _require_mutations()
+            payload = _build_test_impact_map_payload()
+            path = _resolve_repo_path(artifact_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            status = "fresh"
+        else:
+            payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+
+        changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
+        query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
+            "tests": [],
+            "test_details": [],
+            "impacted_sources": [],
+            "unmapped_changed_files": changed if changed and status != "fresh" else [],
+            "coverage_gaps": [],
+            "confidence": 0.0,
+        }
+        result = {
+            "schema": "test_impact_map.query.v1",
+            "artifact_path": artifact_path,
             "artifact_status": status,
-            "test_count": len(query["tests"]),
+            "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
+            "changed_files": changed,
             "selected_tests": query["tests"],
+            "test_details": query["test_details"],
+            "impacted_sources": query["impacted_sources"],
             "unmapped_changed_files": query["unmapped_changed_files"],
+            "coverage_gaps": query["coverage_gaps"],
             "confidence": query["confidence"],
         }
-    return result
+        if profile == "compact":
+            return {
+                "schema": "test_impact_map.query.compact.v1",
+                "artifact_status": status,
+                "test_count": len(query["tests"]),
+                "selected_tests": query["tests"],
+                "unmapped_changed_files": query["unmapped_changed_files"],
+                "confidence": query["confidence"],
+            }
+        return result
+
+    return _run_with_mutation_replay_guard(
+        "test_impact_map",
+        arguments,
+        categories,
+        _run_test_impact_map,
+    )
 
 
 @mcp.tool()
@@ -39504,12 +39627,17 @@ async def continue_model_fallback_configure(request):
     files_for_gate = [str(profile_rel), str(routing_rel), str(agent_proxy_rel)]
     if config.get("api_key"):
         files_for_gate.append(str(secret_rel))
-    _require_tool_security_gate(
+    security_args = {
+        "mode": "write",
+        "files": files_for_gate,
+        "provider": config["provider"],
+        "model": config["model"],
+        "needs_secret": config.get("needs_secret", ""),
+        "has_api_key": bool(config.get("api_key")),
+    }
+    categories = _require_tool_security_gate(
         "continue_model_fallback_configure",
-        {
-            "mode": "write",
-            "files": files_for_gate,
-        },
+        security_args,
         enforce_mutation_permission=False,
     )
     changes = [
@@ -39586,27 +39714,34 @@ async def continue_model_fallback_configure(request):
             status_code=403,
         )
 
-    profile_path = (REPO_PATH / profile_rel).resolve()
-    routing_path = (REPO_PATH / routing_rel).resolve()
-    secret_path = (REPO_PATH / secret_rel).resolve()
-    profile_path.relative_to(REPO_PATH)
-    routing_path.relative_to(REPO_PATH)
-    secret_path.relative_to(REPO_PATH)
-    agent_proxy_path.relative_to(REPO_PATH)
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    routing_path.parent.mkdir(parents=True, exist_ok=True)
-    agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(profile_text, encoding="utf-8")
-    routing_path.write_text(routing_text, encoding="utf-8")
-    agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
-    if config.get("api_key"):
-        _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
-    written_secret_state = _agent_proxy_secret_state(
-        _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+    guard = _mutation_replay_guard_begin(
+        "continue_model_fallback_configure",
+        security_args,
+        categories,
     )
-    written_summary = {**summary, "secret_state": written_secret_state}
-    return JSONResponse(
-        {
+    if guard.get("duplicate"):
+        return JSONResponse(guard.get("response", {}))
+    try:
+        profile_path = (REPO_PATH / profile_rel).resolve()
+        routing_path = (REPO_PATH / routing_rel).resolve()
+        secret_path = (REPO_PATH / secret_rel).resolve()
+        profile_path.relative_to(REPO_PATH)
+        routing_path.relative_to(REPO_PATH)
+        secret_path.relative_to(REPO_PATH)
+        agent_proxy_path.relative_to(REPO_PATH)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        routing_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(profile_text, encoding="utf-8")
+        routing_path.write_text(routing_text, encoding="utf-8")
+        agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
+        if config.get("api_key"):
+            _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
+        written_secret_state = _agent_proxy_secret_state(
+            _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+        )
+        written_summary = {**summary, "secret_state": written_secret_state}
+        response_payload = {
             "schema": "continue_model_fallback.configure.v1",
             "status": "written",
             "summary": written_summary,
@@ -39620,7 +39755,11 @@ async def continue_model_fallback_configure(request):
             "apiBase": config["api_base"],
             "secret_state": written_secret_state,
         }
-    )
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, response_payload)
+    return JSONResponse(response_payload)
 
 
 async def mcp_server_manifest(_request):
