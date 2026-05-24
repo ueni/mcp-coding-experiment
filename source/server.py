@@ -2899,7 +2899,9 @@ def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
         # Balanced mode pseudonymizes high-confidence likely people in common
         # assignment/introduction phrasing while avoiding broad title-case rewrites.
         result = re.sub(
-            r"(?i)\b(?:owner|contact|author|by|from|for)\s+(" + _AGENT_PROXY_PERSON_RE.pattern[2:-2] + r")",
+            r"(?i:\b(?:owner|contact|author|by|from|for)\s+)("
+            + _AGENT_PROXY_PERSON_RE.pattern[2:-2]
+            + r")",
             lambda match: match.group(0).replace(
                 match.group(1),
                 _agent_proxy_new_placeholder(state, "person", match.group(1), reversible=True),
