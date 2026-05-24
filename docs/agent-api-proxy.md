@@ -100,6 +100,21 @@ Summaries are available through the protected endpoint. The summary returns even
 GET /v1/agent-proxy/disclosures?trace_id=<trace>&since=<iso8601>&until=<iso8601>
 ```
 
+
+## Tool-response scanner
+
+Tool-response scanning is disabled by default. When enabled, it scans `role: "tool"` chat messages before they are forwarded into model context.
+
+```bash
+export MCP_TOOL_RESPONSE_SCANNER_MODE=log       # observe only
+export MCP_TOOL_RESPONSE_SCANNER_MODE=sanitize  # redact/remove risky content
+export MCP_TOOL_RESPONSE_SCANNER_MODE=block     # fail closed before provider call
+```
+
+`log` includes bounded redacted scanner metadata in `agent_proxy.policy` without changing forwarded content. `sanitize` redacts secret-looking values and local absolute paths, and replaces prompt-injection-like instruction lines. `block` returns `403` with scanner metadata and does not call the provider.
+
+The scanner is deterministic and offline-safe. Reports include categories, severity, counts, and privacy flags only; raw tool responses, secrets, host paths, and raw excerpts are not logged. See [MCP tool-response scanner](./tool-response-scanner.md).
+
 ## Memory capture gate
 
 Memory capture is disabled by default:
