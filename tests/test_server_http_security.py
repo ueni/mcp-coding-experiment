@@ -801,6 +801,129 @@ index 0000000..257cc56
         self.assertEqual(journal["entries"][0]["mode"], "refresh")
         self.assertEqual(journal["entries"][0]["duplicate_count"], 1)
 
+    def test_mutation_replay_guard_task_router_coding_infer_uses_prompt_digest(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        calls = []
+        original_route = self.server._TASK_ROUTER_SERVICE.route
+
+        def fake_route(**kwargs):
+            calls.append(dict(kwargs))
+            return {"schema": "task_router.coding_infer.v1", "ok": True, "call": len(calls)}
+
+        self.server._TASK_ROUTER_SERVICE.route = fake_route
+        try:
+            with self._authorized_http_tool_context(session_id="router-coding-infer-session"):
+                first = self.server.task_router(
+                    mode="coding_infer",
+                    prompt="first coding request",
+                    system="system prompt alpha",
+                    model="test-model",
+                    max_tokens=42,
+                    sandbox_mode="isolated",
+                    sandbox_id="sbox-alpha",
+                )
+                second = self.server.task_router(
+                    mode="coding_infer",
+                    prompt="second coding request",
+                    system="system prompt alpha",
+                    model="test-model",
+                    max_tokens=42,
+                    sandbox_mode="isolated",
+                    sandbox_id="sbox-alpha",
+                )
+                duplicate = self.server.task_router(
+                    mode="coding_infer",
+                    prompt="first coding request",
+                    system="system prompt alpha",
+                    model="test-model",
+                    max_tokens=42,
+                    sandbox_mode="isolated",
+                    sandbox_id="sbox-alpha",
+                )
+        finally:
+            self.server._TASK_ROUTER_SERVICE.route = original_route
+
+        self.assertEqual(first["call"], 1)
+        self.assertEqual(second["call"], 2)
+        self.assertEqual([call["prompt"] for call in calls], ["first coding request", "second coding request"])
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(len(calls), 2)
+        journal_text = (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("first coding request", journal_text)
+        self.assertNotIn("second coding request", journal_text)
+        self.assertNotIn("system prompt alpha", journal_text)
+        self.assertNotIn("sbox-alpha", journal_text)
+
+    def test_mutation_replay_guard_task_router_package_and_sandbox_fields_change_digest(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        calls = []
+        original_route = self.server._TASK_ROUTER_SERVICE.route
+
+        def fake_route(**kwargs):
+            calls.append(dict(kwargs))
+            return {"schema": f"task_router.{kwargs['mode']}.v1", "ok": True, "call": len(calls)}
+
+        self.server._TASK_ROUTER_SERVICE.route = fake_route
+        try:
+            with self._authorized_http_tool_context(session_id="router-custom-fields-session"):
+                self.server.task_router(
+                    mode="coding_pip",
+                    packages=["package-alpha"],
+                    pip_upgrade=False,
+                    sandbox_id="sbox-pkg",
+                )
+                self.server.task_router(
+                    mode="coding_pip",
+                    packages=["package-alpha"],
+                    pip_upgrade=True,
+                    sandbox_id="sbox-pkg",
+                )
+                pip_duplicate = self.server.task_router(
+                    mode="coding_pip",
+                    packages=["package-alpha"],
+                    pip_upgrade=True,
+                    sandbox_id="sbox-pkg",
+                )
+                self.server.task_router(
+                    mode="coding_sandbox",
+                    sandbox_action="delete",
+                    sandbox_id="sbox-one",
+                )
+                self.server.task_router(
+                    mode="coding_sandbox",
+                    sandbox_action="delete",
+                    sandbox_id="sbox-two",
+                )
+                sandbox_duplicate = self.server.task_router(
+                    mode="coding_sandbox",
+                    sandbox_action="delete",
+                    sandbox_id="sbox-two",
+                )
+        finally:
+            self.server._TASK_ROUTER_SERVICE.route = original_route
+
+        self.assertEqual(
+            [(call["mode"], call["pip_upgrade"], call["sandbox_id"]) for call in calls],
+            [
+                ("coding_pip", False, "sbox-pkg"),
+                ("coding_pip", True, "sbox-pkg"),
+                ("coding_sandbox", False, "sbox-one"),
+                ("coding_sandbox", False, "sbox-two"),
+            ],
+        )
+        self.assertEqual(pip_duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(pip_duplicate["duplicate"])
+        self.assertEqual(sandbox_duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(sandbox_duplicate["duplicate"])
+        journal_text = (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("package-alpha", journal_text)
+        self.assertNotIn("sbox-pkg", journal_text)
+        self.assertNotIn("sbox-one", journal_text)
+        self.assertNotIn("sbox-two", journal_text)
+
     def test_mutation_replay_guard_suppresses_duplicate_apply_diff_patch(self):
         self.server.ALLOW_MUTATIONS = True
         self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True

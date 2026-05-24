@@ -28414,6 +28414,44 @@ def task_router(
         "sandbox_mode": sandbox_mode,
         "sandbox_action": sandbox_action,
     }
+    replay_args = {
+        "mode": mode,
+        "prompt": prompt,
+        "task": task,
+        "prefix": prefix,
+        "suffix": suffix,
+        "language": language,
+        "texts": texts or [],
+        "query": query,
+        "execution_mode": execution_mode,
+        "candidates": candidates or [],
+        "backend": backend,
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system,
+        "stop": stop or [],
+        "normalize": normalize,
+        "top_k": top_k,
+        "output_profile": output_profile,
+        "offset": offset,
+        "limit": limit,
+        "compress": compress,
+        "store_result": store_result,
+        "memory_session": memory_session,
+        "check_profile": check_profile,
+        "check_target": check_target,
+        "check_timeout_seconds": check_timeout_seconds,
+        "run_checks": run_checks,
+        "packages": packages or [],
+        "pip_upgrade": pip_upgrade,
+        "sandbox_mode": sandbox_mode,
+        "sandbox_id": sandbox_id,
+        "sandbox_action": sandbox_action,
+        "prompts": prompts or [],
+        "max_parallel": max_parallel,
+        "auto_parallel_when_possible": auto_parallel_when_possible,
+    }
     categories = _tool_categories("task_router", audit_args)
     span_attrs = _otel_tool_attributes("task_router", audit_args, categories)
     span_attrs.update(
@@ -28481,7 +28519,7 @@ def task_router(
         try:
             result = _run_with_mutation_replay_guard(
                 "task_router",
-                audit_args,
+                replay_args,
                 categories,
                 _route_task,
                 on_duplicate=_on_duplicate,
