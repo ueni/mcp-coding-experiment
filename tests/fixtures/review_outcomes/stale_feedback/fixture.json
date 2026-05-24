@@ -1,0 +1,31 @@
+{
+  "schema": "review_outcome_fixture.v1",
+  "id": "stale-feedback",
+  "description": "A comment becomes stale after file movement and a replacement finding replaces it.",
+  "findings": [
+    {
+      "id": "old-path-null-check",
+      "rule_id": "null-check",
+      "path": "source/old_worker.py",
+      "line": 88,
+      "comment_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "created_at": "2026-05-24T08:45:00Z"
+    }
+  ],
+  "follow_up_commits": [
+    {
+      "source": "follow_up_commit",
+      "sha": "def5678",
+      "timestamp": "2026-05-24T11:00:00Z",
+      "stale_findings": [
+        "old-path-null-check"
+      ],
+      "reason": "file moved and replacement finding tracks source/new_worker.py"
+    }
+  ],
+  "gate_state": {
+    "tests": "unknown",
+    "security": "unknown",
+    "release": "blocked"
+  }
+}

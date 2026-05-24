@@ -40,6 +40,7 @@ SPDX-License-Identifier: MIT
 - [Build download cache verification](./build-download-cache.md) - stable BuildKit cache IDs, offline/no-network gates, and cache audit tooling for Docker builds.
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) - deterministic advisory metadata for instruction-like text in tool outputs with aggregate governance/risk counts.
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) - offline CR-Bench-style fixture scoring for review true positives, misses, and spurious findings.
+- [Review outcome report](./review-outcome-report.md) - offline redacted fixture report for review-comment resolution, dismissal/noise, stale, open, and unverifiable outcomes.
 
 This index lists documentation ownership and status.
 
@@ -77,6 +78,7 @@ This index lists documentation ownership and status.
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
 - [AGENTS.md context health report](./agents-context-health.md) (`docs/agents-context-health.md`) - Status: `prototype`
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
+- [Review outcome report](./review-outcome-report.md) (`docs/review-outcome-report.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`
 - [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`

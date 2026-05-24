@@ -1,0 +1,31 @@
+{
+  "schema": "review_outcome_fixture.v1",
+  "id": "open-feedback",
+  "description": "A valid automated review comment remains open after a follow-up commit touches related files.",
+  "findings": [
+    {
+      "id": "release-note-missing",
+      "rule_id": "release-note-required",
+      "path": "docs/release.md",
+      "line": 7,
+      "comment_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "created_at": "2026-05-24T09:15:00Z"
+    }
+  ],
+  "follow_up_commits": [
+    {
+      "source": "follow_up_commit",
+      "sha": "123abcd",
+      "timestamp": "2026-05-24T12:15:00Z",
+      "open_findings": [
+        "release-note-missing"
+      ],
+      "reason": "follow-up commit did not address the release note finding"
+    }
+  ],
+  "gate_state": {
+    "tests": "failed",
+    "security": "unknown",
+    "release": "blocked"
+  }
+}
