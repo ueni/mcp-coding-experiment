@@ -828,6 +828,54 @@ index 0000000..257cc56
             "duplicate_suppressed",
         )
 
+    def test_mutation_replay_guard_exception_original_duplicate_stays_failed(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        arguments = {
+            "mode": "write",
+            "path": "raised-before-write.txt",
+            "content": "hello",
+        }
+
+        def raise_before_mutation():
+            raise RuntimeError("simulated mutation failure")
+
+        with self._authorized_http_tool_context(
+            session_id="exception-replay",
+            idempotency_key="raising-write",
+        ):
+            with self.assertRaises(RuntimeError):
+                self.server._run_with_tool_security_audit(
+                    "workspace_transaction",
+                    arguments,
+                    raise_before_mutation,
+                )
+            duplicate = self.server._run_with_tool_security_audit(
+                "workspace_transaction",
+                arguments,
+                lambda: self.fail("duplicate mutating action should not run"),
+            )
+
+        self.assertFalse((self.repo_path / "raised-before-write.txt").exists())
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertFalse(duplicate["ok"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["replay_guard"]["original_status"], "failed")
+        self.assertEqual(
+            duplicate["error"],
+            "original mutating request did not complete successfully",
+        )
+        events = [
+            event
+            for event in self._audit_events()
+            if event["tool_name"] == "mutation_replay_guard"
+        ]
+        self.assertFalse(events[-1]["success"])
+        self.assertEqual(
+            events[-1]["arguments"]["replay_guard"]["decision"],
+            "duplicate_suppressed",
+        )
+
     def test_mutation_replay_guard_pending_original_duplicate_stays_failed(self):
         self.server.ALLOW_MUTATIONS = True
         self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
