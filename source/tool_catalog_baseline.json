@@ -12856,7 +12856,7 @@
       "name": "workflow_task"
     },
     {
-      "digest": "sha256:bef4f51c6ecbb842af1ea4a2f44255f47e9368ea82f83083b667df182fdb2c16",
+      "digest": "sha256:98e914dfe0efa1cab77adfaab825ee2e4eefda28520896645136ccdb36929d93",
       "metadata": {
         "documentation": [
           {
@@ -12945,6 +12945,11 @@
                 "default": null,
                 "title": "Exclude Globs"
               },
+              "idempotency_key": {
+                "default": "",
+                "title": "Idempotency Key",
+                "type": "string"
+              },
               "include_build_dir": {
                 "default": false,
                 "title": "Include Build Dir",
@@ -13024,6 +13029,19 @@
                 "default": "",
                 "title": "Replacement",
                 "type": "string"
+              },
+              "request_metadata": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Request Metadata"
               },
               "snapshot_id": {
                 "default": "",
@@ -13672,5 +13690,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:f4d0af559e2ada06f993f2f1a70e233597f4aa66f22e1dfb2148e85c47b9188f"
+  "whole_catalog_digest": "sha256:c469f69d8f077d7b999a17affebb1a1b7a6c8557f549efd8f25cdbdf8e442f8c"
 }

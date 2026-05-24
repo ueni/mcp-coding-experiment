@@ -37,3 +37,13 @@ Example low-risk call shape:
 ```
 
 `workflow_diagnostics` recognizes failures reported as `mutation_step_guard`, `mutating_decisive_deviation`, or `ok_to_mutate=false` under the `mutating_decisive_deviation` category so workflow reports can identify skipped final checkpoints or blocked mutation attempts.
+
+## HTTP mutation replay/idempotency guard
+
+`mutation_step_guard` is a preflight planner checkpoint. It is distinct from the opt-in HTTP mutation replay guard, which protects the execution path for authorized Streamable HTTP MCP calls.
+
+Set `MCP_MUTATION_REPLAY_GUARD_ENABLED=true` to enable the replay guard. It remains disabled by default so existing HTTP clients that do not send idempotency metadata keep their current behavior. When enabled, the server classifies mutation-capable tools and modes from `TOOL_SECURITY_METADATA`; read-only tools and read-only modes do not create journal entries.
+
+For mutating calls, the guard accepts an `Idempotency-Key` HTTP header, an `idempotency_key` tool argument, or request metadata containing `idempotency_key`. It derives a session-scoped digest from the tool name, mode, normalized target paths, current git `HEAD`, session context, and a canonical redacted argument shape. Exact duplicate mutating digests in the same authorized HTTP session return a deterministic duplicate response that links to the original guard record instead of re-running the mutation. Reusing the same idempotency key for a different digest fails closed and emits a redacted audit event.
+
+The repository-local journal defaults to `.codebase-tooling-mcp/audit/mutation_replay_journal.json` and is bounded by `MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES` and `MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS`. Entries contain only redacted digests, session/tool metadata, target path summaries, timestamps, decision status, duplicate counts, and compact result references. They must not contain raw file contents, bearer tokens, environment values, absolute host paths, or unredacted tool arguments. Governance audit aggregation reports compact `mutation_replay_guard` counts for recorded calls, duplicate suppressions, and idempotency-key conflicts.
