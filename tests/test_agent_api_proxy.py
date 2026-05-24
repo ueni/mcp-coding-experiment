@@ -777,6 +777,121 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertEqual(scanner["flagged_message_count"], 1)
         self.assertFalse(scanner["privacy"]["raw_tool_responses_logged"])
 
+    def test_tool_response_scanner_log_mode_flags_email_pii(self):
+        self.enable_online()
+        self.server.MCP_TOOL_RESPONSE_SCANNER_MODE = "log"
+        captured = {}
+
+        def fake_post(url, payload, timeout):
+            captured["payload"] = payload
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        self.server._agent_proxy_http_post_json = fake_post
+        email = "customer@example.com"
+        tool_text = f"Lookup returned contact email {email}."
+
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(
+                    self.base_payload(
+                        messages=[
+                            {"role": "user", "content": "Use tool result"},
+                            {"role": "tool", "tool_call_id": "call-1", "content": tool_text},
+                        ]
+                    )
+                )
+            )
+        )
+        payload = self.response_json(response)
+        scanner = payload["agent_proxy"]["policy"]["tool_response_scanner"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("__MCP_ANON_EMAIL_", captured["payload"]["messages"][1]["content"])
+        self.assertNotIn(email, captured["payload"]["messages"][1]["content"])
+        self.assertEqual(scanner["effective_outcome"], "LOG")
+        self.assertEqual(scanner["flagged_message_count"], 1)
+        self.assertEqual(scanner["findings"][0]["category_counts"], {"pii": 1})
+        self.assertEqual(scanner["findings"][0]["severity"], "medium")
+        self.assertFalse(scanner["privacy"]["raw_tool_responses_logged"])
+
+    def test_tool_response_scanner_sanitize_mode_redacts_email_pii_text_part(self):
+        self.enable_online()
+        self.server.MCP_TOOL_RESPONSE_SCANNER_MODE = "sanitize"
+        captured = {}
+
+        def fake_post(url, payload, timeout):
+            captured["payload"] = payload
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        self.server._agent_proxy_http_post_json = fake_post
+        email = "customer@example.com"
+
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(
+                    self.base_payload(
+                        messages=[
+                            {"role": "user", "content": "Use tool result"},
+                            {
+                                "role": "tool",
+                                "tool_call_id": "call-1",
+                                "content": [
+                                    {"type": "text", "text": f"Contact: {email}"},
+                                ],
+                            },
+                        ]
+                    )
+                )
+            )
+        )
+        payload = self.response_json(response)
+        forwarded = captured["payload"]["messages"][1]["content"][0]["text"]
+        scanner = payload["agent_proxy"]["policy"]["tool_response_scanner"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(scanner["effective_outcome"], "SANITIZE")
+        self.assertEqual(scanner["findings"][0]["category_counts"], {"pii": 1})
+        self.assertIn("<redacted:email>", forwarded)
+        self.assertNotIn(email, forwarded)
+
+    def test_tool_response_scanner_block_mode_blocks_email_pii(self):
+        self.enable_online()
+        self.server.MCP_TOOL_RESPONSE_SCANNER_MODE = "block"
+        called = {"count": 0}
+
+        def fake_post(url, payload, timeout):
+            called["count"] += 1
+            return {}
+
+        self.server._agent_proxy_http_post_json = fake_post
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(
+                    self.base_payload(
+                        messages=[
+                            {"role": "user", "content": "Use tool result"},
+                            {
+                                "role": "tool",
+                                "tool_call_id": "call-1",
+                                "content": "Lookup returned customer@example.com",
+                            },
+                        ]
+                    )
+                )
+            )
+        )
+        payload = self.response_json(response)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(called["count"], 0)
+        self.assertEqual(payload["error"]["code"], "tool_response_scanner_blocked")
+        self.assertEqual(payload["tool_response_scanner"]["effective_outcome"], "BLOCK")
+        self.assertEqual(payload["tool_response_scanner"]["flagged_message_count"], 1)
+        self.assertEqual(
+            payload["tool_response_scanner"]["findings"][0]["category_counts"],
+            {"pii": 1},
+        )
+
     def test_tool_response_scanner_sanitize_mode_redacts_before_forwarding(self):
         self.enable_online()
         self.server.MCP_TOOL_RESPONSE_SCANNER_MODE = "sanitize"

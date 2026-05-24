@@ -21,8 +21,9 @@ Set `MCP_TOOL_RESPONSE_SCANNER_MODE`:
 - `off` (default): do not scan or alter tool-response messages.
 - `log`: scan and include redacted scanner metadata in `agent_proxy.policy`; do
   not alter forwarded content.
-- `sanitize`: redact secret-looking values and local absolute paths, and replace
-  prompt-injection-like instruction lines before forwarding to the model.
+- `sanitize`: redact secret-looking values, local absolute paths, and email
+  addresses/PII, and replace prompt-injection-like instruction lines before
+  forwarding to the model.
 - `block`: reject the chat completion with `403` before any provider call when a
   risky tool-response message is detected.
 
@@ -39,6 +40,7 @@ not raw tool-response text. Detection covers:
 - prompt-injection-like instructions such as overriding previous/system/developer
   instructions, role switching, or tool manipulation;
 - credential/secret leakage and credential exfiltration instructions;
+- email-address PII in text-bearing tool responses;
 - sensitive local absolute paths;
 - unsafe repository or credential exfiltration hints.
 
@@ -55,4 +57,5 @@ local paths. Use `block` for stricter deployments where suspicious tool response
 must never enter model context.
 
 Scanner reports intentionally include only counts, categories, severity, bounds,
-and privacy flags. They do not include raw excerpts, secrets, or host paths.
+and privacy flags. They do not include raw excerpts, secrets, email addresses,
+or host paths.

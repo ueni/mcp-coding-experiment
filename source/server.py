@@ -2932,12 +2932,17 @@ def _tool_response_risk_summary(text: str, *, message_index: int) -> dict[str, A
     path_detected = bool(
         ABSOLUTE_PATH_VALUE_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
     )
+    pii_detected = bool(
+        _AGENT_PROXY_EMAIL_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
+    )
     if secret_detected:
         categories["credential_or_secret_leakage"] = (
             categories.get("credential_or_secret_leakage", 0) + 1
         )
     if path_detected:
         categories["sensitive_local_path"] = categories.get("sensitive_local_path", 0) + 1
+    if pii_detected:
+        categories["pii"] = categories.get("pii", 0) + 1
     severity = str(counts.get("severity", "none") or "none")
     if (
         secret_detected
@@ -2945,7 +2950,7 @@ def _tool_response_risk_summary(text: str, *, message_index: int) -> dict[str, A
         or categories.get("data_exfiltration")
     ):
         severity = "high"
-    elif path_detected and severity not in {"high", "medium"}:
+    elif (path_detected or pii_detected) and severity not in {"high", "medium"}:
         severity = "medium"
     return {
         "detected": bool(categories),
@@ -2954,10 +2959,12 @@ def _tool_response_risk_summary(text: str, *, message_index: int) -> dict[str, A
             int(counts.get("total_signals", 0) or 0)
             + int(secret_detected)
             + int(path_detected)
+            + int(pii_detected)
         ),
         "category_counts": dict(sorted(categories.items())),
         "prompt_injection_signals": counts,
         "secret_detected": secret_detected,
+        "pii_detected": pii_detected,
         "sensitive_path_detected": path_detected,
         "chars_total": len(text),
         "chars_scanned": min(len(text), MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS),
@@ -2992,6 +2999,7 @@ def _sanitize_tool_response_text(text: str) -> str:
             continue
         redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", body)
         redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", redacted)
+        redacted = _AGENT_PROXY_EMAIL_RE.sub("<redacted:email>", redacted)
         sanitized_lines.append(redacted + line_ending)
     return "".join(sanitized_lines)
 
