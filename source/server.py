@@ -3847,7 +3847,7 @@ _OTEL_ABSOLUTE_PATH_RE = re.compile(
 )
 _OTEL_TRACEPARENT_RE = re.compile(
     r"^(?P<version>[0-9a-f]{2})-(?P<trace_id>[0-9a-f]{32})-"
-    r"(?P<parent_span_id>[0-9a-f]{16})-(?P<trace_flags>[0-9a-f]{2})(?:-.+)?$"
+    r"(?P<parent_span_id>[0-9a-f]{16})-(?P<trace_flags>[0-9a-f]{2})(?P<extra>-.+)?$"
 )
 _OTEL_TRACESTATE_KEY_RE = re.compile(
     r"^[a-z0-9][_0-9a-z*\-/]{0,255}(?:@[a-z0-9][_0-9a-z*\-/]{0,240})?$"
@@ -3891,10 +3891,12 @@ def _otel_parse_traceparent(value: str) -> tuple[dict[str, str] | None, int]:
     parsed = match.groupdict()
     if (
         parsed["version"] == "ff"
+        or (parsed["version"] == "00" and parsed.get("extra"))
         or parsed["trace_id"] == "0" * 32
         or parsed["parent_span_id"] == "0" * 16
     ):
         return None, 1
+    parsed.pop("extra", None)
     return parsed, 0
 
 

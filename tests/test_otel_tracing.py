@@ -217,6 +217,29 @@ class OTelTracingTest(ServerToolsTestBase):
         self.assertEqual(tool_span["attributes"]["mcp.trace_context.baggage.dropped_count"], 1)
         self.assertNotIn("hunter2-secret-token", json.dumps(tool_span, sort_keys=True))
 
+    def test_otel_traceparent_version_00_extra_field_is_dropped_but_counted(self):
+        self._enable_tracing()
+        trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        context = self.server._otel_trace_context_from_carrier(
+            {"traceparent": f"00-{trace_id}-bbbbbbbbbbbbbbbb-01-extra"},
+            "http_headers",
+        )
+        token = self.server._OTEL_INCOMING_TRACE_CONTEXT.set(context)
+        try:
+            self.server.task_router(
+                mode="workflow_select",
+                prompt="Pick a safe workflow without accepting malformed trace context",
+            )
+        finally:
+            self.server._OTEL_INCOMING_TRACE_CONTEXT.reset(token)
+
+        tool_span = next(span for span in self._spans() if span["name"] == "mcp.tool.task_router")
+        self.assertNotEqual(tool_span["trace_id"], trace_id)
+        self.assertEqual(tool_span["parent_span_id"], "")
+        self.assertFalse(tool_span["attributes"]["mcp.trace_context.valid"])
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.source"], "http_headers")
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.invalid_count"], 1)
+
     def test_otel_trace_correlation_reaches_governance_summaries(self):
         self._enable_tracing()
         trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
