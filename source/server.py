@@ -33,6 +33,7 @@ import xml.etree.ElementTree as ET
 import pty
 import select
 import concurrent.futures
+import jsonschema
 import importlib.util
 import inspect
 import signal
@@ -111,9 +112,10 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
 
 
 from mcp import types as mcp_types
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import EventMessage, EventStore
-from pydantic import Field, RootModel
+from pydantic import Field, RootModel, ValidationError
 from source.agents_context_health import analyze_agents_context, summarize_agents_context_health
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
@@ -2082,6 +2084,127 @@ def _redact_untrusted_content_excerpt(value: str, *, max_chars: int = 180) -> st
         return redacted[:max_chars] + "...[truncated]"
     return redacted
 
+
+_SEP1303_VALIDATION_EXCEPTION_TYPES = (ValueError, ValidationError, FileNotFoundError)
+_SEP1303_VALIDATION_ERROR_MAX_CHARS = 360
+
+
+def _redact_tool_validation_error_text(value: str) -> str:
+    """Return bounded, model-visible validation text safe for MCP tool results."""
+    text = re.sub(r"\s+", " ", str(value).replace("\x00", " ")).strip()
+    repo_text = str(REPO_PATH)
+    if repo_text and repo_text in text:
+        text = text.replace(repo_text, "<repo>")
+    text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
+    text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", text)
+    text = re.sub(
+        r"(?i)authorization:\s*bearer\s+\S+",
+        "authorization: bearer <redacted:secret>",
+        text,
+    )
+    if len(text) > _SEP1303_VALIDATION_ERROR_MAX_CHARS:
+        text = text[:_SEP1303_VALIDATION_ERROR_MAX_CHARS] + "...[truncated]"
+    return text or "invalid tool arguments"
+
+
+def _tool_validation_exception_from(exc: BaseException) -> BaseException | None:
+    """Classify safe public-tool argument failures for SEP-1303 conversion."""
+    candidate: BaseException | None = exc
+    if isinstance(exc, ToolError) and isinstance(exc.__cause__, BaseException):
+        candidate = exc.__cause__
+    if isinstance(candidate, _SEP1303_VALIDATION_EXCEPTION_TYPES):
+        return candidate
+    return None
+
+
+def _make_tool_validation_error_result(tool_name: str, exc: BaseException) -> mcp_types.CallToolResult:
+    """Build an MCP SEP-1303 tool execution error for invalid-but-well-formed inputs.
+
+    SEP-1303 makes tool argument/input validation failures model-visible so agents can
+    self-correct. The text is deliberately concise and redacted: it includes the public
+    tool name and remediation, but not raw arguments, bearer tokens, host absolute paths,
+    repository file contents, or environment values.
+    """
+    safe_tool = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(tool_name))[:120] or "tool"
+    safe_message = _redact_tool_validation_error_text(str(exc))
+    text = (
+        f"Tool argument validation failed for `{safe_tool}`: {safe_message}. "
+        "Remediation: correct the arguments according to the tool input schema and retry."
+    )
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=text)],
+        isError=True,
+    )
+
+
+_ORIGINAL_MCP_CALL_TOOL = mcp.call_tool
+
+
+async def _sep1303_model_visible_call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    """Call public tools while returning validation failures as tool results.
+
+    Unknown tool names, malformed/non-object arguments, permission/auth failures, and
+    non-validation server failures still raise so the protocol/HTTP layer can handle
+    them as errors. Invalid-but-well-formed arguments raised as ValueError,
+    Pydantic ValidationError, or FileNotFoundError become `isError: true` tool results.
+    """
+    if not isinstance(arguments, dict):
+        raise ToolError("Invalid tool arguments: arguments must be a JSON object")
+    if mcp._tool_manager.get_tool(name) is None:  # type: ignore[attr-defined]
+        raise ToolError(f"Unknown tool: {name}")
+    try:
+        return await _ORIGINAL_MCP_CALL_TOOL(name, arguments)
+    except ToolError as exc:
+        validation_exc = _tool_validation_exception_from(exc)
+        if validation_exc is None:
+            raise
+        return _make_tool_validation_error_result(name, validation_exc)
+
+
+async def _sep1303_call_tool_request_handler(req: mcp_types.CallToolRequest) -> mcp_types.ServerResult:
+    """Low-level MCP handler preserving protocol errors outside SEP-1303 validation."""
+    tool_name = req.params.name
+    arguments = req.params.arguments or {}
+    tool = await mcp._mcp_server._get_cached_tool_definition(tool_name)  # type: ignore[attr-defined]
+    results = await mcp.call_tool(tool_name, arguments)
+    if isinstance(results, mcp_types.CallToolResult):
+        return mcp_types.ServerResult(results)
+    if isinstance(results, mcp_types.CreateTaskResult):
+        return mcp_types.ServerResult(results)
+    if isinstance(results, tuple) and len(results) == 2:
+        unstructured_content, maybe_structured_content = results
+    elif isinstance(results, dict):
+        maybe_structured_content = results
+        unstructured_content = [
+            mcp_types.TextContent(type="text", text=json.dumps(results, indent=2))
+        ]
+    elif hasattr(results, "__iter__"):
+        unstructured_content = results
+        maybe_structured_content = None
+    else:
+        raise RuntimeError(f"Unexpected return type from tool: {type(results).__name__}")
+    if tool and tool.outputSchema is not None:
+        if maybe_structured_content is None:
+            return mcp._mcp_server._make_error_result(  # type: ignore[attr-defined]
+                "Output validation error: outputSchema defined but no structured output returned"
+            )
+        try:
+            jsonschema.validate(instance=maybe_structured_content, schema=tool.outputSchema)
+        except jsonschema.ValidationError as exc:
+            return mcp._mcp_server._make_error_result(  # type: ignore[attr-defined]
+                f"Output validation error: {exc.message}"
+            )
+    return mcp_types.ServerResult(
+        mcp_types.CallToolResult(
+            content=list(unstructured_content),
+            structuredContent=maybe_structured_content,
+            isError=False,
+        )
+    )
+
+
+mcp.call_tool = _sep1303_model_visible_call_tool  # type: ignore[method-assign]
+mcp._mcp_server.request_handlers[mcp_types.CallToolRequest] = _sep1303_call_tool_request_handler  # type: ignore[attr-defined]
 
 def _prompt_injection_signal_negated(text: str, start: int) -> bool:
     prefix = text[max(0, start - 120) : start]
