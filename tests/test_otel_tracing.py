@@ -16,6 +16,7 @@ class OTelTracingTest(ServerToolsTestBase):
         self._orig_otel_exporter = self.server.MCP_OTEL_EXPORTER
         self._orig_otel_spans_file = self.server.MCP_OTEL_SPANS_FILE
         self._orig_otel_service_name = self.server.MCP_OTEL_SERVICE_NAME
+        self._orig_otel_baggage_allowlist = self.server.MCP_OTEL_BAGGAGE_ALLOWLIST_RAW
         self.trace_file = Path(".codebase-tooling-mcp/traces/otel_spans.jsonl")
         self.server.MCP_OTEL_SPANS_FILE = self.trace_file
         self.server.MCP_OTEL_EXPORTER = "jsonl"
@@ -26,6 +27,7 @@ class OTelTracingTest(ServerToolsTestBase):
         self.server.MCP_OTEL_EXPORTER = self._orig_otel_exporter
         self.server.MCP_OTEL_SPANS_FILE = self._orig_otel_spans_file
         self.server.MCP_OTEL_SERVICE_NAME = self._orig_otel_service_name
+        self.server.MCP_OTEL_BAGGAGE_ALLOWLIST_RAW = self._orig_otel_baggage_allowlist
         super().tearDown()
 
     def _enable_tracing(self) -> None:
@@ -72,6 +74,95 @@ class OTelTracingTest(ServerToolsTestBase):
         self.assertNotIn("hunter2-secret-token", encoded)
         self.assertNotIn("/tmp/should-not-leak", encoded)
         self.assertNotIn(str(self.repo_path), encoded)
+
+    def test_otel_valid_trace_context_propagates_to_redacted_spans(self):
+        self._enable_tracing()
+        self.server.MCP_OTEL_BAGGAGE_ALLOWLIST_RAW = "tenant"
+        trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
+        parent_span_id = "00f067aa0ba902b7"
+        context = self.server._otel_trace_context_from_carrier(
+            {
+                "traceparent": f"00-{trace_id}-{parent_span_id}-01",
+                "tracestate": "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE",
+                "baggage": "tenant=acme,authorization=hunter2-secret-token,path=%2Ftmp%2Fshould-not-leak",
+            },
+            "mcp_meta",
+        )
+        token = self.server._OTEL_INCOMING_TRACE_CONTEXT.set(context)
+        try:
+            self.server.task_router(
+                mode="workflow_select",
+                prompt="Pick a safe workflow without capturing content",
+                execution_mode="offline",
+            )
+        finally:
+            self.server._OTEL_INCOMING_TRACE_CONTEXT.reset(token)
+
+        spans = self._spans()
+        tool_span = next(span for span in spans if span["name"] == "mcp.tool.task_router")
+        workflow_span = next(span for span in spans if span["name"] == "mcp.workflow.select")
+        self.assertEqual(tool_span["trace_id"], trace_id)
+        self.assertEqual(tool_span["parent_span_id"], parent_span_id)
+        self.assertEqual(tool_span["correlation_id"], trace_id)
+        self.assertEqual(workflow_span["trace_id"], trace_id)
+        self.assertEqual(workflow_span["parent_span_id"], tool_span["span_id"])
+        self.assertTrue(tool_span["attributes"]["mcp.trace_context.valid"])
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.source"], "mcp_meta")
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.trace_flags"], "01")
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.tracestate.member_count"], 2)
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.baggage.allowed_count"], 1)
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.baggage.tenant"], "acme")
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.baggage.dropped_count"], 2)
+
+        encoded = json.dumps(spans, sort_keys=True)
+        self.assertNotIn("hunter2-secret-token", encoded)
+        self.assertNotIn("/tmp/should-not-leak", encoded)
+        self.assertNotIn(str(self.repo_path), encoded)
+
+    def test_otel_invalid_trace_context_is_dropped_but_counted(self):
+        self._enable_tracing()
+        context = self.server._otel_trace_context_from_carrier(
+            {
+                "traceparent": "00-00000000000000000000000000000000-0000000000000000-01",
+                "baggage": "secret=hunter2-secret-token",
+            },
+            "http_headers",
+        )
+        token = self.server._OTEL_INCOMING_TRACE_CONTEXT.set(context)
+        try:
+            self.server.task_router(
+                mode="workflow_select",
+                prompt="Pick a safe workflow without capturing content",
+            )
+        finally:
+            self.server._OTEL_INCOMING_TRACE_CONTEXT.reset(token)
+
+        tool_span = next(span for span in self._spans() if span["name"] == "mcp.tool.task_router")
+        self.assertNotEqual(tool_span["trace_id"], "00000000000000000000000000000000")
+        self.assertEqual(tool_span["parent_span_id"], "")
+        self.assertFalse(tool_span["attributes"]["mcp.trace_context.valid"])
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.source"], "http_headers")
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.invalid_count"], 1)
+        self.assertEqual(tool_span["attributes"]["mcp.trace_context.baggage.dropped_count"], 1)
+        self.assertNotIn("hunter2-secret-token", json.dumps(tool_span, sort_keys=True))
+
+    def test_otel_trace_correlation_reaches_governance_summaries(self):
+        self._enable_tracing()
+        trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        context = self.server._otel_trace_context_from_carrier(
+            {"traceparent": f"00-{trace_id}-bbbbbbbbbbbbbbbb-01"},
+            "http_headers",
+        )
+        token = self.server._OTEL_INCOMING_TRACE_CONTEXT.set(context)
+        try:
+            diagnostics = self.server.workflow_diagnostics()
+            report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        finally:
+            self.server._OTEL_INCOMING_TRACE_CONTEXT.reset(token)
+
+        self.assertEqual(diagnostics["correlation_id"], trace_id)
+        self.assertEqual(report["correlation_id"], trace_id)
+        self.assertEqual(report["workflow_diagnostics"]["correlation_id"], trace_id)
 
     def test_otel_unsupported_exporter_is_offline_safe_noop(self):
         self.server.MCP_OTEL_TRACING_ENABLED = True
