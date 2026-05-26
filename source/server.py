@@ -13681,6 +13681,177 @@ def _workflow_task_result_is_transient(result: dict[str, Any]) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _workflow_task_error_class_is_transient(error_class: str) -> bool:
+    return error_class in {
+        "TimeoutError",
+        "ConnectionError",
+        "ConnectionResetError",
+        "ConnectionRefusedError",
+        "BrokenPipeError",
+        "BlockingIOError",
+        "ResourceWarning",
+    }
+
+
+def _workflow_task_is_mutating(workflow: str) -> bool:
+    return "write" in _workflow_task_categories(workflow)
+
+
+def _workflow_task_retention_seconds() -> int:
+    return max(1, WORKFLOW_TASK_RETENTION_DAYS) * 24 * 60 * 60
+
+
+def _workflow_task_idempotency_key(workflow: str, arguments: dict[str, Any]) -> str:
+    if _workflow_task_is_mutating(workflow):
+        return ""
+    canonical = json.dumps(
+        {"workflow": workflow, "arguments": _redact_audit_value(arguments)},
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return "readonly-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+
+
+def _workflow_task_last_error_class(payload: dict[str, Any]) -> str:
+    value = payload.get("last_error_class")
+    if isinstance(value, str) and value:
+        return _redact_audit_reason(value)[:80]
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("type", "class", "error_class"):
+            value = error.get(key)
+            if isinstance(value, str) and value:
+                return _redact_audit_reason(value)[:80]
+    if isinstance(error, str) and error:
+        return _redact_audit_reason(error.split(":", 1)[0])[:80]
+    result = payload.get("result")
+    if isinstance(result, dict):
+        nested_error = result.get("error")
+        if isinstance(nested_error, dict):
+            value = nested_error.get("type") or nested_error.get("class")
+            if isinstance(value, str) and value:
+                return _redact_audit_reason(value)[:80]
+        if result.get("timeout") is True:
+            return "TimeoutError"
+    return ""
+
+
+def _workflow_task_expired_result_action(workflow: str) -> str:
+    if _workflow_task_is_mutating(workflow):
+        return "rerun_requires_approval"
+    return "rerun_allowed"
+
+
+def _workflow_task_retry_policy(payload: dict[str, Any], *, transient_failure: bool | None = None) -> tuple[str, int]:
+    workflow = str(payload.get("workflow") or "")
+    status = str(payload.get("status") or "")
+    if _workflow_task_is_mutating(workflow):
+        if status in {"failed", "expired", "cancelled"}:
+            return "human_required", 0
+        return "none", 0
+    if status == "failed":
+        if transient_failure is None:
+            result = payload.get("result")
+            transient_failure = isinstance(result, dict) and _workflow_task_result_is_transient(result)
+            if not transient_failure:
+                transient_failure = _workflow_task_error_class_is_transient(
+                    _workflow_task_last_error_class(payload)
+                )
+        return ("client_may_retry", 30) if transient_failure else ("human_required", 0)
+    if status == "expired":
+        return "client_may_retry", 0
+    return "none", 0
+
+
+def _workflow_task_has_audit_event(
+    payload: dict[str, Any],
+    event: str,
+    fields: dict[str, Any] | None = None,
+) -> bool:
+    safe_fields = _redact_audit_value(fields or {})
+    if not isinstance(safe_fields, dict):
+        safe_fields = {}
+    for item in payload.get("audit_events", []):
+        if not isinstance(item, dict) or item.get("event") != event:
+            continue
+        if all(item.get(key) == value for key, value in safe_fields.items()):
+            return True
+    return False
+
+
+def _workflow_task_add_audit_event_once(
+    payload: dict[str, Any],
+    event: str,
+    fields: dict[str, Any] | None = None,
+) -> None:
+    safe_fields = _redact_audit_value(fields or {})
+    if not isinstance(safe_fields, dict):
+        safe_fields = {}
+    if _workflow_task_has_audit_event(payload, event, safe_fields):
+        return
+    payload.setdefault("audit_events", []).append({"event": event, "at": _now_iso(), **safe_fields})
+
+
+def _workflow_task_apply_lifecycle_metadata(
+    payload: dict[str, Any],
+    *,
+    transient_failure: bool | None = None,
+    persist_decision_events: bool = False,
+) -> dict[str, Any]:
+    updated = dict(payload)
+    workflow = str(updated.get("workflow") or "")
+    arguments = updated.get("arguments") if isinstance(updated.get("arguments"), dict) else {}
+    retry_policy, retry_after_seconds = _workflow_task_retry_policy(
+        updated, transient_failure=transient_failure
+    )
+    max_retries = max(0, int(updated.get("max_retries") or 0))
+    no_auto_retry = _workflow_task_is_mutating(workflow)
+    last_error_class = _workflow_task_last_error_class(updated)
+    expired_result_action = _workflow_task_expired_result_action(workflow)
+    retry_of = str(updated.get("retry_of") or "")
+    lifecycle: dict[str, Any] = {
+        "retry_policy": retry_policy,
+        "retry_after_seconds": retry_after_seconds,
+        "max_attempts": max_retries + 1,
+        "attempt": int(updated.get("attempt") or 0),
+        "last_error_class": last_error_class,
+        "no_auto_retry": no_auto_retry,
+        "retention_seconds": _workflow_task_retention_seconds(),
+        "expired_result_action": expired_result_action,
+    }
+    idempotency_key = _workflow_task_idempotency_key(workflow, arguments)
+    if idempotency_key:
+        lifecycle["idempotency_key"] = idempotency_key
+    if retry_of:
+        lifecycle["replay"] = {
+            "retry_of": retry_of,
+            "source_status": str(WORKFLOW_TASKS_DIR / f"{retry_of}.json"),
+        }
+    updated.update(lifecycle)
+    if persist_decision_events:
+        _workflow_task_add_audit_event_once(
+            updated,
+            "retry_decision",
+            {
+                "retry_policy": retry_policy,
+                "retry_after_seconds": retry_after_seconds,
+                "no_auto_retry": no_auto_retry,
+                "last_error_class": last_error_class,
+            },
+        )
+        _workflow_task_add_audit_event_once(
+            updated,
+            "expiry_decision",
+            {
+                "expires_at": updated.get("expires_at", ""),
+                "retention_seconds": _workflow_task_retention_seconds(),
+                "expired_result_action": expired_result_action,
+            },
+        )
+    return updated
+
+
 def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
     try:
         context = mcp.get_context()
@@ -14306,6 +14477,14 @@ def _workflow_task_artifact_link(task_id: str, created_at: str = "") -> dict[str
 
 
 def _write_workflow_task_status(status: dict[str, Any]) -> dict[str, Any]:
+    persist_decisions = (
+        str(status.get("status") or "") in _WORKFLOW_TASK_FINAL_STATUSES
+        or bool(status.get("result_expired"))
+        or bool(status.get("retry_of"))
+    )
+    status = _workflow_task_apply_lifecycle_metadata(
+        status, persist_decision_events=persist_decisions
+    )
     redacted = _redact_audit_value(status)
     path = _workflow_task_path(str(redacted["task_id"]))
     tmp = path.with_suffix(".json.tmp")
@@ -14347,11 +14526,18 @@ def _expire_workflow_task_if_needed(payload: dict[str, Any]) -> dict[str, Any]:
         *payload.get("audit_events", []),
         {"event": "expired", "at": payload["finished_at"]},
     ]
+    payload = _workflow_task_apply_lifecycle_metadata(payload, persist_decision_events=True)
     _append_audit_event(
         "workflow_task",
-        ["read-only", "async"],
+        _workflow_task_categories(str(payload.get("workflow") or "")),
         False,
-        {"task_id": payload.get("task_id"), "workflow": payload.get("workflow"), "event": "expired"},
+        {
+            "task_id": payload.get("task_id"),
+            "workflow": payload.get("workflow"),
+            "event": "expired",
+            "retry_policy": payload.get("retry_policy"),
+            "expired_result_action": payload.get("expired_result_action"),
+        },
         "expired",
     )
     _otel_record_workflow_lifecycle(
@@ -14366,6 +14552,54 @@ def _expire_workflow_task_if_needed(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _workflow_task_status_payload(task_id: str) -> dict[str, Any]:
     payload = _expire_workflow_task_if_needed(_read_workflow_task_status(task_id))
+    payload = _workflow_task_apply_lifecycle_metadata(payload)
+    status = str(payload.get("status") or "")
+    result_expired = status in _WORKFLOW_TASK_FINAL_STATUSES and _workflow_task_expired(payload)
+    if result_expired and not payload.get("result_expired"):
+        persisted = dict(payload)
+        persisted["result_expired"] = True
+        persisted["result_expired_at"] = str(persisted.get("expires_at") or _now_iso())
+        persisted = _workflow_task_apply_lifecycle_metadata(persisted, persist_decision_events=True)
+        _workflow_task_add_audit_event_once(
+            persisted,
+            "result_expired",
+            {
+                "expired_result_action": persisted.get("expired_result_action"),
+                "result_available": False,
+            },
+        )
+        _write_workflow_task_status(persisted)
+        _append_audit_event(
+            "workflow_task",
+            _workflow_task_categories(str(persisted.get("workflow") or "")),
+            False,
+            {
+                "task_id": persisted.get("task_id"),
+                "workflow": persisted.get("workflow"),
+                "event": "result_expired",
+                "expired_result_action": persisted.get("expired_result_action"),
+            },
+            "result_expired",
+        )
+        payload = persisted
+    if result_expired:
+        payload = dict(payload)
+        payload["result_expired"] = True
+        payload["result_available"] = False
+        payload["result"] = {
+            "schema": "workflow_task.expired_result.v1",
+            "available": False,
+            "expired_at": str(payload.get("expires_at") or ""),
+            "expired_result_action": payload.get("expired_result_action"),
+        }
+        payload["safe_next_actions"] = [
+            "Start a new read-only retry with workflow_task(retry_of=...)"
+            if payload.get("expired_result_action") == "rerun_allowed"
+            else "Request human approval before rerunning this mutating workflow."
+        ]
+    else:
+        payload["result_expired"] = False
+        payload["result_available"] = bool(payload.get("result"))
     created_at = str(payload.get("created_at") or "")
     payload["resource_links"] = [_workflow_task_artifact_link(task_id, created_at=created_at)]
     payload["_meta"] = _artifact_meta(payload["resource_links"])
@@ -14480,6 +14714,7 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             "state": "running",
             "started_at": started_at,
             "updated_at": started_at,
+            "attempt": 1,
             "progress": 0.25,
             "progress_detail": {"phase": "running", "percent": 25},
             "audit_events": [
@@ -14546,6 +14781,7 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
                 ],
             }
         )
+        payload = _workflow_task_apply_lifecycle_metadata(payload, persist_decision_events=True)
         _append_audit_event(
             "workflow_task",
             ["read-only", "async"],
@@ -14555,6 +14791,11 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
                 "workflow": "governance_report",
                 "report_id": result.get("report_id"),
                 "event": "completed",
+                "retry_policy": payload.get("retry_policy"),
+                "retry_after_seconds": payload.get("retry_after_seconds"),
+                "expires_at": payload.get("expires_at"),
+                "retention_seconds": payload.get("retention_seconds"),
+                "expired_result_action": payload.get("expired_result_action"),
             },
             "completed",
         )
@@ -14570,21 +14811,29 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
         _workflow_task_cleanup_runtime(task_id)
     except Exception as exc:  # pragma: no cover - defensive background failure path
         finished_at = _now_iso()
+        error_class = _redact_audit_reason(type(exc).__name__)
         payload.update(
             {
                 "status": "failed",
                 "state": "failed",
                 "ok": False,
+                "attempt": max(1, int(payload.get("attempt") or 1)),
                 "finished_at": finished_at,
                 "updated_at": finished_at,
                 "progress": 1.0,
                 "progress_detail": {"phase": "failed", "percent": 100},
-                "error": _redact_audit_reason(type(exc).__name__),
+                "error": error_class,
+                "last_error_class": error_class,
                 "audit_events": [
                     *payload.get("audit_events", []),
-                    {"event": "failed", "at": finished_at, "reason": type(exc).__name__},
+                    {"event": "failed", "at": finished_at, "reason": error_class},
                 ],
             }
+        )
+        payload = _workflow_task_apply_lifecycle_metadata(
+            payload,
+            transient_failure=_workflow_task_error_class_is_transient(error_class),
+            persist_decision_events=True,
         )
         _write_workflow_task_status(payload)
         _workflow_task_emit_progress(task_id, payload, force=True)
@@ -14593,8 +14842,18 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             "workflow_task",
             ["read-only", "async"],
             False,
-            {"task_id": task_id, "workflow": "governance_report", "event": "failed"},
-            type(exc).__name__,
+            {
+                "task_id": task_id,
+                "workflow": "governance_report",
+                "event": "failed",
+                "retry_policy": payload.get("retry_policy"),
+                "retry_after_seconds": payload.get("retry_after_seconds"),
+                "last_error_class": payload.get("last_error_class"),
+                "expires_at": payload.get("expires_at"),
+                "retention_seconds": payload.get("retention_seconds"),
+                "expired_result_action": payload.get("expired_result_action"),
+            },
+            error_class,
         )
         _otel_record_workflow_lifecycle(
             task_id,
@@ -14625,6 +14884,7 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
             "state": "running",
             "started_at": started_at,
             "updated_at": started_at,
+            "attempt": 1,
             "progress": 0.25,
             "progress_detail": {"phase": "running", "percent": 25},
             "audit_events": [
@@ -14730,6 +14990,13 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
             ],
         }
     )
+    if not ok and not cancelled:
+        payload["last_error_class"] = _workflow_task_last_error_class({**payload, "result": result})
+    payload = _workflow_task_apply_lifecycle_metadata(
+        payload,
+        transient_failure=_workflow_task_result_is_transient(result) if not ok and not cancelled else None,
+        persist_decision_events=True,
+    )
     if cancelled:
         payload = _workflow_task_mark_cancel_requested(
             payload,
@@ -14756,7 +15023,18 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
         "workflow_task",
         _workflow_task_categories("vscode_task_run"),
         ok and not cancelled,
-        {"task_id": task_id, "workflow": "vscode_task_run", "event": terminal_event},
+        {
+            "task_id": task_id,
+            "workflow": "vscode_task_run",
+            "event": terminal_event,
+            "retry_policy": payload.get("retry_policy"),
+            "retry_after_seconds": payload.get("retry_after_seconds"),
+            "last_error_class": payload.get("last_error_class"),
+            "no_auto_retry": payload.get("no_auto_retry"),
+            "expires_at": payload.get("expires_at"),
+            "retention_seconds": payload.get("retention_seconds"),
+            "expired_result_action": payload.get("expired_result_action"),
+        },
         terminal_event,
     )
     _otel_record_workflow_lifecycle(
@@ -14819,6 +15097,7 @@ def _start_workflow_task(
     retention_expires_at = (
         datetime.now(timezone.utc) + timedelta(days=max(1, WORKFLOW_TASK_RETENTION_DAYS))
     ).isoformat()
+    effective_max_retries = max(0, min(3, max_retries))
     payload: dict[str, Any] = {
         "schema": "workflow_task.v1",
         "task_id": task_id,
@@ -14828,7 +15107,7 @@ def _start_workflow_task(
         "started": True,
         "ok": False,
         "attempt": 0,
-        "max_retries": max(0, min(3, max_retries)),
+        "max_retries": effective_max_retries,
         "retries": [],
         "created_at": created_at,
         "started_at": "",
@@ -14859,6 +15138,7 @@ def _start_workflow_task(
             "repo_boundary_enforced": True,
         },
     }
+    payload = _workflow_task_apply_lifecycle_metadata(payload, persist_decision_events=True)
     if retry_of:
         payload["audit_events"].append(
             {"event": "retry", "at": created_at, "retry_of": retry_of}
@@ -14870,7 +15150,7 @@ def _start_workflow_task(
         _WORKFLOW_TASK_CANCEL_EVENTS[task_id] = threading.Event()
     runner = _run_vscode_task if workflow == "vscode_task_run" else _run_governance_report_task
     if workflow == "vscode_task_run":
-        future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args, max(0, min(3, max_retries)))
+        future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args, effective_max_retries)
     else:
         future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args)
     with _WORKFLOW_TASK_LOCK:
@@ -14879,7 +15159,17 @@ def _start_workflow_task(
         "workflow_task",
         _workflow_task_categories(workflow),
         True,
-        {"task_id": task_id, "workflow": workflow, "retry_of": retry_of, "event": "start"},
+        {
+            "task_id": task_id,
+            "workflow": workflow,
+            "retry_of": retry_of,
+            "event": "start",
+            "retry_policy": payload.get("retry_policy"),
+            "no_auto_retry": payload.get("no_auto_retry"),
+            "expires_at": payload.get("expires_at"),
+            "retention_seconds": payload.get("retention_seconds"),
+            "expired_result_action": payload.get("expired_result_action"),
+        },
         "start",
     )
     _otel_record_workflow_lifecycle(task_id, workflow, "start", status="pending")
