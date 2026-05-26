@@ -6,6 +6,8 @@ import asyncio
 from source.tool_output_schemas import (
     ERROR_OUTPUT_SCHEMA,
     RESOURCE_LINK_SCHEMA,
+    RESULT_REFERENCE_SCHEMA,
+    RESULT_REFERENCE_RESOLVE_SCHEMA,
     SCHEMA_BACKED_TOOL_NAMES,
     STATE_SNAPSHOT_OUTPUT_SCHEMA,
     TOOL_OUTPUT_SCHEMAS,
@@ -52,6 +54,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "self_optimization_report",
                 "agents_context_health",
                 "artifact_provenance",
+                "result_reference_resolve",
                 "workflow_diagnostics",
                 "workflow_lineage",
                 "interaction_invariant_audit",
@@ -94,6 +97,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         self.write_repo_text("src/schema_contract.py", "def schema_marker():\n    return 'marker'\n")
 
         lineage_report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        referenced_report = self.server.self_optimization_report(result_mode="reference")
 
         outputs = {
             "repo_info": self.server.repo_info(),
@@ -153,6 +157,9 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "agents_context_health": self.server.agents_context_health(),
             "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
+            "result_reference_resolve": self.server.result_reference_resolve(
+                reference=referenced_report["result_reference"], include_content=False
+            ),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
             "workflow_lineage": self.server.workflow_lineage(
                 manifest_path=lineage_report["exports"]["lineage"]
@@ -177,6 +184,90 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         for tool_name, payload in outputs.items():
             with self.subTest(tool_name=tool_name):
                 validate_against_schema(payload, TOOL_OUTPUT_SCHEMAS[tool_name])
+
+
+    def test_result_reference_mode_creates_resolvable_hash_verified_handle(self):
+        payload = self.server.self_optimization_report(result_mode="reference", result_reference_ttl_hours=1)
+
+        self.assertEqual(payload["schema"], "self_optimization_report.v1")
+        self.assertEqual(payload["result_mode"], "reference")
+        self.assertIn("result_reference", payload)
+        self.assertNotIn("metrics", payload)
+        reference = payload["result_reference"]
+        validate_against_schema(reference, RESULT_REFERENCE_SCHEMA)
+        self.assertEqual(reference["schema"], "mcp_result_reference.v1")
+        self.assertFalse(reference["sensitivity"]["sensitive_payload_embedded"])
+        self.assertEqual(reference["content"]["mime_type"], "application/json")
+
+        resolved = self.server.result_reference_resolve(reference=reference)
+        validate_against_schema(resolved, RESULT_REFERENCE_RESOLVE_SCHEMA)
+        self.assertTrue(resolved["ok"])
+        self.assertEqual(resolved["status"], "resolved")
+        self.assertIn('"schema": "self_optimization_report.v1"', resolved["content"])
+        self.assertEqual(
+            resolved["artifact"]["hash"]["value"],
+            reference["content"]["hash"]["value"],
+        )
+
+        governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        audit_summary = governance["result_references"]
+        self.assertGreaterEqual(audit_summary["created_count"], 1)
+        self.assertGreaterEqual(audit_summary["resolved_count"], 1)
+        self.assertFalse(audit_summary["privacy"]["full_payloads_embedded"])
+        self.assertTrue(
+            any(item["reference_id"] == reference["reference_id"] for item in audit_summary["latest"])
+        )
+
+    def test_result_reference_resolver_rejects_boundary_and_handles_missing_expired_and_hash_mismatch(self):
+        payload = self.server.self_optimization_report(result_mode="reference", result_reference_ttl_hours=1)
+        reference = payload["result_reference"]
+
+        outside = self.server.json.loads(self.server.json.dumps(reference))
+        outside["resolver"]["path"] = "../outside.json"
+        rejected = self.server.result_reference_resolve(reference=outside)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["status"], "boundary_rejected")
+        self.assertNotIn(str(self.repo_path), self.server.json.dumps(rejected))
+
+        missing = self.server.json.loads(self.server.json.dumps(reference))
+        missing["resolver"]["path"] = ".codebase-tooling-mcp/reports/result-references/missing.json"
+        missing_result = self.server.result_reference_resolve(reference=missing)
+        self.assertFalse(missing_result["ok"])
+        self.assertEqual(missing_result["status"], "missing")
+
+        expired = self.server.json.loads(self.server.json.dumps(reference))
+        expired["expires_at"] = "2000-01-01T00:00:00+00:00"
+        expired_result = self.server.result_reference_resolve(reference=expired)
+        self.assertFalse(expired_result["ok"])
+        self.assertEqual(expired_result["status"], "expired")
+
+        mismatch = self.server.json.loads(self.server.json.dumps(reference))
+        mismatch["content"]["hash"]["value"] = "0" * 64
+        mismatch_result = self.server.result_reference_resolve(reference=mismatch)
+        self.assertFalse(mismatch_result["ok"])
+        self.assertEqual(mismatch_result["status"], "hash_mismatch")
+        self.assertNotIn("content", mismatch_result)
+
+    def test_result_modes_preserve_default_inline_and_support_summary_for_two_reports(self):
+        inline_self = self.server.self_optimization_report()
+        self.assertEqual(inline_self["schema"], "self_optimization_report.v1")
+        self.assertIn("metrics", inline_self)
+        self.assertNotIn("result_mode", inline_self)
+
+        summary_self = self.server.self_optimization_report(result_mode="summary")
+        self.assertEqual(summary_self["result_mode"], "summary")
+        self.assertNotIn("metrics", summary_self)
+        self.assertNotIn("result_reference", summary_self)
+
+        inline_governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        self.assertEqual(inline_governance["schema"], "governance_report.v1")
+        self.assertIn("audit", inline_governance)
+
+        summary_governance = self.server.governance_report(
+            base_ref="HEAD", head_ref="HEAD", export=False, result_mode="summary"
+        )
+        self.assertEqual(summary_governance["result_mode"], "summary")
+        self.assertNotIn("audit", summary_governance)
 
     def test_resource_link_schema_validates_generated_artifacts(self):
         report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
