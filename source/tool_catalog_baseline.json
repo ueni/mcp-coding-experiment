@@ -11472,7 +11472,7 @@
       "name": "tool_output_contracts"
     },
     {
-      "digest": "sha256:c53e75b0e927ac4238023ecab0e5f11ed3557e9b0f96b13de37bf12a25dc9879",
+      "digest": "sha256:0ca67e7edeb84f29e6fde1ce39ab28f779f370cce333c32e04a7dee1be2d2097",
       "metadata": {
         "documentation": [
           {
@@ -11534,6 +11534,21 @@
               "audit_source": {
                 "type": "object"
               },
+              "confidence": {
+                "type": "number"
+              },
+              "constraint_violation_count": {
+                "type": "integer"
+              },
+              "constraint_violations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "critical_failure_step": {
+                "type": "object"
+              },
               "critical_step_candidate": {
                 "type": "object"
               },
@@ -11552,11 +11567,23 @@
               "failure_category": {
                 "type": "string"
               },
+              "failure_taxonomy": {
+                "type": "object"
+              },
+              "llm_judging": {
+                "type": "object"
+              },
               "ok": {
                 "type": "boolean"
               },
               "read_only": {
                 "type": "boolean"
+              },
+              "recommended_followup": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "redactions_applied": {
                 "items": {
@@ -11590,10 +11617,12 @@
             "required": [
               "schema",
               "ok",
-              "critical_step_candidate",
+              "critical_failure_step",
               "failure_category",
+              "constraint_violations",
               "evidence",
-              "safe_next_actions",
+              "confidence",
+              "recommended_followup",
               "redactions_applied"
             ],
             "type": "object"
@@ -11642,12 +11671,31 @@
             "read_only",
             "security",
             "trajectory",
-            "failure_categories"
+            "failure_categories",
+            "critical_step_candidate",
+            "safe_next_actions",
+            "failure_taxonomy",
+            "llm_judging"
           ],
           "outputSchema": {
             "additionalProperties": true,
             "properties": {
               "audit_source": {
+                "type": "object"
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "constraint_violation_count": {
+                "type": "integer"
+              },
+              "constraint_violations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "critical_failure_step": {
                 "type": "object"
               },
               "critical_step_candidate": {
@@ -11668,11 +11716,23 @@
               "failure_category": {
                 "type": "string"
               },
+              "failure_taxonomy": {
+                "type": "object"
+              },
+              "llm_judging": {
+                "type": "object"
+              },
               "ok": {
                 "type": "boolean"
               },
               "read_only": {
                 "type": "boolean"
+              },
+              "recommended_followup": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "redactions_applied": {
                 "items": {
@@ -11706,10 +11766,12 @@
             "required": [
               "schema",
               "ok",
-              "critical_step_candidate",
+              "critical_failure_step",
               "failure_category",
+              "constraint_violations",
               "evidence",
-              "safe_next_actions",
+              "confidence",
+              "recommended_followup",
               "redactions_applied"
             ],
             "type": "object"
@@ -11718,10 +11780,12 @@
           "stableFields": [
             "schema",
             "ok",
-            "critical_step_candidate",
+            "critical_failure_step",
             "failure_category",
+            "constraint_violations",
             "evidence",
-            "safe_next_actions",
+            "confidence",
+            "recommended_followup",
             "redactions_applied"
           ],
           "tool": "workflow_diagnostics"
@@ -13690,5 +13754,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:c469f69d8f077d7b999a17affebb1a1b7a6c8557f549efd8f25cdbdf8e442f8c"
+  "whole_catalog_digest": "sha256:73e338a582580584d7f73bda7ef1e3cb764d6693425a597378b045737ca0467d"
 }
