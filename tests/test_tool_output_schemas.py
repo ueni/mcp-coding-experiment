@@ -259,6 +259,11 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         self.assertNotIn("metrics", summary_self)
         self.assertNotIn("result_reference", summary_self)
 
+        reference_self = self.server.self_optimization_report(result_mode="reference")
+        self.assertEqual(reference_self["result_mode"], "reference")
+        self.assertNotIn("metrics", reference_self)
+        self.assertIn("result_reference", reference_self)
+
         inline_governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
         self.assertEqual(inline_governance["schema"], "governance_report.v1")
         self.assertIn("audit", inline_governance)
@@ -268,6 +273,26 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         )
         self.assertEqual(summary_governance["result_mode"], "summary")
         self.assertNotIn("audit", summary_governance)
+
+        reference_governance = self.server.governance_report(
+            base_ref="HEAD", head_ref="HEAD", export=False, result_mode="reference"
+        )
+        self.assertEqual(reference_governance["result_mode"], "reference")
+        self.assertNotIn("audit", reference_governance)
+        self.assertIn("result_reference", reference_governance)
+
+        mode_payloads = {
+            "self_optimization_report:inline": inline_self,
+            "self_optimization_report:summary": summary_self,
+            "self_optimization_report:reference": reference_self,
+            "governance_report:inline": inline_governance,
+            "governance_report:summary": summary_governance,
+            "governance_report:reference": reference_governance,
+        }
+        for case_name, payload in mode_payloads.items():
+            tool_name = case_name.split(":", 1)[0]
+            with self.subTest(case_name=case_name):
+                validate_against_schema(payload, TOOL_OUTPUT_SCHEMAS[tool_name])
 
     def test_resource_link_schema_validates_generated_artifacts(self):
         report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)

@@ -81,9 +81,9 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "agent_security_delta": ("schema", "report_id", "generated_at", "base_ref", "head_ref", "status", "ok", "summary", "findings", "gate", "exports"),
     "agent_security_delta_report": ("schema", "report_id", "generated_at", "base_ref", "head_ref", "status", "ok", "summary", "findings", "gate", "exports"),
     "mcp_threat_model_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "dread_rubric", "threats", "findings", "exports"),
-    "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "agents_context_health", "exports", "resource_links"),
+    "governance_report": ("schema", "report_id", "generated_at"),
     "memory_governance_report": ("schema", "generated_at", "read_only", "policy_version", "summary", "stores", "findings", "security"),
-    "self_optimization_report": ("schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "optimization_integrity_report", "agents_context_health", "security"),
+    "self_optimization_report": ("schema", "report_id", "generated_at"),
     "agents_context_health": ("schema", "read_only", "advisory_only", "target", "budget", "summary", "instruction_categories", "duplicate_guidance", "stale_guidance", "risky_global_instructions", "move_candidates", "safety"),
     "artifact_provenance": ("schema", "provenance_schema", "attestation_schema", "artifact_count", "ok", "checks"),
     "result_reference_resolve": ("schema", "ok", "status", "read_only", "reference_id", "artifact", "security"),
@@ -119,9 +119,9 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "agent_security_delta": ("read_only", "changed_files", "skipped", "security", "resource_links", "provenance", "_meta"),
     "agent_security_delta_report": ("read_only", "changed_files", "skipped", "security", "resource_links", "provenance", "_meta"),
     "mcp_threat_model_report": ("controls", "baseline", "fixtures", "security", "resource_links", "_meta"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "agent_security_delta", "secret_exposure", "untrusted_content_signals", "memory_governance", "result_references", "result_mode", "result_reference", "lineage", "provenance", "compressed_observation", "_meta"),
+    "governance_report": ("audit", "governance_hooks", "agents_context_health", "exports", "resource_links", "summary", "window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "agent_security_delta", "secret_exposure", "untrusted_content_signals", "memory_governance", "result_references", "result_mode", "result_reference", "lineage", "provenance", "compressed_observation", "_meta"),
     "memory_governance_report": ("inputs", "entries", "advisory_only"),
-    "self_optimization_report": ("sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "patch_survivorship", "optimization_candidates[].anti_gaming", "result_mode", "result_reference", "_meta"),
+    "self_optimization_report": ("window", "summary", "metrics", "optimization_candidates", "optimization_integrity_report", "agents_context_health", "security", "sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "patch_survivorship", "optimization_candidates[].anti_gaming", "result_mode", "result_reference", "_meta"),
     "agents_context_health": ("findings", "summary.severity_counts", "budget.remaining_bytes", "budget.remaining_tokens"),
     "artifact_provenance": ("checks[].attestation",),
     "result_reference_resolve": ("producer_tool", "summary", "message", "content", "content_encoding"),
@@ -728,7 +728,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "governance_report": _object_schema(
-        ["schema", "report_id", "generated_at", "audit", "governance_hooks", "agents_context_health", "exports"],
+        ["schema", "report_id", "generated_at"],
         {
             "schema": {"type": "string", "const": "governance_report.v1"},
             "report_id": {"type": "string"},
@@ -772,7 +772,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "self_optimization_report": _object_schema(
-        ["schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "optimization_integrity_report", "agents_context_health", "security"],
+        ["schema", "report_id", "generated_at"],
         {
             "schema": {"type": "string", "const": "self_optimization_report.v1"},
             "report_id": {"type": "string"},
