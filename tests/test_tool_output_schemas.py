@@ -54,6 +54,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "governance_report",
                 "memory_governance_report",
                 "self_optimization_report",
+                "observation_compression_report",
                 "agents_context_health",
                 "artifact_provenance",
                 "result_reference_resolve",
@@ -162,6 +163,11 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "agent_security_delta": self.server.agent_security_delta(base_ref="HEAD", head_ref="HEAD", export=False),
             "agent_security_delta_report": self.server.agent_security_delta_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
+            "observation_compression_report": self.server.observation_compression_report(
+                include_traces=False,
+                include_tasks=False,
+                export=False,
+            ),
             "agents_context_health": self.server.agents_context_health(),
             "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
             "result_reference_resolve": self.server.result_reference_resolve(

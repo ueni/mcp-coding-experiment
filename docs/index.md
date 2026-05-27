@@ -35,6 +35,7 @@ SPDX-License-Identifier: MIT
 - [Explicit Agent API Proxy](./agent-api-proxy.md) - opt-in OpenAI-compatible `/v1/chat/completions` proxy with routing, durable privacy evidence packets, redaction/anonymization, streaming, and offline/no-network controls.
 - [Async workflow tasks](./workflow-tasks.md) - prototype MCP Tasks-style async handles for long-running repo workflows.
 - [Adaptive observation compression](./observation-compression.md) - opt-in deterministic summaries for verbose tool/report outputs.
+- [Observation compression report](./observation-compression-report.md) - read-only TACO-style advisory bucket report for stored workflow/task/tool observations.
 - [MCP roots diagnostics](./roots-diagnostics.md) - read-only advisory diagnostics for client roots vs `REPO_PATH`.
 - [MCP sampling safety adapter](./sampling-safety.md) - disabled-by-default, client-mediated sampling policy for bounded advisory summaries/classifications.
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) - disabled-by-default, redacted local span records for MCP tool/workflow execution.
@@ -70,6 +71,7 @@ This index lists documentation ownership and status.
 - [Workflow reminder packets](./workflow-reminder.md) (`docs/workflow-reminder.md`) - Status: `prototype`
 - [Policy insight regression bank](./policy-insights.md) (`docs/policy-insights.md`) - Status: `canonical`
 - [Adaptive observation compression](./observation-compression.md) (`docs/observation-compression.md`) - Status: `prototype`
+- [Observation compression report](./observation-compression-report.md) (`docs/observation-compression-report.md`) - Status: `prototype`
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`
 - [MCP Registry server.json readiness](./mcp-registry-readiness.md) (`docs/mcp-registry-readiness.md`) - Status: `release readiness`
 - [MCP roots diagnostics](./roots-diagnostics.md) (`docs/roots-diagnostics.md`) - Status: `operational guidance`
