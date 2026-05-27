@@ -221,6 +221,111 @@ class WorkflowTaskTests(ServerToolsTestBase):
         self.assertEqual(out["progress_detail"]["phase"], "expired")
         self.assertIn("expired", [event["event"] for event in out["audit_events"]])
 
+    def test_retryable_read_only_failure_exposes_lifecycle_metadata(self):
+        task_id = "task-" + "b" * 32
+        self._write_workflow_task_fixture(
+            task_id,
+            workflow="governance_report",
+            status="failed",
+            state="failed",
+            ok=False,
+            attempt=1,
+            max_retries=2,
+            error="TimeoutError: bearer secret-token should not leak",
+            result={"schema": "governance_report.v1", "ok": False, "timeout": True},
+            arguments={"base_ref": "HEAD", "token": "secret-token"},
+        )
+
+        out = self.server.task_status(task_id)
+
+        self.assertEqual(out["retry_policy"], "client_may_retry")
+        self.assertGreaterEqual(out["retry_after_seconds"], 0)
+        self.assertEqual(out["max_attempts"], 3)
+        self.assertEqual(out["attempt"], 1)
+        self.assertEqual(out["last_error_class"], "TimeoutError")
+        self.assertFalse(out["no_auto_retry"])
+        self.assertIn("idempotency_key", out)
+        self.assertEqual(out["expired_result_action"], "rerun_allowed")
+        self.assertIn("retry_decision", [event["event"] for event in out["audit_events"]])
+        self.assertNotIn("secret-token", json.dumps(out, sort_keys=True))
+
+    def test_permanent_mutation_failure_requires_human_retry(self):
+        task_id = "task-" + "c" * 32
+        self._write_workflow_task_fixture(
+            task_id,
+            workflow="vscode_task_run",
+            status="failed",
+            state="failed",
+            ok=False,
+            attempt=1,
+            max_retries=0,
+            error="ValueError: unsafe args",
+            result={"schema": "vscode_task_run.v1", "ok": False, "timeout": False},
+            arguments={"label": "Docker: publish", "token": "top-secret"},
+        )
+
+        out = self.server.task_status(task_id)
+
+        self.assertEqual(out["retry_policy"], "human_required")
+        self.assertEqual(out["retry_after_seconds"], 0)
+        self.assertTrue(out["no_auto_retry"])
+        self.assertEqual(out["max_attempts"], 1)
+        self.assertEqual(out["last_error_class"], "ValueError")
+        self.assertNotIn("idempotency_key", out)
+        self.assertEqual(out["expired_result_action"], "rerun_requires_approval")
+        self.assertIn("retry_decision", [event["event"] for event in out["audit_events"]])
+        self.assertNotIn("top-secret", json.dumps(out, sort_keys=True))
+
+    def test_completed_task_before_expiry_keeps_result_available(self):
+        task_id = "task-" + "d" * 32
+        self._write_workflow_task_fixture(
+            task_id,
+            workflow="governance_report",
+            status="succeeded",
+            state="succeeded",
+            ok=True,
+            attempt=1,
+            result={"schema": "governance_report.v1", "ok": True},
+            expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        )
+
+        out = self.server.task_status(task_id)
+
+        self.assertEqual(out["status"], "succeeded")
+        self.assertFalse(out["result_expired"])
+        self.assertTrue(out["result_available"])
+        self.assertEqual(out["result"]["schema"], "governance_report.v1")
+        self.assertEqual(out["retry_policy"], "none")
+
+    def test_expired_final_result_returns_expiry_envelope(self):
+        task_id = "task-" + "e" * 32
+        self._write_workflow_task_fixture(
+            task_id,
+            workflow="governance_report",
+            status="succeeded",
+            state="succeeded",
+            ok=True,
+            attempt=1,
+            result={"schema": "governance_report.v1", "ok": True, "report_id": "report-1"},
+            expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+
+        out = self.server.task_status(task_id)
+
+        self.assertEqual(out["status"], "succeeded")
+        self.assertTrue(out["result_expired"])
+        self.assertFalse(out["result_available"])
+        self.assertEqual(out["result"]["schema"], "workflow_task.expired_result.v1")
+        self.assertEqual(out["result"]["expired_result_action"], "rerun_allowed")
+        self.assertIn("result_expired", [event["event"] for event in out["audit_events"]])
+        persisted = json.loads(
+            (self.repo_path / ".codebase-tooling-mcp" / "tasks" / f"{task_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertTrue(persisted["result_expired"])
+        self.assertIn("result_expired", [event["event"] for event in persisted["audit_events"]])
+
     def test_workflow_task_progress_notifications_are_rate_limited_and_monotonic(self):
         class FakeSession:
             def __init__(self):
