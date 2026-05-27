@@ -5,6 +5,7 @@ import asyncio
 import base64
 import contextlib
 import contextvars
+import copy
 import ast
 import json
 import os
@@ -686,6 +687,15 @@ MCP_AGENT_PROXY_MEMORY_CAPTURE_ENABLED = _env_flag(
 MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS = _env_flag(
     "MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS", True
 )
+MCP_TOOL_RESPONSE_SCANNER_MODE = os.getenv(
+    "MCP_TOOL_RESPONSE_SCANNER_MODE", "off"
+).strip()
+MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS = _env_int(
+    "MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS",
+    PROMPT_INJECTION_SIGNAL_SCAN_MAX_CHARS,
+    minimum=512,
+)
+MCP_TOOL_RESPONSE_SCANNER_SCHEMA = "mcp_tool_response_scanner.v1"
 MCP_AGENT_PROXY_POLICY_VERSION = "mcp_agent_proxy.policy.v1"
 MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "local-reversible-anonymization.v2"
 MCP_AGENT_PROXY_AGENT_FACADE_PROFILE = "chat-completions-controlled-facade.v1"
@@ -3170,6 +3180,236 @@ def _agent_proxy_deanonymize_value(value: Any, mapping: dict[str, Any]) -> Any:
     if isinstance(value, dict):
         return {str(key): _agent_proxy_deanonymize_value(item, mapping) for key, item in value.items()}
     return value
+
+
+def _tool_response_scanner_mode() -> str:
+    raw = str(MCP_TOOL_RESPONSE_SCANNER_MODE or "off").strip().lower().replace("-", "_")
+    aliases = {
+        "": "OFF",
+        "0": "OFF",
+        "false": "OFF",
+        "off": "OFF",
+        "disabled": "OFF",
+        "disable": "OFF",
+        "none": "OFF",
+        "log": "LOG",
+        "audit": "LOG",
+        "report": "LOG",
+        "sanitize": "SANITIZE",
+        "sanitise": "SANITIZE",
+        "redact": "SANITIZE",
+        "block": "BLOCK",
+        "blocked": "BLOCK",
+        "deny": "BLOCK",
+    }
+    return aliases.get(raw, "OFF")
+
+
+def _tool_response_message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif isinstance(item.get("content"), str):
+                    parts.append(str(item["content"]))
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    return ""
+
+
+def _tool_response_risk_summary(text: str, *, message_index: int) -> dict[str, Any]:
+    signals = _prompt_injection_signals_for_text(
+        text,
+        tool_name="agent_proxy.tool_response",
+        input_scope=f"messages[{message_index}].content",
+        max_chars=MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS,
+    )
+    counts = _prompt_injection_signal_counts(signals)
+    categories: dict[str, int] = {}
+    for key, value in counts.get("category_counts", {}).items():
+        categories[str(key)] = int(value or 0)
+    secret_detected = bool(
+        SENSITIVE_AUDIT_VALUE_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
+    )
+    path_detected = bool(
+        ABSOLUTE_PATH_VALUE_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
+    )
+    pii_detected = bool(
+        _AGENT_PROXY_EMAIL_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
+    )
+    if secret_detected:
+        categories["credential_or_secret_leakage"] = (
+            categories.get("credential_or_secret_leakage", 0) + 1
+        )
+    if path_detected:
+        categories["sensitive_local_path"] = categories.get("sensitive_local_path", 0) + 1
+    if pii_detected:
+        categories["pii"] = categories.get("pii", 0) + 1
+    severity = str(counts.get("severity", "none") or "none")
+    if (
+        secret_detected
+        or categories.get("credential_exfiltration")
+        or categories.get("data_exfiltration")
+    ):
+        severity = "high"
+    elif (path_detected or pii_detected) and severity not in {"high", "medium"}:
+        severity = "medium"
+    return {
+        "detected": bool(categories),
+        "severity": severity,
+        "total_signals": (
+            int(counts.get("total_signals", 0) or 0)
+            + int(secret_detected)
+            + int(path_detected)
+            + int(pii_detected)
+        ),
+        "category_counts": dict(sorted(categories.items())),
+        "prompt_injection_signals": counts,
+        "secret_detected": secret_detected,
+        "pii_detected": pii_detected,
+        "sensitive_path_detected": path_detected,
+        "chars_total": len(text),
+        "chars_scanned": min(len(text), MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS),
+        "truncated": len(text) > MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS,
+    }
+
+
+def _tool_response_line_has_prompt_injection(text: str) -> bool:
+    for spec in _PROMPT_INJECTION_SIGNAL_PATTERNS:
+        for match in spec["regex"].finditer(text):
+            if not _prompt_injection_signal_negated(text, match.start()):
+                return True
+    return False
+
+
+def _sanitize_tool_response_text(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        lines = [text]
+    sanitized_lines: list[str] = []
+    for line in lines:
+        line_ending = ""
+        body = line
+        if line.endswith("\r\n"):
+            body, line_ending = line[:-2], "\r\n"
+        elif line.endswith("\n"):
+            body, line_ending = line[:-1], "\n"
+        if _tool_response_line_has_prompt_injection(body):
+            sanitized_lines.append(
+                "[sanitized: tool-response instruction content removed]" + line_ending
+            )
+            continue
+        redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", body)
+        redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", redacted)
+        redacted = _AGENT_PROXY_EMAIL_RE.sub("<redacted:email>", redacted)
+        sanitized_lines.append(redacted + line_ending)
+    return "".join(sanitized_lines)
+
+
+def _sanitize_tool_response_content(content: Any) -> Any:
+    if isinstance(content, str):
+        return _sanitize_tool_response_text(content)
+    if isinstance(content, list):
+        sanitized_items = []
+        for item in content:
+            if isinstance(item, str):
+                sanitized_items.append(_sanitize_tool_response_text(item))
+            elif isinstance(item, dict):
+                copy_item = dict(item)
+                if isinstance(copy_item.get("text"), str):
+                    copy_item["text"] = _sanitize_tool_response_text(
+                        str(copy_item["text"])
+                    )
+                elif isinstance(copy_item.get("content"), str):
+                    copy_item["content"] = _sanitize_tool_response_text(
+                        str(copy_item["content"])
+                    )
+                sanitized_items.append(copy_item)
+            else:
+                sanitized_items.append(item)
+        return sanitized_items
+    if isinstance(content, dict):
+        copy_content = dict(content)
+        if isinstance(copy_content.get("text"), str):
+            copy_content["text"] = _sanitize_tool_response_text(str(copy_content["text"]))
+        return copy_content
+    return content
+
+
+def _tool_response_scanner_apply(
+    payload: dict[str, Any],
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    mode = _tool_response_scanner_mode()
+    report: dict[str, Any] = {
+        "schema": MCP_TOOL_RESPONSE_SCANNER_SCHEMA,
+        "enabled": mode != "OFF",
+        "mode": mode,
+        "effective_outcome": "OFF" if mode == "OFF" else "ALLOW",
+        "scanned_message_count": 0,
+        "flagged_message_count": 0,
+        "findings": [],
+        "privacy": {
+            "raw_tool_responses_logged": False,
+            "raw_evidence_included": False,
+            "secrets_included": False,
+            "host_paths_included": False,
+        },
+    }
+    if mode == "OFF":
+        return True, payload, report
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return True, payload, report
+    scanned_payload = payload
+    blocked = False
+    for idx, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        report["scanned_message_count"] += 1
+        text = _tool_response_message_content_text(message.get("content"))
+        if not text:
+            continue
+        risk = _tool_response_risk_summary(text, message_index=idx)
+        if not risk["detected"]:
+            continue
+        outcome = mode
+        finding = {
+            "message_index": idx,
+            "tool_call_id_present": bool(str(message.get("tool_call_id", "")).strip()),
+            "outcome": outcome,
+            "severity": risk["severity"],
+            "category_counts": risk["category_counts"],
+            "total_signals": risk["total_signals"],
+            "chars_scanned": risk["chars_scanned"],
+            "truncated": risk["truncated"],
+        }
+        report["findings"].append(finding)
+        report["flagged_message_count"] += 1
+        if mode == "BLOCK":
+            blocked = True
+        elif mode == "SANITIZE":
+            if scanned_payload is payload:
+                scanned_payload = copy.deepcopy(payload)
+            scanned_payload["messages"][idx]["content"] = _sanitize_tool_response_content(
+                scanned_payload["messages"][idx].get("content")
+            )
+    if blocked:
+        report["effective_outcome"] = "BLOCK"
+        return False, payload, report
+    if report["flagged_message_count"] and mode == "SANITIZE":
+        report["effective_outcome"] = "SANITIZE"
+    elif report["flagged_message_count"] and mode == "LOG":
+        report["effective_outcome"] = "LOG"
+    return True, scanned_payload, report
 
 
 def _agent_proxy_policy_limits(payload: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
@@ -40487,6 +40727,14 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
             "requires_mutations": MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS,
             "raw_conversation_storage": False,
         },
+        "tool_response_scanner": {
+            "schema": MCP_TOOL_RESPONSE_SCANNER_SCHEMA,
+            "mode": _tool_response_scanner_mode(),
+            "enabled": _tool_response_scanner_mode() != "OFF",
+            "max_chars": MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS,
+            "default_behavior": "preserve existing behavior when mode is OFF",
+            "supported_outcomes": ["LOG", "SANITIZE", "BLOCK"],
+        },
     }
 
 
@@ -40556,6 +40804,40 @@ async def openai_chat_completions(request):
             status_code=403,
         )
         return JSONResponse(error, status_code=status)
+
+    scanner_ok, scanned_payload, scanner_report = _tool_response_scanner_apply(payload)
+    if scanner_report.get("enabled"):
+        policy["tool_response_scanner"] = scanner_report
+    if not scanner_ok:
+        _append_audit_event(
+            "tool_response_scanner",
+            ["network", "audit"],
+            False,
+            {
+                "trace_id": trace_id,
+                "mode": scanner_report.get("mode"),
+                "flagged_message_count": scanner_report.get("flagged_message_count"),
+                "categories": sorted(
+                    {
+                        str(category)
+                        for finding in scanner_report.get("findings", [])
+                        if isinstance(finding, dict)
+                        for category in (finding.get("category_counts", {}) or {}).keys()
+                    }
+                ),
+            },
+            "tool response scanner blocked risky tool content before model context forwarding",
+        )
+        error, status = _agent_proxy_error_payload(
+            "tool response scanner blocked risky tool content before model context forwarding",
+            error_type="invalid_request_error",
+            code="tool_response_scanner_blocked",
+            trace_id=trace_id,
+            status_code=403,
+        )
+        error["tool_response_scanner"] = scanner_report
+        return JSONResponse(error, status_code=status)
+    payload = scanned_payload
 
     route = _agent_proxy_route(payload)
     stream = bool(payload.get("stream", False))
