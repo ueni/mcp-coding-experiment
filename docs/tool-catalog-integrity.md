@@ -118,6 +118,33 @@ cover:
 - discovery/docs mismatches where README/docs or the provisional public manifest
   advertise stale prompt/resource names.
 
+## Draft MCP tool metadata lint
+
+`tool_catalog_integrity` also includes a read-only `draft_tool_metadata_lint`
+section for the MCP draft server/tools metadata described at
+<https://modelcontextprotocol.io/specification/draft/server/tools>. The draft
+currently calls out deterministic `tools/list` ordering for prompt-cache
+efficiency, optional `ttlMs`/`cacheScope` cache hints, and `x-mcp-header` JSON
+Schema annotations for mirroring primitive tool parameters into Streamable HTTP
+headers.
+
+The report is advisory while the referenced MCP text remains draft. Its finding
+severities (`info`, `warn`, `block`) are compatibility severities, not a release
+gate; revisit the severity mapping if the draft becomes final or changes the
+server/client obligations.
+
+The draft lint reports:
+
+- deterministic local catalog ordering across repeated generation;
+- optional cache-hint presence/shape when this server elects to expose
+  `ttlMs`/`cacheScope`;
+- `x-mcp-header` safety: non-empty ASCII header names, no spaces or colons,
+  case-insensitive uniqueness, primitive-only mirrored fields, and no
+  secret/token/password/credential/authorization-like mirrored fields.
+
+Catalogs with no `x-mcp-header` annotations remain passing and return
+`x_mcp_header.status="not_present"` with a not-applicable note.
+
 `governance_report` includes a compact `tool_catalog_integrity` summary so audit
 and release flows can cite the current public-MCP-surface digest, counts, drift
 counts, and advisory lint counts without embedding the full baseline.
