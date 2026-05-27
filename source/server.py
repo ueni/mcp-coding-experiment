@@ -218,6 +218,7 @@ MCP_OTEL_SERVICE_NAME = (
     os.getenv("MCP_OTEL_SERVICE_NAME", "codebase-tooling-mcp").strip()
     or "codebase-tooling-mcp"
 )
+MCP_OTEL_BAGGAGE_ALLOWLIST_RAW = os.getenv("MCP_OTEL_BAGGAGE_ALLOWLIST", "").strip()
 MCP_SAMPLING_ENABLED = os.getenv("MCP_SAMPLING_ENABLED", "false").strip().lower() in {
     "1",
     "true",
@@ -551,6 +552,9 @@ _OTEL_CURRENT_SPAN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _OTEL_CORRELATION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "mcp_otel_correlation_id", default=""
+)
+_OTEL_INCOMING_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "mcp_otel_incoming_trace_context", default=None
 )
 _OTEL_SPANS_LOCK = threading.Lock()
 _HTTP_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
@@ -4354,6 +4358,233 @@ _OTEL_LOCAL_EXPORTERS = {"json", "jsonl", "local", "test"}
 _OTEL_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
 )
+_OTEL_TRACEPARENT_RE = re.compile(
+    r"^(?P<version>[0-9a-f]{2})-(?P<trace_id>[0-9a-f]{32})-"
+    r"(?P<parent_span_id>[0-9a-f]{16})-(?P<trace_flags>[0-9a-f]{2})(?P<extra>-.+)?$"
+)
+_OTEL_TRACESTATE_KEY_RE = re.compile(
+    r"^[a-z0-9][_0-9a-z*\-/]{0,255}(?:@[a-z0-9][_0-9a-z*\-/]{0,240})?$"
+)
+_OTEL_BAGGAGE_KEY_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
+
+
+def _otel_baggage_allowlist() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in str(MCP_OTEL_BAGGAGE_ALLOWLIST_RAW or "").split(",")
+        if item.strip()
+    }
+
+
+def _otel_header_carrier(scope: dict[str, Any]) -> dict[str, str]:
+    carrier: dict[str, str] = {}
+    for key in ("traceparent", "tracestate", "baggage"):
+        values = _http_header_values(scope, key)
+        if values:
+            carrier[key] = values[-1]
+    return carrier
+
+
+def _otel_normalized_carrier_value(carrier: dict[str, Any], key: str) -> str:
+    for item_key, item_value in carrier.items():
+        if str(item_key).strip().lower() == key:
+            if isinstance(item_value, (list, tuple)):
+                item_value = item_value[-1] if item_value else ""
+            return str(item_value or "").strip()
+    return ""
+
+
+def _otel_parse_traceparent(value: str) -> tuple[dict[str, str] | None, int]:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None, 0
+    match = _OTEL_TRACEPARENT_RE.match(text)
+    if not match:
+        return None, 1
+    parsed = match.groupdict()
+    if (
+        parsed["version"] == "ff"
+        or (parsed["version"] == "00" and parsed.get("extra"))
+        or parsed["trace_id"] == "0" * 32
+        or parsed["parent_span_id"] == "0" * 16
+    ):
+        return None, 1
+    parsed.pop("extra", None)
+    return parsed, 0
+
+
+def _otel_parse_tracestate(value: str) -> tuple[int, int]:
+    text = str(value or "").strip()
+    if not text:
+        return 0, 0
+    members = [part.strip() for part in text.split(",")]
+    if len(members) > 32:
+        return 0, 1
+    seen: set[str] = set()
+    for member in members:
+        if not member or "=" not in member:
+            return 0, 1
+        key, member_value = member.split("=", 1)
+        if (
+            not _OTEL_TRACESTATE_KEY_RE.match(key)
+            or key in seen
+            or len(member_value) > 256
+            or "," in member_value
+            or any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in member_value)
+        ):
+            return 0, 1
+        seen.add(key)
+    return len(members), 0
+
+
+def _otel_parse_baggage(value: str) -> tuple[dict[str, str], int, int]:
+    text = str(value or "").strip()
+    if not text:
+        return {}, 0, 0
+    allowlist = _otel_baggage_allowlist()
+    allowed: dict[str, str] = {}
+    dropped = 0
+    invalid = 0
+    for raw_item in text.split(",")[:64]:
+        item = raw_item.strip()
+        if not item or "=" not in item:
+            invalid += 1
+            dropped += 1
+            continue
+        key, raw_value = item.split("=", 1)
+        key = key.strip()
+        raw_value = raw_value.split(";", 1)[0].strip()
+        if not _OTEL_BAGGAGE_KEY_RE.match(key):
+            invalid += 1
+            dropped += 1
+            continue
+        if key.lower() not in allowlist or len(allowed) >= 8:
+            dropped += 1
+            continue
+        decoded = urllib.parse.unquote(raw_value)[:160]
+        allowed[key.lower()] = str(_otel_safe_value(decoded))[:160]
+    return allowed, dropped, invalid
+
+
+def _otel_trace_context_from_carrier(carrier: dict[str, Any] | None, source: str) -> dict[str, Any]:
+    carrier = carrier or {}
+    traceparent = _otel_normalized_carrier_value(carrier, "traceparent")
+    tracestate = _otel_normalized_carrier_value(carrier, "tracestate")
+    baggage = _otel_normalized_carrier_value(carrier, "baggage")
+    parsed_traceparent, invalid_count = _otel_parse_traceparent(traceparent)
+    tracestate_count, tracestate_invalid = _otel_parse_tracestate(tracestate)
+    baggage_allowed, baggage_dropped, baggage_invalid = _otel_parse_baggage(baggage)
+    invalid_count += tracestate_invalid + baggage_invalid
+    context: dict[str, Any] = {
+        "source": source,
+        "valid": bool(parsed_traceparent),
+        "trace_id": "",
+        "parent_span_id": "",
+        "trace_flags": "",
+        "tracestate_member_count": tracestate_count,
+        "tracestate_present": bool(tracestate),
+        "baggage_allowed": baggage_allowed,
+        "baggage_dropped_count": baggage_dropped,
+        "invalid_count": invalid_count,
+    }
+    if parsed_traceparent:
+        context.update(
+            {
+                "trace_id": parsed_traceparent["trace_id"],
+                "parent_span_id": parsed_traceparent["parent_span_id"],
+                "trace_flags": parsed_traceparent["trace_flags"],
+            }
+        )
+    return context
+
+
+def _otel_object_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json", by_alias=True)
+            return dumped if isinstance(dumped, dict) else {}
+        except Exception:
+            return {}
+    attrs = getattr(value, "__dict__", None)
+    return attrs if isinstance(attrs, dict) else {}
+
+
+def _otel_context_from_active_mcp_meta() -> dict[str, Any] | None:
+    try:
+        context = mcp.get_context()
+    except Exception:
+        return None
+    try:
+        request_context = getattr(context, "request_context", None)
+    except Exception:
+        return None
+    meta = getattr(request_context, "meta", None) if request_context is not None else None
+    carrier = _otel_object_to_dict(meta)
+    if not carrier:
+        return None
+    nested = carrier.get("_meta")
+    if isinstance(nested, dict):
+        carrier = {**carrier, **nested}
+    parsed = _otel_trace_context_from_carrier(carrier, "mcp_meta")
+    if not parsed.get("valid") and not parsed.get("invalid_count") and not parsed.get("tracestate_present") and not parsed.get("baggage_allowed"):
+        return None
+    return parsed
+
+
+def _otel_current_trace_context() -> dict[str, Any]:
+    context = _OTEL_INCOMING_TRACE_CONTEXT.get()
+    if context is None:
+        context = _otel_context_from_active_mcp_meta()
+    return context if isinstance(context, dict) else {}
+
+
+def _otel_current_correlation_id() -> str:
+    if not MCP_OTEL_TRACING_ENABLED:
+        return ""
+    correlation_id = str(_OTEL_CORRELATION_ID.get() or "").strip()
+    if correlation_id:
+        return str(_otel_safe_value(correlation_id))
+    context = _otel_current_trace_context()
+    if context.get("valid") and context.get("trace_id"):
+        return str(_otel_safe_value(context.get("trace_id")))
+    return ""
+
+
+def _otel_apply_trace_context_to_span(span: "_OtelSpan", context: dict[str, Any]) -> None:
+    if not context:
+        return
+    valid = bool(context.get("valid") and context.get("trace_id"))
+    if valid:
+        span.trace_id = str(context.get("trace_id"))
+        remote_parent = str(context.get("parent_span_id") or "")
+        if remote_parent and not span.parent_span_id:
+            span.parent_span_id = remote_parent
+        span.attributes["mcp.trace_context.trace_id"] = _otel_safe_value(context.get("trace_id"))
+        span.attributes["mcp.trace_context.remote_parent_span_id"] = _otel_safe_value(remote_parent)
+        span.attributes["mcp.trace_context.trace_flags"] = _otel_safe_value(context.get("trace_flags"))
+    span.attributes["mcp.trace_context.valid"] = valid
+    span.attributes["mcp.trace_context.source"] = _otel_safe_value(context.get("source", ""))
+    if context.get("tracestate_present"):
+        span.attributes["mcp.trace_context.tracestate.member_count"] = int(
+            context.get("tracestate_member_count") or 0
+        )
+    baggage_allowed = context.get("baggage_allowed")
+    if isinstance(baggage_allowed, dict):
+        span.attributes["mcp.trace_context.baggage.allowed_count"] = len(baggage_allowed)
+        for key, value in sorted(baggage_allowed.items()):
+            if _OTEL_BAGGAGE_KEY_RE.match(str(key)):
+                span.attributes[f"mcp.trace_context.baggage.{key}"] = _otel_safe_value(value)
+    if context.get("baggage_dropped_count"):
+        span.attributes["mcp.trace_context.baggage.dropped_count"] = int(
+            context.get("baggage_dropped_count") or 0
+        )
+    if context.get("invalid_count"):
+        span.attributes["mcp.trace_context.invalid_count"] = int(context.get("invalid_count") or 0)
 
 
 def _otel_exporter_name() -> str:
@@ -4460,13 +4691,17 @@ class _OtelSpan:
         self.start_perf = time.perf_counter()
         self.span_id = uuid.uuid4().hex[:16]
         self.parent_span_id = _OTEL_CURRENT_SPAN_ID.get()
+        trace_context = _otel_current_trace_context()
+        incoming_trace_id = str(trace_context.get("trace_id") or "") if trace_context else ""
         self.correlation_id = (
             str(self.requested_correlation_id or "").strip()
             or str(self.attributes.get("mcp.correlation_id") or "").strip()
             or _OTEL_CORRELATION_ID.get()
+            or incoming_trace_id
             or self.span_id
         )
         self.trace_id = hashlib.sha256(self.correlation_id.encode("utf-8")).hexdigest()[:32]
+        _otel_apply_trace_context_to_span(self, trace_context)
         self.attributes["mcp.correlation_id"] = _otel_safe_value(self.correlation_id)
         self._span_token = _OTEL_CURRENT_SPAN_ID.set(self.span_id)
         self._correlation_token = _OTEL_CORRELATION_ID.set(self.correlation_id)
@@ -8082,6 +8317,7 @@ def _build_workflow_diagnostics(events: list[dict[str, Any]], trajectory: list[d
         category_counts[key] = category_counts.get(key, 0) + 1
     report = {
         "schema": "workflow_diagnostics.v1",
+        "correlation_id": _otel_current_correlation_id(),
         "ok": not failed,
         "step_count": len(steps),
         "failed_step_count": len(failed),
@@ -8100,6 +8336,7 @@ def _workflow_diagnostics_compact(report: dict[str, Any]) -> dict[str, Any]:
     critical = report.get("critical_step_candidate", {})
     return {
         "schema": "workflow_diagnostics.summary.v1",
+        "correlation_id": str(report.get("correlation_id", "")),
         "ok": bool(report.get("ok", True)),
         "failed_step_count": int(report.get("failed_step_count", 0)),
         "failure_category": str(report.get("failure_category", "none")),
@@ -13258,6 +13495,10 @@ class MCPHTTPAuthMiddleware:
         scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
         idempotency_values = _http_header_values(scope, "idempotency-key")
         idempotency_token = _HTTP_IDEMPOTENCY_KEY.set(idempotency_values[-1] if idempotency_values else "")
+        trace_carrier = _otel_header_carrier(scope)
+        trace_context_token = _OTEL_INCOMING_TRACE_CONTEXT.set(
+            _otel_trace_context_from_carrier(trace_carrier, "http_headers") if trace_carrier else None
+        )
         streamable_session_token = _STREAMABLE_HTTP_SESSION_ID.set(
             _streamable_http_session_id_from_scope(scope)
         )
@@ -13295,6 +13536,7 @@ class MCPHTTPAuthMiddleware:
             await response(scope, receive, send)
         finally:
             _STREAMABLE_HTTP_SESSION_ID.reset(streamable_session_token)
+            _OTEL_INCOMING_TRACE_CONTEXT.reset(trace_context_token)
             _HTTP_IDEMPOTENCY_KEY.reset(idempotency_token)
             _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
@@ -31868,6 +32110,7 @@ def _governance_report_impl(
     report: dict[str, Any] = {
         "schema": "governance_report.v1",
         "report_id": report_id,
+        "correlation_id": _otel_current_correlation_id(),
         "generated_at": generated_at,
         "window": {
             "start_time": start_dt.isoformat() if start_dt else "",
