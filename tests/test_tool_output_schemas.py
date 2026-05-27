@@ -261,6 +261,56 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         self.assertEqual(mismatch_result["status"], "hash_mismatch")
         self.assertNotIn("content", mismatch_result)
 
+    def test_result_reference_resolver_rejects_path_only_and_missing_hash_inputs(self):
+        for include_content in (False, True):
+            with self.subTest(include_content=include_content):
+                path_only = self.server.result_reference_resolve(
+                    path="README.md",
+                    include_content=include_content,
+                )
+                validate_against_schema(path_only, RESULT_REFERENCE_RESOLVE_SCHEMA)
+                self.assertFalse(path_only["ok"])
+                self.assertEqual(path_only["status"], "invalid_reference")
+                self.assertFalse(path_only["security"]["hash_verified_before_content"])
+                self.assertFalse(path_only["security"]["payload_embedded"])
+                self.assertNotIn("content", path_only)
+                self.assertNotIn("# Test Repo", self.server.json.dumps(path_only))
+
+        missing_hash = self.server.result_reference_resolve(
+            reference_id="manual-readme",
+            path="README.md",
+            include_content=True,
+        )
+        validate_against_schema(missing_hash, RESULT_REFERENCE_RESOLVE_SCHEMA)
+        self.assertFalse(missing_hash["ok"])
+        self.assertEqual(missing_hash["status"], "invalid_reference")
+        self.assertFalse(missing_hash["security"]["hash_verified_before_content"])
+        self.assertFalse(missing_hash["security"]["payload_embedded"])
+        self.assertNotIn("content", missing_hash)
+
+        readme_hash = self.server.hashlib.sha256((self.repo_path / "README.md").read_bytes()).hexdigest()
+        missing_reference_id = self.server.result_reference_resolve(
+            path="README.md",
+            expected_hash=readme_hash,
+            include_content=True,
+        )
+        self.assertFalse(missing_reference_id["ok"])
+        self.assertEqual(missing_reference_id["status"], "invalid_reference")
+        self.assertNotIn("content", missing_reference_id)
+
+        explicit = self.server.result_reference_resolve(
+            reference_id="manual-readme",
+            path="README.md",
+            expected_hash=readme_hash,
+            include_content=False,
+        )
+        validate_against_schema(explicit, RESULT_REFERENCE_RESOLVE_SCHEMA)
+        self.assertTrue(explicit["ok"])
+        self.assertEqual(explicit["status"], "resolved")
+        self.assertTrue(explicit["security"]["hash_verified_before_content"])
+        self.assertFalse(explicit["security"]["payload_embedded"])
+        self.assertNotIn("content", explicit)
+
     def test_result_modes_preserve_default_inline_and_support_summary_for_two_reports(self):
         inline_self = self.server.self_optimization_report()
         self.assertEqual(inline_self["schema"], "self_optimization_report.v1")

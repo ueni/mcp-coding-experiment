@@ -15512,6 +15512,10 @@ def _reference_field(reference: dict[str, Any], *path: str) -> Any:
     return current
 
 
+def _is_sha256_hex(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{64}", value))
+
+
 def _normalize_result_reference_input(
     reference: dict[str, Any] | None = None,
     *,
@@ -15523,14 +15527,53 @@ def _normalize_result_reference_input(
     resolver = ref.get("resolver") if isinstance(ref.get("resolver"), dict) else {}
     content = ref.get("content") if isinstance(ref.get("content"), dict) else {}
     hash_obj = content.get("hash") if isinstance(content.get("hash"), dict) else {}
+
+    explicit_reference_id = str(reference_id or "")
+    explicit_path = str(path or "")
+    explicit_hash = str(expected_hash or "")
+    reference_hash = str(hash_obj.get("value", ""))
+    hash_algorithm = str(hash_obj.get("algorithm", "sha256")).lower()
+
+    has_reference = bool(ref)
+    explicit_triplet_valid = bool(
+        explicit_reference_id
+        and explicit_path
+        and explicit_hash
+        and _is_sha256_hex(explicit_hash)
+    )
+    handle_valid = bool(
+        has_reference
+        and ref.get("schema") == RESULT_REFERENCE_SCHEMA
+        and str(ref.get("reference_id", ""))
+        and str(resolver.get("path", ""))
+        and hash_algorithm == "sha256"
+        and _is_sha256_hex(reference_hash)
+    )
+
+    invalid_reason = ""
+    if not handle_valid and not explicit_triplet_valid:
+        if has_reference:
+            invalid_reason = (
+                "result reference must be a valid mcp_result_reference.v1 handle or include "
+                "explicit reference_id, repository-relative artifact path, and SHA-256 hash"
+            )
+        else:
+            invalid_reason = (
+                "result reference resolver requires a valid mcp_result_reference.v1 handle or "
+                "explicit reference_id, repository-relative artifact path, and SHA-256 hash"
+            )
+    elif explicit_hash and not _is_sha256_hex(explicit_hash):
+        invalid_reason = "explicit expected_hash must be a SHA-256 hex digest"
+
     return {
-        "reference_id": reference_id or str(ref.get("reference_id", "")),
-        "path": path or str(resolver.get("path", "")),
-        "expected_hash": expected_hash or str(hash_obj.get("value", "")),
+        "reference_id": explicit_reference_id or str(ref.get("reference_id", "")),
+        "path": explicit_path or str(resolver.get("path", "")),
+        "expected_hash": explicit_hash or reference_hash,
         "expires_at": str(ref.get("expires_at", "")),
         "mime_type": str(content.get("mime_type", content.get("content_type", "application/octet-stream"))),
         "producer_tool": str(ref.get("producer_tool", "")),
         "summary": ref.get("summary", {}) if isinstance(ref.get("summary"), dict) else {},
+        "invalid_reason": invalid_reason,
     }
 
 
@@ -15545,6 +15588,7 @@ def _result_reference_response(
     summary: dict[str, Any] | None = None,
     artifact: dict[str, Any] | None = None,
     content: str | None = None,
+    hash_verified_before_content: bool = False,
 ) -> dict[str, Any]:
     response: dict[str, Any] = {
         "schema": RESULT_REFERENCE_RESOLVE_SCHEMA,
@@ -15560,7 +15604,7 @@ def _result_reference_response(
             "repo_boundary_enforced": True,
             "mutates_repository": False,
             "absolute_host_paths_exposed": False,
-            "hash_verified_before_content": status == "resolved",
+            "hash_verified_before_content": hash_verified_before_content,
             "payload_embedded": content is not None,
         },
     }
@@ -15598,8 +15642,19 @@ def _result_reference_resolve_impl(
     )
     ref_id = normalized["reference_id"]
     rel_path = normalized["path"]
+    expected = normalized["expected_hash"]
     producer_tool = normalized["producer_tool"]
     summary = normalized["summary"]
+    if normalized["invalid_reason"]:
+        return _result_reference_response(
+            status="invalid_reference",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message=normalized["invalid_reason"],
+            producer_tool=producer_tool,
+            summary=summary,
+        )
     if not rel_path:
         return _result_reference_response(
             status="invalid_reference",
@@ -15644,7 +15699,6 @@ def _result_reference_resolve_impl(
         )
     data = artifact_path.read_bytes()
     actual_hash = hashlib.sha256(data).hexdigest()
-    expected = normalized["expected_hash"]
     artifact = {
         "uri": _repo_resource_uri(rel_path),
         "path": rel_path,
@@ -15652,7 +15706,7 @@ def _result_reference_resolve_impl(
         "size_bytes": len(data),
         "hash": {"algorithm": "sha256", "value": actual_hash},
     }
-    if expected and not hmac.compare_digest(actual_hash, expected):
+    if not hmac.compare_digest(actual_hash, expected):
         return _result_reference_response(
             status="hash_mismatch",
             ok=False,
@@ -15674,6 +15728,7 @@ def _result_reference_resolve_impl(
         summary=summary,
         artifact=artifact,
         content=text,
+        hash_verified_before_content=True,
     )
 
 
