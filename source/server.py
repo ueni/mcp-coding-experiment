@@ -653,6 +653,15 @@ MCP_AGENT_PROXY_COST_PER_1K_OUTPUT_USD = _env_float(
 MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = os.getenv(
     "MCP_AGENT_PROXY_ANONYMIZE_TERMS", ""
 ).strip()
+MCP_AGENT_PROXY_ANONYMIZATION_MODE = os.getenv(
+    "MCP_AGENT_PROXY_ANONYMIZATION_MODE", "balanced"
+).strip().lower()
+MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS = _env_int(
+    "MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS", 512, minimum=1
+)
+MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED = _env_flag(
+    "MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED", True
+)
 MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT = _env_flag(
     "MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT", True
 )
@@ -672,7 +681,7 @@ MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS = _env_flag(
     "MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS", True
 )
 MCP_AGENT_PROXY_POLICY_VERSION = "mcp_agent_proxy.policy.v1"
-MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "default-request-local-redaction.v1"
+MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "local-reversible-anonymization.v2"
 MCP_AGENT_PROXY_AGENT_FACADE_PROFILE = "chat-completions-controlled-facade.v1"
 _AGENT_PROXY_DISCLOSURE_AUDIT_LOCK = threading.Lock()
 AGENT_EXECUTION_MODE_PROMPT_TERMS = {
@@ -2373,8 +2382,34 @@ _AGENT_PROXY_SECRET_TOKEN_RE = re.compile(
     r"(?i)(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
 )
 _AGENT_PROXY_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_AGENT_PROXY_GIT_REMOTE_RE = re.compile(
+    r"(?ix)\b(?:git@|ssh://git@|https://)(?:[A-Za-z0-9.-]+)[/:][A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?"
+)
+_AGENT_PROXY_URL_RE = re.compile(r"(?i)\bhttps?://[^\s<>\"']+")
+_AGENT_PROXY_DOMAIN_RE = re.compile(
+    r"(?i)(?<![@/\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|io|ai|dev|app|cloud|co|de|uk|us|biz|info)(?![/\w.-])"
+)
 _AGENT_PROXY_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
+)
+_AGENT_PROXY_REPO_SLUG_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])(?:github\.com[:/])?([A-Za-z0-9_.-]{2,39}/[A-Za-z0-9_.-]{2,80})(?:\.git)?(?![A-Za-z0-9_.-])"
+)
+_AGENT_PROXY_TICKET_RE = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Z][A-Z0-9]{1,12}-\d{1,7}|#\d{2,7})(?![A-Za-z0-9_])")
+_AGENT_PROXY_BRANCH_RE = re.compile(
+    r"(?ix)\b(?:branch|checkout|merge|rebase|from|onto|refs/heads/)\s+((?:feature|fix|bugfix|hotfix|release|chore|task|builder|origin)/[A-Za-z0-9._/-]{2,120}|[A-Za-z0-9._-]{2,80})"
+)
+_AGENT_PROXY_ORG_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,5}\s+(?:Corp|Corporation|Company|Inc|LLC|Ltd|Limited|GmbH|AG|SA|PLC|BV|Foundation|Labs|Systems|Technologies|Tech|Group|Studio|Studios))\b"
+)
+_AGENT_PROXY_PROJECT_RE = re.compile(
+    r"\b(?:Project|Customer|Client|Account|Program|Codename)\s+[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*){0,4}\b"
+)
+_AGENT_PROXY_PERSON_RE = re.compile(
+    r"\b(?:[A-Z][a-z]{1,30}\s+[A-Z][a-z]{1,30})(?:\s+[A-Z][a-z]{1,30})?\b"
+)
+_AGENT_PROXY_NDA_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:nda|confidential|customer|client|company|organisation|organization|project|codename|internal|private|proprietary)\b"
 )
 _AGENT_PROXY_PLACEHOLDER_RE = re.compile(r"__MCP_(?:ANON|REDACTED)_[A-Z_]+_\d{4}__")
 _AGENT_PROXY_PLACEHOLDER_FRAGMENT_RE = re.compile(r"__MCP(?:_[A-Z0-9_]*)?")
@@ -2759,12 +2794,32 @@ def _agent_proxy_error_payload(
     }, status_code
 
 
+def _agent_proxy_anonymization_mode() -> str:
+    mode = str(MCP_AGENT_PROXY_ANONYMIZATION_MODE or "balanced").strip().lower()
+    if mode in {"off", "disabled", "none"}:
+        return "off"
+    if mode in {"strict", "nda", "nda-strict", "fail-closed"}:
+        return "strict"
+    return "balanced"
+
+
+def _agent_proxy_anonymization_profile_id() -> str:
+    return f"{MCP_AGENT_PROXY_ANONYMIZATION_PROFILE}.{_agent_proxy_anonymization_mode()}"
+
+
 def _agent_proxy_new_placeholder(
     state: dict[str, Any], category: str, value: str, *, reversible: bool
 ) -> str:
     existing = state["by_value"].get((category, value, reversible))
     if existing:
         return existing
+    max_placeholders = int(state.get("max_placeholders", MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS))
+    total = sum(int(item) for item in state["counts"].values())
+    if total >= max_placeholders:
+        state["bounds_exceeded"] = True
+        category = "overflow"
+        reversible = False
+        value = ""
     count = int(state["counts"].get(category, 0)) + 1
     state["counts"][category] = count
     token = "ANON" if reversible else "REDACTED"
@@ -2807,18 +2862,46 @@ def _agent_proxy_configured_terms() -> list[str]:
 def _agent_proxy_replace_configured_terms(text: str, state: dict[str, Any]) -> str:
     result = text
     for term in _agent_proxy_configured_terms():
-        placeholder = _agent_proxy_new_placeholder(state, "term", term, reversible=True)
-        if re.fullmatch(r"[\w .-]+", term):
+        if re.fullmatch(r"[\w .:/@#-]+", term):
             pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE)
-            result = pattern.sub(placeholder, result)
-        else:
+            result = pattern.sub(
+                lambda _match, raw_term=term: _agent_proxy_new_placeholder(
+                    state, "term", raw_term, reversible=True
+                ),
+                result,
+            )
+        elif term in result:
+            placeholder = _agent_proxy_new_placeholder(state, "term", term, reversible=True)
             result = result.replace(term, placeholder)
     return result
+
+
+def _agent_proxy_replace_pattern(
+    text: str,
+    state: dict[str, Any],
+    pattern: re.Pattern[str],
+    category: str,
+    *,
+    reversible: bool = True,
+) -> str:
+    return pattern.sub(
+        lambda match: _agent_proxy_new_placeholder(
+            state, category, match.group(0), reversible=reversible
+        ),
+        text,
+    )
+
+
+def _agent_proxy_replace_branch_match(match: re.Match[str], state: dict[str, Any]) -> str:
+    branch = match.group(1)
+    placeholder = _agent_proxy_new_placeholder(state, "branch", branch, reversible=True)
+    return match.group(0).replace(branch, placeholder, 1)
 
 
 def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
     if not text:
         return text
+    mode = str(state.get("mode") or _agent_proxy_anonymization_mode())
     state["seen_text"] += "\n" + text[:10000]
     result = _AGENT_PROXY_SECRET_ASSIGNMENT_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), text
@@ -2829,15 +2912,38 @@ def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
     result = _AGENT_PROXY_SECRET_TOKEN_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), result
     )
-    result = _AGENT_PROXY_EMAIL_RE.sub(
-        lambda match: _agent_proxy_new_placeholder(state, "email", match.group(0), reversible=True),
-        result,
+    if mode == "off":
+        return result
+    result = _agent_proxy_replace_configured_terms(result, state)
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_EMAIL_RE, "email")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_GIT_REMOTE_RE, "repo")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_URL_RE, "url")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_ABSOLUTE_PATH_RE, "path")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_REPO_SLUG_RE, "repo")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_DOMAIN_RE, "domain")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_TICKET_RE, "ticket")
+    result = _AGENT_PROXY_BRANCH_RE.sub(
+        lambda match: _agent_proxy_replace_branch_match(match, state), result
     )
-    result = _AGENT_PROXY_ABSOLUTE_PATH_RE.sub(
-        lambda match: _agent_proxy_new_placeholder(state, "path", match.group(0), reversible=True),
-        result,
-    )
-    return _agent_proxy_replace_configured_terms(result, state)
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_PROJECT_RE, "project")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_ORG_RE, "org")
+    if mode == "strict":
+        result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_PERSON_RE, "person")
+    else:
+        # Balanced mode pseudonymizes high-confidence likely people in common
+        # assignment/introduction phrasing while avoiding broad title-case rewrites.
+        result = re.sub(
+            r"(?i:\b(?:owner|contact|author|by|from|for)\s+)("
+            + _AGENT_PROXY_PERSON_RE.pattern[2:-2]
+            + r")",
+            lambda match: match.group(0).replace(
+                match.group(1),
+                _agent_proxy_new_placeholder(state, "person", match.group(1), reversible=True),
+                1,
+            ),
+            result,
+        )
+    return result
 
 
 def _agent_proxy_anonymize_value(value: Any, state: dict[str, Any]) -> Any:
@@ -2850,21 +2956,65 @@ def _agent_proxy_anonymize_value(value: Any, state: dict[str, Any]) -> Any:
     return value
 
 
+def _agent_proxy_payload_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return "\n".join(_agent_proxy_payload_text(item) for item in value.values())
+    if isinstance(value, list):
+        return "\n".join(_agent_proxy_payload_text(item) for item in value)
+    return str(value) if value is not None else ""
+
+
+def _agent_proxy_anonymization_confidence(
+    original: dict[str, Any], anonymized: dict[str, Any], state: dict[str, Any]
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    mode = str(state.get("mode") or _agent_proxy_anonymization_mode())
+    counts = state.get("counts", {}) if isinstance(state.get("counts"), dict) else {}
+    transformed = sum(int(item) for item in counts.values()) if counts else 0
+    original_text = _agent_proxy_payload_text(_agent_proxy_request_text_digest_input(original))
+    anonymized_text = _agent_proxy_payload_text(_agent_proxy_request_text_digest_input(anonymized))
+    if state.get("bounds_exceeded"):
+        reasons.append("placeholder_bound_exceeded")
+    configured_terms = _agent_proxy_configured_terms()
+    if configured_terms and any(term and term in anonymized_text for term in configured_terms):
+        reasons.append("configured_terms_remain")
+    if mode == "off" and (_AGENT_PROXY_NDA_SIGNAL_RE.search(original_text) or configured_terms):
+        reasons.append("anonymization_off_for_sensitive_input")
+    if mode == "strict" and _AGENT_PROXY_NDA_SIGNAL_RE.search(original_text) and transformed == 0:
+        reasons.append("strict_sensitive_input_without_transform")
+    return ("low" if reasons else "high"), reasons
+
+
 def _agent_proxy_anonymize_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    mode = _agent_proxy_anonymization_mode()
     state: dict[str, Any] = {
+        "mode": mode,
         "counts": {},
         "by_value": {},
         "reversible": {},
         "irreversible": set(),
         "seen_text": "",
+        "bounds_exceeded": False,
+        "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
     }
     anonymized = _agent_proxy_anonymize_value(payload, state)
+    confidence, confidence_reasons = _agent_proxy_anonymization_confidence(payload, anonymized, state)
     inventory = {
         "counts": dict(sorted(state["counts"].items())),
         "reversible_placeholders": len(state["reversible"]),
         "irreversible_placeholders": len(state["irreversible"]),
         "placeholder_categories": sorted(state["counts"].keys()),
         "mapping_persisted": False,
+        "mapping_scope": "request_local_process_memory",
+        "profile": _agent_proxy_anonymization_profile_id(),
+        "mode": mode,
+        "version": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
+        "confidence": confidence,
+        "confidence_reasons": confidence_reasons,
+        "fail_closed_required": bool(mode == "strict" and MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED),
     }
     return anonymized, {
         "reversible": dict(state["reversible"]),
@@ -3008,7 +3158,7 @@ def _agent_proxy_audit_inventory(mapping: dict[str, Any] | None) -> dict[str, An
             except (TypeError, ValueError):
                 continue
             safe_counts[safe_key] = safe_counts.get(safe_key, 0) + count
-    safe_inventory["profile"] = MCP_AGENT_PROXY_ANONYMIZATION_PROFILE
+    safe_inventory["profile"] = _agent_proxy_anonymization_profile_id()
     safe_inventory["counts"] = dict(sorted(safe_counts.items()))
     safe_inventory["placeholder_categories"] = sorted(safe_counts.keys())
     safe_inventory["residual_sensitive_class_status"] = {
@@ -3060,7 +3210,7 @@ def _agent_proxy_policy_decision(route: dict[str, Any], policy: dict[str, Any]) 
         "decision": "online_allowed" if online_allowed else str(route.get("reason", "blocked")),
         "reason": route.get("reason"),
         "online_allowed": online_allowed,
-        "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "anonymizer_profile": _agent_proxy_anonymization_profile_id(),
         "anonymizer_required_before_online": route.get("backend") == "online",
         "offline_controls": {
             "no_network": bool(route.get("offline_no_network")),
@@ -3203,7 +3353,7 @@ def _agent_proxy_audit_base(
             "offline_no_network": route.get("offline_no_network"),
             "model_allowlist_configured": route.get("model_allowlist_configured"),
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
-            "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+            "anonymizer_profile": _agent_proxy_anonymization_profile_id(),
         },
         "anonymization": _agent_proxy_audit_inventory(mapping),
         "privacy": {
@@ -20703,9 +20853,49 @@ async def model_assisted_summary(
                         context_text=context_text,
                         execution_mode=resolved_mode,
                     )
+                    sampling_payload_for_anonymizer = {
+                        "model": "mcp-client-sampling",
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                    anonymized_sampling_payload, sampling_mapping = _agent_proxy_anonymize_payload(
+                        sampling_payload_for_anonymizer
+                    )
+                    anonymized_messages = anonymized_sampling_payload.get("messages", [])
+                    if anonymized_messages and isinstance(anonymized_messages[0], dict):
+                        prompt = str(anonymized_messages[0].get("content", prompt))
+                    sampling_anonymization = _agent_proxy_audit_inventory(sampling_mapping)
+                    if (
+                        sampling_anonymization.get("confidence") == "low"
+                        and sampling_anonymization.get("fail_closed_required")
+                    ):
+                        result = _sampling_base_result(
+                            status="denied",
+                            reason="anonymization_confidence_too_low",
+                            purpose=purpose_norm,
+                            execution_mode=resolved_mode,
+                            execution_mode_source=mode_source,
+                            policy=policy,
+                            capability=capability,
+                            context=context_meta,
+                            request={
+                                "would_call_client": False,
+                                "dry_run": bool(dry_run),
+                                "human_review_expected": True,
+                                "include_context": "none",
+                                "metadata": {
+                                    "anonymization_result": sampling_anonymization,
+                                    "raw_prompt_stored": False,
+                                },
+                            },
+                        )
+                        _otel_set_result_attributes(span, result)
+                        span.set_attribute("mcp.sampling.status", result.get("status", ""))
+                        return result
                     for code in question_redactions:
                         if code not in context_meta["redactions_applied"]:
                             context_meta["redactions_applied"].append(code)
+                    if sampling_anonymization.get("counts"):
+                        context_meta["redactions_applied"].append("local_reversible_anonymization")
                     prompt_digest = _sampling_digest_text(prompt)
                     metadata = {
                         "schema": "mcp_sampling_request_metadata.v1",
@@ -20716,6 +20906,8 @@ async def model_assisted_summary(
                         "advisory_only": True,
                         "repository_boundary_enforced": True,
                         "redaction_applied": True,
+                        "anonymization_result": sampling_anonymization,
+                        "placeholder_mapping_sent": False,
                         "prompt_digest": prompt_digest,
                         "context_source_count": len(context_meta.get("sources", [])),
                         "forbidden_decisions": [
@@ -20793,6 +20985,7 @@ async def model_assisted_summary(
                             )
                         else:
                             raw_output = _sampling_extract_response_text(response)
+                            raw_output = _agent_proxy_deanonymize_text(raw_output, sampling_mapping)
                             safe_output, output_redactions = _sampling_redact_text(raw_output)
                             for code in output_redactions:
                                 if code not in context_meta["redactions_applied"]:
@@ -39314,7 +39507,7 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         "enabled": bool(config.get("enabled")),
         "endpoint": "/v1/chat/completions",
         "policy_version": MCP_AGENT_PROXY_POLICY_VERSION,
-        "anonymization_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "anonymization_profile": _agent_proxy_anonymization_profile_id(),
         "agent_facade_profile": MCP_AGENT_PROXY_AGENT_FACADE_PROFILE,
         "disabled_by_default": True,
         "explicit_proxy_only": True,
@@ -39345,9 +39538,16 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         },
         "privacy_controls": {
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
+            "anonymization_profile": _agent_proxy_anonymization_profile_id(),
+            "anonymization_mode": _agent_proxy_anonymization_mode(),
+            "anonymization_modes": ["strict", "balanced", "off"],
+            "default_online_mode": "balanced",
             "anonymize_configured_terms": bool(_agent_proxy_configured_terms()),
             "irreversible_secret_redaction": True,
             "local_only_placeholder_mapping": True,
+            "placeholder_mapping_scope": "request_local_process_memory",
+            "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
+            "strict_nda_fail_closed": MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED,
             "raw_prompt_storage_default": False,
             "raw_response_storage_default": False,
         },
@@ -39467,6 +39667,33 @@ async def openai_chat_completions(request):
         return JSONResponse(response_payload)
 
     anonymized_payload, mapping = _agent_proxy_anonymize_payload(payload)
+    anonymization_inventory = _agent_proxy_audit_inventory(mapping)
+    confidence = str(anonymization_inventory.get("confidence", "high"))
+    fail_closed = bool(anonymization_inventory.get("fail_closed_required"))
+    if confidence == "low" and fail_closed:
+        _append_audit_event(
+            "agent_proxy_anonymization",
+            ["network", "audit"],
+            False,
+            {
+                "trace_id": trace_id,
+                "model": str(payload.get("model", "")),
+                "profile": anonymization_inventory.get("profile"),
+                "categories": anonymization_inventory.get("placeholder_categories", []),
+                "confidence": confidence,
+                "reasons": anonymization_inventory.get("confidence_reasons", []),
+            },
+            "anonymization confidence too low for online provider call",
+        )
+        error, status = _agent_proxy_error_payload(
+            "agent proxy anonymization confidence too low; use local/no-network mode or a stricter configured profile",
+            error_type="invalid_request_error",
+            code="agent_proxy_anonymization_low_confidence",
+            trace_id=trace_id,
+            status_code=403,
+        )
+        return JSONResponse(error, status_code=status)
+
     provider_url = _agent_proxy_provider_url()
     try:
         _agent_proxy_record_online_request_audit(
