@@ -16,8 +16,9 @@ Initial supported workflows:
 - `governance_report` - read-only audit/governance report generation, including
   JSON/Markdown artifact resource links, local provenance sidecars, and the
   linked `workflow_lineage.v1` manifest when `export=true`.
-- `vscode_task_run` - starts one approved VS Code task by label, with bounded
-  retry metadata for transient failures.
+- `vscode_task_run` - starts one approved VS Code task by label. Because it is a
+  mutating/shell workflow, it is explicitly marked `no_auto_retry=true`; callers
+  must request human approval before rerunning failed or expired results.
 
 ## Progress, cancellation, and polling
 
@@ -76,8 +77,17 @@ Status records use `workflow_task.v1` and include:
 - `resource_links` / `_meta`: resource link for the task status artifact itself
 - `cancellation`: redacted best-effort cancellation metadata when cancellation
   is requested or ignored
+- lifecycle retry metadata: `retry_policy` (`none`, `client_may_retry`,
+  `server_retrying`, or `human_required`), `retry_after_seconds`,
+  `max_attempts`, `attempt`, redacted `last_error_class`, `idempotency_key` for
+  read-only retries, optional `replay.retry_of`, and `no_auto_retry` for mutating
+  workflows
+- lifecycle expiry metadata: `expires_at`, `retention_seconds`,
+  `retention_expires_at`, `result_expired`, `result_available`, and
+  `expired_result_action` (`rerun_allowed`, `rerun_requires_approval`, or
+  `unavailable`)
 - `audit_events`: redacted lifecycle events for start, completion, failure,
-  retry, cancellation, and expiry
+  retry decisions, cancellation, and expiry decisions
 
 Secrets are not stored intentionally. Arguments, errors, and audit details pass
 through the MCP audit redactor before persistence. Status artifacts use
@@ -94,10 +104,17 @@ Defaults are environment-configurable:
 - `MCP_STREAM_REPLAY_RETRY_INTERVAL_MS=1000`
 
 Non-final tasks observed after `expires_at` are marked `expired` on the next
-`task_status` read. On task start, status records whose `retention_expires_at`
-has passed may be pruned from `.codebase-tooling-mcp/tasks/*.json`; the pruning
-is limited to task status JSON records and does not delete final result artifact
-files such as `.codebase-tooling-mcp/tasks/artifacts/*`.
+`task_status` read. Final tasks keep their terminal status, but once the result
+expiry has passed the status response reports `result_expired=true`,
+`result_available=false`, and replaces the inline result with a
+`workflow_task.expired_result.v1` envelope containing the safe next action. This
+keeps future result handles (#175) aligned with the same `expires_at`,
+`retention_seconds`, and `expired_result_action` semantics.
+
+On task start, status records whose `retention_expires_at` has passed may be
+pruned from `.codebase-tooling-mcp/tasks/*.json`; the pruning is limited to task
+status JSON records and does not delete final result artifact files such as
+`.codebase-tooling-mcp/tasks/artifacts/*`.
 
 ## Retry
 
@@ -108,6 +125,9 @@ workflow_task(workflow="governance_report", retry_of="task-...")
 ```
 
 The retry receives a task id derived from the workflow arguments plus the source
-handle and records `retry_of` plus a redacted `retry` audit event. For VS Code
-workflow runs, `max_retries` records transient failure retries in the same status
-artifact.
+handle and records `retry_of`, `replay.retry_of`, and redacted `retry` /
+`retry_decision` audit events. Failed read-only tasks use `client_may_retry` for
+transient failures and `human_required` for permanent failures. Mutating tasks
+(`vscode_task_run`) are never auto-retried by this lifecycle layer; their status
+sets `no_auto_retry=true`; failed/cancelled/expired responses use
+`human_required` / `rerun_requires_approval`.
