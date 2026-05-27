@@ -11669,7 +11669,7 @@
       "name": "tool_annotations"
     },
     {
-      "digest": "sha256:815d571a41d6cc9463291dd255a0fb7928a46241e58467abdefca66b1e596107",
+      "digest": "sha256:cbf1e74db272847c3a448fbff8c7f097a9be132bb0d6fe71a0db9fe14b95eacb",
       "metadata": {
         "documentation": [
           {
@@ -11708,6 +11708,9 @@
               "current": {
                 "type": "object"
               },
+              "draft_tool_metadata_lint": {
+                "type": "object"
+              },
               "drift": {
                 "type": "object"
               },
@@ -11740,6 +11743,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -11788,7 +11792,8 @@
             "baseline.per_tool",
             "current.per_tool",
             "drift.changed[].metadata_diff",
-            "lint.findings"
+            "lint.findings",
+            "draft_tool_metadata_lint.findings"
           ],
           "outputSchema": {
             "additionalProperties": true,
@@ -11797,6 +11802,9 @@
                 "type": "object"
               },
               "current": {
+                "type": "object"
+              },
+              "draft_tool_metadata_lint": {
                 "type": "object"
               },
               "drift": {
@@ -11831,6 +11839,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -11844,6 +11853,7 @@
             "current",
             "drift",
             "lint",
+            "draft_tool_metadata_lint",
             "security"
           ],
           "tool": "tool_catalog_integrity"
@@ -14143,5 +14153,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:d6baebc25d585ce196aebc9bf8ad782872c8783549ea0a311c2d2955e9f5eaed"
+  "whole_catalog_digest": "sha256:459fb18b5f9d0d2595508a0f843e65691e55a020b54bc97725cac61b732197e6"
 }

@@ -161,6 +161,14 @@ _DESCRIPTION_KEYS = {"description", "summary", "title", "text"}
 _MUTATION_CATEGORIES = {"write", "git mutation"}
 _OPEN_WORLD_CATEGORIES = {"network", "shell/process", "secret-sensitive"}
 _HOST_PATH_URI_RE = re.compile(r"^(?:file:|/[A-Za-z0-9_.-]|[A-Za-z]:[\\/])")
+_DRAFT_LINT_SCHEMA = "draft_tool_metadata_lint.v1"
+_DRAFT_RULE_PREFIX = "mcp-draft-tools"
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_SECRET_LIKE_NAME_RE = re.compile(
+    r"(?:secret|token|password|passwd|credential|api[_-]?key|authorization|bearer)",
+    re.IGNORECASE,
+)
+_PRIMITIVE_JSON_SCHEMA_TYPES = {"string", "number", "integer", "boolean"}
 
 
 def canonical_json(value: Any) -> str:
@@ -180,6 +188,49 @@ def documentation_references(tool_name: str) -> list[dict[str, str]]:
 
 def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, sort_keys=True, ensure_ascii=True, default=str))
+
+
+def _severity_rank(severity: str) -> int:
+    return {"info": 0, "warn": 1, "block": 2}.get(severity, 0)
+
+
+def _draft_finding(
+    rule_id: str,
+    severity: str,
+    message: str,
+    *,
+    tool: str = "",
+    path: str = "",
+    header: str = "",
+    parameter: str = "",
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    finding_id_parts = [rule_id]
+    if tool:
+        finding_id_parts.append(tool)
+    if parameter:
+        finding_id_parts.append(parameter)
+    if header:
+        finding_id_parts.append(header.lower())
+    if path and not parameter:
+        finding_id_parts.append(path)
+    finding = {
+        "id": ":".join(part for part in finding_id_parts if part),
+        "rule_id": rule_id,
+        "severity": severity,
+        "message": message,
+    }
+    if tool:
+        finding["tool"] = tool
+    if path:
+        finding["path"] = path
+    if header:
+        finding["header"] = header
+    if parameter:
+        finding["parameter"] = parameter
+    if evidence:
+        finding["evidence"] = _jsonable(evidence)
+    return finding
 
 
 def _tool_name(tool: dict[str, Any]) -> str:
@@ -960,6 +1011,319 @@ def _lint_public_discovery(catalog: dict[str, Any]) -> list[dict[str, Any]]:
     return findings
 
 
+def _tool_order_signature(catalog: dict[str, Any]) -> list[dict[str, str]]:
+    tools = catalog.get("tools", []) if isinstance(catalog, dict) else []
+    if not isinstance(tools, list):
+        return []
+    return [
+        {"tool": str(tool.get("name", "")), "digest": str(tool.get("digest", ""))}
+        for tool in tools
+        if isinstance(tool, dict)
+    ]
+
+
+def _extract_cache_hints(catalog: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(catalog, dict):
+        return {}
+    candidate_containers = [catalog]
+    for key in ("_meta", "meta", "metadata", "tools_list", "tools_list_meta", "cache"):
+        value = catalog.get(key)
+        if isinstance(value, dict):
+            candidate_containers.append(value)
+    for container in candidate_containers:
+        hints = {
+            key: container[key]
+            for key in ("ttlMs", "cacheScope")
+            if key in container
+        }
+        if hints:
+            return hints
+    return {}
+
+
+def _lint_cache_hints(
+    catalog: dict[str, Any],
+    repeated_catalog: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    hints = _extract_cache_hints(catalog)
+    repeated_hints = _extract_cache_hints(repeated_catalog or {})
+    findings: list[dict[str, Any]] = []
+    if not hints:
+        return {
+            "status": "not_present",
+            "present": False,
+            "ttlMs": "not_present",
+            "cacheScope": "not_present",
+            "note": "tools/list cache hints are optional in the MCP draft and are not exposed by this catalog.",
+        }, findings
+
+    ttl = hints.get("ttlMs")
+    cache_scope = hints.get("cacheScope")
+    if ttl is not None and (not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 0):
+        findings.append(
+            _draft_finding(
+                f"{_DRAFT_RULE_PREFIX}/cache-hint-invalid-ttl-ms",
+                "warn",
+                "tools/list ttlMs cache hint should be a non-negative integer when exposed.",
+                path="cache_hints.ttlMs",
+                evidence={"ttlMs_type": type(ttl).__name__},
+            )
+        )
+    if cache_scope is not None and (not isinstance(cache_scope, str) or not cache_scope.strip()):
+        findings.append(
+            _draft_finding(
+                f"{_DRAFT_RULE_PREFIX}/cache-hint-invalid-cache-scope",
+                "warn",
+                "tools/list cacheScope cache hint should be a non-empty string when exposed.",
+                path="cache_hints.cacheScope",
+                evidence={"cacheScope_type": type(cache_scope).__name__},
+            )
+        )
+    if repeated_hints and repeated_hints != hints:
+        findings.append(
+            _draft_finding(
+                f"{_DRAFT_RULE_PREFIX}/cache-hint-nondeterministic",
+                "warn",
+                "tools/list cache hints changed across repeated local catalog generation.",
+                path="cache_hints",
+            )
+        )
+    return {
+        "status": "present" if not findings else "findings",
+        "present": True,
+        "ttlMs": "present" if "ttlMs" in hints else "not_present",
+        "cacheScope": "present" if "cacheScope" in hints else "not_present",
+        "hint_keys": sorted(hints),
+    }, findings
+
+
+def _x_mcp_header_name(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("name", "header", "headerName", "header_name"):
+            if key in value:
+                return str(value.get(key) or "")
+    return str(value or "")
+
+
+def _is_primitive_schema(schema: dict[str, Any]) -> bool:
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        return bool(schema_type) and all(
+            item in _PRIMITIVE_JSON_SCHEMA_TYPES for item in schema_type
+        )
+    if isinstance(schema_type, str):
+        return schema_type in _PRIMITIVE_JSON_SCHEMA_TYPES
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        return all(isinstance(item, (str, int, float, bool)) for item in enum_values)
+    if "properties" in schema or "items" in schema or "additionalProperties" in schema:
+        return False
+    return True
+
+
+def _iter_x_mcp_header_fields(
+    schema: Any,
+    *,
+    path: str = "metadata.list_tools.input_schema",
+    parameter_path: str = "",
+):
+    if not isinstance(schema, dict):
+        return
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, subschema in properties.items():
+            child_path = f"{path}.properties.{name}"
+            child_parameter_path = f"{parameter_path}.{name}" if parameter_path else str(name)
+            if isinstance(subschema, dict):
+                if "x-mcp-header" in subschema:
+                    yield child_parameter_path, child_path, subschema, subschema.get("x-mcp-header")
+                yield from _iter_x_mcp_header_fields(
+                    subschema,
+                    path=child_path,
+                    parameter_path=child_parameter_path,
+                )
+    items = schema.get("items")
+    if isinstance(items, dict):
+        yield from _iter_x_mcp_header_fields(
+            items,
+            path=f"{path}.items",
+            parameter_path=f"{parameter_path}[]" if parameter_path else "[]",
+        )
+
+
+def _lint_x_mcp_headers(catalog: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    findings: list[dict[str, Any]] = []
+    seen_headers: dict[str, dict[str, str]] = {}
+    annotated_field_count = 0
+    annotated_tools: set[str] = set()
+    tools = catalog.get("tools", []) if isinstance(catalog, dict) else []
+    if not isinstance(tools, list):
+        tools = []
+    for tool_entry in tools:
+        if not isinstance(tool_entry, dict):
+            continue
+        tool_name = str(tool_entry.get("name", ""))
+        metadata = tool_entry.get("metadata", {}) if isinstance(tool_entry.get("metadata"), dict) else {}
+        list_tools = metadata.get("list_tools", {}) if isinstance(metadata.get("list_tools"), dict) else {}
+        input_schema = list_tools.get("input_schema", {})
+        for parameter, path, field_schema, annotation in _iter_x_mcp_header_fields(input_schema):
+            annotated_field_count += 1
+            annotated_tools.add(tool_name)
+            header = _x_mcp_header_name(annotation)
+            lower_header = header.lower()
+            if not header or not header.isascii() or not _HTTP_HEADER_NAME_RE.fullmatch(header):
+                findings.append(
+                    _draft_finding(
+                        f"{_DRAFT_RULE_PREFIX}/x-mcp-header-invalid-name",
+                        "block",
+                        "x-mcp-header names must be non-empty ASCII HTTP field names without spaces or colon characters.",
+                        tool=tool_name,
+                        path=f"{path}.x-mcp-header",
+                        header=header,
+                        parameter=parameter,
+                    )
+                )
+            elif lower_header in seen_headers:
+                first = seen_headers[lower_header]
+                findings.append(
+                    _draft_finding(
+                        f"{_DRAFT_RULE_PREFIX}/x-mcp-header-duplicate-name",
+                        "block",
+                        "x-mcp-header names must be unique case-insensitively across mirrored tool parameters.",
+                        tool=tool_name,
+                        path=f"{path}.x-mcp-header",
+                        header=header,
+                        parameter=parameter,
+                        evidence={
+                            "first_tool": first["tool"],
+                            "first_parameter": first["parameter"],
+                            "first_header": first["header"],
+                        },
+                    )
+                )
+            else:
+                seen_headers[lower_header] = {
+                    "tool": tool_name,
+                    "parameter": parameter,
+                    "header": header,
+                }
+            if not _is_primitive_schema(field_schema):
+                findings.append(
+                    _draft_finding(
+                        f"{_DRAFT_RULE_PREFIX}/x-mcp-header-non-primitive-field",
+                        "block",
+                        "x-mcp-header may only mirror primitive JSON-schema fields.",
+                        tool=tool_name,
+                        path=path,
+                        header=header,
+                        parameter=parameter,
+                        evidence={"schema_type": field_schema.get("type", "unknown")},
+                    )
+                )
+            if _SECRET_LIKE_NAME_RE.search(parameter) or _SECRET_LIKE_NAME_RE.search(header):
+                findings.append(
+                    _draft_finding(
+                        f"{_DRAFT_RULE_PREFIX}/x-mcp-header-secret-like-field",
+                        "block",
+                        "x-mcp-header must not mirror secret-, token-, password-, credential-, or authorization-like fields.",
+                        tool=tool_name,
+                        path=f"{path}.x-mcp-header",
+                        header=header,
+                        parameter=parameter,
+                    )
+                )
+    if annotated_field_count == 0:
+        status = "not_present"
+    elif findings:
+        status = "findings"
+    else:
+        status = "valid"
+    return {
+        "status": status,
+        "present": annotated_field_count > 0,
+        "annotated_field_count": annotated_field_count,
+        "annotated_tool_count": len(annotated_tools),
+        "note": "No x-mcp-header annotations are present; header-mirroring checks are not applicable."
+        if annotated_field_count == 0
+        else "x-mcp-header annotations were checked against draft MCP header-mirroring constraints.",
+    }, findings
+
+
+def draft_tool_metadata_lint(
+    catalog: dict[str, Any],
+    *,
+    repeated_catalog: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return advisory MCP draft tools metadata lint for cache/header safety."""
+    findings: list[dict[str, Any]] = []
+    order_signature = _tool_order_signature(catalog)
+    repeated_signature = _tool_order_signature(repeated_catalog or catalog)
+    tool_names = [item["tool"] for item in order_signature]
+    sorted_tool_names = sorted(tool_names)
+    if tool_names != sorted_tool_names:
+        findings.append(
+            _draft_finding(
+                f"{_DRAFT_RULE_PREFIX}/tools-list-order-not-sorted",
+                "warn",
+                "Local tools/list catalog entries should be sorted by stable tool name for prompt-cache efficiency.",
+                path="tools",
+            )
+        )
+    if repeated_catalog is not None and order_signature != repeated_signature:
+        findings.append(
+            _draft_finding(
+                f"{_DRAFT_RULE_PREFIX}/tools-list-order-nondeterministic",
+                "block",
+                "Local tools/list catalog generation changed tool order or digests across repeated runs.",
+                path="tools",
+            )
+        )
+    cache_hints, cache_findings = _lint_cache_hints(catalog, repeated_catalog)
+    x_mcp_header, header_findings = _lint_x_mcp_headers(catalog)
+    findings.extend(cache_findings)
+    findings.extend(header_findings)
+    by_severity = {"info": 0, "warn": 0, "block": 0}
+    by_rule_id: dict[str, int] = {}
+    for finding in findings:
+        severity = str(finding.get("severity", "info"))
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        rule_id = str(finding.get("rule_id", "unknown"))
+        by_rule_id[rule_id] = by_rule_id.get(rule_id, 0) + 1
+    max_severity = "info"
+    if findings:
+        max_severity = max((str(item.get("severity", "info")) for item in findings), key=_severity_rank)
+    return {
+        "schema": _DRAFT_LINT_SCHEMA,
+        "advisory_only": True,
+        "ok": True,
+        "status": "clean" if not findings else "advisory_findings",
+        "draft_spec": {
+            "name": "MCP draft server/tools metadata",
+            "status": "draft",
+            "reference": "https://modelcontextprotocol.io/specification/draft/server/tools",
+            "severity_policy": "info/warn/block are compatibility severities only; this report remains advisory until this server adopts a final mandatory spec requirement.",
+        },
+        "deterministic_ordering": {
+            "status": "stable" if not any(finding.get("rule_id") in {f"{_DRAFT_RULE_PREFIX}/tools-list-order-not-sorted", f"{_DRAFT_RULE_PREFIX}/tools-list-order-nondeterministic"} for finding in findings) else "findings",
+            "ok": not any(finding.get("rule_id") in {f"{_DRAFT_RULE_PREFIX}/tools-list-order-not-sorted", f"{_DRAFT_RULE_PREFIX}/tools-list-order-nondeterministic"} for finding in findings),
+            "repeated_catalogs_compared": 2 if repeated_catalog is not None else 1,
+            "tool_count": len(tool_names),
+            "ordering": "sorted_by_tool_name",
+        },
+        "cache_hints": cache_hints,
+        "x_mcp_header": x_mcp_header,
+        "summary": {
+            "finding_count": len(findings),
+            "max_severity": max_severity,
+            "by_severity": dict(sorted(by_severity.items())),
+            "by_rule_id": dict(sorted(by_rule_id.items())),
+        },
+        "findings": findings,
+    }
+
+
 def lint_tool_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
     """Return advisory lint findings for public MCP surface metadata."""
     findings: list[dict[str, Any]] = []
@@ -1044,9 +1408,13 @@ def integrity_report(
     current: dict[str, Any],
     baseline_error: str = "",
     include_tools: bool = False,
+    repeated_current: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current = refresh_catalog_digests(current)
+    if repeated_current is not None:
+        repeated_current = refresh_catalog_digests(repeated_current)
     lint = lint_tool_catalog(current)
+    draft_lint = draft_tool_metadata_lint(current, repeated_catalog=repeated_current)
     if baseline is None:
         status = "baseline_missing" if baseline_error == "missing" else "baseline_invalid"
         drift = {
@@ -1108,6 +1476,7 @@ def integrity_report(
         "current": catalog_digest_summary(current),
         "drift": drift,
         "lint": lint,
+        "draft_tool_metadata_lint": draft_lint,
         "security": {
             "public_metadata_only": True,
             "contains_repository_contents": False,
