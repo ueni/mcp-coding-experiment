@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 41,
+  "tool_count": 42,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -6858,6 +6858,458 @@
       "name": "mutation_step_guard"
     },
     {
+      "digest": "sha256:2f3e4de8aa73481ca38abac515ff5bbe0e2dc29e6c692e7269f3b43672989643",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Observation compression report",
+            "path": "docs/observation-compression-report.md"
+          },
+          {
+            "label": "Adaptive observation compression",
+            "path": "docs/observation-compression.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Build an advisory TACO-style compression report for stored workflow/task/tool observations without deleting raw evidence.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "end_time": {
+                "default": "",
+                "title": "End Time",
+                "type": "string"
+              },
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              },
+              "include_audit": {
+                "default": true,
+                "title": "Include Audit",
+                "type": "boolean"
+              },
+              "include_tasks": {
+                "default": true,
+                "title": "Include Tasks",
+                "type": "boolean"
+              },
+              "include_traces": {
+                "default": true,
+                "title": "Include Traces",
+                "type": "boolean"
+              },
+              "max_observations": {
+                "default": 500,
+                "title": "Max Observations",
+                "type": "integer"
+              },
+              "start_time": {
+                "default": "",
+                "title": "Start Time",
+                "type": "string"
+              },
+              "window_hours": {
+                "default": 168,
+                "title": "Window Hours",
+                "type": "integer"
+              }
+            },
+            "title": "observation_compression_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "observation_compression_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "classification_buckets": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "compression_opportunities": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "fingerprints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "low_confidence_caveats": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "markdown": {
+                "type": "string"
+              },
+              "observations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "observation_compression_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "sources": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "window": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "window",
+              "summary",
+              "classification_buckets",
+              "observations",
+              "fingerprints",
+              "compression_opportunities",
+              "low_confidence_caveats",
+              "security"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "sources",
+            "resource_links",
+            "exports",
+            "markdown",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "classification_buckets": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "compression_opportunities": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "fingerprints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "low_confidence_caveats": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "markdown": {
+                "type": "string"
+              },
+              "observations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "observation_compression_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "sources": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "window": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "window",
+              "summary",
+              "classification_buckets",
+              "observations",
+              "fingerprints",
+              "compression_opportunities",
+              "low_confidence_caveats",
+              "security"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "read_only",
+            "advisory_only",
+            "window",
+            "summary",
+            "classification_buckets",
+            "observations",
+            "fingerprints",
+            "compression_opportunities",
+            "low_confidence_caveats",
+            "security"
+          ],
+          "tool": "observation_compression_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "observation_compression_report"
+        }
+      },
+      "name": "observation_compression_report"
+    },
+    {
       "digest": "sha256:32d16aa355dff9571ee2d5a5770dff38f67020b80d5ea365f654b72c47d027c2",
       "metadata": {
         "documentation": [
@@ -9491,7 +9943,7 @@
       "name": "secret_exposure_report"
     },
     {
-      "digest": "sha256:6f60e0bd083f5173770b84b3bef5bddea33901c15a24683c75235b96ca77901d",
+      "digest": "sha256:f9ca4c40bad3589b36e5abcd9a0e4bc5a26a04858b4ebf293e2fbc65831419ac",
       "metadata": {
         "documentation": [
           {
@@ -9800,6 +10252,7 @@
             "github_issue_gate",
             "patch_survivorship",
             "optimization_candidates[].anti_gaming",
+            "metrics.observation_compression",
             "_meta"
           ],
           "outputSchema": {
@@ -15052,5 +15505,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:1404270138b8d6e676f27450639a6c257fcf0ad4801632f86c3e33114a096351"
+  "whole_catalog_digest": "sha256:c9e70243b6cb245fa3c735d2a62536645e6ca53ba5c76a025308e96677a73013"
 }

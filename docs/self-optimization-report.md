@@ -53,6 +53,7 @@ The tool returns `self_optimization_report.v1` with:
 - first-class task buckets plus state-transition, test-gate, retry/rework, and blocked/waiting-time metrics when task/status artifacts include that evidence;
 - cache entry counts, observed cache hits, and conservative cache savings estimates;
 - compressed-observation counts and estimated token savings from omitted signals;
+- aggregate `observation_compression_report.v1` opportunities for stored workflow/task/tool observations, including conservative savings estimates and retained critical-signal counts;
 - failed/noisy run counts and bottleneck summaries;
 - issue/PR/workflow/task throughput attribution from local refs such as `issue #90`, `PR #12`, or persisted task IDs;
 - duplicate-suppressed optimization candidates with stable `duplicate_key` values;
@@ -62,6 +63,8 @@ The tool returns `self_optimization_report.v1` with:
 `optimization_integrity_report` is advisory and non-blocking. It flags suspicious proxy wins such as faster/cheaper runs paired with failed, skipped, stale, or unknown release/test gates; retries or rework; suppressions; unmapped changed files; low success rate; missing denominators; and human-review/patch-survivorship pushback. It also records whether holdout or regression evidence was observed. Candidates whose verdict is not `trusted_improvement` carry `anti_gaming.auto_issue_review_required=true`, so high-confidence GitHub issue automation remains dry-run/blocked until a human reviews the counter-signals.
 
 The patch-survivorship extension aggregates proposed, applied, committed, rewritten, reverted, and `retained_after_n_commits` states by workflow, tool, and execution mode. It keeps only patch IDs or SHA-256 digests plus aggregate diff metrics (line/hunk/add/delete counts), structured local human-pushback labels/review decisions, and available correlations to test gates, security/risk artifacts, and governance artifacts. It does not persist raw prompts, full private patches, or private conversation text.
+
+The observation-compression extension calls the same local sources as `observation_compression_report` and embeds only aggregate bucket counts, conservative savings estimates, and caveats under `metrics.observation_compression`. It is advisory and does not drop or rewrite evidence.
 
 When evidence is absent, the report uses explicit `unknown` / `not_available` statuses in `metrics.data_availability`, lowers `confidence`, and adds caveats instead of inventing token usage, transition timing, test-gate coverage, or blocked-time savings.
 
