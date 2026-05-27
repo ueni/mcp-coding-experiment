@@ -7251,6 +7251,9 @@ OBSERVATION_SECRET_OR_HOST_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 OBSERVATION_REPO_PATH_RE = re.compile(r"\b(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+)(?:\.[A-Za-z0-9_.-]+)?\b")
+OBSERVATION_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:[^\s\"'`<>|{}\[\],;:]+/)*[^\s\"'`<>|{}\[\],;:]+"
+)
 
 
 def _observation_safe_string(value: Any) -> str:
@@ -7345,24 +7348,62 @@ def _observation_collect_values_for_keys(value: Any, key_terms: tuple[str, ...],
     return found
 
 
+def _observation_path_value_texts(value: Any, depth: int = 0) -> list[str]:
+    if depth > 5:
+        return []
+    if isinstance(value, dict):
+        texts: list[str] = []
+        for item in value.values():
+            texts.extend(_observation_path_value_texts(item, depth + 1))
+        return texts
+    if isinstance(value, list):
+        texts = []
+        for item in value[:80]:
+            texts.extend(_observation_path_value_texts(item, depth + 1))
+        return texts
+    if isinstance(value, (str, os.PathLike)):
+        return [str(value)]
+    return []
+
+
+def _observation_repo_relative_path_candidate(raw_path: str) -> str | None:
+    text = raw_path.strip().strip('"\'')
+    if not text or "\x00" in text:
+        return None
+    if text in {".", ".."} or text.startswith(("../", "..\\", "~/")):
+        return None
+    candidate = Path(text)
+    resolved = candidate.resolve(strict=False) if candidate.is_absolute() else (REPO_PATH / candidate).resolve(strict=False)
+    try:
+        rel = resolved.relative_to(REPO_PATH.resolve())
+    except ValueError:
+        return None
+    rel_text = str(rel).replace("\\", "/")
+    if not rel_text or rel_text == "." or "/.git/" in f"/{rel_text}/" or len(rel_text) > 160:
+        return None
+    return _observation_safe_string(rel_text)
+
+
 def _observation_repo_relative_paths(value: Any) -> list[str]:
     candidates: set[str] = set()
     # Preserve explicit changed-file/security path fields without treating every
     # command argument or passing-test target as a safety-critical changed file.
     direct_values = _observation_collect_values_for_keys(value, ("path", "file", "changed"))
     for item in direct_values:
-        if isinstance(item, list):
-            texts = [str(part) for part in item[:80]]
-        elif isinstance(item, dict):
-            texts = [json.dumps(item, sort_keys=True, ensure_ascii=True, default=str)]
-        else:
-            texts = [str(item)]
-        for text in texts:
+        for text in _observation_path_value_texts(item):
+            absolute_matches = OBSERVATION_ABSOLUTE_PATH_RE.findall(text)
+            if absolute_matches:
+                for match in absolute_matches:
+                    rel = _observation_repo_relative_path_candidate(match)
+                    if rel:
+                        candidates.add(rel)
+                # Do not extract repo-looking substrings from absolute host
+                # paths such as /home/alice/private.txt after rejecting them.
+                continue
             for match in OBSERVATION_REPO_PATH_RE.findall(text):
-                if match.startswith(('/', '../')) or '/.git/' in f'/{match}/':
-                    continue
-                if len(match) <= 160:
-                    candidates.add(_observation_safe_string(match))
+                rel = _observation_repo_relative_path_candidate(match)
+                if rel:
+                    candidates.add(rel)
     return sorted(candidates)[:20]
 
 

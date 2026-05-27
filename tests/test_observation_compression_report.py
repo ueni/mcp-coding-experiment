@@ -129,6 +129,56 @@ class ObservationCompressionReportTests(ServerToolsTestBase):
         self.assertNotIn("/home/alice/private.txt", encoded)
         self.assertTrue(all(item["raw_excerpt_included"] is False for item in report["fingerprints"]))
 
+    def test_rejects_outside_absolute_paths_before_changed_path_extraction(self):
+        self._write_jsonl(
+            ".codebase-tooling-mcp/audit/security_events.jsonl",
+            [
+                {
+                    "timestamp": "2026-05-10T11:00:00+00:00",
+                    "tool_name": "redaction_probe",
+                    "success": False,
+                    "exit_code": 1,
+                    "result": {
+                        "path": "/home/alice/private.txt",
+                        "file_path": "/work/private/secret.txt",
+                        "changed": "/etc/passwd",
+                    },
+                },
+                {
+                    "timestamp": "2026-05-10T11:01:00+00:00",
+                    "tool_name": "valid_path_probe",
+                    "success": True,
+                    "result": {
+                        "path": "docs/a.md",
+                        "file_path": str(self.repo_path / "src" / "sample.py"),
+                        "changed_files": [
+                            "src/sample.py",
+                            str(self.repo_path / "tests" / "test_sample.py"),
+                        ],
+                    },
+                },
+            ],
+        )
+
+        report = self.server.observation_compression_report(
+            start_time="2026-05-10T00:00:00+00:00",
+            end_time="2026-05-11T00:00:00+00:00",
+            export=False,
+        )
+
+        changed_paths = [
+            path
+            for row in report["observations"]
+            for path in row["critical_signals"].get("changed_file_paths", [])
+        ]
+        encoded_paths = json.dumps(changed_paths, sort_keys=True)
+        self.assertNotIn("home/alice/private.txt", encoded_paths)
+        self.assertNotIn("work/private/secret.txt", encoded_paths)
+        self.assertNotIn("etc/passwd", encoded_paths)
+        self.assertIn("docs/a.md", changed_paths)
+        self.assertIn("src/sample.py", changed_paths)
+        self.assertIn("tests/test_sample.py", changed_paths)
+
     def test_output_is_deterministic_for_same_stored_observations(self):
         self._write_jsonl(".codebase-tooling-mcp/audit/security_events.jsonl", self._sample_rows())
 
