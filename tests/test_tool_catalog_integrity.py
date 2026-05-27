@@ -7,6 +7,7 @@ import copy
 
 from source.tool_catalog_integrity import (
     compare_tool_catalogs,
+    draft_tool_metadata_lint,
     integrity_report,
     lint_tool_catalog,
     refresh_catalog_digests,
@@ -15,6 +16,40 @@ from tests.server_test_support import ServerToolsTestBase
 
 
 class ToolCatalogIntegrityTests(ServerToolsTestBase):
+    def _draft_header_catalog(self, properties):
+        return {
+            "schema": "tool_catalog_integrity_baseline.v1",
+            "digest_algorithm": "sha256",
+            "tools": [
+                {
+                    "name": "draft_header_fixture",
+                    "digest": "sha256:fixture",
+                    "metadata": {
+                        "list_tools": {
+                            "description": "Draft x-mcp-header fixture.",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": properties,
+                            },
+                            "output_schema": None,
+                        },
+                        "security": {
+                            "categories": ["read-only"],
+                            "annotations": {"readOnlyHint": True},
+                        },
+                        "output_contract": None,
+                        "documentation": [],
+                    },
+                }
+            ],
+            "prompts": [],
+            "resources": [],
+            "public_discovery": [],
+        }
+
+    def _draft_rule_ids(self, report):
+        return {finding["rule_id"] for finding in report["findings"]}
+
     def test_checked_in_baseline_matches_live_public_catalog(self):
         report = self.server.tool_catalog_integrity()
 
@@ -30,6 +65,10 @@ class ToolCatalogIntegrityTests(ServerToolsTestBase):
         self.assertFalse(report["security"]["contains_repository_contents"])
         self.assertFalse(report["security"]["resource_payloads_hashed"])
         self.assertTrue(report["security"]["prompt_argument_values_redacted"])
+        self.assertEqual(report["draft_tool_metadata_lint"]["schema"], "draft_tool_metadata_lint.v1")
+        self.assertEqual(report["draft_tool_metadata_lint"]["status"], "clean")
+        self.assertEqual(report["draft_tool_metadata_lint"]["x_mcp_header"]["status"], "not_present")
+        self.assertFalse(report["draft_tool_metadata_lint"]["x_mcp_header"]["present"])
 
     def test_drift_diff_reports_changed_metadata(self):
         current = self.server._current_tool_catalog_baseline()
@@ -240,3 +279,113 @@ class ToolCatalogIntegrityTests(ServerToolsTestBase):
         self.assertIn("cross_tool_manipulation", finding_types)
         self.assertIn("exfiltration_wording", finding_types)
         self.assertIn("annotation_category_mismatch", finding_types)
+
+    def test_draft_tool_metadata_lint_accepts_valid_x_mcp_headers(self):
+        report = draft_tool_metadata_lint(
+            self._draft_header_catalog(
+                {
+                    "tenant_id": {"type": "string", "x-mcp-header": "X-Tenant-Id"},
+                    "retry_count": {"type": "integer", "x-mcp-header": "X-Retry-Count"},
+                    "dry_run": {"type": "boolean", "x-mcp-header": "X-Dry-Run"},
+                }
+            )
+        )
+
+        self.assertEqual(report["status"], "clean")
+        self.assertEqual(report["x_mcp_header"]["status"], "valid")
+        self.assertEqual(report["x_mcp_header"]["annotated_field_count"], 3)
+        self.assertEqual(report["findings"], [])
+
+    def test_draft_tool_metadata_lint_reports_duplicate_headers_case_insensitively(self):
+        report = draft_tool_metadata_lint(
+            self._draft_header_catalog(
+                {
+                    "tenant_id": {"type": "string", "x-mcp-header": "X-Tenant-Id"},
+                    "tenant_alias": {"type": "string", "x-mcp-header": "x-tenant-id"},
+                }
+            )
+        )
+
+        self.assertIn(
+            "mcp-draft-tools/x-mcp-header-duplicate-name",
+            self._draft_rule_ids(report),
+        )
+        self.assertEqual(report["summary"]["by_severity"]["block"], 1)
+
+    def test_draft_tool_metadata_lint_reports_invalid_header_names(self):
+        report = draft_tool_metadata_lint(
+            self._draft_header_catalog(
+                {
+                    "bad_space": {"type": "string", "x-mcp-header": "X Bad"},
+                    "bad_colon": {"type": "string", "x-mcp-header": "X-Bad:Name"},
+                }
+            )
+        )
+
+        self.assertIn(
+            "mcp-draft-tools/x-mcp-header-invalid-name",
+            self._draft_rule_ids(report),
+        )
+        self.assertEqual(
+            report["summary"]["by_rule_id"]["mcp-draft-tools/x-mcp-header-invalid-name"],
+            2,
+        )
+
+    def test_draft_tool_metadata_lint_reports_non_primitive_header_fields(self):
+        report = draft_tool_metadata_lint(
+            self._draft_header_catalog(
+                {
+                    "filters": {
+                        "type": "object",
+                        "properties": {"kind": {"type": "string"}},
+                        "x-mcp-header": "X-Filters",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "x-mcp-header": "X-Tags",
+                    },
+                }
+            )
+        )
+
+        self.assertIn(
+            "mcp-draft-tools/x-mcp-header-non-primitive-field",
+            self._draft_rule_ids(report),
+        )
+        self.assertEqual(
+            report["summary"]["by_rule_id"]["mcp-draft-tools/x-mcp-header-non-primitive-field"],
+            2,
+        )
+
+    def test_draft_tool_metadata_lint_reports_secret_like_header_fields(self):
+        report = draft_tool_metadata_lint(
+            self._draft_header_catalog(
+                {
+                    "api_token": {"type": "string", "x-mcp-header": "X-Request-Id"},
+                    "request_id": {"type": "string", "x-mcp-header": "X-Api-Key"},
+                }
+            )
+        )
+
+        self.assertIn(
+            "mcp-draft-tools/x-mcp-header-secret-like-field",
+            self._draft_rule_ids(report),
+        )
+        self.assertEqual(
+            report["summary"]["by_rule_id"]["mcp-draft-tools/x-mcp-header-secret-like-field"],
+            2,
+        )
+
+    def test_draft_tool_metadata_lint_reports_nondeterministic_repeated_catalog(self):
+        current = self._draft_header_catalog({})
+        repeated = copy.deepcopy(current)
+        repeated["tools"][0]["digest"] = "sha256:changed"
+
+        report = draft_tool_metadata_lint(current, repeated_catalog=repeated)
+
+        self.assertIn(
+            "mcp-draft-tools/tools-list-order-nondeterministic",
+            self._draft_rule_ids(report),
+        )
+        self.assertEqual(report["deterministic_ordering"]["status"], "findings")

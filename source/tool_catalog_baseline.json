@@ -11216,7 +11216,7 @@
       "name": "tool_annotations"
     },
     {
-      "digest": "sha256:815d571a41d6cc9463291dd255a0fb7928a46241e58467abdefca66b1e596107",
+      "digest": "sha256:cbf1e74db272847c3a448fbff8c7f097a9be132bb0d6fe71a0db9fe14b95eacb",
       "metadata": {
         "documentation": [
           {
@@ -11255,6 +11255,9 @@
               "current": {
                 "type": "object"
               },
+              "draft_tool_metadata_lint": {
+                "type": "object"
+              },
               "drift": {
                 "type": "object"
               },
@@ -11287,6 +11290,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -11335,7 +11339,8 @@
             "baseline.per_tool",
             "current.per_tool",
             "drift.changed[].metadata_diff",
-            "lint.findings"
+            "lint.findings",
+            "draft_tool_metadata_lint.findings"
           ],
           "outputSchema": {
             "additionalProperties": true,
@@ -11344,6 +11349,9 @@
                 "type": "object"
               },
               "current": {
+                "type": "object"
+              },
+              "draft_tool_metadata_lint": {
                 "type": "object"
               },
               "drift": {
@@ -11378,6 +11386,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -11391,6 +11400,7 @@
             "current",
             "drift",
             "lint",
+            "draft_tool_metadata_lint",
             "security"
           ],
           "tool": "tool_catalog_integrity"
@@ -13690,5 +13700,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:c469f69d8f077d7b999a17affebb1a1b7a6c8557f549efd8f25cdbdf8e442f8c"
+  "whole_catalog_digest": "sha256:a28a5f2e8622b9f1fd607f681a02dbedcbedb9b4700f99cc56191aa2caaee777"
 }

@@ -20145,6 +20145,7 @@ def _current_tool_catalog_baseline() -> dict[str, Any]:
 
 def _tool_catalog_integrity_impl(include_tools: bool = False) -> dict[str, Any]:
     current = _current_tool_catalog_baseline()
+    repeated_current = _current_tool_catalog_baseline()
     try:
         baseline = load_tool_catalog_baseline(TOOL_CATALOG_BASELINE_FILE)
         baseline_error = ""
@@ -20159,6 +20160,7 @@ def _tool_catalog_integrity_impl(include_tools: bool = False) -> dict[str, Any]:
         current=current,
         baseline_error=baseline_error,
         include_tools=include_tools,
+        repeated_current=repeated_current,
     )
 
 
