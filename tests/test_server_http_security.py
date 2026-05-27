@@ -5,6 +5,8 @@
 import asyncio
 import json
 import tempfile
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tests.server_test_support import ServerToolsTestBase
@@ -23,9 +25,14 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self._orig_rate_window = self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS
         self._orig_request_timeout = self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS
         self._orig_audit_file = self.server.MCP_AUDIT_LOG_FILE
+        self._orig_replay_guard_enabled = self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED
+        self._orig_replay_guard_file = self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE
+        self._orig_replay_guard_max_entries = self.server.MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES
+        self._orig_replay_guard_ttl = self.server.MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS
         self.server._HTTP_RATE_LIMIT_BUCKETS.clear()
         self.audit_tmp = tempfile.TemporaryDirectory()
         self.server.MCP_AUDIT_LOG_FILE = Path(self.audit_tmp.name) / "audit.jsonl"
+        self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE = Path(".codebase-tooling-mcp/audit/test-mutation-replay-journal.json")
 
     def tearDown(self):
         self.server.MCP_HTTP_AUTH_MODE = self._orig_auth_mode
@@ -38,6 +45,10 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
         self.server.MCP_HTTP_RATE_LIMIT_WINDOW_SECONDS = self._orig_rate_window
         self.server.MCP_HTTP_REQUEST_TIMEOUT_SECONDS = self._orig_request_timeout
         self.server.MCP_AUDIT_LOG_FILE = self._orig_audit_file
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = self._orig_replay_guard_enabled
+        self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE = self._orig_replay_guard_file
+        self.server.MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES = self._orig_replay_guard_max_entries
+        self.server.MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS = self._orig_replay_guard_ttl
         self.server._HTTP_RATE_LIMIT_BUCKETS.clear()
         self.audit_tmp.cleanup()
         super().tearDown()
@@ -92,6 +103,28 @@ class ServerHTTPSecurityTest(ServerToolsTestBase):
             json.loads(line)
             for line in self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8").splitlines()
         ]
+
+    @contextmanager
+    def _authorized_http_tool_context(
+        self,
+        *,
+        session_id: str = "session-1",
+        idempotency_key: str = "",
+        scopes: frozenset[str] | None = None,
+    ):
+        auth_token = self.server._HTTP_REQUEST_AUTHORIZED.set(True)
+        scope_token = self.server._HTTP_REQUEST_GRANTED_SCOPES.set(
+            scopes or frozenset({self.server.MCP_SCOPE_READ, self.server.MCP_SCOPE_MUTATE})
+        )
+        session_token = self.server._STREAMABLE_HTTP_SESSION_ID.set(session_id)
+        idempotency_token = self.server._HTTP_IDEMPOTENCY_KEY.set(idempotency_key)
+        try:
+            yield
+        finally:
+            self.server._HTTP_IDEMPOTENCY_KEY.reset(idempotency_token)
+            self.server._STREAMABLE_HTTP_SESSION_ID.reset(session_token)
+            self.server._HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
+            self.server._HTTP_REQUEST_AUTHORIZED.reset(auth_token)
 
     def test_http_bearer_auth_scope_accepts_valid_token(self):
         self.server.MCP_HTTP_AUTH_MODE = "token"
@@ -674,6 +707,458 @@ index 0000000..257cc56
         self.assertTrue(all(not event["success"] for event in failure_events))
         self.assertIn("shell/process", events[0]["categories"])
         self.assertIn("git mutation", events[3]["categories"])
+
+    def test_mutation_replay_guard_disabled_preserves_existing_http_behavior(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = False
+
+        with self._authorized_http_tool_context(session_id="replay-disabled", idempotency_key="same-key"):
+            first = self.server.workspace_transaction(
+                mode="write",
+                path="guard-disabled.txt",
+                content="first",
+                overwrite=False,
+            )
+            with self.assertRaises(FileExistsError):
+                self.server.workspace_transaction(
+                    mode="write",
+                    path="guard-disabled.txt",
+                    content="first",
+                    overwrite=False,
+                )
+
+        self.assertEqual(first["mode"], "write")
+        self.assertFalse((self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).exists())
+
+    def test_mutation_replay_guard_suppresses_duplicate_workspace_write(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+
+        with self._authorized_http_tool_context(session_id="replay-session", idempotency_key="patch-1"):
+            first = self.server.workspace_transaction(
+                mode="write",
+                path="guarded-write.txt",
+                content="hello",
+                overwrite=False,
+            )
+            duplicate = self.server.workspace_transaction(
+                mode="write",
+                path="guarded-write.txt",
+                content="hello",
+                overwrite=False,
+            )
+
+        self.assertEqual(first["mode"], "write")
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual((self.repo_path / "guarded-write.txt").read_text(encoding="utf-8"), "hello")
+        journal = json.loads(
+            (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        )
+        self.assertEqual(journal["schema"], "mutation_replay_journal.v1")
+        self.assertEqual(len(journal["entries"]), 1)
+        entry = journal["entries"][0]
+        self.assertEqual(entry["tool_name"], "workspace_transaction")
+        self.assertEqual(entry["mode"], "write")
+        self.assertEqual(entry["duplicate_count"], 1)
+        journal_text = json.dumps(journal, sort_keys=True)
+        self.assertNotIn("hello", journal_text)
+        self.assertNotIn(str(self.repo_path), journal_text)
+        decisions = [event["arguments"].get("replay_guard", {}).get("decision") for event in self._audit_events()]
+        self.assertIn("recorded", decisions)
+        self.assertIn("duplicate_suppressed", decisions)
+
+    def test_mutation_replay_guard_suppresses_duplicate_test_impact_refresh(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        calls = []
+        original_builder = self.server._build_test_impact_map_payload
+
+        def fake_builder():
+            calls.append(len(calls) + 1)
+            return {"schema": "test_impact_map.v1", "generated_at": f"call-{len(calls)}"}
+
+        self.server._build_test_impact_map_payload = fake_builder
+        try:
+            with self._authorized_http_tool_context(
+                session_id="impact-refresh-session",
+                idempotency_key="refresh-impact-map",
+            ):
+                first = self.server.test_impact_map(refresh=True, output_profile="normal")
+                duplicate = self.server.test_impact_map(refresh=True, output_profile="normal")
+        finally:
+            self.server._build_test_impact_map_payload = original_builder
+
+        self.assertEqual(calls, [1])
+        self.assertEqual(first["artifact_status"], "fresh")
+        self.assertEqual(first["generated_at"], "call-1")
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(duplicate["duplicate"])
+        journal = json.loads(
+            (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        )
+        self.assertEqual(journal["entries"][0]["tool_name"], "test_impact_map")
+        self.assertEqual(journal["entries"][0]["mode"], "refresh")
+        self.assertEqual(journal["entries"][0]["duplicate_count"], 1)
+
+    def test_mutation_replay_guard_task_router_coding_infer_uses_prompt_digest(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        calls = []
+        original_route = self.server._TASK_ROUTER_SERVICE.route
+
+        def fake_route(**kwargs):
+            calls.append(dict(kwargs))
+            return {"schema": "task_router.coding_infer.v1", "ok": True, "call": len(calls)}
+
+        self.server._TASK_ROUTER_SERVICE.route = fake_route
+        try:
+            with self._authorized_http_tool_context(session_id="router-coding-infer-session"):
+                first = self.server.task_router(
+                    mode="coding_infer",
+                    prompt="first coding request",
+                    system="system prompt alpha",
+                    model="test-model",
+                    max_tokens=42,
+                    sandbox_mode="isolated",
+                    sandbox_id="sbox-alpha",
+                )
+                second = self.server.task_router(
+                    mode="coding_infer",
+                    prompt="second coding request",
+                    system="system prompt alpha",
+                    model="test-model",
+                    max_tokens=42,
+                    sandbox_mode="isolated",
+                    sandbox_id="sbox-alpha",
+                )
+                duplicate = self.server.task_router(
+                    mode="coding_infer",
+                    prompt="first coding request",
+                    system="system prompt alpha",
+                    model="test-model",
+                    max_tokens=42,
+                    sandbox_mode="isolated",
+                    sandbox_id="sbox-alpha",
+                )
+        finally:
+            self.server._TASK_ROUTER_SERVICE.route = original_route
+
+        self.assertEqual(first["call"], 1)
+        self.assertEqual(second["call"], 2)
+        self.assertEqual([call["prompt"] for call in calls], ["first coding request", "second coding request"])
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(len(calls), 2)
+        journal_text = (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("first coding request", journal_text)
+        self.assertNotIn("second coding request", journal_text)
+        self.assertNotIn("system prompt alpha", journal_text)
+        self.assertNotIn("sbox-alpha", journal_text)
+
+    def test_mutation_replay_guard_task_router_package_and_sandbox_fields_change_digest(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        calls = []
+        original_route = self.server._TASK_ROUTER_SERVICE.route
+
+        def fake_route(**kwargs):
+            calls.append(dict(kwargs))
+            return {"schema": f"task_router.{kwargs['mode']}.v1", "ok": True, "call": len(calls)}
+
+        self.server._TASK_ROUTER_SERVICE.route = fake_route
+        try:
+            with self._authorized_http_tool_context(session_id="router-custom-fields-session"):
+                self.server.task_router(
+                    mode="coding_pip",
+                    packages=["package-alpha"],
+                    pip_upgrade=False,
+                    sandbox_id="sbox-pkg",
+                )
+                self.server.task_router(
+                    mode="coding_pip",
+                    packages=["package-alpha"],
+                    pip_upgrade=True,
+                    sandbox_id="sbox-pkg",
+                )
+                pip_duplicate = self.server.task_router(
+                    mode="coding_pip",
+                    packages=["package-alpha"],
+                    pip_upgrade=True,
+                    sandbox_id="sbox-pkg",
+                )
+                self.server.task_router(
+                    mode="coding_sandbox",
+                    sandbox_action="delete",
+                    sandbox_id="sbox-one",
+                )
+                self.server.task_router(
+                    mode="coding_sandbox",
+                    sandbox_action="delete",
+                    sandbox_id="sbox-two",
+                )
+                sandbox_duplicate = self.server.task_router(
+                    mode="coding_sandbox",
+                    sandbox_action="delete",
+                    sandbox_id="sbox-two",
+                )
+        finally:
+            self.server._TASK_ROUTER_SERVICE.route = original_route
+
+        self.assertEqual(
+            [(call["mode"], call["pip_upgrade"], call["sandbox_id"]) for call in calls],
+            [
+                ("coding_pip", False, "sbox-pkg"),
+                ("coding_pip", True, "sbox-pkg"),
+                ("coding_sandbox", False, "sbox-one"),
+                ("coding_sandbox", False, "sbox-two"),
+            ],
+        )
+        self.assertEqual(pip_duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(pip_duplicate["duplicate"])
+        self.assertEqual(sandbox_duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(sandbox_duplicate["duplicate"])
+        journal_text = (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("package-alpha", journal_text)
+        self.assertNotIn("sbox-pkg", journal_text)
+        self.assertNotIn("sbox-one", journal_text)
+        self.assertNotIn("sbox-two", journal_text)
+
+    def test_mutation_replay_guard_suppresses_duplicate_apply_diff_patch(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        diff_text = """diff --git a/docs/a.md b/docs/a.md
+--- a/docs/a.md
++++ b/docs/a.md
+@@ -1 +1 @@
+-hello world
++hello replay
+"""
+
+        with self._authorized_http_tool_context(session_id="patch-session", idempotency_key="patch-1"):
+            first = self.server.apply_unified_diff(diff_text=diff_text, check_only=False)
+            duplicate = self.server.apply_unified_diff(diff_text=diff_text, check_only=False)
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual((self.repo_path / "docs" / "a.md").read_text(encoding="utf-8"), "hello replay\n")
+        journal_text = (self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("hello world", journal_text)
+        self.assertNotIn("hello replay", journal_text)
+
+    def test_mutation_replay_guard_failed_original_duplicate_stays_failed(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+
+        with self._authorized_http_tool_context(
+            session_id="failed-replay",
+            idempotency_key="bad-patch",
+        ):
+            first = self.server.apply_unified_diff(
+                diff_text="not a patch",
+                check_only=False,
+            )
+            duplicate = self.server.apply_unified_diff(
+                diff_text="not a patch",
+                check_only=False,
+            )
+
+        self.assertFalse(first["ok"])
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertFalse(duplicate["ok"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["replay_guard"]["original_status"], "failed")
+        self.assertEqual(
+            duplicate["error"],
+            "original mutating request did not complete successfully",
+        )
+        events = [
+            event
+            for event in self._audit_events()
+            if event["tool_name"] == "mutation_replay_guard"
+        ]
+        self.assertFalse(events[-1]["success"])
+        self.assertEqual(
+            events[-1]["arguments"]["replay_guard"]["decision"],
+            "duplicate_suppressed",
+        )
+
+    def test_mutation_replay_guard_exception_original_duplicate_stays_failed(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+        arguments = {
+            "mode": "write",
+            "path": "raised-before-write.txt",
+            "content": "hello",
+        }
+
+        def raise_before_mutation():
+            raise RuntimeError("simulated mutation failure")
+
+        with self._authorized_http_tool_context(
+            session_id="exception-replay",
+            idempotency_key="raising-write",
+        ):
+            with self.assertRaises(RuntimeError):
+                self.server._run_with_tool_security_audit(
+                    "workspace_transaction",
+                    arguments,
+                    raise_before_mutation,
+                )
+            duplicate = self.server._run_with_tool_security_audit(
+                "workspace_transaction",
+                arguments,
+                lambda: self.fail("duplicate mutating action should not run"),
+            )
+
+        self.assertFalse((self.repo_path / "raised-before-write.txt").exists())
+        self.assertEqual(duplicate["schema"], "mutation_replay_guard.duplicate.v1")
+        self.assertFalse(duplicate["ok"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["replay_guard"]["original_status"], "failed")
+        self.assertEqual(
+            duplicate["error"],
+            "original mutating request did not complete successfully",
+        )
+        events = [
+            event
+            for event in self._audit_events()
+            if event["tool_name"] == "mutation_replay_guard"
+        ]
+        self.assertFalse(events[-1]["success"])
+        self.assertEqual(
+            events[-1]["arguments"]["replay_guard"]["decision"],
+            "duplicate_suppressed",
+        )
+
+    def test_mutation_replay_guard_pending_original_duplicate_stays_failed(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+
+        with self._authorized_http_tool_context(
+            session_id="pending-replay",
+            idempotency_key="pending-write",
+        ):
+            categories = self.server._require_tool_security_gate(
+                "workspace_transaction",
+                {"mode": "write", "path": "pending.txt", "content": "hello"},
+            )
+            first_guard = self.server._mutation_replay_guard_begin(
+                "workspace_transaction",
+                {"mode": "write", "path": "pending.txt", "content": "hello"},
+                categories,
+            )
+            duplicate_guard = self.server._mutation_replay_guard_begin(
+                "workspace_transaction",
+                {"mode": "write", "path": "pending.txt", "content": "hello"},
+                categories,
+            )
+
+        self.assertTrue(first_guard["enabled"])
+        self.assertFalse(first_guard.get("duplicate", False))
+        self.assertTrue(duplicate_guard["duplicate"])
+        duplicate = duplicate_guard["response"]
+        self.assertFalse(duplicate["ok"])
+        self.assertEqual(duplicate["replay_guard"]["original_status"], "started")
+        self.assertEqual(
+            duplicate["error"],
+            "original mutating request did not complete successfully",
+        )
+
+    def test_mutation_replay_guard_denies_key_reuse_with_different_digest(self):
+        self.server.ALLOW_MUTATIONS = True
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+
+        with self._authorized_http_tool_context(session_id="replay-session"):
+            self.server.workspace_transaction(
+                mode="write",
+                path="first-key-use.txt",
+                content="one",
+                overwrite=False,
+                request_metadata={"idempotency_key": "same-key"},
+            )
+            with self.assertRaises(PermissionError):
+                self.server.workspace_transaction(
+                    mode="write",
+                    path="second-key-use.txt",
+                    content="two",
+                    overwrite=False,
+                    request_metadata={"idempotency_key": "same-key"},
+                )
+
+        events = self._audit_events()
+        conflict = [event for event in events if event["tool_name"] == "mutation_replay_guard" and not event["success"]][0]
+        self.assertEqual(conflict["arguments"]["replay_guard"]["decision"], "idempotency_key_conflict")
+        self.assertEqual(conflict["reason"], "idempotency key reused for different mutating digest")
+        audit_text = self.server.MCP_AUDIT_LOG_FILE.read_text(encoding="utf-8")
+        self.assertNotIn("one", audit_text)
+        self.assertNotIn("two", audit_text)
+
+    def test_mutation_replay_guard_read_only_categories_do_not_journal(self):
+        self.server.MCP_MUTATION_REPLAY_GUARD_ENABLED = True
+
+        with self._authorized_http_tool_context(
+            session_id="read-only-session",
+            scopes=frozenset({self.server.MCP_SCOPE_READ}),
+        ):
+            categories = self.server._require_tool_security_gate("workspace_transaction", {"mode": "validate"})
+            guard = self.server._mutation_replay_guard_begin("workspace_transaction", {"mode": "validate"}, categories)
+
+        self.assertEqual(categories, ["read-only"])
+        self.assertFalse(guard["enabled"])
+        self.assertFalse((self.repo_path / self.server.MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE).exists())
+
+    def test_mutation_replay_guard_prunes_by_ttl_and_count(self):
+        self.server.MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES = 2
+        self.server.MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS = 60
+        now = datetime.now(timezone.utc)
+        entries = [
+            {"guard_id": "old", "created_at": (now - timedelta(seconds=120)).isoformat()},
+            {"guard_id": "a", "created_at": (now - timedelta(seconds=3)).isoformat()},
+            {"guard_id": "b", "created_at": (now - timedelta(seconds=2)).isoformat()},
+            {"guard_id": "c", "created_at": (now - timedelta(seconds=1)).isoformat()},
+        ]
+
+        pruned = self.server._mutation_replay_prune_entries(entries, now=now)
+
+        self.assertEqual([entry["guard_id"] for entry in pruned], ["b", "c"])
+
+    def test_governance_audit_summary_counts_replay_guard_decisions(self):
+        events = [
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "tool_name": "mutation_replay_guard",
+                "categories": ["audit", "write"],
+                "success": True,
+                "reason": "recorded",
+                "arguments": {"replay_guard": {"decision": "recorded"}},
+            },
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "tool_name": "mutation_replay_guard",
+                "categories": ["audit", "write"],
+                "success": True,
+                "reason": "duplicate_suppressed",
+                "arguments": {"replay_guard": {"decision": "duplicate_suppressed"}},
+            },
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "tool_name": "mutation_replay_guard",
+                "categories": ["audit", "write"],
+                "success": False,
+                "reason": "idempotency key reused for different mutating digest",
+                "arguments": {"replay_guard": {"decision": "idempotency_key_conflict"}},
+            },
+        ]
+
+        summary = self.server._aggregate_audit_events(events)["mutation_replay_guard"]
+
+        self.assertEqual(summary["event_count"], 3)
+        self.assertEqual(summary["recorded_count"], 1)
+        self.assertEqual(summary["duplicate_suppressed_count"], 1)
+        self.assertEqual(summary["conflict_count"], 1)
+        self.assertEqual(summary["by_decision"]["idempotency_key_conflict"], 1)
 
     def test_redacts_sensitive_audit_arguments_and_reason(self):
         self.server._append_audit_event(

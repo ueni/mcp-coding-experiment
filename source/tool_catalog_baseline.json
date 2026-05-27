@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 40,
+  "tool_count": 41,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -6858,6 +6858,376 @@
       "name": "mutation_step_guard"
     },
     {
+      "digest": "sha256:32d16aa355dff9571ee2d5a5770dff38f67020b80d5ea365f654b72c47d027c2",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Evaluate declared MCP tool steps against a reviewed repo-local policy bundle without executing them.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "allowed_targets": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Allowed Targets"
+              },
+              "data_classification": {
+                "default": "unspecified",
+                "title": "Data Classification",
+                "type": "string"
+              },
+              "execution_mode": {
+                "default": "auto",
+                "title": "Execution Mode",
+                "type": "string"
+              },
+              "intent": {
+                "title": "Intent",
+                "type": "string"
+              },
+              "planned_steps": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Planned Steps",
+                "type": "array"
+              },
+              "policy_bundle_path": {
+                "default": ".config/codebase-tooling-mcp/policies/mcp-governance.example.json",
+                "title": "Policy Bundle Path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "intent",
+              "planned_steps"
+            ],
+            "title": "policy_governance_decisionArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "policy_governance_decision",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "authoritative_hard_gates": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "bundle_id": {
+                "type": "string"
+              },
+              "bundle_version": {
+                "type": "string"
+              },
+              "data_classification": {
+                "type": "string"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "requires_approval"
+                ],
+                "type": "string"
+              },
+              "decision_counts": {
+                "type": "object"
+              },
+              "decision_id": {
+                "type": "string"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "execution_mode": {
+                "type": "string"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "matched_rule_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "policy_bundle": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "rule_results": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "policy_governance_decision.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "step_count": {
+                "type": "integer"
+              },
+              "workflow_policy_plan": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "decision",
+              "ok",
+              "decision_id",
+              "policy_bundle",
+              "matched_rule_ids",
+              "decision_counts",
+              "rule_results",
+              "findings",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "intent",
+            "execution_mode",
+            "data_classification",
+            "step_count",
+            "bundle_id",
+            "bundle_version",
+            "authoritative_hard_gates",
+            "workflow_policy_plan",
+            "security"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "authoritative_hard_gates": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "bundle_id": {
+                "type": "string"
+              },
+              "bundle_version": {
+                "type": "string"
+              },
+              "data_classification": {
+                "type": "string"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "requires_approval"
+                ],
+                "type": "string"
+              },
+              "decision_counts": {
+                "type": "object"
+              },
+              "decision_id": {
+                "type": "string"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "execution_mode": {
+                "type": "string"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "matched_rule_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "policy_bundle": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "rule_results": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "policy_governance_decision.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "step_count": {
+                "type": "integer"
+              },
+              "workflow_policy_plan": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "decision",
+              "ok",
+              "decision_id",
+              "policy_bundle",
+              "matched_rule_ids",
+              "decision_counts",
+              "rule_results",
+              "findings",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "executed_plan",
+            "decision",
+            "ok",
+            "decision_id",
+            "policy_bundle",
+            "matched_rule_ids",
+            "decision_counts",
+            "rule_results",
+            "findings",
+            "safe_next_actions"
+          ],
+          "tool": "policy_governance_decision"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "policy_governance_decision"
+        }
+      },
+      "name": "policy_governance_decision"
+    },
+    {
       "digest": "sha256:3f6cd6b499d0e504f385076aa7e9d8d427e77d6e19f8785953f1c492da565cce",
       "metadata": {
         "documentation": [
@@ -10846,7 +11216,7 @@
       "name": "tool_annotations"
     },
     {
-      "digest": "sha256:815d571a41d6cc9463291dd255a0fb7928a46241e58467abdefca66b1e596107",
+      "digest": "sha256:cbf1e74db272847c3a448fbff8c7f097a9be132bb0d6fe71a0db9fe14b95eacb",
       "metadata": {
         "documentation": [
           {
@@ -10885,6 +11255,9 @@
               "current": {
                 "type": "object"
               },
+              "draft_tool_metadata_lint": {
+                "type": "object"
+              },
               "drift": {
                 "type": "object"
               },
@@ -10917,6 +11290,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -10965,7 +11339,8 @@
             "baseline.per_tool",
             "current.per_tool",
             "drift.changed[].metadata_diff",
-            "lint.findings"
+            "lint.findings",
+            "draft_tool_metadata_lint.findings"
           ],
           "outputSchema": {
             "additionalProperties": true,
@@ -10974,6 +11349,9 @@
                 "type": "object"
               },
               "current": {
+                "type": "object"
+              },
+              "draft_tool_metadata_lint": {
                 "type": "object"
               },
               "drift": {
@@ -11008,6 +11386,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -11021,6 +11400,7 @@
             "current",
             "drift",
             "lint",
+            "draft_tool_metadata_lint",
             "security"
           ],
           "tool": "tool_catalog_integrity"
@@ -12486,7 +12866,7 @@
       "name": "workflow_task"
     },
     {
-      "digest": "sha256:bef4f51c6ecbb842af1ea4a2f44255f47e9368ea82f83083b667df182fdb2c16",
+      "digest": "sha256:98e914dfe0efa1cab77adfaab825ee2e4eefda28520896645136ccdb36929d93",
       "metadata": {
         "documentation": [
           {
@@ -12575,6 +12955,11 @@
                 "default": null,
                 "title": "Exclude Globs"
               },
+              "idempotency_key": {
+                "default": "",
+                "title": "Idempotency Key",
+                "type": "string"
+              },
               "include_build_dir": {
                 "default": false,
                 "title": "Include Build Dir",
@@ -12654,6 +13039,19 @@
                 "default": "",
                 "title": "Replacement",
                 "type": "string"
+              },
+              "request_metadata": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Request Metadata"
               },
               "snapshot_id": {
                 "default": "",
@@ -13302,5 +13700,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:b77111a18590c8a795fd60400b6a6e136119c147883db60af7d745922870477c"
+  "whole_catalog_digest": "sha256:a28a5f2e8622b9f1fd607f681a02dbedcbedb9b4700f99cc56191aa2caaee777"
 }

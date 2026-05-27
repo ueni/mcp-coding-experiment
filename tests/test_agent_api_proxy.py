@@ -58,6 +58,9 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "MCP_AGENT_PROXY_COST_PER_1K_INPUT_USD",
             "MCP_AGENT_PROXY_COST_PER_1K_OUTPUT_USD",
             "MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW",
+            "MCP_AGENT_PROXY_ANONYMIZATION_MODE",
+            "MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS",
+            "MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED",
             "MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT",
             "MCP_AGENT_PROXY_AUDIT_EMERGENCY_ALLOW",
             "MCP_AGENT_PROXY_DISCLOSURE_AUDIT_FILE",
@@ -80,6 +83,9 @@ class AgentAPIProxyTest(ServerToolsTestBase):
             "MCP_AGENT_PROXY_DEFAULT_MODEL",
             "MCP_AGENT_PROXY_LOCAL_MODELS",
             "MCP_AGENT_PROXY_PREFER_LOCAL",
+            "MCP_AGENT_PROXY_ANONYMIZATION_MODE",
+            "MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS",
+            "MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED",
             "MCP_TOOL_RESPONSE_SCANNER_MODE",
         ]
         self.orig_proxy_values = {name: getattr(self.server, name) for name in self.proxy_attrs}
@@ -99,6 +105,9 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.server.MCP_AGENT_PROXY_MAX_COST_USD = 0
         self.server.MCP_AGENT_PROXY_COST_PER_1K_INPUT_USD = 0
         self.server.MCP_AGENT_PROXY_COST_PER_1K_OUTPUT_USD = 0
+        self.server.MCP_AGENT_PROXY_ANONYMIZATION_MODE = "balanced"
+        self.server.MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS = 512
+        self.server.MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED = True
         self.server.MCP_AGENT_PROXY_AUDIT_EMERGENCY_ALLOW = False
         self.server.MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT = True
         self.server.MCP_TOOL_RESPONSE_SCANNER_MODE = "off"
@@ -373,6 +382,107 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertGreaterEqual(summary["disclosure_categories"].get("email", 0), 1)
         self.assertGreaterEqual(summary["disclosure_categories"].get("opaque_redactions", 0), 1)
 
+    def test_anonymizer_profile_detects_typed_entities_and_keeps_mapping_local(self):
+        self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = "NDA Alpha"
+        payload = self.base_payload(
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "NDA Alpha for Acme Corp by owner Jane Doe uses "
+                        "repo git@github.com:acme/private-repo.git on branch feature/secret-work "
+                        "at /home/user/customer/private-repo with ticket ABC-123, "
+                        "email jane.doe@acme.example and https://customer.example/internal."
+                    ),
+                }
+            ]
+        )
+
+        anonymized, mapping = self.server._agent_proxy_anonymize_payload(payload)
+        forwarded = json.dumps(anonymized, sort_keys=True)
+        inventory = self.server._agent_proxy_audit_inventory(mapping)
+
+        for raw in [
+            "NDA Alpha",
+            "Acme Corp",
+            "Jane Doe",
+            "git@github.com:acme/private-repo.git",
+            "feature/secret-work",
+            "/home/user/customer/private-repo",
+            "ABC-123",
+            "jane.doe@acme.example",
+            "https://customer.example/internal.",
+        ]:
+            self.assertNotIn(raw, forwarded)
+        self.assertIn("__MCP_ANON_ORG_", forwarded)
+        self.assertIn("__MCP_ANON_PERSON_", forwarded)
+        self.assertIn("__MCP_ANON_REPO_", forwarded)
+        self.assertIn("__MCP_ANON_BRANCH_", forwarded)
+        self.assertIn("__MCP_ANON_PATH_", forwarded)
+        self.assertIn("__MCP_ANON_TICKET_", forwarded)
+        self.assertIn("__MCP_ANON_EMAIL_", forwarded)
+        self.assertIn("__MCP_ANON_URL_", forwarded)
+        self.assertFalse(inventory["mapping_persisted"])
+        self.assertEqual("request_local_process_memory", inventory["mapping_scope"])
+        self.assertEqual("high", inventory["confidence"])
+        self.assertFalse("reversible" in inventory and isinstance(inventory.get("reversible"), dict))
+        self.assertIn("org", inventory["placeholder_categories"])
+        self.assertIn("person", inventory["placeholder_categories"])
+
+    def test_anonymization_off_still_redacts_secrets(self):
+        self.server.MCP_AGENT_PROXY_ANONYMIZATION_MODE = "off"
+        payload = self.base_payload(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "NDA Alpha for Acme Corp with token sk-abcdefghijklmnopqrstuvwxyz123456",
+                }
+            ]
+        )
+
+        anonymized, mapping = self.server._agent_proxy_anonymize_payload(payload)
+        forwarded = json.dumps(anonymized, sort_keys=True)
+        inventory = self.server._agent_proxy_audit_inventory(mapping)
+
+        self.assertIn("NDA Alpha", forwarded)
+        self.assertIn("Acme Corp", forwarded)
+        self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz123456", forwarded)
+        self.assertIn("__MCP_REDACTED_SECRET_", forwarded)
+        self.assertEqual("off", inventory["mode"])
+        self.assertEqual("low", inventory["confidence"])
+        self.assertIn("anonymization_off_for_sensitive_input", inventory["confidence_reasons"])
+
+    def test_strict_anonymization_low_confidence_fails_closed_before_provider_call(self):
+        self.enable_online()
+        self.server.MCP_AGENT_PROXY_ANONYMIZATION_MODE = "strict"
+        called = {"count": 0}
+
+        def fake_post(url, payload, timeout):
+            called["count"] += 1
+            return {}
+
+        self.server._agent_proxy_http_post_json = fake_post
+        response = asyncio.run(
+            self.server.openai_chat_completions(
+                FakeRequest(
+                    self.base_payload(
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": "This confidential internal NDA context has no safely detected entity.",
+                            }
+                        ]
+                    )
+                )
+            )
+        )
+        payload = self.response_json(response)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(payload["error"]["code"], "agent_proxy_anonymization_low_confidence")
+        self.assertEqual(called["count"], 0)
+        self.assertNotIn("confidential internal NDA", self.disclosure_text())
+
     def test_online_non_streaming_redacts_full_bearer_authorization_before_forwarding(self):
         self.enable_online()
         self.server.MCP_AGENT_PROXY_MEMORY_CAPTURE_ENABLED = True
@@ -483,7 +593,7 @@ class AgentAPIProxyTest(ServerToolsTestBase):
         self.assertTrue(packet["policy_decision"]["online_allowed"])
         self.assertEqual(
             packet["policy_decision"]["anonymizer_profile"],
-            self.server.MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+            self.server._agent_proxy_anonymization_profile_id(),
         )
         self.assertFalse(packet["policy_decision"]["offline_controls"]["no_network"])
         self.assertEqual(

@@ -34,6 +34,7 @@ import xml.etree.ElementTree as ET
 import pty
 import select
 import concurrent.futures
+import jsonschema
 import importlib.util
 import inspect
 import signal
@@ -112,9 +113,10 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
 
 
 from mcp import types as mcp_types
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import EventMessage, EventStore
-from pydantic import Field, RootModel
+from pydantic import Field, RootModel, ValidationError
 from source.agents_context_health import analyze_agents_context, summarize_agents_context_health
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
@@ -181,6 +183,23 @@ MCP_STREAM_REPLAY_RETENTION_SECONDS = max(
 MCP_STREAM_REPLAY_RETRY_INTERVAL_MS = max(
     250,
     int(os.getenv("MCP_STREAM_REPLAY_RETRY_INTERVAL_MS", "1000")),
+)
+MCP_MUTATION_REPLAY_GUARD_ENABLED = os.getenv(
+    "MCP_MUTATION_REPLAY_GUARD_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE = Path(
+    os.getenv(
+        "MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE",
+        ".codebase-tooling-mcp/audit/mutation_replay_journal.json",
+    )
+)
+MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES = max(
+    1,
+    int(os.getenv("MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES", "1000")),
+)
+MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS = max(
+    1,
+    int(os.getenv("MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS", "86400")),
 )
 MCP_AUDIT_LOG_FILE = Path(
     os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
@@ -389,6 +408,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "workflow_policy_plan": {"categories": ["read-only", "governance"]},
+    "policy_governance_decision": {"categories": ["read-only", "governance"]},
     "workflow_reminder": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
@@ -523,6 +543,9 @@ _HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.Cont
 _HTTP_REQUEST_GRANTED_SCOPES: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
     "http_request_granted_scopes", default=None
 )
+_HTTP_IDEMPOTENCY_KEY: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "http_idempotency_key", default=""
+)
 _OTEL_CURRENT_SPAN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "mcp_otel_current_span_id", default=""
 )
@@ -633,6 +656,15 @@ MCP_AGENT_PROXY_COST_PER_1K_OUTPUT_USD = _env_float(
 MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = os.getenv(
     "MCP_AGENT_PROXY_ANONYMIZE_TERMS", ""
 ).strip()
+MCP_AGENT_PROXY_ANONYMIZATION_MODE = os.getenv(
+    "MCP_AGENT_PROXY_ANONYMIZATION_MODE", "balanced"
+).strip().lower()
+MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS = _env_int(
+    "MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS", 512, minimum=1
+)
+MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED = _env_flag(
+    "MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED", True
+)
 MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT = _env_flag(
     "MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT", True
 )
@@ -661,7 +693,7 @@ MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS = _env_int(
 )
 MCP_TOOL_RESPONSE_SCANNER_SCHEMA = "mcp_tool_response_scanner.v1"
 MCP_AGENT_PROXY_POLICY_VERSION = "mcp_agent_proxy.policy.v1"
-MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "default-request-local-redaction.v1"
+MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "local-reversible-anonymization.v2"
 MCP_AGENT_PROXY_AGENT_FACADE_PROFILE = "chat-completions-controlled-facade.v1"
 _AGENT_PROXY_DISCLOSURE_AUDIT_LOCK = threading.Lock()
 AGENT_EXECUTION_MODE_PROMPT_TERMS = {
@@ -2032,6 +2064,19 @@ def _redact_audit_value(value: Any, depth: int = 0) -> Any:
                 redacted[key_str] = item
             elif SENSITIVE_AUDIT_KEY_RE.search(key_str):
                 redacted[key_str] = "<redacted>"
+            elif key_lower in {
+                "content",
+                "diff_text",
+                "replacement",
+                "patch",
+                "patch_text",
+                "new_content",
+                "old_content",
+                "stdin",
+                "env",
+                "environment",
+            }:
+                redacted[key_str] = "<redacted>"
             else:
                 redacted[key_str] = _redact_audit_value(item, depth + 1)
         return redacted
@@ -2058,6 +2103,127 @@ def _redact_untrusted_content_excerpt(value: str, *, max_chars: int = 180) -> st
         return redacted[:max_chars] + "...[truncated]"
     return redacted
 
+
+_SEP1303_VALIDATION_EXCEPTION_TYPES = (ValueError, ValidationError, FileNotFoundError)
+_SEP1303_VALIDATION_ERROR_MAX_CHARS = 360
+
+
+def _redact_tool_validation_error_text(value: str) -> str:
+    """Return bounded, model-visible validation text safe for MCP tool results."""
+    text = re.sub(r"\s+", " ", str(value).replace("\x00", " ")).strip()
+    repo_text = str(REPO_PATH)
+    if repo_text and repo_text in text:
+        text = text.replace(repo_text, "<repo>")
+    text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
+    text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", text)
+    text = re.sub(
+        r"(?i)authorization:\s*bearer\s+\S+",
+        "authorization: bearer <redacted:secret>",
+        text,
+    )
+    if len(text) > _SEP1303_VALIDATION_ERROR_MAX_CHARS:
+        text = text[:_SEP1303_VALIDATION_ERROR_MAX_CHARS] + "...[truncated]"
+    return text or "invalid tool arguments"
+
+
+def _tool_validation_exception_from(exc: BaseException) -> BaseException | None:
+    """Classify safe public-tool argument failures for SEP-1303 conversion."""
+    candidate: BaseException | None = exc
+    if isinstance(exc, ToolError) and isinstance(exc.__cause__, BaseException):
+        candidate = exc.__cause__
+    if isinstance(candidate, _SEP1303_VALIDATION_EXCEPTION_TYPES):
+        return candidate
+    return None
+
+
+def _make_tool_validation_error_result(tool_name: str, exc: BaseException) -> mcp_types.CallToolResult:
+    """Build an MCP SEP-1303 tool execution error for invalid-but-well-formed inputs.
+
+    SEP-1303 makes tool argument/input validation failures model-visible so agents can
+    self-correct. The text is deliberately concise and redacted: it includes the public
+    tool name and remediation, but not raw arguments, bearer tokens, host absolute paths,
+    repository file contents, or environment values.
+    """
+    safe_tool = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(tool_name))[:120] or "tool"
+    safe_message = _redact_tool_validation_error_text(str(exc))
+    text = (
+        f"Tool argument validation failed for `{safe_tool}`: {safe_message}. "
+        "Remediation: correct the arguments according to the tool input schema and retry."
+    )
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=text)],
+        isError=True,
+    )
+
+
+_ORIGINAL_MCP_CALL_TOOL = mcp.call_tool
+
+
+async def _sep1303_model_visible_call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    """Call public tools while returning validation failures as tool results.
+
+    Unknown tool names, malformed/non-object arguments, permission/auth failures, and
+    non-validation server failures still raise so the protocol/HTTP layer can handle
+    them as errors. Invalid-but-well-formed arguments raised as ValueError,
+    Pydantic ValidationError, or FileNotFoundError become `isError: true` tool results.
+    """
+    if not isinstance(arguments, dict):
+        raise ToolError("Invalid tool arguments: arguments must be a JSON object")
+    if mcp._tool_manager.get_tool(name) is None:  # type: ignore[attr-defined]
+        raise ToolError(f"Unknown tool: {name}")
+    try:
+        return await _ORIGINAL_MCP_CALL_TOOL(name, arguments)
+    except ToolError as exc:
+        validation_exc = _tool_validation_exception_from(exc)
+        if validation_exc is None:
+            raise
+        return _make_tool_validation_error_result(name, validation_exc)
+
+
+async def _sep1303_call_tool_request_handler(req: mcp_types.CallToolRequest) -> mcp_types.ServerResult:
+    """Low-level MCP handler preserving protocol errors outside SEP-1303 validation."""
+    tool_name = req.params.name
+    arguments = req.params.arguments or {}
+    tool = await mcp._mcp_server._get_cached_tool_definition(tool_name)  # type: ignore[attr-defined]
+    results = await mcp.call_tool(tool_name, arguments)
+    if isinstance(results, mcp_types.CallToolResult):
+        return mcp_types.ServerResult(results)
+    if isinstance(results, mcp_types.CreateTaskResult):
+        return mcp_types.ServerResult(results)
+    if isinstance(results, tuple) and len(results) == 2:
+        unstructured_content, maybe_structured_content = results
+    elif isinstance(results, dict):
+        maybe_structured_content = results
+        unstructured_content = [
+            mcp_types.TextContent(type="text", text=json.dumps(results, indent=2))
+        ]
+    elif hasattr(results, "__iter__"):
+        unstructured_content = results
+        maybe_structured_content = None
+    else:
+        raise RuntimeError(f"Unexpected return type from tool: {type(results).__name__}")
+    if tool and tool.outputSchema is not None:
+        if maybe_structured_content is None:
+            return mcp._mcp_server._make_error_result(  # type: ignore[attr-defined]
+                "Output validation error: outputSchema defined but no structured output returned"
+            )
+        try:
+            jsonschema.validate(instance=maybe_structured_content, schema=tool.outputSchema)
+        except jsonschema.ValidationError as exc:
+            return mcp._mcp_server._make_error_result(  # type: ignore[attr-defined]
+                f"Output validation error: {exc.message}"
+            )
+    return mcp_types.ServerResult(
+        mcp_types.CallToolResult(
+            content=list(unstructured_content),
+            structuredContent=maybe_structured_content,
+            isError=False,
+        )
+    )
+
+
+mcp.call_tool = _sep1303_model_visible_call_tool  # type: ignore[method-assign]
+mcp._mcp_server.request_handlers[mcp_types.CallToolRequest] = _sep1303_call_tool_request_handler  # type: ignore[attr-defined]
 
 def _prompt_injection_signal_negated(text: str, start: int) -> bool:
     prefix = text[max(0, start - 120) : start]
@@ -2349,8 +2515,34 @@ _AGENT_PROXY_SECRET_TOKEN_RE = re.compile(
     r"(?i)(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
 )
 _AGENT_PROXY_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_AGENT_PROXY_GIT_REMOTE_RE = re.compile(
+    r"(?ix)\b(?:git@|ssh://git@|https://)(?:[A-Za-z0-9.-]+)[/:][A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?"
+)
+_AGENT_PROXY_URL_RE = re.compile(r"(?i)\bhttps?://[^\s<>\"']+")
+_AGENT_PROXY_DOMAIN_RE = re.compile(
+    r"(?i)(?<![@/\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|io|ai|dev|app|cloud|co|de|uk|us|biz|info)(?![/\w.-])"
+)
 _AGENT_PROXY_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
+)
+_AGENT_PROXY_REPO_SLUG_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])(?:github\.com[:/])?([A-Za-z0-9_.-]{2,39}/[A-Za-z0-9_.-]{2,80})(?:\.git)?(?![A-Za-z0-9_.-])"
+)
+_AGENT_PROXY_TICKET_RE = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Z][A-Z0-9]{1,12}-\d{1,7}|#\d{2,7})(?![A-Za-z0-9_])")
+_AGENT_PROXY_BRANCH_RE = re.compile(
+    r"(?ix)\b(?:branch|checkout|merge|rebase|from|onto|refs/heads/)\s+((?:feature|fix|bugfix|hotfix|release|chore|task|builder|origin)/[A-Za-z0-9._/-]{2,120}|[A-Za-z0-9._-]{2,80})"
+)
+_AGENT_PROXY_ORG_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,5}\s+(?:Corp|Corporation|Company|Inc|LLC|Ltd|Limited|GmbH|AG|SA|PLC|BV|Foundation|Labs|Systems|Technologies|Tech|Group|Studio|Studios))\b"
+)
+_AGENT_PROXY_PROJECT_RE = re.compile(
+    r"\b(?:Project|Customer|Client|Account|Program|Codename)\s+[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*){0,4}\b"
+)
+_AGENT_PROXY_PERSON_RE = re.compile(
+    r"\b(?:[A-Z][a-z]{1,30}\s+[A-Z][a-z]{1,30})(?:\s+[A-Z][a-z]{1,30})?\b"
+)
+_AGENT_PROXY_NDA_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:nda|confidential|customer|client|company|organisation|organization|project|codename|internal|private|proprietary)\b"
 )
 _AGENT_PROXY_PLACEHOLDER_RE = re.compile(r"__MCP_(?:ANON|REDACTED)_[A-Z_]+_\d{4}__")
 _AGENT_PROXY_PLACEHOLDER_FRAGMENT_RE = re.compile(r"__MCP(?:_[A-Z0-9_]*)?")
@@ -2735,12 +2927,32 @@ def _agent_proxy_error_payload(
     }, status_code
 
 
+def _agent_proxy_anonymization_mode() -> str:
+    mode = str(MCP_AGENT_PROXY_ANONYMIZATION_MODE or "balanced").strip().lower()
+    if mode in {"off", "disabled", "none"}:
+        return "off"
+    if mode in {"strict", "nda", "nda-strict", "fail-closed"}:
+        return "strict"
+    return "balanced"
+
+
+def _agent_proxy_anonymization_profile_id() -> str:
+    return f"{MCP_AGENT_PROXY_ANONYMIZATION_PROFILE}.{_agent_proxy_anonymization_mode()}"
+
+
 def _agent_proxy_new_placeholder(
     state: dict[str, Any], category: str, value: str, *, reversible: bool
 ) -> str:
     existing = state["by_value"].get((category, value, reversible))
     if existing:
         return existing
+    max_placeholders = int(state.get("max_placeholders", MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS))
+    total = sum(int(item) for item in state["counts"].values())
+    if total >= max_placeholders:
+        state["bounds_exceeded"] = True
+        category = "overflow"
+        reversible = False
+        value = ""
     count = int(state["counts"].get(category, 0)) + 1
     state["counts"][category] = count
     token = "ANON" if reversible else "REDACTED"
@@ -2783,18 +2995,46 @@ def _agent_proxy_configured_terms() -> list[str]:
 def _agent_proxy_replace_configured_terms(text: str, state: dict[str, Any]) -> str:
     result = text
     for term in _agent_proxy_configured_terms():
-        placeholder = _agent_proxy_new_placeholder(state, "term", term, reversible=True)
-        if re.fullmatch(r"[\w .-]+", term):
+        if re.fullmatch(r"[\w .:/@#-]+", term):
             pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE)
-            result = pattern.sub(placeholder, result)
-        else:
+            result = pattern.sub(
+                lambda _match, raw_term=term: _agent_proxy_new_placeholder(
+                    state, "term", raw_term, reversible=True
+                ),
+                result,
+            )
+        elif term in result:
+            placeholder = _agent_proxy_new_placeholder(state, "term", term, reversible=True)
             result = result.replace(term, placeholder)
     return result
+
+
+def _agent_proxy_replace_pattern(
+    text: str,
+    state: dict[str, Any],
+    pattern: re.Pattern[str],
+    category: str,
+    *,
+    reversible: bool = True,
+) -> str:
+    return pattern.sub(
+        lambda match: _agent_proxy_new_placeholder(
+            state, category, match.group(0), reversible=reversible
+        ),
+        text,
+    )
+
+
+def _agent_proxy_replace_branch_match(match: re.Match[str], state: dict[str, Any]) -> str:
+    branch = match.group(1)
+    placeholder = _agent_proxy_new_placeholder(state, "branch", branch, reversible=True)
+    return match.group(0).replace(branch, placeholder, 1)
 
 
 def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
     if not text:
         return text
+    mode = str(state.get("mode") or _agent_proxy_anonymization_mode())
     state["seen_text"] += "\n" + text[:10000]
     result = _AGENT_PROXY_SECRET_ASSIGNMENT_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), text
@@ -2805,15 +3045,38 @@ def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
     result = _AGENT_PROXY_SECRET_TOKEN_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), result
     )
-    result = _AGENT_PROXY_EMAIL_RE.sub(
-        lambda match: _agent_proxy_new_placeholder(state, "email", match.group(0), reversible=True),
-        result,
+    if mode == "off":
+        return result
+    result = _agent_proxy_replace_configured_terms(result, state)
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_EMAIL_RE, "email")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_GIT_REMOTE_RE, "repo")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_URL_RE, "url")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_ABSOLUTE_PATH_RE, "path")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_REPO_SLUG_RE, "repo")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_DOMAIN_RE, "domain")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_TICKET_RE, "ticket")
+    result = _AGENT_PROXY_BRANCH_RE.sub(
+        lambda match: _agent_proxy_replace_branch_match(match, state), result
     )
-    result = _AGENT_PROXY_ABSOLUTE_PATH_RE.sub(
-        lambda match: _agent_proxy_new_placeholder(state, "path", match.group(0), reversible=True),
-        result,
-    )
-    return _agent_proxy_replace_configured_terms(result, state)
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_PROJECT_RE, "project")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_ORG_RE, "org")
+    if mode == "strict":
+        result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_PERSON_RE, "person")
+    else:
+        # Balanced mode pseudonymizes high-confidence likely people in common
+        # assignment/introduction phrasing while avoiding broad title-case rewrites.
+        result = re.sub(
+            r"(?i:\b(?:owner|contact|author|by|from|for)\s+)("
+            + _AGENT_PROXY_PERSON_RE.pattern[2:-2]
+            + r")",
+            lambda match: match.group(0).replace(
+                match.group(1),
+                _agent_proxy_new_placeholder(state, "person", match.group(1), reversible=True),
+                1,
+            ),
+            result,
+        )
+    return result
 
 
 def _agent_proxy_anonymize_value(value: Any, state: dict[str, Any]) -> Any:
@@ -2826,21 +3089,65 @@ def _agent_proxy_anonymize_value(value: Any, state: dict[str, Any]) -> Any:
     return value
 
 
+def _agent_proxy_payload_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return "\n".join(_agent_proxy_payload_text(item) for item in value.values())
+    if isinstance(value, list):
+        return "\n".join(_agent_proxy_payload_text(item) for item in value)
+    return str(value) if value is not None else ""
+
+
+def _agent_proxy_anonymization_confidence(
+    original: dict[str, Any], anonymized: dict[str, Any], state: dict[str, Any]
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    mode = str(state.get("mode") or _agent_proxy_anonymization_mode())
+    counts = state.get("counts", {}) if isinstance(state.get("counts"), dict) else {}
+    transformed = sum(int(item) for item in counts.values()) if counts else 0
+    original_text = _agent_proxy_payload_text(_agent_proxy_request_text_digest_input(original))
+    anonymized_text = _agent_proxy_payload_text(_agent_proxy_request_text_digest_input(anonymized))
+    if state.get("bounds_exceeded"):
+        reasons.append("placeholder_bound_exceeded")
+    configured_terms = _agent_proxy_configured_terms()
+    if configured_terms and any(term and term in anonymized_text for term in configured_terms):
+        reasons.append("configured_terms_remain")
+    if mode == "off" and (_AGENT_PROXY_NDA_SIGNAL_RE.search(original_text) or configured_terms):
+        reasons.append("anonymization_off_for_sensitive_input")
+    if mode == "strict" and _AGENT_PROXY_NDA_SIGNAL_RE.search(original_text) and transformed == 0:
+        reasons.append("strict_sensitive_input_without_transform")
+    return ("low" if reasons else "high"), reasons
+
+
 def _agent_proxy_anonymize_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    mode = _agent_proxy_anonymization_mode()
     state: dict[str, Any] = {
+        "mode": mode,
         "counts": {},
         "by_value": {},
         "reversible": {},
         "irreversible": set(),
         "seen_text": "",
+        "bounds_exceeded": False,
+        "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
     }
     anonymized = _agent_proxy_anonymize_value(payload, state)
+    confidence, confidence_reasons = _agent_proxy_anonymization_confidence(payload, anonymized, state)
     inventory = {
         "counts": dict(sorted(state["counts"].items())),
         "reversible_placeholders": len(state["reversible"]),
         "irreversible_placeholders": len(state["irreversible"]),
         "placeholder_categories": sorted(state["counts"].keys()),
         "mapping_persisted": False,
+        "mapping_scope": "request_local_process_memory",
+        "profile": _agent_proxy_anonymization_profile_id(),
+        "mode": mode,
+        "version": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
+        "confidence": confidence,
+        "confidence_reasons": confidence_reasons,
+        "fail_closed_required": bool(mode == "strict" and MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED),
     }
     return anonymized, {
         "reversible": dict(state["reversible"]),
@@ -3214,7 +3521,7 @@ def _agent_proxy_audit_inventory(mapping: dict[str, Any] | None) -> dict[str, An
             except (TypeError, ValueError):
                 continue
             safe_counts[safe_key] = safe_counts.get(safe_key, 0) + count
-    safe_inventory["profile"] = MCP_AGENT_PROXY_ANONYMIZATION_PROFILE
+    safe_inventory["profile"] = _agent_proxy_anonymization_profile_id()
     safe_inventory["counts"] = dict(sorted(safe_counts.items()))
     safe_inventory["placeholder_categories"] = sorted(safe_counts.keys())
     safe_inventory["residual_sensitive_class_status"] = {
@@ -3266,7 +3573,7 @@ def _agent_proxy_policy_decision(route: dict[str, Any], policy: dict[str, Any]) 
         "decision": "online_allowed" if online_allowed else str(route.get("reason", "blocked")),
         "reason": route.get("reason"),
         "online_allowed": online_allowed,
-        "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "anonymizer_profile": _agent_proxy_anonymization_profile_id(),
         "anonymizer_required_before_online": route.get("backend") == "online",
         "offline_controls": {
             "no_network": bool(route.get("offline_no_network")),
@@ -3409,7 +3716,7 @@ def _agent_proxy_audit_base(
             "offline_no_network": route.get("offline_no_network"),
             "model_allowlist_configured": route.get("model_allowlist_configured"),
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
-            "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+            "anonymizer_profile": _agent_proxy_anonymization_profile_id(),
         },
         "anonymization": _agent_proxy_audit_inventory(mapping),
         "privacy": {
@@ -4435,6 +4742,13 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     sensitive_count = 0
     mutation_gate_failures = 0
     http_auth_denials = 0
+    mutation_replay_guard = {
+        "event_count": 0,
+        "recorded_count": 0,
+        "duplicate_suppressed_count": 0,
+        "conflict_count": 0,
+        "by_decision": {},
+    }
     clarification_gate = {
         "event_count": 0,
         "ok_to_continue_count": 0,
@@ -4477,6 +4791,20 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             mutation_gate_failures += 1
         if "http session not authorized" in reason_lower or "bearer token" in reason_lower or "not authorized" in reason_lower:
             http_auth_denials += 1
+        if tool == "mutation_replay_guard":
+            mutation_replay_guard["event_count"] += 1
+            args = event.get("arguments", {}) if isinstance(event.get("arguments"), dict) else {}
+            guard_args = args.get("replay_guard", {}) if isinstance(args.get("replay_guard"), dict) else {}
+            decision = str(guard_args.get("decision") or reason or "unknown")
+            by_decision = mutation_replay_guard["by_decision"]
+            if isinstance(by_decision, dict):
+                by_decision[decision] = int(by_decision.get(decision, 0)) + 1
+            if decision == "recorded":
+                mutation_replay_guard["recorded_count"] += 1
+            elif decision == "duplicate_suppressed":
+                mutation_replay_guard["duplicate_suppressed_count"] += 1
+            elif decision == "idempotency_key_conflict":
+                mutation_replay_guard["conflict_count"] += 1
         if tool == "clarification_gate":
             clarification_gate["event_count"] += 1
             args = event.get("arguments", {}) if isinstance(event.get("arguments"), dict) else {}
@@ -4516,6 +4844,12 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             "mode": "hash_chain_over_redacted_events",
             "event_count": len(events),
             "chain_head": chain_head,
+        },
+        "mutation_replay_guard": {
+            **mutation_replay_guard,
+            "by_decision": dict(sorted(mutation_replay_guard["by_decision"].items()))
+            if isinstance(mutation_replay_guard.get("by_decision"), dict)
+            else {},
         },
         "clarification_gate": {
             **clarification_gate,
@@ -7785,10 +8119,11 @@ def _governance_result_store_summary() -> dict[str, Any]:
     rows = payload.get("results", {})
     if not isinstance(rows, dict):
         rows = {}
-    wanted = {"policy_simulator", "workflow_policy_plan", "release_readiness", "required_tool_chain"}
+    wanted = {"policy_simulator", "workflow_policy_plan", "policy_governance_decision", "release_readiness", "required_tool_chain"}
     out: dict[str, Any] = {
         "policy_simulator": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "workflow_policy_plan": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
+        "policy_governance_decision": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "release_readiness": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "required_tool_chain": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
     }
@@ -7808,7 +8143,7 @@ def _governance_result_store_summary() -> dict[str, Any]:
         if not latest or created_at >= str(latest.get("created_at", "")):
             details: dict[str, Any] = {}
             if isinstance(value, dict):
-                for key in ("schema", "ok", "decision", "plan_id", "blocking_policies", "required_preconditions", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
+                for key in ("schema", "ok", "decision", "plan_id", "decision_id", "bundle_id", "bundle_version", "matched_rule_ids", "decision_counts", "blocking_policies", "required_preconditions", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
                     if key in value:
                         details[key] = _redact_audit_value(value[key])
             bucket["latest"] = {"result_id": str(rid), "created_at": created_at, "ok": ok, "details": details}
@@ -12272,6 +12607,379 @@ def _http_request_granted_scopes_for_tools() -> frozenset[str]:
     return scopes
 
 
+_MUTATION_REPLAY_JOURNAL_SCHEMA = "mutation_replay_journal.v1"
+_MUTATION_REPLAY_LOCK = threading.RLock()
+_MUTATION_REPLAY_CONTENT_KEYS = {
+    "content",
+    "diff_text",
+    "replacement",
+    "patch",
+    "patch_text",
+    "new_content",
+    "old_content",
+    "stdin",
+    "stdout",
+    "stderr",
+    "env",
+    "environment",
+}
+_MUTATION_REPLAY_PATH_KEYS = {
+    "path",
+    "paths",
+    "file",
+    "files",
+    "target",
+    "targets",
+    "source",
+    "source_path",
+    "destination",
+    "directory",
+    "directories",
+}
+
+
+def _mutation_replay_guard_enabled() -> bool:
+    return bool(MCP_MUTATION_REPLAY_GUARD_ENABLED)
+
+
+def _mutation_replay_journal_path() -> Path:
+    configured = MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE
+    if configured.is_absolute():
+        resolved = configured.resolve()
+        try:
+            resolved.relative_to(REPO_PATH)
+        except ValueError as exc:
+            raise PermissionError("mutation replay journal must stay inside the repository") from exc
+        return resolved
+    return _resolve_repo_path(str(configured))
+
+
+def _mutation_replay_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _mutation_replay_parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _mutation_replay_load_journal() -> dict[str, Any]:
+    path = _mutation_replay_journal_path()
+    if not path.exists():
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    if not isinstance(payload, dict):
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": [e for e in entries if isinstance(e, dict)]}
+
+
+def _mutation_replay_prune_entries(entries: list[dict[str, Any]], *, now: datetime | None = None) -> list[dict[str, Any]]:
+    now_dt = now or datetime.now(timezone.utc)
+    cutoff = now_dt - timedelta(seconds=MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS)
+    retained: list[dict[str, Any]] = []
+    for entry in entries:
+        created = _mutation_replay_parse_ts(entry.get("created_at"))
+        if created is not None and created < cutoff:
+            continue
+        retained.append(entry)
+    if len(retained) > MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES:
+        retained = retained[-MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES :]
+    return retained
+
+
+def _mutation_replay_save_journal(payload: dict[str, Any]) -> None:
+    path = _mutation_replay_journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    safe_payload = {
+        "schema": _MUTATION_REPLAY_JOURNAL_SCHEMA,
+        "updated_at": _mutation_replay_now_iso(),
+        "bounds": {
+            "max_entries": MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES,
+            "ttl_seconds": MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS,
+        },
+        "entries": entries,
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(safe_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _mutation_replay_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _mutation_replay_normalize_path(value: Any) -> str:
+    text = str(value or "").replace("\x00", " ").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if text.startswith("/") or re.match(r"^[A-Za-z]:/", text):
+        return "<redacted:absolute-path>"
+    while text.startswith("./"):
+        text = text[2:]
+    return _redact_audit_string(text.strip("/") or ".")[:160]
+
+
+def _mutation_replay_extract_targets(value: Any, *, parent_key: str = "") -> list[str]:
+    targets: list[str] = []
+    key = parent_key.lower()
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            targets.extend(_mutation_replay_extract_targets(item_value, parent_key=str(item_key)))
+    elif isinstance(value, list):
+        for item in value:
+            targets.extend(_mutation_replay_extract_targets(item, parent_key=parent_key))
+    elif key in _MUTATION_REPLAY_PATH_KEYS:
+        target = _mutation_replay_normalize_path(value)
+        if target:
+            targets.append(target)
+    return list(dict.fromkeys(targets))[:25]
+
+
+def _mutation_replay_digest_value(value: Any, *, parent_key: str = "", depth: int = 0) -> Any:
+    key = parent_key.lower()
+    if depth > 8:
+        return {"type": type(value).__name__, "truncated": True}
+    if SENSITIVE_AUDIT_KEY_RE.search(key):
+        return {"type": type(value).__name__, "redacted": True}
+    if key in _MUTATION_REPLAY_CONTENT_KEYS:
+        raw = str(value) if value is not None else ""
+        return {"type": type(value).__name__, "length": len(raw), "sha256": _mutation_replay_hash(raw)}
+    if isinstance(value, dict):
+        return {
+            str(k): _mutation_replay_digest_value(v, parent_key=str(k), depth=depth + 1)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if str(k) not in {"idempotency_key", "idempotencyKey", "request_metadata", "_meta"}
+        }
+    if isinstance(value, (list, tuple)):
+        return [_mutation_replay_digest_value(item, parent_key=parent_key, depth=depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        if key in _MUTATION_REPLAY_PATH_KEYS:
+            return {"path": _mutation_replay_normalize_path(value)}
+        redacted = _redact_audit_string(value.replace("\x00", " "))
+        if redacted == "<redacted>":
+            return {"type": "str", "redacted": True}
+        return {"type": "str", "length": len(redacted), "sha256": _mutation_replay_hash(redacted)}
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    return {"type": type(value).__name__, "sha256": _mutation_replay_hash(str(value))}
+
+
+def _mutation_replay_idempotency_key(arguments: dict[str, Any]) -> str:
+    header_key = _HTTP_IDEMPOTENCY_KEY.get().strip()
+    if header_key:
+        return header_key
+    for key in ("idempotency_key", "idempotencyKey"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for meta_key in ("_meta", "request_metadata", "metadata"):
+        meta = arguments.get(meta_key)
+        if isinstance(meta, dict):
+            for key in ("idempotency_key", "idempotencyKey", "idempotency-key"):
+                value = meta.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return ""
+
+
+def _mutation_replay_session_scope() -> tuple[str, str]:
+    session_id = _streamable_http_current_session_id().strip()
+    if not session_id:
+        session_id = "legacy-http-session"
+    return session_id, _mutation_replay_hash(session_id)[:24]
+
+
+def _mutation_replay_git_head() -> str:
+    try:
+        return _git("rev-parse", "HEAD").stdout.strip()
+    except Exception:
+        return ""
+
+
+def _mutation_replay_digest(tool_name: str, arguments: dict[str, Any], session_hash: str) -> tuple[str, dict[str, Any]]:
+    mode = str(arguments.get("mode", "") or "").strip().lower()
+    git_head = _mutation_replay_git_head()
+    normalized = {
+        "tool": tool_name,
+        "mode": mode,
+        "session": session_hash,
+        "git_head": git_head,
+        "targets": _mutation_replay_extract_targets(arguments),
+        "arguments": _mutation_replay_digest_value(arguments),
+    }
+    canonical = json.dumps(normalized, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return _mutation_replay_hash(canonical), {
+        "mode": mode,
+        "git_head": git_head[:40],
+        "target_paths": normalized["targets"],
+    }
+
+
+def _mutation_replay_guard_audit_event(decision: str, entry: dict[str, Any], *, success: bool = True, reason: str = "") -> None:
+    arguments = {
+        "replay_guard": {
+            "decision": decision,
+            "guard_id": entry.get("guard_id", ""),
+            "tool_name": entry.get("tool_name", ""),
+            "mode": entry.get("mode", ""),
+            "session_hash": entry.get("session_hash", ""),
+            "idempotency_key_hash": entry.get("idempotency_key_hash", ""),
+            "mutation_digest": entry.get("mutation_digest", ""),
+            "status": entry.get("status", ""),
+        }
+    }
+    _append_audit_event(
+        "mutation_replay_guard",
+        ["audit", "write"],
+        success,
+        arguments,
+        reason or decision,
+        required_scope=MCP_SCOPE_MUTATE,
+        granted_scopes=_http_request_granted_scopes_for_tools() if _inside_http_request() else None,
+    )
+
+
+def _mutation_replay_duplicate_response(entry: dict[str, Any]) -> dict[str, Any]:
+    original_status = str(entry.get("status", "") or "")
+    original_applied = original_status == "applied"
+    response = {
+        "schema": "mutation_replay_guard.duplicate.v1",
+        "ok": original_applied,
+        "duplicate": True,
+        "replay_guard": {
+            "decision": "duplicate_suppressed",
+            "guard_id": entry.get("guard_id", ""),
+            "tool_name": entry.get("tool_name", ""),
+            "mode": entry.get("mode", ""),
+            "original_status": original_status,
+            "original_created_at": entry.get("created_at", ""),
+            "result_digest": entry.get("result_digest", ""),
+        },
+    }
+    if not original_applied:
+        response["error"] = "original mutating request did not complete successfully"
+    return response
+
+
+def _mutation_replay_guard_begin(tool_name: str, arguments: dict[str, Any], categories: list[str]) -> dict[str, Any]:
+    if (
+        not _mutation_replay_guard_enabled()
+        or not _inside_http_request()
+        or not MUTATION_TOOL_CATEGORIES.intersection(categories)
+    ):
+        return {"enabled": False}
+    session_id, session_hash = _mutation_replay_session_scope()
+    idempotency_key = _mutation_replay_idempotency_key(arguments)
+    idempotency_key_hash = _mutation_replay_hash(idempotency_key)[:24] if idempotency_key else ""
+    mutation_digest, metadata = _mutation_replay_digest(tool_name, arguments, session_hash)
+    now = _mutation_replay_now_iso()
+    with _MUTATION_REPLAY_LOCK:
+        journal = _mutation_replay_load_journal()
+        entries = _mutation_replay_prune_entries(journal.get("entries", []))
+        for entry in entries:
+            if entry.get("session_hash") != session_hash:
+                continue
+            if idempotency_key_hash and entry.get("idempotency_key_hash") == idempotency_key_hash and entry.get("mutation_digest") != mutation_digest:
+                conflict = {
+                    **entry,
+                    "status": "conflict",
+                    "last_seen_at": now,
+                    "conflicting_digest": mutation_digest,
+                }
+                _mutation_replay_guard_audit_event(
+                    "idempotency_key_conflict",
+                    conflict,
+                    success=False,
+                    reason="idempotency key reused for different mutating digest",
+                )
+                journal["entries"] = entries
+                _mutation_replay_save_journal(journal)
+                raise PermissionError("idempotency key reused for a different mutating request")
+            if entry.get("mutation_digest") == mutation_digest:
+                entry["last_seen_at"] = now
+                entry["duplicate_count"] = int(entry.get("duplicate_count", 0)) + 1
+                entry["status"] = entry.get("status") or "started"
+                original_applied = entry.get("status") == "applied"
+                _mutation_replay_guard_audit_event(
+                    "duplicate_suppressed",
+                    entry,
+                    success=original_applied,
+                    reason=(
+                        "duplicate_suppressed"
+                        if original_applied
+                        else "duplicate suppressed; original mutation did not complete successfully"
+                    ),
+                )
+                journal["entries"] = entries
+                _mutation_replay_save_journal(journal)
+                return {
+                    "enabled": True,
+                    "duplicate": True,
+                    "response": _mutation_replay_duplicate_response(entry),
+                }
+        entry = {
+            "guard_id": uuid.uuid4().hex[:16],
+            "tool_name": tool_name,
+            "mode": metadata.get("mode", ""),
+            "session_hash": session_hash,
+            "idempotency_key_hash": idempotency_key_hash,
+            "mutation_digest": mutation_digest,
+            "git_head": metadata.get("git_head", ""),
+            "target_paths": metadata.get("target_paths", []),
+            "status": "started",
+            "created_at": now,
+            "last_seen_at": now,
+            "duplicate_count": 0,
+        }
+        entries.append(entry)
+        journal["entries"] = _mutation_replay_prune_entries(entries)
+        _mutation_replay_save_journal(journal)
+        _mutation_replay_guard_audit_event("recorded", entry)
+    return {"enabled": True, "entry": entry, "session_id": session_id}
+
+
+def _mutation_replay_guard_finish(guard: dict[str, Any], result: Any, *, error: Exception | None = None) -> None:
+    if not guard.get("enabled") or guard.get("duplicate"):
+        return
+    entry = guard.get("entry")
+    if not isinstance(entry, dict):
+        return
+    result_summary = {
+        "ok": False if error is not None else _tool_result_success(result),
+        "schema": result.get("schema") if isinstance(result, dict) else "",
+        "error_type": type(error).__name__ if error is not None else "",
+    }
+    result_digest = _mutation_replay_hash(
+        json.dumps(_redact_audit_value(result_summary), sort_keys=True, ensure_ascii=True)
+    )[:24]
+    with _MUTATION_REPLAY_LOCK:
+        journal = _mutation_replay_load_journal()
+        entries = _mutation_replay_prune_entries(journal.get("entries", []))
+        for existing in entries:
+            if existing.get("guard_id") == entry.get("guard_id"):
+                existing["status"] = "failed" if error is not None or not result_summary["ok"] else "applied"
+                existing["completed_at"] = _mutation_replay_now_iso()
+                existing["result_digest"] = result_digest
+                existing["result_summary"] = result_summary
+                break
+        journal["entries"] = entries
+        _mutation_replay_save_journal(journal)
+
+
 def _require_tool_security_gate(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
@@ -12367,6 +13075,30 @@ def _tool_result_failure_reason(result: Any) -> str:
     return "tool returned ok=false"
 
 
+def _run_with_mutation_replay_guard(
+    tool_name: str,
+    arguments: dict[str, Any],
+    categories: list[str],
+    action: Callable[[], Any],
+    *,
+    on_duplicate: Callable[[Any], None] | None = None,
+) -> Any:
+    """Run an already-authorized tool action through the HTTP mutation replay guard."""
+    guard = _mutation_replay_guard_begin(tool_name, arguments, categories)
+    if guard.get("duplicate"):
+        result = guard.get("response")
+        if on_duplicate is not None:
+            on_duplicate(result)
+        return result
+    try:
+        result = action()
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, result)
+    return result
+
+
 def _run_with_tool_security_audit(
     tool_name: str,
     arguments: dict[str, Any],
@@ -12380,8 +13112,25 @@ def _run_with_tool_security_audit(
         categories = _require_tool_security_gate(tool_name, arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
+
         try:
-            result = action()
+            result = _run_with_mutation_replay_guard(
+                tool_name,
+                arguments,
+                categories,
+                action,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
             if sensitive:
                 _append_audit_event(
@@ -12396,6 +13145,8 @@ def _run_with_tool_security_audit(
                     ),
                 )
             raise
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if sensitive:
             success = _tool_result_success(result)
@@ -12505,6 +13256,8 @@ class MCPHTTPAuthMiddleware:
         )
         token = _HTTP_REQUEST_AUTHORIZED.set(True)
         scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
+        idempotency_values = _http_header_values(scope, "idempotency-key")
+        idempotency_token = _HTTP_IDEMPOTENCY_KEY.set(idempotency_values[-1] if idempotency_values else "")
         streamable_session_token = _STREAMABLE_HTTP_SESSION_ID.set(
             _streamable_http_session_id_from_scope(scope)
         )
@@ -12542,6 +13295,7 @@ class MCPHTTPAuthMiddleware:
             await response(scope, receive, send)
         finally:
             _STREAMABLE_HTTP_SESSION_ID.reset(streamable_session_token)
+            _HTTP_IDEMPOTENCY_KEY.reset(idempotency_token)
             _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
 
@@ -19631,6 +20385,7 @@ def _current_tool_catalog_baseline() -> dict[str, Any]:
 
 def _tool_catalog_integrity_impl(include_tools: bool = False) -> dict[str, Any]:
     current = _current_tool_catalog_baseline()
+    repeated_current = _current_tool_catalog_baseline()
     try:
         baseline = load_tool_catalog_baseline(TOOL_CATALOG_BASELINE_FILE)
         baseline_error = ""
@@ -19645,6 +20400,7 @@ def _tool_catalog_integrity_impl(include_tools: bool = False) -> dict[str, Any]:
         current=current,
         baseline_error=baseline_error,
         include_tools=include_tools,
+        repeated_current=repeated_current,
     )
 
 
@@ -20462,9 +21218,49 @@ async def model_assisted_summary(
                         context_text=context_text,
                         execution_mode=resolved_mode,
                     )
+                    sampling_payload_for_anonymizer = {
+                        "model": "mcp-client-sampling",
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                    anonymized_sampling_payload, sampling_mapping = _agent_proxy_anonymize_payload(
+                        sampling_payload_for_anonymizer
+                    )
+                    anonymized_messages = anonymized_sampling_payload.get("messages", [])
+                    if anonymized_messages and isinstance(anonymized_messages[0], dict):
+                        prompt = str(anonymized_messages[0].get("content", prompt))
+                    sampling_anonymization = _agent_proxy_audit_inventory(sampling_mapping)
+                    if (
+                        sampling_anonymization.get("confidence") == "low"
+                        and sampling_anonymization.get("fail_closed_required")
+                    ):
+                        result = _sampling_base_result(
+                            status="denied",
+                            reason="anonymization_confidence_too_low",
+                            purpose=purpose_norm,
+                            execution_mode=resolved_mode,
+                            execution_mode_source=mode_source,
+                            policy=policy,
+                            capability=capability,
+                            context=context_meta,
+                            request={
+                                "would_call_client": False,
+                                "dry_run": bool(dry_run),
+                                "human_review_expected": True,
+                                "include_context": "none",
+                                "metadata": {
+                                    "anonymization_result": sampling_anonymization,
+                                    "raw_prompt_stored": False,
+                                },
+                            },
+                        )
+                        _otel_set_result_attributes(span, result)
+                        span.set_attribute("mcp.sampling.status", result.get("status", ""))
+                        return result
                     for code in question_redactions:
                         if code not in context_meta["redactions_applied"]:
                             context_meta["redactions_applied"].append(code)
+                    if sampling_anonymization.get("counts"):
+                        context_meta["redactions_applied"].append("local_reversible_anonymization")
                     prompt_digest = _sampling_digest_text(prompt)
                     metadata = {
                         "schema": "mcp_sampling_request_metadata.v1",
@@ -20475,6 +21271,8 @@ async def model_assisted_summary(
                         "advisory_only": True,
                         "repository_boundary_enforced": True,
                         "redaction_applied": True,
+                        "anonymization_result": sampling_anonymization,
+                        "placeholder_mapping_sent": False,
                         "prompt_digest": prompt_digest,
                         "context_source_count": len(context_meta.get("sources", [])),
                         "forbidden_decisions": [
@@ -20552,6 +21350,7 @@ async def model_assisted_summary(
                             )
                         else:
                             raw_output = _sampling_extract_response_text(response)
+                            raw_output = _agent_proxy_deanonymize_text(raw_output, sampling_mapping)
                             safe_output, output_redactions = _sampling_redact_text(raw_output)
                             for code in output_redactions:
                                 if code not in context_meta["redactions_applied"]:
@@ -28175,6 +28974,44 @@ def task_router(
         "sandbox_mode": sandbox_mode,
         "sandbox_action": sandbox_action,
     }
+    replay_args = {
+        "mode": mode,
+        "prompt": prompt,
+        "task": task,
+        "prefix": prefix,
+        "suffix": suffix,
+        "language": language,
+        "texts": texts or [],
+        "query": query,
+        "execution_mode": execution_mode,
+        "candidates": candidates or [],
+        "backend": backend,
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system,
+        "stop": stop or [],
+        "normalize": normalize,
+        "top_k": top_k,
+        "output_profile": output_profile,
+        "offset": offset,
+        "limit": limit,
+        "compress": compress,
+        "store_result": store_result,
+        "memory_session": memory_session,
+        "check_profile": check_profile,
+        "check_target": check_target,
+        "check_timeout_seconds": check_timeout_seconds,
+        "run_checks": run_checks,
+        "packages": packages or [],
+        "pip_upgrade": pip_upgrade,
+        "sandbox_mode": sandbox_mode,
+        "sandbox_id": sandbox_id,
+        "sandbox_action": sandbox_action,
+        "prompts": prompts or [],
+        "max_parallel": max_parallel,
+        "auto_parallel_when_possible": auto_parallel_when_possible,
+    }
     categories = _tool_categories("task_router", audit_args)
     span_attrs = _otel_tool_attributes("task_router", audit_args, categories)
     span_attrs.update(
@@ -28188,8 +29025,19 @@ def task_router(
         categories = _require_tool_security_gate("task_router", audit_args)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
-        try:
-            result = _TASK_ROUTER_SERVICE.route(
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
+
+        def _route_task() -> dict[str, Any]:
+            return _TASK_ROUTER_SERVICE.route(
                 mode=mode,
                 prompt=prompt,
                 task=task,
@@ -28227,10 +29075,21 @@ def task_router(
                 max_parallel=max_parallel,
                 auto_parallel_when_possible=auto_parallel_when_possible,
             )
+
+        try:
+            result = _run_with_mutation_replay_guard(
+                "task_router",
+                replay_args,
+                categories,
+                _route_task,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
             if sensitive:
                 _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
             raise
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if isinstance(result, dict) and isinstance(result.get("execution_mode"), str):
             span.set_attribute("mcp.execution_mode", result["execution_mode"])
@@ -31021,6 +31880,7 @@ def _governance_report_impl(
         ),
         "governance_hooks": _governance_result_store_summary(),
         "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
+        "policy_governance_decision": _latest_policy_governance_decision_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
         "agents_context_health": summarize_agents_context_health(
             analyze_agents_context(REPO_PATH)
@@ -31424,20 +32284,29 @@ def self_optimization_report(
     ) as span:
         categories = _require_tool_security_gate("self_optimization_report", arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
-        result = _self_optimization_report_impl(
-            start_time=start_time,
-            end_time=end_time,
-            window_hours=window_hours,
-            export=export,
-            recommendation_limit=recommendation_limit,
-            include_git=include_git,
-            include_audit=include_audit,
-            include_traces=include_traces,
-            redact_terms=redact_terms,
-            github_issue_metadata=github_issue_metadata,
-            github_issue_update_mode=github_issue_update_mode,
-            github_repository=github_repository,
-            github_token_env=github_token_env,
+
+        def _run_self_optimization_report() -> dict[str, Any]:
+            return _self_optimization_report_impl(
+                start_time=start_time,
+                end_time=end_time,
+                window_hours=window_hours,
+                export=export,
+                recommendation_limit=recommendation_limit,
+                include_git=include_git,
+                include_audit=include_audit,
+                include_traces=include_traces,
+                redact_terms=redact_terms,
+                github_issue_metadata=github_issue_metadata,
+                github_issue_update_mode=github_issue_update_mode,
+                github_repository=github_repository,
+                github_token_env=github_token_env,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "self_optimization_report",
+            arguments,
+            categories,
+            _run_self_optimization_report,
         )
         _otel_set_result_attributes(span, result)
         return result
@@ -31721,7 +32590,27 @@ def workflow_task(
     action = str(action or "start").strip().lower() or "start"
     workflow = str(workflow or "vscode_task_run").strip()
     trace_task_id = task_id.strip()
-    trace_categories = ["read-only"] if action == "status" else _workflow_task_categories(workflow)
+    security_args = {
+        "mode": action,
+        "action": action,
+        "workflow": workflow,
+        "task_id": trace_task_id,
+        "label": label,
+        "tasks_path": tasks_path,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+        "max_retries": max_retries,
+        "restart": restart,
+        "start_time": start_time,
+        "end_time": end_time,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "export": export,
+        "retry_of": retry_of,
+        "cancel_reason": cancel_reason,
+    }
+    trace_categories = _tool_categories("workflow_task", security_args)
     attrs = _otel_tool_attributes(
         "workflow_task",
         {"action": action, "workflow": workflow, "task_id": trace_task_id},
@@ -31738,62 +32627,84 @@ def workflow_task(
         _require_git_repo()
         if action not in {"start", "status", "cancel"}:
             raise ValueError("action must be one of: start, status, cancel")
-        if action == "cancel":
-            _require_mutations()
-            if not task_id:
-                raise ValueError("task_id is required for cancel")
-            result = _cancel_workflow_task(task_id, reason=cancel_reason)
+        categories = _require_tool_security_gate("workflow_task", security_args)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
             _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if action == "status":
-            if not task_id:
-                raise ValueError("task_id is required for status")
-            result = _workflow_task_status_payload(task_id)
-            _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if workflow == "vscode_task_run":
-            _require_mutations()
-            if not label.strip():
-                raise ValueError("label is required for vscode_task_run")
-            if timeout_seconds < 1:
-                raise ValueError("timeout_seconds must be >= 1")
-            args = {
-                "label": label.strip(),
-                "tasks_path": tasks_path,
-                "control_profile": control_profile,
-                "timeout_seconds": timeout_seconds,
-                "max_output_chars": max_output_chars,
-            }
-        elif workflow == "governance_report":
-            args = {
-                "start_time": start_time,
-                "end_time": end_time,
-                "base_ref": base_ref,
-                "head_ref": head_ref,
-                "export": export,
-            }
-        else:
-            raise ValueError(
-                "workflow must be one of: "
-                + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
             )
-        id_args = dict(args)
-        if retry_of:
-            id_args["retry_of"] = retry_of
-        resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
-        span.set_attribute("mcp.workflow.task_id", resolved_task_id)
-        if not trace_task_id:
-            span.set_attribute("mcp.workflow.task_id.generated", True)
-        result = _start_workflow_task(
-            workflow,
-            args,
-            retry_of=retry_of,
-            task_id=task_id,
-            max_retries=max_retries if workflow == "vscode_task_run" else 0,
-            restart=restart,
+
+        def _run_workflow_task() -> dict[str, Any]:
+            if action == "cancel":
+                _require_mutations()
+                if not task_id:
+                    raise ValueError("task_id is required for cancel")
+                result = _cancel_workflow_task(task_id, reason=cancel_reason)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if action == "status":
+                if not task_id:
+                    raise ValueError("task_id is required for status")
+                result = _workflow_task_status_payload(task_id)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if workflow == "vscode_task_run":
+                _require_mutations()
+                if not label.strip():
+                    raise ValueError("label is required for vscode_task_run")
+                if timeout_seconds < 1:
+                    raise ValueError("timeout_seconds must be >= 1")
+                args = {
+                    "label": label.strip(),
+                    "tasks_path": tasks_path,
+                    "control_profile": control_profile,
+                    "timeout_seconds": timeout_seconds,
+                    "max_output_chars": max_output_chars,
+                }
+            elif workflow == "governance_report":
+                args = {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "base_ref": base_ref,
+                    "head_ref": head_ref,
+                    "export": export,
+                }
+            else:
+                raise ValueError(
+                    "workflow must be one of: "
+                    + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+                )
+            id_args = dict(args)
+            if retry_of:
+                id_args["retry_of"] = retry_of
+            resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
+            span.set_attribute("mcp.workflow.task_id", resolved_task_id)
+            if not trace_task_id:
+                span.set_attribute("mcp.workflow.task_id.generated", True)
+            return _start_workflow_task(
+                workflow,
+                args,
+                retry_of=retry_of,
+                task_id=task_id,
+                max_retries=max_retries if workflow == "vscode_task_run" else 0,
+                restart=restart,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "workflow_task",
+            security_args,
+            categories,
+            _run_workflow_task,
+            on_duplicate=_on_duplicate,
         )
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         return result
 
@@ -33567,6 +34478,13 @@ def release_readiness(
         preflight_check["warning_reason"] = "latest workflow policy preflight did not allow the declared sequence"
     result["checks"]["workflow_policy_plan"] = preflight_check
 
+    policy_decision_check = _latest_policy_governance_decision_from_result_store()
+    policy_decision_check["ok"] = policy_decision_check.get("ok", True) if policy_decision_check.get("present") else True
+    if policy_decision_check.get("present") and policy_decision_check.get("decision") != "allow":
+        policy_decision_check["warning"] = True
+        policy_decision_check["warning_reason"] = "latest policy-governance decision did not allow the declared sequence"
+    result["checks"]["policy_governance_decision"] = policy_decision_check
+
     result["finished_at"] = _now_iso()
     if summary_mode == "quick":
         quick_result = {
@@ -34020,6 +34938,106 @@ def state_restore(
 
 @mcp.tool()
 def workspace_transaction(
+
+    mode: str = "begin",
+    transaction_id: str = "",
+    label: str = "",
+    changes: list[dict[str, Any]] | None = None,
+    create_dirs: bool = True,
+    delete_metadata: bool = False,
+    snapshot_id: str = "",
+    include_build_dir: bool = False,
+    path: str = "",
+    content: str = "",
+    overwrite: bool = True,
+    encoding: str = "utf-8",
+    pattern: str = "",
+    replacement: str = "",
+    regex: bool = False,
+    case_insensitive: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    max_file_bytes: int = 1048576,
+    max_files: int = 1000,
+    max_replacements: int = 1000,
+    source_path: str = "",
+    destination: str = "",
+    recursive: bool = False,
+    diff_text: str = "",
+    cached: bool = False,
+    idempotency_key: str = "",
+    request_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Strict workspace mutation router for transactional edits, snapshots, and direct file mutations."""
+    arguments = {
+        "mode": mode,
+        "transaction_id": transaction_id,
+        "label": label,
+        "changes": changes,
+        "create_dirs": create_dirs,
+        "delete_metadata": delete_metadata,
+        "snapshot_id": snapshot_id,
+        "include_build_dir": include_build_dir,
+        "path": path,
+        "content": content,
+        "overwrite": overwrite,
+        "encoding": encoding,
+        "pattern": pattern,
+        "replacement": replacement,
+        "regex": regex,
+        "case_insensitive": case_insensitive,
+        "include_globs": include_globs,
+        "exclude_globs": exclude_globs,
+        "include_hidden": include_hidden,
+        "max_file_bytes": max_file_bytes,
+        "max_files": max_files,
+        "max_replacements": max_replacements,
+        "source_path": source_path,
+        "destination": destination,
+        "recursive": recursive,
+        "diff_text": diff_text,
+        "cached": cached,
+        "idempotency_key": idempotency_key,
+        "request_metadata": request_metadata or {},
+    }
+    return _run_with_tool_security_audit(
+        "workspace_transaction",
+        arguments,
+        lambda: _workspace_transaction_impl(
+            mode=mode,
+            transaction_id=transaction_id,
+            label=label,
+            changes=changes,
+            create_dirs=create_dirs,
+            delete_metadata=delete_metadata,
+            snapshot_id=snapshot_id,
+            include_build_dir=include_build_dir,
+            path=path,
+            content=content,
+            overwrite=overwrite,
+            encoding=encoding,
+            pattern=pattern,
+            replacement=replacement,
+            regex=regex,
+            case_insensitive=case_insensitive,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            include_hidden=include_hidden,
+            max_file_bytes=max_file_bytes,
+            max_files=max_files,
+            max_replacements=max_replacements,
+            source_path=source_path,
+            destination=destination,
+            recursive=recursive,
+            diff_text=diff_text,
+            cached=cached,
+        ),
+    )
+
+
+def _workspace_transaction_impl(
+
     mode: str = "begin",
     transaction_id: str = "",
     label: str = "",
@@ -34048,7 +35066,6 @@ def workspace_transaction(
     diff_text: str = "",
     cached: bool = False,
 ) -> dict[str, Any]:
-    """Strict workspace mutation router for transactional edits, snapshots, and direct file mutations."""
     allowed = {
         "begin",
         "apply",
@@ -34173,6 +35190,7 @@ _WORKFLOW_POLICY_READ_TOOLS = {
     "interaction_invariant_audit",
     "agents_context_health",
     "test_impact_map",
+    "policy_governance_decision",
 }
 _WORKFLOW_POLICY_RELEASE_TOOLS = {
     "release_readiness",
@@ -34626,6 +35644,465 @@ def workflow_policy_plan(
         allowed_targets=allowed_targets or [],
         data_classification=data_classification,
         planned_steps=planned_steps or [],
+    )
+
+
+
+POLICY_GOVERNANCE_BUNDLE_SCHEMA = "mcp_governance_policy_bundle.v1"
+POLICY_GOVERNANCE_DECISION_SCHEMA = "policy_governance_decision.v1"
+POLICY_GOVERNANCE_DEFAULT_BUNDLE = ".config/codebase-tooling-mcp/policies/mcp-governance.example.json"
+_POLICY_GOVERNANCE_ALLOWED_ROOTS = (
+    ".config/codebase-tooling-mcp/policies",
+    ".codebase-tooling-mcp/policies",
+)
+_POLICY_GOVERNANCE_EFFECTS = {"allow", "deny", "requires_approval"}
+_POLICY_GOVERNANCE_DECISION_ORDER = {"allow": 0, "requires_approval": 1, "deny": 2}
+
+
+def _policy_governance_decision_id(payload: dict[str, Any]) -> str:
+    stable = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return "policy-decision-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+
+
+def _policy_governance_bundle_path(policy_bundle_path: str) -> Path:
+    rel_path = (policy_bundle_path or POLICY_GOVERNANCE_DEFAULT_BUNDLE).strip()
+    if not rel_path:
+        rel_path = POLICY_GOVERNANCE_DEFAULT_BUNDLE
+    candidate = _resolve_repo_path(rel_path)
+    rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+    if not any(rel == root or rel.startswith(root + "/") for root in _POLICY_GOVERNANCE_ALLOWED_ROOTS):
+        raise ValueError("policy bundle path must stay under a repository policy directory")
+    return candidate
+
+
+def _policy_governance_bundle_error(code: str, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": code,
+        "message": _workflow_policy_redact_string(message, max_chars=240),
+    }
+
+
+def _policy_governance_load_bundle(policy_bundle_path: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    try:
+        path = _policy_governance_bundle_path(policy_bundle_path)
+    except ValueError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_path_out_of_scope", str(exc))
+    rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, _policy_governance_bundle_error("policy_bundle_missing", f"policy bundle not found: {rel}")
+    except OSError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_unreadable", f"policy bundle could not be read: {rel}: {exc}")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_malformed", f"policy bundle JSON is malformed: {rel}: {exc.msg}")
+    if not isinstance(payload, dict):
+        return None, _policy_governance_bundle_error("policy_bundle_malformed", "policy bundle root must be an object")
+    if payload.get("schema") != POLICY_GOVERNANCE_BUNDLE_SCHEMA:
+        return None, _policy_governance_bundle_error("policy_bundle_unknown_schema", "policy bundle schema is unsupported")
+    bundle_id = str(payload.get("bundle_id", "")).strip()
+    version = str(payload.get("version", "")).strip()
+    trust = payload.get("trust") if isinstance(payload.get("trust"), dict) else {}
+    if not bundle_id or not version:
+        return None, _policy_governance_bundle_error("policy_bundle_missing_metadata", "policy bundle requires bundle_id and version")
+    if trust.get("source") != "repository" or trust.get("reviewed") is not True:
+        return None, _policy_governance_bundle_error("policy_bundle_untrusted", "policy bundle trust metadata must mark a reviewed repository source")
+    rules = payload.get("rules")
+    if not isinstance(rules, list) or not rules:
+        return None, _policy_governance_bundle_error("policy_bundle_missing_rules", "policy bundle requires at least one rule")
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {index} must be an object")
+        rule_id = str(rule.get("id", "")).strip()
+        effect = str(rule.get("effect", "")).strip()
+        if not rule_id or effect not in _POLICY_GOVERNANCE_EFFECTS:
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {index} requires id and allow/deny/requires_approval effect")
+        when = rule.get("when")
+        if when is not None and not isinstance(when, dict):
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {rule_id} when clause must be an object")
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    meta = {
+        "ok": True,
+        "path": rel,
+        "digest": digest,
+        "schema": POLICY_GOVERNANCE_BUNDLE_SCHEMA,
+        "bundle_id": bundle_id,
+        "bundle_version": version,
+        "rule_count": len(rules),
+    }
+    return payload, meta
+
+
+def _policy_governance_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def _policy_governance_bool_matches(expected: Any, actual: bool) -> bool:
+    if expected is None:
+        return True
+    return bool(expected) == actual
+
+
+def _policy_governance_any_match(patterns: list[str], value: str) -> bool:
+    if not patterns:
+        return True
+    lowered = value.lower()
+    return any(fnmatch.fnmatch(lowered, pattern.lower()) for pattern in patterns)
+
+
+def _policy_governance_targets_match(patterns: list[str], targets: list[str]) -> bool:
+    if not patterns:
+        return True
+    if not targets:
+        return any(pattern in {"*", ".", ""} for pattern in patterns)
+    for target in targets:
+        lowered = str(target).lower()
+        for pattern in patterns:
+            candidate = pattern.lower()
+            if fnmatch.fnmatch(lowered, candidate) or lowered.startswith(candidate.rstrip("/") + "/"):
+                return True
+    return False
+
+
+def _policy_governance_step_matches_rule(
+    step: dict[str, Any],
+    rule: dict[str, Any],
+    *,
+    data_classification: str,
+    execution_mode: str,
+) -> bool:
+    when = rule.get("when") if isinstance(rule.get("when"), dict) else {}
+    tool = str(step.get("tool", ""))
+    mode = str(step.get("mode", ""))
+    categories = [str(item) for item in step.get("categories", [])]
+    if not _policy_governance_any_match(_policy_governance_list(when.get("tools")), tool):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("modes")), mode):
+        return False
+    category_any = _policy_governance_list(when.get("categories_any"))
+    if category_any and not any(cat in categories for cat in category_any):
+        return False
+    category_all = _policy_governance_list(when.get("categories_all"))
+    if category_all and not all(cat in categories for cat in category_all):
+        return False
+    if not _policy_governance_bool_matches(when.get("mutates"), bool(step.get("mutates"))):
+        return False
+    if not _policy_governance_bool_matches(when.get("network"), bool(step.get("network"))):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("data_classifications")), data_classification):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("execution_modes")), execution_mode):
+        return False
+    if not _policy_governance_targets_match(_policy_governance_list(when.get("target_globs")), [str(item) for item in step.get("targets", [])]):
+        return False
+    return True
+
+
+def _policy_governance_rule_priority(rule: dict[str, Any]) -> int:
+    try:
+        return int(rule.get("priority", 1000))
+    except (TypeError, ValueError):
+        return 1000
+
+
+def _policy_governance_rule_result(rule: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+    evidence_terms = [
+        _workflow_policy_redact_string(str(item), max_chars=120)
+        for item in _policy_governance_list(rule.get("evidence"))[:8]
+    ]
+    actions = [
+        _workflow_policy_redact_string(str(item), max_chars=180)
+        for item in _policy_governance_list(rule.get("safe_next_actions"))[:6]
+    ]
+    targets = [str(item) for item in step.get("targets", []) if str(item).strip()]
+    return {
+        "rule_id": _workflow_policy_redact_string(str(rule.get("id", "")), max_chars=120),
+        "effect": str(rule.get("effect", "")),
+        "step_index": int(step.get("index", 0)),
+        "rationale": _workflow_policy_redact_string(str(rule.get("rationale", rule.get("description", ""))), max_chars=240),
+        "evidence": {
+            "terms": evidence_terms,
+            "step": {
+                "tool": _workflow_policy_redact_string(str(step.get("tool", "")), max_chars=120),
+                "mode": _workflow_policy_redact_string(str(step.get("mode", "")), max_chars=80),
+                "categories": [str(item) for item in step.get("categories", [])[:10]],
+                "mutates": bool(step.get("mutates")),
+                "network": bool(step.get("network")),
+                "target_count": len(targets),
+                "targets_redacted": bool(targets),
+            },
+        },
+        "safe_next_actions": actions,
+    }
+
+
+def _policy_governance_hard_gate_results(preflight: dict[str, Any], normalized_steps: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    results: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    preflight_decision = str(preflight.get("decision", ""))
+    if preflight_decision in {"deny", "needs_approval", "needs_clarification"}:
+        effect = "deny" if preflight_decision in {"deny", "needs_clarification"} else "requires_approval"
+        results.append(
+            {
+                "rule_id": "hard_gate.workflow_policy_plan",
+                "effect": effect,
+                "step_index": None,
+                "rationale": "Existing workflow_policy_plan preflight remains authoritative for scope, shadow-tool, release, mutation, and dataflow checks.",
+                "evidence": {
+                    "decision": preflight_decision,
+                    "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
+                    "finding_codes": [str(item.get("code", "")) for item in preflight.get("findings", [])[:20] if isinstance(item, dict)],
+                },
+                "safe_next_actions": _workflow_policy_safe_next_actions(preflight_decision, preflight.get("findings", [])),
+            }
+        )
+    if any(bool(step.get("mutates")) for step in normalized_steps) and not ALLOW_MUTATIONS:
+        finding = _workflow_policy_finding(
+            code="allow_mutations_disabled",
+            severity="block",
+            policy="hard_gate.allow_mutations",
+            message="mutation-capable planned steps cannot be allowed while ALLOW_MUTATIONS is false",
+            required_precondition="explicit_mutation_mode",
+        )
+        findings.append(finding)
+        results.append(
+            {
+                "rule_id": "hard_gate.allow_mutations",
+                "effect": "deny",
+                "step_index": None,
+                "rationale": "The policy adapter is read-only and cannot grant mutation permission or bypass ALLOW_MUTATIONS.",
+                "evidence": {"allow_mutations": False, "mutating_step_count": sum(1 for step in normalized_steps if step.get("mutates"))},
+                "safe_next_actions": ["Keep the workflow read-only or obtain explicit operator approval before enabling mutation mode."],
+            }
+        )
+    return results, findings
+
+
+def _policy_governance_counts(rule_results: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"allow": 0, "requires_approval": 0, "deny": 0}
+    for result in rule_results:
+        effect = str(result.get("effect", ""))
+        if effect in counts:
+            counts[effect] += 1
+    return counts
+
+
+def _policy_governance_decision_from_results(rule_results: list[dict[str, Any]]) -> str:
+    if not rule_results:
+        return "deny"
+    decision = "allow"
+    for result in rule_results:
+        effect = str(result.get("effect", ""))
+        if _POLICY_GOVERNANCE_DECISION_ORDER.get(effect, 2) > _POLICY_GOVERNANCE_DECISION_ORDER[decision]:
+            decision = effect
+    return decision
+
+
+def _policy_governance_payload(
+    *,
+    intent: str,
+    planned_steps: list[dict[str, Any]],
+    execution_mode: str,
+    allowed_targets: list[str],
+    data_classification: str,
+    policy_bundle_path: str,
+) -> dict[str, Any]:
+    normalized_execution_mode = _workflow_policy_redact_string(execution_mode or "auto", max_chars=80)
+    normalized_data_classification = _workflow_policy_redact_string(data_classification or "unspecified", max_chars=80).lower()
+    preflight = _workflow_policy_plan_payload(
+        intent=intent,
+        execution_mode=execution_mode,
+        allowed_targets=allowed_targets,
+        data_classification=data_classification,
+        planned_steps=planned_steps,
+    )
+    normalized_steps = preflight.get("steps", []) if isinstance(preflight.get("steps"), list) else []
+    bundle, bundle_meta = _policy_governance_load_bundle(policy_bundle_path)
+    if bundle is None:
+        finding = _workflow_policy_finding(
+            code=str(bundle_meta.get("code", "policy_bundle_invalid")),
+            severity="block",
+            policy="policy_bundle",
+            message=str(bundle_meta.get("message", "policy bundle invalid")),
+        )
+        result = {
+            "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+            "read_only": True,
+            "executed_plan": False,
+            "decision": "deny",
+            "ok": False,
+            "decision_id": _policy_governance_decision_id({"bundle_error": bundle_meta, "preflight_plan_id": preflight.get("plan_id", "")}),
+            "policy_bundle": bundle_meta,
+            "matched_rule_ids": [],
+            "decision_counts": {"allow": 0, "requires_approval": 0, "deny": 1},
+            "rule_results": [],
+            "findings": [finding],
+            "safe_next_actions": ["Fix the repository-local reviewed policy bundle and rerun the policy decision before executing planned tools."],
+            "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
+            "workflow_policy_plan": {"decision": preflight.get("decision"), "plan_id": preflight.get("plan_id"), "ok": preflight.get("ok")},
+            "security": {
+                "redacted": True,
+                "read_only": True,
+                "contains_raw_policy_inputs": False,
+                "contains_file_contents": False,
+                "contains_host_absolute_paths": False,
+                "external_services_called": False,
+                "dynamic_code_loaded": False,
+                "can_grant_mutation_permission": False,
+            },
+        }
+        return result
+
+    rule_results: list[dict[str, Any]] = []
+    rules = sorted(bundle.get("rules", []), key=_policy_governance_rule_priority)
+    for step in normalized_steps:
+        for rule in rules:
+            if _policy_governance_step_matches_rule(
+                step,
+                rule,
+                data_classification=normalized_data_classification,
+                execution_mode=normalized_execution_mode,
+            ):
+                rule_results.append(_policy_governance_rule_result(rule, step))
+    hard_gate_results, hard_gate_findings = _policy_governance_hard_gate_results(preflight, normalized_steps)
+    rule_results.extend(hard_gate_results)
+    findings = list(preflight.get("findings", []))[:25] + hard_gate_findings
+    if not rule_results:
+        findings.append(
+            _workflow_policy_finding(
+                code="policy_no_matching_rule",
+                severity="block",
+                policy="policy_bundle",
+                message="no policy bundle rule matched the declared MCP action sequence",
+            )
+        )
+    decision = _policy_governance_decision_from_results(rule_results)
+    counts = _policy_governance_counts(rule_results)
+    if not rule_results:
+        counts["deny"] = 1
+    safe_next_actions: list[str] = []
+    for result in rule_results:
+        for action in result.get("safe_next_actions", []):
+            if isinstance(action, str) and action not in safe_next_actions:
+                safe_next_actions.append(action)
+    for action in _workflow_policy_safe_next_actions("allow" if decision == "allow" else "deny", findings):
+        if action not in safe_next_actions:
+            safe_next_actions.append(action)
+    basis = {
+        "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+        "bundle_digest": bundle_meta.get("digest", ""),
+        "plan_id": preflight.get("plan_id", ""),
+        "matched_rule_ids": [str(item.get("rule_id", "")) for item in rule_results],
+        "decision": decision,
+    }
+    return {
+        "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+        "read_only": True,
+        "executed_plan": False,
+        "decision": decision,
+        "ok": decision == "allow",
+        "decision_id": _policy_governance_decision_id(basis),
+        "intent": _workflow_policy_redact_string(intent, max_chars=240),
+        "execution_mode": normalized_execution_mode,
+        "data_classification": normalized_data_classification,
+        "step_count": len(normalized_steps),
+        "policy_bundle": bundle_meta,
+        "bundle_id": bundle_meta.get("bundle_id", ""),
+        "bundle_version": bundle_meta.get("bundle_version", ""),
+        "matched_rule_ids": [str(item.get("rule_id", "")) for item in rule_results],
+        "decision_counts": counts,
+        "rule_results": rule_results[:50],
+        "findings": findings,
+        "safe_next_actions": safe_next_actions[:10],
+        "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
+        "workflow_policy_plan": {
+            "schema": preflight.get("schema", ""),
+            "decision": preflight.get("decision", ""),
+            "ok": bool(preflight.get("ok", False)),
+            "plan_id": preflight.get("plan_id", ""),
+            "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
+            "required_preconditions": _redact_audit_value(preflight.get("required_preconditions", [])),
+        },
+        "security": {
+            "redacted": True,
+            "read_only": True,
+            "contains_raw_policy_inputs": False,
+            "contains_file_contents": False,
+            "contains_host_absolute_paths": False,
+            "external_services_called": False,
+            "dynamic_code_loaded": False,
+            "agent_authored_runtime_policy_mutation": False,
+            "can_grant_mutation_permission": False,
+        },
+    }
+
+
+def _latest_policy_governance_decision_from_result_store() -> dict[str, Any]:
+    payload = _result_store_load()
+    rows = payload.get("results", {})
+    if not isinstance(rows, dict):
+        return {"present": False, "required": False}
+    latest: dict[str, Any] | None = None
+    counts = {"allow": 0, "requires_approval": 0, "deny": 0}
+    total = 0
+    for rid, row in rows.items():
+        if not isinstance(row, dict) or row.get("tool") != "policy_governance_decision":
+            continue
+        value = row.get("value")
+        if not isinstance(value, dict) or value.get("schema") != POLICY_GOVERNANCE_DECISION_SCHEMA:
+            continue
+        total += 1
+        decision = str(value.get("decision", ""))
+        if decision in counts:
+            counts[decision] += 1
+        created_at = str(row.get("created_at", ""))
+        entry = {
+            "present": True,
+            "required": False,
+            "result_id": str(rid),
+            "created_at": created_at,
+            "schema": str(value.get("schema", "")),
+            "decision": decision,
+            "ok": bool(value.get("ok", False)),
+            "decision_id": str(value.get("decision_id", "")),
+            "bundle_id": str(value.get("bundle_id", "")),
+            "bundle_version": str(value.get("bundle_version", "")),
+            "matched_rule_ids": [str(item) for item in value.get("matched_rule_ids", [])[:20]],
+            "decision_counts": dict(counts),
+            "total_count": total,
+        }
+        if latest is None or created_at >= str(latest.get("created_at", "")):
+            latest = entry
+    if latest:
+        latest["decision_counts"] = counts
+        latest["total_count"] = total
+        return latest
+    return {"present": False, "required": False}
+
+
+@mcp.tool()
+def policy_governance_decision(
+    intent: str,
+    planned_steps: list[dict[str, Any]],
+    execution_mode: str = "auto",
+    allowed_targets: list[str] | None = None,
+    data_classification: str = "unspecified",
+    policy_bundle_path: str = POLICY_GOVERNANCE_DEFAULT_BUNDLE,
+) -> dict[str, Any]:
+    """Evaluate declared MCP tool steps against a reviewed repo-local policy bundle without executing them."""
+    return _policy_governance_payload(
+        intent=intent,
+        planned_steps=planned_steps or [],
+        execution_mode=execution_mode,
+        allowed_targets=allowed_targets or [],
+        data_classification=data_classification,
+        policy_bundle_path=policy_bundle_path,
     )
 
 
@@ -35995,55 +37472,73 @@ def test_impact_map(
     output_profile: str | None = None,
 ) -> dict[str, Any]:
     """Read or refresh the static Python test impact map and query impacted tests."""
-    _require_git_repo()
-    if max_tests < 1:
-        raise ValueError("max_tests must be >= 1")
-    if max_age_hours < 0:
-        raise ValueError("max_age_hours must be >= 0")
-    profile = _default_output_profile(output_profile)
-    artifact_path = str(TEST_IMPACT_MAP_FILE)
-    if refresh:
-        _require_mutations()
-        payload = _build_test_impact_map_payload()
-        path = _resolve_repo_path(artifact_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        status = "fresh"
-    else:
-        payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+    arguments = {
+        "mode": "refresh" if refresh else "query",
+        "changed_files": changed_files or [],
+        "refresh": refresh,
+        "max_age_hours": max_age_hours,
+        "max_tests": max_tests,
+        "output_profile": output_profile or "",
+    }
+    categories = _require_tool_security_gate("test_impact_map", arguments)
 
-    changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
-    query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
-        "tests": [],
-        "test_details": [],
-        "impacted_sources": [],
-        "unmapped_changed_files": changed if changed and status != "fresh" else [],
-        "coverage_gaps": [],
-        "confidence": 0.0,
-    }
-    result = {
-        "schema": "test_impact_map.query.v1",
-        "artifact_path": artifact_path,
-        "artifact_status": status,
-        "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
-        "changed_files": changed,
-        "selected_tests": query["tests"],
-        "test_details": query["test_details"],
-        "impacted_sources": query["impacted_sources"],
-        "unmapped_changed_files": query["unmapped_changed_files"],
-        "coverage_gaps": query["coverage_gaps"],
-        "confidence": query["confidence"],
-    }
-    if profile == "compact":
-        return {
-            "schema": "test_impact_map.query.compact.v1",
+    def _run_test_impact_map() -> dict[str, Any]:
+        _require_git_repo()
+        if max_tests < 1:
+            raise ValueError("max_tests must be >= 1")
+        if max_age_hours < 0:
+            raise ValueError("max_age_hours must be >= 0")
+        profile = _default_output_profile(output_profile)
+        artifact_path = str(TEST_IMPACT_MAP_FILE)
+        if refresh:
+            _require_mutations()
+            payload = _build_test_impact_map_payload()
+            path = _resolve_repo_path(artifact_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            status = "fresh"
+        else:
+            payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+
+        changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
+        query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
+            "tests": [],
+            "test_details": [],
+            "impacted_sources": [],
+            "unmapped_changed_files": changed if changed and status != "fresh" else [],
+            "coverage_gaps": [],
+            "confidence": 0.0,
+        }
+        result = {
+            "schema": "test_impact_map.query.v1",
+            "artifact_path": artifact_path,
             "artifact_status": status,
-            "test_count": len(query["tests"]),
+            "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
+            "changed_files": changed,
             "selected_tests": query["tests"],
+            "test_details": query["test_details"],
+            "impacted_sources": query["impacted_sources"],
             "unmapped_changed_files": query["unmapped_changed_files"],
+            "coverage_gaps": query["coverage_gaps"],
             "confidence": query["confidence"],
         }
-    return result
+        if profile == "compact":
+            return {
+                "schema": "test_impact_map.query.compact.v1",
+                "artifact_status": status,
+                "test_count": len(query["tests"]),
+                "selected_tests": query["tests"],
+                "unmapped_changed_files": query["unmapped_changed_files"],
+                "confidence": query["confidence"],
+            }
+        return result
+
+    return _run_with_mutation_replay_guard(
+        "test_impact_map",
+        arguments,
+        categories,
+        _run_test_impact_map,
+    )
 
 
 @mcp.tool()
@@ -38377,7 +39872,7 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         "enabled": bool(config.get("enabled")),
         "endpoint": "/v1/chat/completions",
         "policy_version": MCP_AGENT_PROXY_POLICY_VERSION,
-        "anonymization_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "anonymization_profile": _agent_proxy_anonymization_profile_id(),
         "agent_facade_profile": MCP_AGENT_PROXY_AGENT_FACADE_PROFILE,
         "disabled_by_default": True,
         "explicit_proxy_only": True,
@@ -38408,9 +39903,16 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         },
         "privacy_controls": {
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
+            "anonymization_profile": _agent_proxy_anonymization_profile_id(),
+            "anonymization_mode": _agent_proxy_anonymization_mode(),
+            "anonymization_modes": ["strict", "balanced", "off"],
+            "default_online_mode": "balanced",
             "anonymize_configured_terms": bool(_agent_proxy_configured_terms()),
             "irreversible_secret_redaction": True,
             "local_only_placeholder_mapping": True,
+            "placeholder_mapping_scope": "request_local_process_memory",
+            "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
+            "strict_nda_fail_closed": MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED,
             "raw_prompt_storage_default": False,
             "raw_response_storage_default": False,
         },
@@ -38572,6 +40074,33 @@ async def openai_chat_completions(request):
         return JSONResponse(response_payload)
 
     anonymized_payload, mapping = _agent_proxy_anonymize_payload(payload)
+    anonymization_inventory = _agent_proxy_audit_inventory(mapping)
+    confidence = str(anonymization_inventory.get("confidence", "high"))
+    fail_closed = bool(anonymization_inventory.get("fail_closed_required"))
+    if confidence == "low" and fail_closed:
+        _append_audit_event(
+            "agent_proxy_anonymization",
+            ["network", "audit"],
+            False,
+            {
+                "trace_id": trace_id,
+                "model": str(payload.get("model", "")),
+                "profile": anonymization_inventory.get("profile"),
+                "categories": anonymization_inventory.get("placeholder_categories", []),
+                "confidence": confidence,
+                "reasons": anonymization_inventory.get("confidence_reasons", []),
+            },
+            "anonymization confidence too low for online provider call",
+        )
+        error, status = _agent_proxy_error_payload(
+            "agent proxy anonymization confidence too low; use local/no-network mode or a stricter configured profile",
+            error_type="invalid_request_error",
+            code="agent_proxy_anonymization_low_confidence",
+            trace_id=trace_id,
+            status_code=403,
+        )
+        return JSONResponse(error, status_code=status)
+
     provider_url = _agent_proxy_provider_url()
     try:
         _agent_proxy_record_online_request_audit(
@@ -39240,12 +40769,17 @@ async def continue_model_fallback_configure(request):
     files_for_gate = [str(profile_rel), str(routing_rel), str(agent_proxy_rel)]
     if config.get("api_key"):
         files_for_gate.append(str(secret_rel))
-    _require_tool_security_gate(
+    security_args = {
+        "mode": "write",
+        "files": files_for_gate,
+        "provider": config["provider"],
+        "model": config["model"],
+        "needs_secret": config.get("needs_secret", ""),
+        "has_api_key": bool(config.get("api_key")),
+    }
+    categories = _require_tool_security_gate(
         "continue_model_fallback_configure",
-        {
-            "mode": "write",
-            "files": files_for_gate,
-        },
+        security_args,
         enforce_mutation_permission=False,
     )
     changes = [
@@ -39322,27 +40856,34 @@ async def continue_model_fallback_configure(request):
             status_code=403,
         )
 
-    profile_path = (REPO_PATH / profile_rel).resolve()
-    routing_path = (REPO_PATH / routing_rel).resolve()
-    secret_path = (REPO_PATH / secret_rel).resolve()
-    profile_path.relative_to(REPO_PATH)
-    routing_path.relative_to(REPO_PATH)
-    secret_path.relative_to(REPO_PATH)
-    agent_proxy_path.relative_to(REPO_PATH)
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    routing_path.parent.mkdir(parents=True, exist_ok=True)
-    agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(profile_text, encoding="utf-8")
-    routing_path.write_text(routing_text, encoding="utf-8")
-    agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
-    if config.get("api_key"):
-        _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
-    written_secret_state = _agent_proxy_secret_state(
-        _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+    guard = _mutation_replay_guard_begin(
+        "continue_model_fallback_configure",
+        security_args,
+        categories,
     )
-    written_summary = {**summary, "secret_state": written_secret_state}
-    return JSONResponse(
-        {
+    if guard.get("duplicate"):
+        return JSONResponse(guard.get("response", {}))
+    try:
+        profile_path = (REPO_PATH / profile_rel).resolve()
+        routing_path = (REPO_PATH / routing_rel).resolve()
+        secret_path = (REPO_PATH / secret_rel).resolve()
+        profile_path.relative_to(REPO_PATH)
+        routing_path.relative_to(REPO_PATH)
+        secret_path.relative_to(REPO_PATH)
+        agent_proxy_path.relative_to(REPO_PATH)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        routing_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(profile_text, encoding="utf-8")
+        routing_path.write_text(routing_text, encoding="utf-8")
+        agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
+        if config.get("api_key"):
+            _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
+        written_secret_state = _agent_proxy_secret_state(
+            _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+        )
+        written_summary = {**summary, "secret_state": written_secret_state}
+        response_payload = {
             "schema": "continue_model_fallback.configure.v1",
             "status": "written",
             "summary": written_summary,
@@ -39356,7 +40897,11 @@ async def continue_model_fallback_configure(request):
             "apiBase": config["api_base"],
             "secret_state": written_secret_state,
         }
-    )
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, response_payload)
+    return JSONResponse(response_payload)
 
 
 async def mcp_server_manifest(_request):

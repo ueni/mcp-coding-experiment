@@ -1,0 +1,72 @@
+{
+  "schema": "mcp_governance_policy_bundle.v1",
+  "bundle_id": "codebase-tooling-mcp.example-governance",
+  "version": "2026-05-23",
+  "description": "Reviewed example policy-as-code bundle for read-only MCP governance decisions.",
+  "trust": {
+    "source": "repository",
+    "reviewed": true,
+    "reviewed_by": "maintainers",
+    "runtime_mutation_allowed": false
+  },
+  "compatibility": {
+    "opa": "export-shape-only; no Rego execution in this adapter",
+    "cedar": "export-shape-only; no Cedar execution in this adapter",
+    "agent_governance_toolkit": "decision/report vocabulary alignment only"
+  },
+  "rules": [
+    {
+      "id": "deny.sensitive-network-step",
+      "effect": "deny",
+      "priority": 10,
+      "description": "Deny network-capable steps when the declared data classification is sensitive or higher.",
+      "when": {
+        "network": true,
+        "data_classifications": ["sensitive", "secret", "restricted", "credential", "credentials"]
+      },
+      "rationale": "Repository/config reads must not be followed by network-capable tooling for sensitive data without a separate reviewed workflow.",
+      "evidence": ["network-capable planned MCP step", "sensitive declared data classification"],
+      "safe_next_actions": ["Remove the network-capable step or produce a redacted offline artifact before any external handoff."]
+    },
+    {
+      "id": "approval.repository-mutation",
+      "effect": "requires_approval",
+      "priority": 20,
+      "description": "Mutation-capable steps require explicit operator approval and existing mutation hard gates.",
+      "when": {
+        "mutates": true
+      },
+      "rationale": "Policy-as-code decisions are advisory/read-only and cannot grant mutation permission.",
+      "evidence": ["mutation-capable catalog category or explicit mutates flag"],
+      "safe_next_actions": ["Run mutation_step_guard with fresh scope, snapshot, rollback, and validation evidence before mutating."]
+    },
+    {
+      "id": "approval.release-readiness",
+      "effect": "requires_approval",
+      "priority": 30,
+      "description": "Release-sensitive workflows require validation evidence before readiness claims.",
+      "when": {
+        "tools": ["release_readiness", "quality_router"],
+        "modes": ["*release*"]
+      },
+      "rationale": "Release summaries need recent validation and rollback evidence.",
+      "evidence": ["release-sensitive planned MCP step"],
+      "safe_next_actions": ["Run focused tests/change-impact and release_readiness before handoff."]
+    },
+    {
+      "id": "allow.read-only-repository-governance",
+      "effect": "allow",
+      "priority": 100,
+      "description": "Allow catalogued read-only MCP inspection/governance steps inside the declared scope.",
+      "when": {
+        "categories_any": ["read-only"],
+        "mutates": false,
+        "network": false,
+        "target_globs": ["*", "."]
+      },
+      "rationale": "Read-only repository inspection is safe when existing path-scope and authorization gates remain authoritative.",
+      "evidence": ["catalogued read-only MCP tool", "no network", "no mutation"],
+      "safe_next_actions": ["Proceed read-only; rerun the decision if tools, target scope, execution mode, or data classification changes."]
+    }
+  ]
+}
