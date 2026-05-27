@@ -419,6 +419,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
     "self_optimization_report": {"categories": ["read-only"]},
+    "observation_compression_report": {"categories": ["read-only"]},
     "agents_context_health": {"categories": ["read-only", "governance"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
@@ -4348,6 +4349,7 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 SELF_OPTIMIZATION_REPORT_SCHEMA = "self_optimization_report.v1"
+OBSERVATION_COMPRESSION_REPORT_SCHEMA = "observation_compression_report.v1"
 OPTIMIZATION_INTEGRITY_REPORT_SCHEMA = "optimization_integrity_report.v1"
 SELF_OPTIMIZATION_NO_ATTRIBUTION = "unattributed"
 SELF_OPTIMIZATION_NAME_PLACEHOLDER = "<redacted:name>"
@@ -4372,7 +4374,9 @@ SELF_OPTIMIZATION_SAFE_BOOLEAN_KEYS = {"contains_secrets", "records_secrets", "s
 SELF_OPTIMIZATION_SAFE_TOKEN_KEYS = {
     "compressed_tokens",
     "compression_estimated_saved_tokens",
+    "estimated_raw_tokens",
     "estimated_saved_tokens",
+    "estimated_token_savings",
     "explicit_token_record_count",
     "input_tokens",
     "output_tokens",
@@ -6815,6 +6819,8 @@ def _self_opt_build_recommendations(
     throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
     cache = metrics.get("cache", {}) if isinstance(metrics.get("cache"), dict) else {}
     compression = metrics.get("compression", {}) if isinstance(metrics.get("compression"), dict) else {}
+    observation_compression = metrics.get("observation_compression", {}) if isinstance(metrics.get("observation_compression"), dict) else {}
+    observation_opportunities = observation_compression.get("compression_opportunities", {}) if isinstance(observation_compression.get("compression_opportunities"), dict) else {}
     failures = metrics.get("failures", {}) if isinstance(metrics.get("failures"), dict) else {}
     candidates: list[dict[str, Any]] = []
     failed_or_noisy = int(totals.get("failed_or_noisy_count", 0) or 0)
@@ -6846,16 +6852,20 @@ def _self_opt_build_recommendations(
             )
         )
     if int(totals.get("verbose_tool_call_count", 0) or 0) > 0 and int(compression.get("compressed_observation_count", 0) or 0) == 0:
+        observation_saved_tokens = int(observation_opportunities.get("estimated_token_savings", 0) or 0)
         candidates.append(
             _self_opt_candidate(
                 "token-compression",
                 "Use compressed observations for verbose MCP outputs",
                 "Verbose report/search tools ran without local compressed-observation evidence.",
-                {"verbose_tool_call_count": totals.get("verbose_tool_call_count", 0)},
-                "Enable `compressed_observation=true` on supported verbose tools and keep raw artifacts behind repo-local resource links.",
-                estimated_saved_tokens=max(0, int(totals.get("tool_call_count", 0) or 0) * 120),
+                {
+                    "verbose_tool_call_count": totals.get("verbose_tool_call_count", 0),
+                    "observation_compression_estimated_saved_tokens": observation_saved_tokens,
+                },
+                "Enable `compressed_observation=true` on supported verbose tools and run `observation_compression_report` for advisory TACO-style bucket guidance before dropping any evidence from model context.",
+                estimated_saved_tokens=max(observation_saved_tokens, int(totals.get("tool_call_count", 0) or 0) * 120),
                 confidence="medium",
-                caveats=["Token impact is estimated unless raw/compressed token fields are recorded."],
+                caveats=["Token impact is estimated unless raw/compressed token fields are recorded; observation compression is advisory and never deletes raw evidence."],
             )
         )
     if int(totals.get("total_tokens", 0) or 0) == 0:
@@ -7205,6 +7215,563 @@ def _write_self_opt_report_exports(report: dict[str, Any]) -> dict[str, str]:
     return {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
 
 
+
+OBSERVATION_COMPRESSION_BUCKETS = (
+    "preserve_raw",
+    "summarize",
+    "deduplicate",
+    "drop_low_value",
+    "redact_blocked",
+)
+OBSERVATION_LOW_VALUE_RE = re.compile(
+    r"(={2,}\s*(?:test session starts|passed)|\b\d+\s+passed\b|\ball tests passed\b|"
+    r"\bcollecting\s+packages\b|\binstalling collected packages\b|\bsuccessfully installed\b|"
+    r"\brequirement already satisfied\b|\bnpm\s+(?:warn|notice)\b|\baudit\s+0\s+vulnerabilit)",
+    re.IGNORECASE,
+)
+OBSERVATION_STACK_TRACE_RE = re.compile(
+    r"(traceback \(most recent call last\)|\n\s*File \"[^\n]+\", line \d+|\n\s*at \S+\s*\([^\n]+:\d+:\d+\))",
+    re.IGNORECASE,
+)
+OBSERVATION_FAILURE_RE = re.compile(
+    r"(\bfailed\b|\berror\b|\bexception\b|\bexit(?:ed)?\s+(?:code|status)\s*[=:]?\s*[1-9]\d*|\breturn\s*code\s*[=:]?\s*[1-9]\d*)",
+    re.IGNORECASE,
+)
+OBSERVATION_SECURITY_RE = re.compile(
+    r"(\bsecurity\b|\bvulnerab|\bCVE-\d{4}-\d+\b|secret_exposure|\bfinding\b|\bseverity\b)",
+    re.IGNORECASE,
+)
+OBSERVATION_SNAPSHOT_RE = re.compile(r"\b(?:snapshot|rollback|restore)[_-]?(?:id|ref)?\b|state_snapshot|state_restore", re.IGNORECASE)
+OBSERVATION_POLICY_RE = re.compile(r"\b(?:policy|gate|blocking_policies|ok_to_mutate|mutation_step_guard|authorization|forbidden|denied)\b", re.IGNORECASE)
+OBSERVATION_CONSTRAINT_RE = re.compile(r"\b(?:constraint|must|do not|don't|never|requirement|required|acceptance criteria)\b", re.IGNORECASE)
+OBSERVATION_SECRET_OR_HOST_PATH_RE = re.compile(
+    r"(\bBearer\s+\S+|\b(?:token|secret|password|credential|authorization|api[_-]?key)\b\s*[:=]\s*\S+|"
+    r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{12,}\b|\bsk-[A-Za-z0-9_-]{16,}\b|"
+    r"\bAKIA[0-9A-Z]{16}\b|/(?:home|Users|var|etc|tmp|opt)/[^\s\"']+)",
+    re.IGNORECASE,
+)
+OBSERVATION_REPO_PATH_RE = re.compile(r"\b(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+)(?:\.[A-Za-z0-9_.-]+)?\b")
+
+
+def _observation_safe_string(value: Any) -> str:
+    return _redact_audit_string(str(value or ""))
+
+
+def _observation_payload_text(value: Any, depth: int = 0) -> str:
+    if depth > 6:
+        return ""
+    parts: list[str] = []
+    if isinstance(value, dict):
+        for key, item in sorted(value.items(), key=lambda item: str(item[0])):
+            key_lower = str(key).lower()
+            if key_lower in {
+                "command",
+                "cmd",
+                "error",
+                "message",
+                "output",
+                "reason",
+                "result",
+                "stderr",
+                "stdout",
+                "summary",
+                "traceback",
+                "log",
+                "logs",
+                "status",
+            }:
+                parts.append(_observation_payload_text(item, depth + 1))
+            elif isinstance(item, (dict, list)):
+                parts.append(_observation_payload_text(item, depth + 1))
+            elif key_lower in {"exit_code", "returncode", "return_code"}:
+                parts.append(f"{key_lower}={item}")
+    elif isinstance(value, list):
+        for item in value[:80]:
+            parts.append(_observation_payload_text(item, depth + 1))
+    elif isinstance(value, str):
+        parts.append(value[:8000])
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        parts.append(str(value))
+    return "\n".join(part for part in parts if part)
+
+
+def _observation_canonical_fingerprint(value: Any) -> str:
+    safe_text = _observation_safe_string(_observation_payload_text(value)).lower()
+    safe_text = re.sub(r"\b0x[0-9a-f]+\b", "0x<hex>", safe_text)
+    safe_text = re.sub(r"\b\d{2,}\b", "<n>", safe_text)
+    safe_text = re.sub(r"\s+", " ", safe_text).strip()
+    if not safe_text:
+        safe_text = json.dumps(_redact_audit_value(value), sort_keys=True, ensure_ascii=True, default=str)[:8000]
+    return hashlib.sha256(safe_text.encode("utf-8")).hexdigest()
+
+
+def _observation_raw_token_estimate(value: Any) -> int:
+    payload = json.dumps(_redact_audit_value(value), sort_keys=True, ensure_ascii=True, default=str)
+    return max(1, int(math.ceil(len(payload) / 4.0)))
+
+
+def _observation_int_at_keys(value: Any, keys: set[str], depth: int = 0) -> int | None:
+    if depth > 5:
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower().replace("-", "_")
+            if key_lower in keys and isinstance(item, (int, float)) and not isinstance(item, bool):
+                return int(item)
+            found = _observation_int_at_keys(item, keys, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value[:80]:
+            found = _observation_int_at_keys(item, keys, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _observation_collect_values_for_keys(value: Any, key_terms: tuple[str, ...], depth: int = 0) -> list[Any]:
+    if depth > 5:
+        return []
+    found: list[Any] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower()
+            if any(term in key_lower for term in key_terms):
+                found.append(item)
+            found.extend(_observation_collect_values_for_keys(item, key_terms, depth + 1))
+    elif isinstance(value, list):
+        for item in value[:80]:
+            found.extend(_observation_collect_values_for_keys(item, key_terms, depth + 1))
+    return found
+
+
+def _observation_repo_relative_paths(value: Any) -> list[str]:
+    candidates: set[str] = set()
+    # Preserve explicit changed-file/security path fields without treating every
+    # command argument or passing-test target as a safety-critical changed file.
+    direct_values = _observation_collect_values_for_keys(value, ("path", "file", "changed"))
+    for item in direct_values:
+        if isinstance(item, list):
+            texts = [str(part) for part in item[:80]]
+        elif isinstance(item, dict):
+            texts = [json.dumps(item, sort_keys=True, ensure_ascii=True, default=str)]
+        else:
+            texts = [str(item)]
+        for text in texts:
+            for match in OBSERVATION_REPO_PATH_RE.findall(text):
+                if match.startswith(('/', '../')) or '/.git/' in f'/{match}/':
+                    continue
+                if len(match) <= 160:
+                    candidates.add(_observation_safe_string(match))
+    return sorted(candidates)[:20]
+
+
+def _observation_has_key_signal(value: Any, key_terms: tuple[str, ...]) -> bool:
+    return bool(_observation_collect_values_for_keys(value, key_terms))
+
+
+def _observation_source_records(
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    include_audit: bool,
+    include_traces: bool,
+    include_tasks: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    sources: dict[str, Any] = {}
+    if include_audit:
+        audit_events, audit_meta = _load_audit_events(start_dt, end_dt)
+        sources["audit"] = _self_opt_public_source_meta(audit_meta)
+        for index, event in enumerate(audit_events):
+            records.append({"source": "audit", "index": index, "payload": event, "timestamp": _self_opt_first_timestamp(event)})
+    else:
+        sources["audit"] = {"enabled": False}
+    if include_traces:
+        spans, span_meta = _self_opt_load_jsonl_records(MCP_OTEL_SPANS_FILE, start_dt, end_dt)
+        sources["traces"] = _self_opt_public_source_meta(span_meta)
+        for index, span in enumerate(spans):
+            safe_span = _redact_audit_value(span)
+            records.append({"source": "trace", "index": index, "payload": safe_span, "timestamp": _self_opt_first_timestamp(safe_span)})
+    else:
+        sources["traces"] = {"enabled": False}
+    if include_tasks:
+        task_dir = _resolve_repo_path(str(WORKFLOW_TASKS_DIR))
+        task_meta = {"path": str(WORKFLOW_TASKS_DIR), "exists": task_dir.exists(), "readable": False, "records_total": 0, "records_in_window": 0, "malformed_files": 0}
+        if task_dir.exists() and task_dir.is_dir():
+            task_meta["readable"] = True
+            for index, path in enumerate(sorted(task_dir.glob("*.json"), key=lambda item: item.name)):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    task_meta["malformed_files"] += 1
+                    continue
+                if not isinstance(payload, dict):
+                    task_meta["malformed_files"] += 1
+                    continue
+                task_meta["records_total"] += 1
+                ts = _self_opt_first_timestamp(payload)
+                if _self_opt_in_window(ts, start_dt, end_dt):
+                    task_meta["records_in_window"] += 1
+                    safe_payload = _redact_audit_value(payload)
+                    records.append({"source": "task", "index": index, "payload": safe_payload, "timestamp": ts, "path": str(WORKFLOW_TASKS_DIR / path.name)})
+        else:
+            task_meta["readable"] = True
+        sources["tasks"] = task_meta
+    else:
+        sources["tasks"] = {"enabled": False}
+    records.sort(key=lambda row: (row.get("timestamp") or datetime.min.replace(tzinfo=timezone.utc), str(row.get("source", "")), int(row.get("index", 0))))
+    return records, sources
+
+
+def _observation_signal_profile(payload: dict[str, Any], fingerprint: str, seen_error_fingerprints: set[str], duplicate_count: int) -> dict[str, Any]:
+    text = _observation_payload_text(payload)
+    safe_text = _observation_safe_string(text)
+    exit_code = _observation_int_at_keys(payload, {"exit_code", "returncode", "return_code", "status_code"})
+    success_value = payload.get("success", payload.get("ok", None)) if isinstance(payload, dict) else None
+    status_text = str(payload.get("status", "") if isinstance(payload, dict) else "").lower()
+    failing = (isinstance(exit_code, int) and exit_code != 0) or success_value is False or status_text in {"error", "failed", "failure"} or bool(OBSERVATION_FAILURE_RE.search(safe_text))
+    stack_trace = bool(OBSERVATION_STACK_TRACE_RE.search(safe_text))
+    security = bool(OBSERVATION_SECURITY_RE.search(safe_text)) or _observation_has_key_signal(payload, ("security", "vulnerab", "finding", "severity", "secret_exposure"))
+    snapshot = bool(OBSERVATION_SNAPSHOT_RE.search(safe_text)) or _observation_has_key_signal(payload, ("snapshot", "rollback", "restore"))
+    policy = bool(OBSERVATION_POLICY_RE.search(safe_text)) or _observation_has_key_signal(payload, ("blocking_policies", "policy", "gate"))
+    constraints = bool(OBSERVATION_CONSTRAINT_RE.search(safe_text)) or _observation_has_key_signal(payload, ("constraint", "requirement", "acceptance"))
+    encoded_payload = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+    sensitive = (
+        "<redacted" in encoded_payload
+        or bool(OBSERVATION_SECRET_OR_HOST_PATH_RE.search(text))
+        or bool(OBSERVATION_SECRET_OR_HOST_PATH_RE.search(encoded_payload))
+    )
+    low_value = bool(OBSERVATION_LOW_VALUE_RE.search(safe_text)) and not failing and not security
+    repo_paths = _observation_repo_relative_paths(payload)
+    novel_error = bool(failing or stack_trace) and fingerprint not in seen_error_fingerprints
+    if failing or stack_trace:
+        seen_error_fingerprints.add(fingerprint)
+    critical_signals = {
+        "failing_command": bool(failing),
+        "exit_code": exit_code if isinstance(exit_code, int) else None,
+        "changed_file_paths": repo_paths,
+        "security_finding": bool(security),
+        "rollback_or_snapshot_reference": bool(snapshot),
+        "policy_gate": bool(policy),
+        "user_constraint": bool(constraints),
+        "novel_error": bool(novel_error),
+        "stack_trace": bool(stack_trace),
+    }
+    retained_count = sum(
+        1
+        for key, value in critical_signals.items()
+        if (key == "exit_code" and value not in (None, 0))
+        or (key == "changed_file_paths" and bool(value))
+        or (key not in {"exit_code", "changed_file_paths"} and bool(value))
+    )
+    if sensitive:
+        bucket = "redact_blocked"
+        reason = "redaction_sensitive_content"
+    elif duplicate_count > 0:
+        bucket = "deduplicate"
+        reason = "duplicate_fingerprint"
+    elif retained_count > 0:
+        bucket = "preserve_raw"
+        reason = "safety_critical_signal"
+    elif low_value:
+        bucket = "drop_low_value"
+        reason = "low_value_boilerplate"
+    else:
+        bucket = "summarize"
+        reason = "unique_noncritical_observation"
+    return {
+        "bucket": bucket,
+        "reason_code": reason,
+        "critical_signals": critical_signals,
+        "retained_critical_signal_count": retained_count,
+        "low_value": low_value,
+        "sensitive": sensitive,
+        "duplicate_count": duplicate_count,
+    }
+
+
+def _observation_estimated_savings(bucket: str, raw_tokens: int) -> int:
+    if bucket == "preserve_raw":
+        return 0
+    targets = {
+        "summarize": 96,
+        "deduplicate": 24,
+        "drop_low_value": 12,
+        "redact_blocked": 32,
+    }
+    retained = targets.get(bucket, 96)
+    return max(0, raw_tokens - retained)
+
+
+def _observation_summary_text(row: dict[str, Any]) -> str:
+    signals = row.get("critical_signals", {}) if isinstance(row.get("critical_signals"), dict) else {}
+    bits: list[str] = []
+    if signals.get("failing_command"):
+        bits.append("failing command")
+    if signals.get("exit_code") not in (None, 0):
+        bits.append(f"exit_code={signals.get('exit_code')}")
+    if signals.get("changed_file_paths"):
+        bits.append(f"{len(signals.get('changed_file_paths') or [])} changed path(s)")
+    if signals.get("security_finding"):
+        bits.append("security finding")
+    if signals.get("rollback_or_snapshot_reference"):
+        bits.append("rollback/snapshot reference")
+    if signals.get("policy_gate"):
+        bits.append("policy gate")
+    if signals.get("user_constraint"):
+        bits.append("user constraint")
+    if signals.get("novel_error"):
+        bits.append("first novel error")
+    if not bits:
+        bits.append(str(row.get("reason_code", "observation")))
+    return "; ".join(bits[:6])
+
+
+def _observation_compression_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    buckets = summary.get("bucket_counts", {}) if isinstance(summary.get("bucket_counts"), dict) else {}
+    lines = [
+        f"# Observation compression report `{report.get('report_id', '')}`",
+        "",
+        "Advisory-only guidance for compressing stored workflow/task/tool observations. Raw evidence is not deleted.",
+        "",
+        "## Summary",
+        "",
+        f"- Observations: {summary.get('observation_count', 0)}",
+        f"- Estimated token savings: {summary.get('estimated_token_savings', 0)}",
+        f"- Retained critical signals: {summary.get('retained_critical_signal_count', 0)}",
+        f"- Low-confidence caveats: {len(report.get('low_confidence_caveats', []) if isinstance(report.get('low_confidence_caveats'), list) else [])}",
+        "",
+        "## Buckets",
+        "",
+    ]
+    for bucket in OBSERVATION_COMPRESSION_BUCKETS:
+        lines.append(f"- `{bucket}`: {int(buckets.get(bucket, 0) or 0)}")
+    lines.extend(["", "## Top fingerprints", ""])
+    for item in report.get("fingerprints", [])[:10] if isinstance(report.get("fingerprints"), list) else []:
+        lines.append(f"- `{item.get('fingerprint', '')[:16]}` x{item.get('count', 0)} -> `{item.get('recommended_bucket', '')}` / `{item.get('reason_code', '')}`")
+    if not report.get("fingerprints"):
+        lines.append("- None observed.")
+    lines.extend(["", "## Caveats", ""])
+    caveats = report.get("low_confidence_caveats", []) if isinstance(report.get("low_confidence_caveats"), list) else []
+    if caveats:
+        for caveat in caveats:
+            lines.append(f"- {caveat}")
+    else:
+        lines.append("- None.")
+    lines.extend(["", "Compression advice is advisory only; inspect raw references before destructive, release, or security decisions.", ""])
+    return "\n".join(lines)
+
+
+def _observation_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
+
+def _write_observation_compression_exports(report: dict[str, Any]) -> dict[str, str]:
+    paths = _observation_report_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    md = _observation_compression_markdown(report)
+    json_path.write_text(json.dumps({**report, "markdown": md}, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(md, encoding="utf-8")
+    return {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+
+
+def _observation_compression_report_impl(
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    include_tasks: bool = True,
+    max_observations: int = 500,
+    export: bool = False,
+) -> dict[str, Any]:
+    _ensure_repo_path_exists()
+    if max_observations < 0 or max_observations > 5000:
+        raise ValueError("max_observations must be between 0 and 5000")
+    start_dt, end_dt = _self_opt_parse_window(start_time, end_time, window_hours)
+    source_records, sources = _observation_source_records(
+        start_dt,
+        end_dt,
+        include_audit=include_audit,
+        include_traces=include_traces,
+        include_tasks=include_tasks,
+    )
+    if max_observations:
+        source_records = source_records[:max_observations]
+    fingerprint_counts: dict[str, int] = {}
+    seen_error_fingerprints: set[str] = set()
+    observations: list[dict[str, Any]] = []
+    bucket_counts = {bucket: 0 for bucket in OBSERVATION_COMPRESSION_BUCKETS}
+    reason_counts: dict[str, int] = {}
+    retained_critical_signal_count = 0
+    estimated_saved_tokens = 0
+    raw_token_estimate = 0
+    for record in source_records:
+        payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
+        fingerprint = _observation_canonical_fingerprint(payload)
+        duplicate_count = fingerprint_counts.get(fingerprint, 0)
+        fingerprint_counts[fingerprint] = duplicate_count + 1
+        profile = _observation_signal_profile(payload, fingerprint, seen_error_fingerprints, duplicate_count)
+        raw_tokens = _observation_raw_token_estimate(payload)
+        saved_tokens = _observation_estimated_savings(str(profile["bucket"]), raw_tokens)
+        raw_token_estimate += raw_tokens
+        estimated_saved_tokens += saved_tokens
+        retained_critical_signal_count += int(profile["retained_critical_signal_count"])
+        bucket = str(profile["bucket"])
+        reason = str(profile["reason_code"])
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        source = str(record.get("source", "unknown"))
+        index = int(record.get("index", 0) or 0)
+        observation_id = f"obs-{source}-{index}-{fingerprint[:12]}"
+        raw_reference = {
+            "source": source,
+            "index": index,
+            "retention_policy": "existing evidence only; no deletion or mutation is performed",
+        }
+        if record.get("path"):
+            raw_reference["path"] = str(record["path"])
+        row = {
+            "observation_id": observation_id,
+            "source": source,
+            "timestamp": (record.get("timestamp").isoformat() if isinstance(record.get("timestamp"), datetime) else ""),
+            "bucket": bucket,
+            "reason_code": reason,
+            "fingerprint": fingerprint,
+            "duplicate_count_before": duplicate_count,
+            "raw_token_estimate": raw_tokens,
+            "estimated_saved_tokens": saved_tokens,
+            "retained_critical_signal_count": int(profile["retained_critical_signal_count"]),
+            "critical_signals": profile["critical_signals"],
+            "summary": "",
+            "raw_reference": raw_reference,
+        }
+        row["summary"] = _observation_summary_text(row)
+        observations.append(row)
+    fingerprint_rows: list[dict[str, Any]] = []
+    by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+    for row in observations:
+        by_fingerprint.setdefault(str(row["fingerprint"]), []).append(row)
+    for fingerprint, rows in sorted(by_fingerprint.items(), key=lambda item: (-len(item[1]), item[0])):
+        first = rows[0]
+        fingerprint_rows.append(
+            {
+                "fingerprint": fingerprint,
+                "count": len(rows),
+                "recommended_bucket": first.get("bucket", "summarize") if len(rows) == 1 else "deduplicate",
+                "reason_code": "duplicate_fingerprint" if len(rows) > 1 else first.get("reason_code", "unique_noncritical_observation"),
+                "raw_excerpt_included": False,
+            }
+        )
+    caveats: list[str] = []
+    if not source_records:
+        caveats.append("No stored audit, trace, or task observations were available in the selected window.")
+    caveats.append("Token savings are conservative character-count estimates, not tokenizer-specific measurements.")
+    if any(row.get("bucket") == "redact_blocked" for row in observations):
+        caveats.append("Some observations matched secret or host-path redaction heuristics; inspect the original secured raw reference if authorized.")
+    if len(source_records) >= max_observations > 0:
+        caveats.append("The report reached max_observations; later records were not classified.")
+    summary = {
+        "observation_count": len(observations),
+        "bucket_counts": bucket_counts,
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "estimated_raw_tokens": raw_token_estimate,
+        "estimated_token_savings": estimated_saved_tokens,
+        "retained_critical_signal_count": retained_critical_signal_count,
+        "fingerprint_count": len(fingerprint_rows),
+        "duplicate_fingerprint_count": sum(1 for item in fingerprint_rows if int(item.get("count", 0) or 0) > 1),
+    }
+    report_seed = json.dumps(
+        {
+            "window": [start_dt.isoformat(), end_dt.isoformat()],
+            "summary": summary,
+            "fingerprints": fingerprint_rows[:50],
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+        default=str,
+    )
+    report_id = f"observation-compression-report-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}"
+    report: dict[str, Any] = {
+        "schema": OBSERVATION_COMPRESSION_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": end_dt.isoformat(),
+        "read_only": True,
+        "advisory_only": True,
+        "window": {
+            "start_time": start_dt.isoformat(),
+            "end_time": end_dt.isoformat(),
+            "window_hours": round((end_dt - start_dt).total_seconds() / 3600.0, 3),
+        },
+        "summary": summary,
+        "classification_buckets": [
+            {"bucket": "preserve_raw", "stable_reason": "safety_critical_signal", "guidance": "Keep raw evidence reachable for critical signals."},
+            {"bucket": "summarize", "stable_reason": "unique_noncritical_observation", "guidance": "Replace verbose unique non-critical content with deterministic structured summary."},
+            {"bucket": "deduplicate", "stable_reason": "duplicate_fingerprint", "guidance": "Keep the first occurrence and refer to duplicates by fingerprint/count."},
+            {"bucket": "drop_low_value", "stable_reason": "low_value_boilerplate", "guidance": "Omit boilerplate such as package-install or passing-test noise from model context."},
+            {"bucket": "redact_blocked", "stable_reason": "redaction_sensitive_content", "guidance": "Do not include raw sensitive excerpts; keep only redacted metadata and secured raw reference."},
+        ],
+        "observations": observations,
+        "fingerprints": fingerprint_rows[:100],
+        "compression_opportunities": {
+            "estimated_token_savings": estimated_saved_tokens,
+            "conservative": True,
+            "no_evidence_deleted": True,
+            "raw_references_required_before_destructive_or_security_decisions": True,
+        },
+        "low_confidence_caveats": caveats,
+        "sources": sources,
+        "security": {
+            "offline_capable": True,
+            "network_used": False,
+            "repo_boundary_enforced": True,
+            "redaction_applied": True,
+            "raw_logs_exposed": False,
+            "raw_secret_excerpts_included": False,
+            "automatic_deletion": False,
+        },
+        "exports": {},
+        "resource_links": [],
+    }
+    report["markdown"] = _observation_compression_markdown(report)
+    if export:
+        exports = _write_observation_compression_exports(report)
+        report["exports"] = exports
+        links = [
+            _artifact_resource_link(
+                title="Observation compression report JSON",
+                rel_path=exports["json"],
+                mime_type="application/json",
+                created_at=report["generated_at"],
+                redacted=True,
+                safety_note="JSON export contains redacted compression classifications and fingerprints only.",
+            ),
+            _artifact_resource_link(
+                title="Observation compression report Markdown",
+                rel_path=exports["markdown"],
+                mime_type="text/markdown",
+                created_at=report["generated_at"],
+                redacted=True,
+                safety_note="Markdown export contains advisory compression guidance only.",
+            ),
+        ]
+        for link in links:
+            if isinstance(link.get("path"), str):
+                path = _resolve_repo_path(str(link["path"]))
+                if path.exists():
+                    link["size_bytes"] = path.stat().st_size
+        report["resource_links"] = links
+        report["_meta"] = _artifact_meta(links)
+        _write_observation_compression_exports(report)
+    else:
+        report["_meta"] = _artifact_meta([])
+    return report
+
 def _self_optimization_report_impl(
     start_time: str = "",
     end_time: str = "",
@@ -7275,6 +7842,28 @@ def _self_optimization_report_impl(
         sources["cache"] = {"readable": False, "reason": exc.__class__.__name__}
 
     metrics = _self_opt_aggregate_records(records, cache_stats)
+    try:
+        observation_compression = _observation_compression_report_impl(
+            start_time=start_dt.isoformat(),
+            end_time=end_dt.isoformat(),
+            include_audit=include_audit,
+            include_traces=include_traces,
+            include_tasks=True,
+            max_observations=500,
+            export=False,
+        )
+        metrics["observation_compression"] = {
+            "schema": OBSERVATION_COMPRESSION_REPORT_SCHEMA,
+            "summary": observation_compression.get("summary", {}),
+            "compression_opportunities": observation_compression.get("compression_opportunities", {}),
+            "low_confidence_caveats": observation_compression.get("low_confidence_caveats", []),
+        }
+    except Exception as exc:
+        metrics["observation_compression"] = {
+            "schema": OBSERVATION_COMPRESSION_REPORT_SCHEMA,
+            "status": "unavailable",
+            "reason": exc.__class__.__name__,
+        }
     generated_at = _now_iso()
     report_seed = json.dumps(
         {
@@ -31749,6 +32338,49 @@ def self_optimization_report(
             arguments,
             categories,
             _run_self_optimization_report,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
+def observation_compression_report(
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    include_tasks: bool = True,
+    max_observations: int = 500,
+    export: bool = False,
+) -> dict[str, Any]:
+    """Build an advisory TACO-style compression report for stored workflow/task/tool observations without deleting raw evidence."""
+    arguments = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "window_hours": window_hours,
+        "include_audit": include_audit,
+        "include_traces": include_traces,
+        "include_tasks": include_tasks,
+        "max_observations": max_observations,
+        "export": export,
+    }
+    categories = _tool_categories("observation_compression_report", arguments)
+    with _otel_span(
+        "mcp.tool.observation_compression_report",
+        _otel_tool_attributes("observation_compression_report", arguments, categories),
+    ) as span:
+        categories = _require_tool_security_gate("observation_compression_report", arguments)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        result = _observation_compression_report_impl(
+            start_time=start_time,
+            end_time=end_time,
+            window_hours=window_hours,
+            include_audit=include_audit,
+            include_traces=include_traces,
+            include_tasks=include_tasks,
+            max_observations=max_observations,
+            export=export,
         )
         _otel_set_result_attributes(span, result)
         return result
