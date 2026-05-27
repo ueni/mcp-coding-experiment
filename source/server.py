@@ -7919,7 +7919,24 @@ WORKFLOW_FAILURE_CATEGORIES = {
     "missing_snapshot_rollback",
     "failed_readiness_test_gate",
     "malformed_tool_output",
+    "context",
+    "clarification",
+    "policy",
+    "mutation-snapshot",
+    "test",
+    "tool-output-security",
+    "rollback",
     "unknown_failure",
+}
+
+WORKFLOW_FAILURE_LOCALIZATION_TAXONOMY = {
+    "context": "Stale, missing, or contradicted context before the failed decision.",
+    "clarification": "The run needed unresolved user/operator clarification before proceeding.",
+    "policy": "A policy, authorization, path-scope, or required-gate constraint blocked the step.",
+    "mutation-snapshot": "A mutating step lacked pre-mutation snapshot or rollback-point evidence.",
+    "test": "Required validation, readiness, or selected-test evidence was missing or failed.",
+    "tool-output-security": "Untrusted tool output or injection/security findings were not safely handled.",
+    "rollback": "Recovery evidence was missing or rollback/recovery failed after an unsafe change.",
 }
 
 
@@ -7938,6 +7955,12 @@ def _workflow_failure_category(step: dict[str, Any]) -> str:
     flags = step.get("policy_flags", [])
     outputs = step.get("key_outputs", {})
     blob = _diagnostic_text_blob(tool, category, reason, flags, outputs, step.get("redacted_args", {}))
+    if any(term in blob for term in ("needs_clarification", "missing clarification", "clarification required", "ask the user", "operator clarification")):
+        return "clarification"
+    if any(term in blob for term in ("stale context", "context stale", "missing context", "fresh_context=false", "context_fresh=false", "tests_fresh=false")):
+        return "context"
+    if any(term in blob for term in ("blocked untrusted", "prompt injection", "prompt_injection", "tool-output injection", "untrusted content", "unsafe tool output")):
+        return "tool-output-security"
     if any(term in blob for term in ("mutations disabled", "mutation disabled", "allow_mutations=false")):
         return "mutation_disabled"
     if any(term in blob for term in ("mutation_step_guard", "mutating_decisive_deviation", "decisive deviation", "ok_to_mutate=false", "intent drift before mutation", "scope drift before mutation")):
@@ -7946,9 +7969,13 @@ def _workflow_failure_category(step: dict[str, Any]) -> str:
         return "auth_policy_denial"
     if any(term in blob for term in ("outside repo", "outside repository", "repo boundary", "path boundary", "path/scope", "not under repo", "scope violation")):
         return "path_scope_violation"
-    if any(term in blob for term in ("missing snapshot", "snapshot missing", "rollback missing", "rollback required", "state_snapshot", "state_restore")):
+    if any(term in blob for term in ("missing snapshot", "snapshot missing", "snapshot before mutation", "pre-mutation snapshot")):
+        return "mutation-snapshot"
+    if any(term in blob for term in ("rollback failed", "recovery failed", "state_restore failed")):
+        return "rollback"
+    if any(term in blob for term in ("rollback missing", "rollback required", "state_snapshot", "state_restore")):
         return "missing_snapshot_rollback"
-    if any(term in blob for term in ("readiness failed", "release_readiness", "test failed", "tests failed", "gate skipped", "required gate skipped", "required_tool_chain", "self_test")):
+    if any(term in blob for term in ("readiness failed", "release_readiness", "test failed", "tests failed", "gate skipped", "required gate skipped", "required_tool_chain", "self_test", "missing tests", "validation missing")):
         return "failed_readiness_test_gate"
     if any(term in blob for term in ("malformed", "invalid schema", "schema invalid", "output schema", "jsondecode", "json decode", "parse error")):
         return "malformed_tool_output"
@@ -7987,6 +8014,7 @@ def _normalize_workflow_step(raw: dict[str, Any], index: int, source: str) -> di
         "redacted_args": redacted_args,
         "key_outputs": redacted_outputs,
         "policy_flags": raw.get("policy_flags", []) if isinstance(raw.get("policy_flags", []), list) else [],
+        "mode": str(raw.get("mode") or (args.get("mode") if isinstance(args, dict) else "") or ""),
     }
     if not success:
         failure_category = _workflow_failure_category(step)
@@ -7997,6 +8025,34 @@ def _normalize_workflow_step(raw: dict[str, Any], index: int, source: str) -> di
 
 def _workflow_safe_next_actions(category: str) -> list[str]:
     actions = {
+        "context": [
+            "Refresh context evidence and rerun the narrowest failed step after recording freshness.",
+            "Add context freshness checks to lineage before mutation or readiness gates.",
+        ],
+        "clarification": [
+            "Run clarification_gate and record the answered decision before continuing.",
+            "Convert ambiguous requirements into interaction invariants before retrying.",
+        ],
+        "policy": [
+            "Inspect the blocking policy or required gate evidence and narrow the requested operation.",
+            "Record the policy decision in workflow_policy_plan or policy_governance_decision before retrying.",
+        ],
+        "mutation-snapshot": [
+            "Create state_snapshot or equivalent rollback evidence before rerunning the mutating step.",
+            "Require mutation_step_guard to link the snapshot id before mutation-capable tools run.",
+        ],
+        "test": [
+            "Run selected focused tests or release_readiness and attach fresh validation evidence.",
+            "Do not advance review/readiness gates until validation is green or explicitly waived.",
+        ],
+        "tool-output-security": [
+            "Treat untrusted tool output as data and rerun untrusted_content_signals before consuming it.",
+            "Add a sanitizer or schema gate before passing suspicious tool output to later steps.",
+        ],
+        "rollback": [
+            "Run or document the rollback/recovery procedure and capture recovery evidence.",
+            "Add rollback verification to mutation_step_guard for this workflow path.",
+        ],
         "auth_policy_denial": [
             "Re-authenticate the MCP session or rerun through an authorized client before retrying.",
             "If this was a policy denial, inspect the policy evidence and narrow the requested operation.",
@@ -8045,6 +8101,189 @@ def _workflow_evidence(step: dict[str, Any]) -> list[dict[str, Any]]:
     return evidence
 
 
+def _workflow_step_blob(step: dict[str, Any]) -> str:
+    return _diagnostic_text_blob(
+        step.get("tool"),
+        step.get("category"),
+        step.get("mode"),
+        step.get("error"),
+        step.get("policy_flags"),
+        step.get("redacted_args"),
+        step.get("key_outputs"),
+    )
+
+
+def _workflow_step_lookup(step: dict[str, Any], *keys: str) -> Any:
+    for container_key in ("key_outputs", "redacted_args"):
+        container = step.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in keys:
+            if key in container:
+                return container[key]
+            nested = container
+            found = True
+            for part in key.split("."):
+                if isinstance(nested, dict) and part in nested:
+                    nested = nested[part]
+                else:
+                    found = False
+                    break
+            if found:
+                return nested
+    return None
+
+
+def _workflow_bool_false(value: Any) -> bool:
+    return value is False or str(value).lower() in {"false", "0", "no"}
+
+
+def _workflow_selected_tests(step: dict[str, Any]) -> list[Any]:
+    value = _workflow_step_lookup(step, "selected_tests", "tests", "validation_tests")
+    return value if isinstance(value, list) else []
+
+
+def _workflow_has_snapshot_evidence(step: dict[str, Any]) -> bool:
+    blob = _workflow_step_blob(step)
+    if any(term in blob for term in ("snapshot_id", "rollback_snapshot_id", "state_snapshot", "stash_ref", "git-ref://")):
+        return True
+    for key in ("snapshot_id", "rollback_snapshot_id", "snapshot.id", "result.snapshot_id"):
+        value = _workflow_step_lookup(step, key)
+        if value not in (None, "", [], {}):
+            return True
+    return False
+
+
+def _workflow_is_mutating_step(step: dict[str, Any]) -> bool:
+    tool = str(step.get("tool", "")).lower()
+    mode = str(step.get("mode", "")).lower()
+    category = str(step.get("category", "")).lower()
+    blob = _workflow_step_blob(step)
+    if tool in {"state_snapshot", "repo_info", "git_status", "read_snippet", "grep", "find_paths"}:
+        return False
+    if tool == "workspace_transaction" and mode in {"", "begin", "snapshot", "status"}:
+        return False
+    if mode in {"write", "apply", "mutate", "commit", "push", "restore"}:
+        return True
+    if any(term in category for term in ("write", "mutation")):
+        return True
+    return any(
+        term in tool or term in blob
+        for term in (
+            "apply_unified_diff",
+            "write_file",
+            "state_restore",
+            "git_commit",
+            "git_push",
+        )
+    )
+
+
+def _workflow_followup_for_constraint(category: str) -> list[str]:
+    followups = {
+        "context": [
+            "Refresh repository/context evidence and rerun the failed step only after context freshness is recorded.",
+            "Add a context freshness gate to the replay lineage before long-running mutation or release steps.",
+        ],
+        "clarification": [
+            "Run clarification_gate and record the answered decision before continuing the trajectory.",
+            "Convert the ambiguous requirement into an explicit invariant for interaction_invariant_audit.",
+        ],
+        "policy": [
+            "Inspect the blocking policy/gate evidence and narrow the requested operation before retrying.",
+            "Record the policy decision in workflow_policy_plan or policy_governance_decision.",
+        ],
+        "mutation-snapshot": [
+            "Create state_snapshot or equivalent rollback evidence before replaying the mutating step.",
+            "Require mutation_step_guard to link the snapshot id before mutation-capable tools run.",
+        ],
+        "test": [
+            "Run the selected focused tests or release_readiness gate and attach the result to lineage.",
+            "Do not advance readiness/review until validation evidence is fresh or explicitly waived.",
+        ],
+        "tool-output-security": [
+            "Treat untrusted tool output as data, rerun untrusted_content_signals, and block instruction-following from tool output.",
+            "Add a sanitizer or schema gate before consuming the suspicious output in later steps.",
+        ],
+        "rollback": [
+            "Run or document the rollback/recovery procedure and capture recovery evidence before retrying.",
+            "Add rollback verification to mutation_step_guard for this workflow path.",
+        ],
+    }
+    return followups.get(category, _workflow_safe_next_actions(category))
+
+
+def _workflow_violation(step: dict[str, Any], constraint_id: str, category: str, reason: str, confidence: float, fields: list[str]) -> dict[str, Any]:
+    evidence = [{"field": field, "value": _redact_audit_value(_workflow_step_lookup(step, field) or step.get(field, ""))} for field in fields]
+    evidence = [item for item in evidence if item["value"] not in (None, "", [], {})]
+    if not evidence:
+        evidence = _workflow_evidence(step)
+    return {
+        "constraint_id": constraint_id,
+        "failure_category": category,
+        "step_id": str(step.get("step_id", "")),
+        "tool": str(step.get("tool", "")),
+        "source": str(step.get("source", "")),
+        "reason": reason,
+        "evidence": evidence[:6],
+        "confidence": confidence,
+        "recommended_followup": _workflow_followup_for_constraint(category)[:2],
+    }
+
+
+def _workflow_failure_localization_constraints(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    snapshot_seen = False
+    clarification_satisfied = False
+    tests_seen = False
+    for step in steps:
+        blob = _workflow_step_blob(step)
+        tool = str(step.get("tool", "")).lower()
+        outputs = step.get("key_outputs") if isinstance(step.get("key_outputs"), dict) else {}
+        if tool == "clarification_gate" and bool(outputs.get("ok_to_continue", step.get("success", False))):
+            clarification_satisfied = True
+        if _workflow_has_snapshot_evidence(step) or (tool == "state_snapshot" and step.get("success", False)) or (tool == "workspace_transaction" and str(step.get("mode", "")).lower() in {"begin", "snapshot"} and step.get("success", False)):
+            snapshot_seen = True
+        if ("test" in tool or tool == "release_readiness") and step.get("success", False):
+            tests_seen = True
+        if _workflow_selected_tests(step) and step.get("success", False):
+            tests_seen = True
+
+        if _workflow_bool_false(_workflow_step_lookup(step, "context_metadata.fresh", "context_fresh", "fresh_context")) or any(term in blob for term in ("stale context", "context stale", "fresh_context=false", "context_fresh=false")):
+            violations.append(_workflow_violation(step, "fresh_context", "context", "Step used stale or missing context evidence.", 0.92, ["context_metadata.fresh", "context_fresh", "error"]))
+        if _workflow_bool_false(_workflow_step_lookup(step, "context_metadata.tests_fresh", "tests_fresh")) or any(term in blob for term in ("tests_fresh=false", "stale tests")):
+            violations.append(_workflow_violation(step, "fresh_validation_context", "context", "Step depended on stale validation context.", 0.88, ["context_metadata.tests_fresh", "tests_fresh", "error"]))
+        if ("needs_clarification" in blob or "missing clarification" in blob or "clarification required" in blob or _workflow_step_lookup(step, "requires_clarification") is True) and not clarification_satisfied:
+            violations.append(_workflow_violation(step, "clarification_satisfied", "clarification", "Required clarification was not satisfied before this step.", 0.95, ["decision", "status", "error"]))
+        if any(term in blob for term in ("policy denied", "policy denial", "blocking_policies", "required gate skipped", "gate skipped")):
+            violations.append(_workflow_violation(step, "policy_gate_present", "policy", "Policy or required gate evidence blocked the replay step.", 0.9, ["blocking_policies", "policy_flags", "error"]))
+        if any(term in blob for term in ("blocked untrusted", "prompt injection", "prompt_injection", "tool-output injection", "untrusted content")):
+            violations.append(_workflow_violation(step, "tool_output_security", "tool-output-security", "Untrusted tool-output security evidence was not cleared before use.", 0.9, ["prompt_injection_signals", "untrusted_content_signals", "error"]))
+        if _workflow_is_mutating_step(step) and not snapshot_seen and (step.get("success", False) or any(term in blob for term in ("missing snapshot", "snapshot before mutation", "pre-mutation snapshot"))):
+            violations.append(_workflow_violation(step, "snapshot_before_mutation", "mutation-snapshot", "Mutating step has no prior snapshot or rollback-point evidence.", 0.96, ["snapshot_id", "rollback_snapshot_id", "mode", "error"]))
+        if any(term in blob for term in ("rollback failed", "recovery failed", "rollback missing", "rollback required", "state_restore failed")):
+            violations.append(_workflow_violation(step, "rollback_recovery_evidence", "rollback", "Rollback or recovery evidence is missing or failed.", 0.9, ["rollback_snapshot_id", "recovery_plan", "error"]))
+        if ("missing tests" in blob or "validation missing" in blob or "selected_tests=[]" in blob or "tests failed" in blob or "readiness failed" in blob) and not tests_seen:
+            violations.append(_workflow_violation(step, "validation_evidence", "test", "Required validation evidence is missing or failing.", 0.88, ["selected_tests", "tests", "error"]))
+    return violations
+
+
+def _workflow_localization_from_failure(step: dict[str, Any]) -> dict[str, Any]:
+    category = str(step.get("failure_category") or "unknown_failure")
+    confidence = 0.85 if category != "unknown_failure" else 0.55
+    return {
+        "step_id": str(step.get("step_id", "")),
+        "tool": str(step.get("tool", "")),
+        "source": str(step.get("source", "")),
+        "failure_category": category,
+        "constraint_id": "explicit_step_failure",
+        "reason": str(step.get("error", "") or "step reported failure"),
+        "evidence": _workflow_evidence(step),
+        "confidence": confidence,
+        "recommended_followup": _workflow_safe_next_actions(category)[:2],
+    }
+
+
 def _workflow_redactions_applied(steps: list[dict[str, Any]]) -> list[str]:
     encoded = json.dumps(steps, sort_keys=True, ensure_ascii=True)
     redactions: list[str] = []
@@ -8066,42 +8305,76 @@ def _build_workflow_diagnostics(events: list[dict[str, Any]], trajectory: list[d
     ]
     steps = audit_steps + trajectory_steps
     failed = [step for step in steps if not step.get("success", False)]
+    violations = _workflow_failure_localization_constraints(steps)
     categorized = [step for step in failed if step.get("failure_category") != "unknown_failure"]
     critical = (categorized or failed or [None])[0]
-    failure_category = str(critical.get("failure_category", "") if isinstance(critical, dict) else "")
+    violations_by_step: dict[str, list[dict[str, Any]]] = {}
+    for violation in violations:
+        violations_by_step.setdefault(str(violation.get("step_id", "")), []).append(violation)
+    critical_localization: dict[str, Any] = {}
+    for step in steps:
+        step_id = str(step.get("step_id", ""))
+        if not step.get("success", False) and step in (categorized or failed):
+            critical_localization = _workflow_localization_from_failure(step)
+            break
+        if violations_by_step.get(step_id):
+            critical_localization = violations_by_step[step_id][0]
+            break
+    if not critical_localization and isinstance(critical, dict):
+        critical_localization = _workflow_localization_from_failure(critical)
+    if not critical_localization and violations:
+        critical_localization = violations[0]
+    failure_category = str(critical_localization.get("failure_category", ""))
     if not failure_category:
         failure_category = "none"
     category_counts: dict[str, int] = {}
     for step in failed:
         key = str(step.get("failure_category", "unknown_failure"))
         category_counts[key] = category_counts.get(key, 0) + 1
+    for violation in violations:
+        key = str(violation.get("failure_category", "unknown_failure"))
+        category_counts[key] = category_counts.get(key, 0) + 1
+    recommended = list(critical_localization.get("recommended_followup", [])) if critical_localization else []
+    if not recommended and failure_category != "none":
+        recommended = _workflow_safe_next_actions(failure_category)
     report = {
         "schema": "workflow_diagnostics.v1",
         "correlation_id": _otel_current_correlation_id(),
-        "ok": not failed,
+        "ok": not failed and not violations,
         "step_count": len(steps),
         "failed_step_count": len(failed),
+        "constraint_violation_count": len(violations),
+        "failure_taxonomy": WORKFLOW_FAILURE_LOCALIZATION_TAXONOMY,
         "failure_categories": dict(sorted(category_counts.items())),
         "critical_step_candidate": critical or {},
+        "critical_failure_step": critical_localization,
         "failure_category": failure_category,
-        "evidence": _workflow_evidence(critical) if isinstance(critical, dict) else [],
+        "constraint_violations": violations[:limit],
+        "evidence": list(critical_localization.get("evidence", [])) if critical_localization else [],
+        "confidence": float(critical_localization.get("confidence", 1.0 if failure_category == "none" else 0.55)),
+        "recommended_followup": recommended[:3],
         "safe_next_actions": _workflow_safe_next_actions(failure_category) if failure_category != "none" else [],
-        "redactions_applied": _workflow_redactions_applied(steps),
+        "redactions_applied": _workflow_redactions_applied(steps + violations),
         "trajectory": steps[:limit],
+        "llm_judging": {"enabled": False, "default": "off", "reason": "deterministic replay constraints only"},
     }
     return report
 
 
 def _workflow_diagnostics_compact(report: dict[str, Any]) -> dict[str, Any]:
-    critical = report.get("critical_step_candidate", {})
+    critical = report.get("critical_failure_step") or report.get("critical_step_candidate", {})
+    recommended = report.get("recommended_followup", report.get("safe_next_actions", []))
     return {
         "schema": "workflow_diagnostics.summary.v1",
         "correlation_id": str(report.get("correlation_id", "")),
         "ok": bool(report.get("ok", True)),
         "failed_step_count": int(report.get("failed_step_count", 0)),
+        "constraint_violation_count": int(report.get("constraint_violation_count", 0)),
         "failure_category": str(report.get("failure_category", "none")),
         "critical_step_id": str(critical.get("step_id", "")) if isinstance(critical, dict) else "",
         "critical_tool": str(critical.get("tool", "")) if isinstance(critical, dict) else "",
+        "confidence": float(report.get("confidence", 1.0)),
+        "recommended_followup": list(recommended)[:3] if isinstance(recommended, list) else [],
         "safe_next_actions": list(report.get("safe_next_actions", []))[:3]
         if isinstance(report.get("safe_next_actions"), list)
         else [],
