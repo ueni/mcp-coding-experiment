@@ -101,6 +101,11 @@ _DOC_REFS_BY_TOOL: dict[str, tuple[dict[str, str], ...]] = {
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Self-optimization efficiency report", "path": "docs/self-optimization-report.md"},
     ),
+    "observation_compression_report": (
+        {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
+        {"label": "Observation compression report", "path": "docs/observation-compression-report.md"},
+        {"label": "Adaptive observation compression", "path": "docs/observation-compression.md"},
+    ),
     "agents_context_health": (
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "AGENTS.md context health report", "path": "docs/agents-context-health.md"},
