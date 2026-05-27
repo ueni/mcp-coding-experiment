@@ -157,6 +157,10 @@ Example client response excerpt for `governance_report(export=true)`:
 
 ## Error shape
 
+SEP-1303 input-validation behavior is enforced for public MCP tools: invalid-but-well-formed arguments, unsupported router modes, repository-relative path validation failures, and similar business-rule input denials are returned to clients as model-visible tool execution errors (`isError: true`) with concise redacted remediation text. Clients should pass that text back to the agent so it can correct and retry the call. The response must not include bearer tokens, secrets, host absolute paths, raw environment values, or unnecessary repository content.
+
+Protocol and transport boundaries remain separate: unknown tool names, malformed JSON-RPC/non-object tool arguments, HTTP authentication/scope failures, and non-validation server failures continue to raise protocol or HTTP errors as appropriate.
+
 All schema-backed tools share this documented error envelope for clients that normalize exceptions into structured results:
 
 ```json
