@@ -39,6 +39,8 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workflow_policy_plan",
                 "policy_governance_decision",
                 "workflow_reminder",
+                "workflow_task",
+                "task_status",
                 "clarification_gate",
                 "release_readiness",
                 "agent_quality_delta",
@@ -98,6 +100,9 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
 
         lineage_report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
         referenced_report = self.server.self_optimization_report(result_mode="reference")
+        workflow_task_output = self.server.workflow_task(
+            workflow="governance_report", base_ref="HEAD", head_ref="HEAD", export=False
+        )
 
         outputs = {
             "repo_info": self.server.repo_info(),
@@ -131,6 +136,8 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 intended_next_action={"tool": "release_readiness", "mode": "release"},
                 last_gate_results={"change_impact_gate": {"ok": True, "selected_tests": ["tests/test_tool_output_schemas.py"]}},
             ),
+            "workflow_task": workflow_task_output,
+            "task_status": self.server.task_status(workflow_task_output["task_id"]),
             "clarification_gate": self.server.clarification_gate(
                 intent="prepare a safe release",
                 target="HEAD",
