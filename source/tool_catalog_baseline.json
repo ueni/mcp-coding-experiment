@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 43,
+  "tool_count": 44,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -16520,5 +16520,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:01586a6278ef3aacf53f2460bbe8ea681dadb2fce73fc8c91d3ae4c35416012d"
+  "whole_catalog_digest": "sha256:fb079dc0ff2f5669c0b3c59d5b115a0d103d48c285017c3ffba7d31e35d408df"
 }
