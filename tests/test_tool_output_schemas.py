@@ -6,6 +6,8 @@ import asyncio
 from source.tool_output_schemas import (
     ERROR_OUTPUT_SCHEMA,
     RESOURCE_LINK_SCHEMA,
+    RESULT_REFERENCE_SCHEMA,
+    RESULT_REFERENCE_RESOLVE_SCHEMA,
     SCHEMA_BACKED_TOOL_NAMES,
     STATE_SNAPSHOT_OUTPUT_SCHEMA,
     TOOL_OUTPUT_SCHEMAS,
@@ -56,6 +58,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "observation_compression_report",
                 "agents_context_health",
                 "artifact_provenance",
+                "result_reference_resolve",
                 "workflow_diagnostics",
                 "workflow_lineage",
                 "interaction_invariant_audit",
@@ -98,6 +101,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
         self.write_repo_text("src/schema_contract.py", "def schema_marker():\n    return 'marker'\n")
 
         lineage_report = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=True)
+        referenced_report = self.server.self_optimization_report(result_mode="reference")
         workflow_task_output = self.server.workflow_task(
             workflow="governance_report", base_ref="HEAD", head_ref="HEAD", export=False
         )
@@ -168,6 +172,9 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             ),
             "agents_context_health": self.server.agents_context_health(),
             "artifact_provenance": self.server.artifact_provenance(include_reports=False, include_snapshots=False),
+            "result_reference_resolve": self.server.result_reference_resolve(
+                reference=referenced_report["result_reference"], include_content=False
+            ),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
             "workflow_lineage": self.server.workflow_lineage(
                 manifest_path=lineage_report["exports"]["lineage"]
@@ -191,6 +198,165 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
 
         for tool_name, payload in outputs.items():
             with self.subTest(tool_name=tool_name):
+                validate_against_schema(payload, TOOL_OUTPUT_SCHEMAS[tool_name])
+
+
+    def test_result_reference_mode_creates_resolvable_hash_verified_handle(self):
+        payload = self.server.self_optimization_report(result_mode="reference", result_reference_ttl_hours=1)
+
+        self.assertEqual(payload["schema"], "self_optimization_report.v1")
+        self.assertEqual(payload["result_mode"], "reference")
+        self.assertIn("result_reference", payload)
+        self.assertNotIn("metrics", payload)
+        reference = payload["result_reference"]
+        validate_against_schema(reference, RESULT_REFERENCE_SCHEMA)
+        self.assertEqual(reference["schema"], "mcp_result_reference.v1")
+        self.assertFalse(reference["sensitivity"]["sensitive_payload_embedded"])
+        self.assertEqual(reference["content"]["mime_type"], "application/json")
+
+        resolved = self.server.result_reference_resolve(reference=reference)
+        validate_against_schema(resolved, RESULT_REFERENCE_RESOLVE_SCHEMA)
+        self.assertTrue(resolved["ok"])
+        self.assertEqual(resolved["status"], "resolved")
+        self.assertIn('"schema": "self_optimization_report.v1"', resolved["content"])
+        self.assertEqual(
+            resolved["artifact"]["hash"]["value"],
+            reference["content"]["hash"]["value"],
+        )
+
+        governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        audit_summary = governance["result_references"]
+        self.assertGreaterEqual(audit_summary["created_count"], 1)
+        self.assertGreaterEqual(audit_summary["resolved_count"], 1)
+        self.assertFalse(audit_summary["privacy"]["full_payloads_embedded"])
+        self.assertTrue(
+            any(item["reference_id"] == reference["reference_id"] for item in audit_summary["latest"])
+        )
+
+    def test_result_reference_resolver_rejects_boundary_and_handles_missing_expired_and_hash_mismatch(self):
+        payload = self.server.self_optimization_report(result_mode="reference", result_reference_ttl_hours=1)
+        reference = payload["result_reference"]
+
+        outside = self.server.json.loads(self.server.json.dumps(reference))
+        outside["resolver"]["path"] = "../outside.json"
+        rejected = self.server.result_reference_resolve(reference=outside)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["status"], "boundary_rejected")
+        self.assertNotIn(str(self.repo_path), self.server.json.dumps(rejected))
+
+        missing = self.server.json.loads(self.server.json.dumps(reference))
+        missing["resolver"]["path"] = ".codebase-tooling-mcp/reports/result-references/missing.json"
+        missing_result = self.server.result_reference_resolve(reference=missing)
+        self.assertFalse(missing_result["ok"])
+        self.assertEqual(missing_result["status"], "missing")
+
+        expired = self.server.json.loads(self.server.json.dumps(reference))
+        expired["expires_at"] = "2000-01-01T00:00:00+00:00"
+        expired_result = self.server.result_reference_resolve(reference=expired)
+        self.assertFalse(expired_result["ok"])
+        self.assertEqual(expired_result["status"], "expired")
+
+        mismatch = self.server.json.loads(self.server.json.dumps(reference))
+        mismatch["content"]["hash"]["value"] = "0" * 64
+        mismatch_result = self.server.result_reference_resolve(reference=mismatch)
+        self.assertFalse(mismatch_result["ok"])
+        self.assertEqual(mismatch_result["status"], "hash_mismatch")
+        self.assertNotIn("content", mismatch_result)
+
+    def test_result_reference_resolver_rejects_path_only_and_missing_hash_inputs(self):
+        for include_content in (False, True):
+            with self.subTest(include_content=include_content):
+                path_only = self.server.result_reference_resolve(
+                    path="README.md",
+                    include_content=include_content,
+                )
+                validate_against_schema(path_only, RESULT_REFERENCE_RESOLVE_SCHEMA)
+                self.assertFalse(path_only["ok"])
+                self.assertEqual(path_only["status"], "invalid_reference")
+                self.assertFalse(path_only["security"]["hash_verified_before_content"])
+                self.assertFalse(path_only["security"]["payload_embedded"])
+                self.assertNotIn("content", path_only)
+                self.assertNotIn("# Test Repo", self.server.json.dumps(path_only))
+
+        missing_hash = self.server.result_reference_resolve(
+            reference_id="manual-readme",
+            path="README.md",
+            include_content=True,
+        )
+        validate_against_schema(missing_hash, RESULT_REFERENCE_RESOLVE_SCHEMA)
+        self.assertFalse(missing_hash["ok"])
+        self.assertEqual(missing_hash["status"], "invalid_reference")
+        self.assertFalse(missing_hash["security"]["hash_verified_before_content"])
+        self.assertFalse(missing_hash["security"]["payload_embedded"])
+        self.assertNotIn("content", missing_hash)
+
+        readme_hash = self.server.hashlib.sha256((self.repo_path / "README.md").read_bytes()).hexdigest()
+        missing_reference_id = self.server.result_reference_resolve(
+            path="README.md",
+            expected_hash=readme_hash,
+            include_content=True,
+        )
+        self.assertFalse(missing_reference_id["ok"])
+        self.assertEqual(missing_reference_id["status"], "invalid_reference")
+        self.assertNotIn("content", missing_reference_id)
+
+        explicit = self.server.result_reference_resolve(
+            reference_id="manual-readme",
+            path="README.md",
+            expected_hash=readme_hash,
+            include_content=False,
+        )
+        validate_against_schema(explicit, RESULT_REFERENCE_RESOLVE_SCHEMA)
+        self.assertTrue(explicit["ok"])
+        self.assertEqual(explicit["status"], "resolved")
+        self.assertTrue(explicit["security"]["hash_verified_before_content"])
+        self.assertFalse(explicit["security"]["payload_embedded"])
+        self.assertNotIn("content", explicit)
+
+    def test_result_modes_preserve_default_inline_and_support_summary_for_two_reports(self):
+        inline_self = self.server.self_optimization_report()
+        self.assertEqual(inline_self["schema"], "self_optimization_report.v1")
+        self.assertIn("metrics", inline_self)
+        self.assertNotIn("result_mode", inline_self)
+
+        summary_self = self.server.self_optimization_report(result_mode="summary")
+        self.assertEqual(summary_self["result_mode"], "summary")
+        self.assertNotIn("metrics", summary_self)
+        self.assertNotIn("result_reference", summary_self)
+
+        reference_self = self.server.self_optimization_report(result_mode="reference")
+        self.assertEqual(reference_self["result_mode"], "reference")
+        self.assertNotIn("metrics", reference_self)
+        self.assertIn("result_reference", reference_self)
+
+        inline_governance = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+        self.assertEqual(inline_governance["schema"], "governance_report.v1")
+        self.assertIn("audit", inline_governance)
+
+        summary_governance = self.server.governance_report(
+            base_ref="HEAD", head_ref="HEAD", export=False, result_mode="summary"
+        )
+        self.assertEqual(summary_governance["result_mode"], "summary")
+        self.assertNotIn("audit", summary_governance)
+
+        reference_governance = self.server.governance_report(
+            base_ref="HEAD", head_ref="HEAD", export=False, result_mode="reference"
+        )
+        self.assertEqual(reference_governance["result_mode"], "reference")
+        self.assertNotIn("audit", reference_governance)
+        self.assertIn("result_reference", reference_governance)
+
+        mode_payloads = {
+            "self_optimization_report:inline": inline_self,
+            "self_optimization_report:summary": summary_self,
+            "self_optimization_report:reference": reference_self,
+            "governance_report:inline": inline_governance,
+            "governance_report:summary": summary_governance,
+            "governance_report:reference": reference_governance,
+        }
+        for case_name, payload in mode_payloads.items():
+            tool_name = case_name.split(":", 1)[0]
+            with self.subTest(case_name=case_name):
                 validate_against_schema(payload, TOOL_OUTPUT_SCHEMAS[tool_name])
 
     def test_resource_link_schema_validates_generated_artifacts(self):

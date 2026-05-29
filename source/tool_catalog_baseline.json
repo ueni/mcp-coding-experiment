@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 43,
+  "tool_count": 44,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -3692,7 +3692,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:90e896594dbd13fee276a374c986e9ac0828cdb6a964f1c5b94a15666c5408ac",
+      "digest": "sha256:1f1668751779df5563d51b26c646259d65504bad4447ba8dd31192585ff89bf8",
       "metadata": {
         "documentation": [
           {
@@ -3734,6 +3734,23 @@
                 "default": "HEAD",
                 "title": "Head Ref",
                 "type": "string"
+              },
+              "result_mode": {
+                "default": "inline",
+                "title": "Result Mode",
+                "type": "string"
+              },
+              "result_reference_ttl_hours": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Result Reference Ttl Hours"
               },
               "start_time": {
                 "default": "",
@@ -3849,6 +3866,95 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
+              "result_references": {
+                "type": "object"
+              },
               "schema": {
                 "const": "governance_report.v1",
                 "type": "string"
@@ -3875,11 +3981,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "audit",
-              "governance_hooks",
-              "agents_context_health",
-              "exports"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -3923,6 +4025,12 @@
             "type": "object"
           },
           "experimentalFields": [
+            "audit",
+            "governance_hooks",
+            "agents_context_health",
+            "exports",
+            "resource_links",
+            "summary",
             "window",
             "git",
             "snapshots",
@@ -3934,6 +4042,9 @@
             "secret_exposure",
             "untrusted_content_signals",
             "memory_governance",
+            "result_references",
+            "result_mode",
+            "result_reference",
             "lineage",
             "provenance",
             "compressed_observation",
@@ -4041,6 +4152,95 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
+              "result_references": {
+                "type": "object"
+              },
               "schema": {
                 "const": "governance_report.v1",
                 "type": "string"
@@ -4067,11 +4267,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "audit",
-              "governance_hooks",
-              "agents_context_health",
-              "exports"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -4079,12 +4275,7 @@
           "stableFields": [
             "schema",
             "report_id",
-            "generated_at",
-            "audit",
-            "governance_hooks",
-            "agents_context_health",
-            "exports",
-            "resource_links"
+            "generated_at"
           ],
           "tool": "governance_report"
         },
@@ -8825,6 +9016,264 @@
       "name": "repo_info"
     },
     {
+      "digest": "sha256:c67cdeec084986f555d7d64a3ee918a1b10d59e037372d4812490f84d368ab35",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Resolve a repository-local mcp_result_reference.v1 artifact handle.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "expected_hash": {
+                "default": "",
+                "title": "Expected Hash",
+                "type": "string"
+              },
+              "include_content": {
+                "default": true,
+                "title": "Include Content",
+                "type": "boolean"
+              },
+              "path": {
+                "default": "",
+                "title": "Path",
+                "type": "string"
+              },
+              "reference": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Reference"
+              },
+              "reference_id": {
+                "default": "",
+                "title": "Reference Id",
+                "type": "string"
+              }
+            },
+            "title": "result_reference_resolveArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "result_reference_resolve",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "artifact": {
+                "type": "object"
+              },
+              "content": {
+                "type": "string"
+              },
+              "content_encoding": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "producer_tool": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "reference_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "mcp_result_reference.resolve.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "resolved",
+                  "expired",
+                  "missing",
+                  "boundary_rejected",
+                  "hash_mismatch",
+                  "invalid_reference"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "ok",
+              "status",
+              "read_only",
+              "reference_id",
+              "artifact",
+              "security"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "producer_tool",
+            "summary",
+            "message",
+            "content",
+            "content_encoding"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "artifact": {
+                "type": "object"
+              },
+              "content": {
+                "type": "string"
+              },
+              "content_encoding": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "producer_tool": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "reference_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "mcp_result_reference.resolve.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "resolved",
+                  "expired",
+                  "missing",
+                  "boundary_rejected",
+                  "hash_mismatch",
+                  "invalid_reference"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "ok",
+              "status",
+              "read_only",
+              "reference_id",
+              "artifact",
+              "security"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "ok",
+            "status",
+            "read_only",
+            "reference_id",
+            "artifact",
+            "security"
+          ],
+          "tool": "result_reference_resolve"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "result_reference_resolve"
+        }
+      },
+      "name": "result_reference_resolve"
+    },
+    {
       "digest": "sha256:b28e0e1511723da075de569de2995337bc3dc203cc04184fa2d489016aeee6f5",
       "metadata": {
         "documentation": [
@@ -10334,7 +10783,7 @@
       "name": "security_root_cause_evidence"
     },
     {
-      "digest": "sha256:f9ca4c40bad3589b36e5abcd9a0e4bc5a26a04858b4ebf293e2fbc65831419ac",
+      "digest": "sha256:ba1f798aab75c9a66212bd28c9f6d0f20faca56a648e9087e55210e7d7231397",
       "metadata": {
         "documentation": [
           {
@@ -10427,6 +10876,23 @@
                 ],
                 "default": null,
                 "title": "Redact Terms"
+              },
+              "result_mode": {
+                "default": "inline",
+                "title": "Result Mode",
+                "type": "string"
+              },
+              "result_reference_ttl_hours": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Result Reference Ttl Hours"
               },
               "start_time": {
                 "default": "",
@@ -10559,6 +11025,92 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
               "schema": {
                 "const": "self_optimization_report.v1",
                 "type": "string"
@@ -10582,14 +11134,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "window",
-              "summary",
-              "metrics",
-              "optimization_candidates",
-              "optimization_integrity_report",
-              "agents_context_health",
-              "security"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -10633,6 +11178,13 @@
             "type": "object"
           },
           "experimentalFields": [
+            "window",
+            "summary",
+            "metrics",
+            "optimization_candidates",
+            "optimization_integrity_report",
+            "agents_context_health",
+            "security",
             "sources",
             "bottlenecks",
             "usage_guidance",
@@ -10644,6 +11196,8 @@
             "patch_survivorship",
             "optimization_candidates[].anti_gaming",
             "metrics.observation_compression",
+            "result_mode",
+            "result_reference",
             "_meta"
           ],
           "outputSchema": {
@@ -10760,6 +11314,92 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
               "schema": {
                 "const": "self_optimization_report.v1",
                 "type": "string"
@@ -10783,14 +11423,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "window",
-              "summary",
-              "metrics",
-              "optimization_candidates",
-              "optimization_integrity_report",
-              "agents_context_health",
-              "security"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -10798,14 +11431,7 @@
           "stableFields": [
             "schema",
             "report_id",
-            "generated_at",
-            "window",
-            "summary",
-            "metrics",
-            "optimization_candidates",
-            "optimization_integrity_report",
-            "agents_context_health",
-            "security"
+            "generated_at"
           ],
           "tool": "self_optimization_report"
         },
@@ -15896,5 +16522,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:45cdd8ec81ae714a4420e119292b951f35979d1a1553cd4df13c745bd036c856"
+  "whole_catalog_digest": "sha256:38192e95b17ad364e12d9f993d591475da92f5113086fbbba39f71b986485539"
 }

@@ -23,6 +23,7 @@ SPDX-License-Identifier: MIT
 - [Agent quality delta](./agent-quality-delta.md) - deterministic read-only base/head maintainability delta gate for autonomous PRs.
 - [Workflow reminder packets](./workflow-reminder.md) - deterministic read-only instruction-fade reminder packets before high-risk planned actions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
+- [Reference-based result handles](./result-references.md) - opt-in `mcp_result_reference.v1` handles and resolver for large read-only outputs.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [AGENTS.md context health report](./agents-context-health.md) - read-only minimal-context budget, duplication, stale guidance, risky global instruction, and move-candidate lint.
@@ -85,6 +86,7 @@ This index lists documentation ownership and status.
 - [MCP tool-response scanner](./tool-response-scanner.md) (`docs/tool-response-scanner.md`) - Status: `prototype`
 - [AGENTS.md context health report](./agents-context-health.md) (`docs/agents-context-health.md`) - Status: `prototype`
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
+- [Reference-based result handles](./result-references.md) (`docs/result-references.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`
 - [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`
