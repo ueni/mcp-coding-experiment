@@ -130,7 +130,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `agent_security_delta`, `agent_security_delta_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `agents_context_health`, `artifact_provenance`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`, `workflow_reminder`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `agent_security_delta`, `agent_security_delta_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `observation_compression_report`, `agents_context_health`, `artifact_provenance`, `result_reference_resolve`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`, `policy_governance_decision`, `workflow_reminder`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -155,6 +155,8 @@ Public tools:
 `mcp_threat_model_report` is the offline public governance tool for MCP trust-boundary review. It maps host/client, LLM, server, repository, and external-service boundaries to STRIDE/DREAD-style threats, returns the checked-in deterministic DREAD rubric, links existing controls to risks, analyzes secret-free poisoned-tool fixtures including post-handshake `notifications/tools/list_changed` plus repeated `tools/list` mutations, and can compare a local baseline for high-severity uncovered regressions without exposing secrets or raw external state.
 
 `self_optimization_report` is the direct public tool for the software team's self-optimization loop on this repository. It stays offline/repo-local while aggregating redacted audit events, local spans, task handles, cache metadata, and local Git refs into usage, savings, throughput, bottleneck, duplicate-suppressed recommendation, and advisory optimization-integrity summaries. The nested `optimization_integrity_report` checks suspicious proxy wins before efficiency metrics are reused for optimization issues or release-gate policy.
+
+`observation_compression_report` is the standalone read-only observation-compression audit path. It classifies stored workflow/task/tool observations into conservative preserve/summarize/deduplicate/drop/redact buckets, reports retained critical signals and estimated savings, and never deletes raw evidence.
 
 `agents_context_health` is the read-only AGENTS.md context lint report. It checks byte/token budgets, duplicate or stale guidance candidates, risky global instruction signals, instruction categories, and move-to-router/docs suggestions without returning raw AGENTS text, writing artifacts, or using network access.
 
@@ -277,7 +279,7 @@ Restore:
 ### 9.1 Result Handles and Persistent Reports
 
 - `result_handle` enables referential linking of prior tool outputs.
-- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison. `dependency_security_report` writes dependency-security JSON/SBOM artifacts with adjacent local provenance sidecars, `governance_report` writes adjacent local provenance sidecars plus a `workflow_lineage.v1` manifest, `artifact_provenance` verifies report/snapshot sidecars read-only, and `workflow_lineage` verifies governance-report lineage drift read-only. `TEST_IMPACT_MAP.json` is the refreshable static Python test-impact report consumed by `test_impact_map` and preferred by `impact_tests` when fresh.
+- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison. `dependency_security_report` writes dependency-security JSON/SBOM artifacts with adjacent local provenance sidecars, `governance_report` writes adjacent local provenance sidecars plus a `workflow_lineage.v1` manifest and opt-in result-reference artifacts, `artifact_provenance` verifies report/snapshot sidecars read-only, `result_reference_resolve` fetches repository-local result handles only after boundary/expiry/hash checks, and `workflow_lineage` verifies governance-report lineage drift read-only. `TEST_IMPACT_MAP.json` is the refreshable static Python test-impact report consumed by `test_impact_map` and preferred by `impact_tests` when fresh.
 
 ### 9.2 Replay and Memory
 

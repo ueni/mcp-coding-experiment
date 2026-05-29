@@ -63,6 +63,23 @@ Span records also include `trace_id`, `span_id`, `parent_span_id`,
 `correlation_id`, start/end timestamps, duration, status, and
 `resource.service.name`. Async workflow spans use the task id as the correlation
 id; direct tool calls get a generated local correlation id when no task id exists.
+When a valid incoming W3C `traceparent` is present, spans join that `trace_id`
+and the top-level local span uses the remote parent span id.
+
+## Incoming trace context
+
+When tracing is enabled, the server reads W3C trace context from both Streamable
+HTTP headers and MCP request `_meta` fields:
+
+- `traceparent` is validated and rejected if malformed or all-zero.
+- `tracestate` is summarized as a member count; raw vendor values are not stored.
+- `baggage` is dropped by default. Set `MCP_OTEL_BAGGAGE_ALLOWLIST` to a
+  comma-separated list of low-sensitivity baggage keys to expose bounded,
+  redacted values such as `tenant` or `workflow`.
+
+Invalid context is counted on the span as redacted metadata instead of being
+propagated. Workflow diagnostics and governance summaries include only the
+opaque span correlation id, not raw baggage or request content.
 
 ## Redaction and content-capture boundaries
 

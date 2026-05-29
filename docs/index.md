@@ -18,9 +18,11 @@ SPDX-License-Identifier: MIT
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) - deterministic read-only ToolFuzz-style runtime checks for public tool contracts, error paths, and redaction invariants.
 - [Workflow lineage manifests](./workflow-lineage.md) - deterministic redacted plan identity, lineage graph, artifact digests, and read-only drift verification for replayable MCP executions.
 - [Workflow policy plan preflight](./workflow-policy-plan.md) - deterministic read-only preflight for intent-declared MCP tool sequences before execution.
+- [Policy-as-code governance decision adapter](./policy-governance-decision.md) - reviewed repo-local policy bundles for read-only MCP governance allow/deny/requires-approval decisions.
 - [Agent quality delta](./agent-quality-delta.md) - deterministic read-only base/head maintainability delta gate for autonomous PRs.
 - [Workflow reminder packets](./workflow-reminder.md) - deterministic read-only instruction-fade reminder packets before high-risk planned actions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
+- [Reference-based result handles](./result-references.md) - opt-in `mcp_result_reference.v1` handles and resolver for large read-only outputs.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [AGENTS.md context health report](./agents-context-health.md) - read-only minimal-context budget, duplication, stale guidance, risky global instruction, and move-candidate lint.
@@ -33,12 +35,14 @@ SPDX-License-Identifier: MIT
 - [Explicit Agent API Proxy](./agent-api-proxy.md) - opt-in OpenAI-compatible `/v1/chat/completions` proxy with routing, durable privacy evidence packets, redaction/anonymization, streaming, and offline/no-network controls.
 - [Async workflow tasks](./workflow-tasks.md) - prototype MCP Tasks-style async handles for long-running repo workflows.
 - [Adaptive observation compression](./observation-compression.md) - opt-in deterministic summaries for verbose tool/report outputs.
+- [Observation compression report](./observation-compression-report.md) - read-only TACO-style advisory bucket report for stored workflow/task/tool observations.
 - [MCP roots diagnostics](./roots-diagnostics.md) - read-only advisory diagnostics for client roots vs `REPO_PATH`.
 - [MCP sampling safety adapter](./sampling-safety.md) - disabled-by-default, client-mediated sampling policy for bounded advisory summaries/classifications.
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) - disabled-by-default, redacted local span records for MCP tool/workflow execution.
 - [Hash-pinned dependency locks](./dependency-locks.md) - checked-in pip hash locks, refresh/check tooling, and opt-in Docker locked installs.
 - [Build download cache verification](./build-download-cache.md) - stable BuildKit cache IDs, offline/no-network gates, and cache audit tooling for Docker builds.
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) - deterministic advisory metadata for instruction-like text in tool outputs with aggregate governance/risk counts.
+- [MCP tool-response scanner](./tool-response-scanner.md) - opt-in LOG/SANITIZE/BLOCK enforcement for risky `role: "tool"` messages before Agent API Proxy model-context forwarding.
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) - offline CR-Bench-style fixture scoring for review true positives, misses, and spurious findings.
 - [Review outcome report](./review-outcome-report.md) - offline redacted fixture report for review-comment resolution, dismissal/noise, stale, open, and unverifiable outcomes.
 
@@ -63,10 +67,12 @@ This index lists documentation ownership and status.
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) (`docs/tool-contract-fuzzing.md`) - Status: `prototype`
 - [Workflow lineage manifests](./workflow-lineage.md) (`docs/workflow-lineage.md`) - Status: `prototype`
 - [Workflow policy plan preflight](./workflow-policy-plan.md) (`docs/workflow-policy-plan.md`) - Status: `prototype`
+- [Policy-as-code governance decision adapter](./policy-governance-decision.md) (`docs/policy-governance-decision.md`) - Status: `prototype`
 - [Agent quality delta](./agent-quality-delta.md) (`docs/agent-quality-delta.md`) - Status: `prototype`
 - [Workflow reminder packets](./workflow-reminder.md) (`docs/workflow-reminder.md`) - Status: `prototype`
 - [Policy insight regression bank](./policy-insights.md) (`docs/policy-insights.md`) - Status: `canonical`
 - [Adaptive observation compression](./observation-compression.md) (`docs/observation-compression.md`) - Status: `prototype`
+- [Observation compression report](./observation-compression-report.md) (`docs/observation-compression-report.md`) - Status: `prototype`
 - [MCP Apps release readiness dashboard](./mcp-apps-release-readiness.md) (`docs/mcp-apps-release-readiness.md`) - Status: `prototype`
 - [MCP Registry server.json readiness](./mcp-registry-readiness.md) (`docs/mcp-registry-readiness.md`) - Status: `release readiness`
 - [MCP roots diagnostics](./roots-diagnostics.md) (`docs/roots-diagnostics.md`) - Status: `operational guidance`
@@ -76,9 +82,11 @@ This index lists documentation ownership and status.
 - [Self-optimization efficiency report](./self-optimization-report.md) (`docs/self-optimization-report.md`) - Status: `prototype`
 - [Build download cache verification](./build-download-cache.md) (`docs/build-download-cache.md`) - Status: `operational verification`
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
+- [MCP tool-response scanner](./tool-response-scanner.md) (`docs/tool-response-scanner.md`) - Status: `prototype`
 - [AGENTS.md context health report](./agents-context-health.md) (`docs/agents-context-health.md`) - Status: `prototype`
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
 - [Review outcome report](./review-outcome-report.md) (`docs/review-outcome-report.md`) - Status: `prototype`
+- [Reference-based result handles](./result-references.md) (`docs/result-references.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`
 - [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`

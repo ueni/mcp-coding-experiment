@@ -37,15 +37,21 @@ Before constructing a prompt, the adapter:
   credentials/secrets files;
 - applies the audit redaction patterns to repository text, user questions, and
   returned model text;
+- applies the Agent API Proxy local reversible anonymisation profile before a
+  client sampling request can leave the host, replacing configured NDA terms and
+  likely identifiers with typed request-local placeholders;
 - redacts private-key blocks, secret-looking values, and host absolute paths;
 - enforces path, byte, estimated context-token, and output-token budgets; and
 - sends `include_context="none"` so the sampling request contains only the
   adapter-built, bounded context.
 
 Audit and trace metadata record purpose, status, approval/denial status when
-observable, context source refs, redaction codes, prompt digest, and output
-digest. They do not store raw prompts, raw model responses, secrets, or full file
-contents.
+observable, context source refs, redaction/anonymisation codes, compact
+anonymisation counts/categories/profile metadata, prompt digest, and output
+digest. They do not store raw prompts, raw model responses, secrets, configured
+NDA terms, reversible mappings, or full file contents. Sampling responses are
+deanonymised locally before returned summaries are exposed; irreversible secret
+redactions remain redacted.
 
 ## Online/offline behavior
 

@@ -44,6 +44,10 @@ class SamplingSafetyAdapterTest(ServerToolsTestBase):
         self._orig_sampling_max_bytes = self.server.MCP_SAMPLING_MAX_BYTES
         self._orig_sampling_max_context_tokens = self.server.MCP_SAMPLING_MAX_CONTEXT_TOKENS
         self._orig_sampling_max_output_tokens = self.server.MCP_SAMPLING_MAX_OUTPUT_TOKENS
+        self._orig_agent_proxy_terms = self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW
+        self._orig_agent_proxy_mode = self.server.MCP_AGENT_PROXY_ANONYMIZATION_MODE
+        self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = ""
+        self.server.MCP_AGENT_PROXY_ANONYMIZATION_MODE = "balanced"
         self.server.MCP_SAMPLING_ALLOWED_USE_CASES_RAW = "summary,classification,workflow_selection"
         self.server.MCP_SAMPLING_MAX_PATHS = 3
         self.server.MCP_SAMPLING_MAX_BYTES = 512
@@ -57,6 +61,8 @@ class SamplingSafetyAdapterTest(ServerToolsTestBase):
         self.server.MCP_SAMPLING_MAX_BYTES = self._orig_sampling_max_bytes
         self.server.MCP_SAMPLING_MAX_CONTEXT_TOKENS = self._orig_sampling_max_context_tokens
         self.server.MCP_SAMPLING_MAX_OUTPUT_TOKENS = self._orig_sampling_max_output_tokens
+        self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = self._orig_agent_proxy_terms
+        self.server.MCP_AGENT_PROXY_ANONYMIZATION_MODE = self._orig_agent_proxy_mode
         super().tearDown()
 
     def _run_with_session(self, session, **kwargs):
@@ -157,6 +163,37 @@ class SamplingSafetyAdapterTest(ServerToolsTestBase):
         self.assertNotIn("response-secret-value", out["sampling"]["summary"])
         self.assertNotIn("/tmp/private", out["sampling"]["summary"])
         self.assertIn("value", out["sampling"]["output_digest"])
+
+    def test_sampling_prompt_uses_local_anonymization_and_deanonymizes_response(self):
+        self.server.MCP_SAMPLING_ENABLED = True
+        self.server.MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = "NDA Alpha"
+        self.write_repo_text(
+            "docs/sampling-nda.md",
+            "NDA Alpha for Acme Corp at customer.example with owner Jane Doe.\n",
+        )
+        session = _SamplingSession(
+            supported=True,
+            response_text="Summary mentions __MCP_ANON_TERM_0001__ and __MCP_ANON_ORG_0001__.",
+        )
+
+        out = self._run_with_session(
+            session,
+            paths=["docs/sampling-nda.md"],
+            question="Summarize NDA Alpha for owner Jane Doe",
+        )
+        prompt = self._prompt_from_call(session)
+
+        self.assertEqual(out["status"], "approved")
+        self.assertIn("__MCP_ANON_TERM_", prompt)
+        self.assertIn("__MCP_ANON_ORG_", prompt)
+        self.assertNotIn("NDA Alpha", prompt)
+        self.assertNotIn("Acme Corp", prompt)
+        self.assertNotIn("Jane Doe", prompt)
+        self.assertIn("local_reversible_anonymization", out["context"]["redactions_applied"])
+        self.assertIn("anonymization_result", out["request"]["metadata"])
+        self.assertFalse(out["request"]["metadata"]["placeholder_mapping_sent"])
+        self.assertIn("NDA Alpha", out["sampling"]["summary"])
+        self.assertIn("Acme Corp", out["sampling"]["summary"])
 
     def test_path_budget_or_secret_path_denies_before_client_call(self):
         self.server.MCP_SAMPLING_ENABLED = True

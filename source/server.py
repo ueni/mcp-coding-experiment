@@ -5,6 +5,7 @@ import asyncio
 import base64
 import contextlib
 import contextvars
+import copy
 import ast
 import json
 import os
@@ -33,6 +34,7 @@ import xml.etree.ElementTree as ET
 import pty
 import select
 import concurrent.futures
+import jsonschema
 import importlib.util
 import inspect
 import signal
@@ -111,9 +113,10 @@ def _import_optional_dependency(module_name: str, package_name: str | None = Non
 
 
 from mcp import types as mcp_types
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import EventMessage, EventStore
-from pydantic import Field, RootModel
+from pydantic import Field, RootModel, ValidationError
 from source.agents_context_health import analyze_agents_context, summarize_agents_context_health
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
@@ -181,6 +184,23 @@ MCP_STREAM_REPLAY_RETRY_INTERVAL_MS = max(
     250,
     int(os.getenv("MCP_STREAM_REPLAY_RETRY_INTERVAL_MS", "1000")),
 )
+MCP_MUTATION_REPLAY_GUARD_ENABLED = os.getenv(
+    "MCP_MUTATION_REPLAY_GUARD_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE = Path(
+    os.getenv(
+        "MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE",
+        ".codebase-tooling-mcp/audit/mutation_replay_journal.json",
+    )
+)
+MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES = max(
+    1,
+    int(os.getenv("MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES", "1000")),
+)
+MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS = max(
+    1,
+    int(os.getenv("MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS", "86400")),
+)
 MCP_AUDIT_LOG_FILE = Path(
     os.getenv("MCP_AUDIT_LOG_FILE", ".codebase-tooling-mcp/audit/security_events.jsonl")
 )
@@ -198,6 +218,7 @@ MCP_OTEL_SERVICE_NAME = (
     os.getenv("MCP_OTEL_SERVICE_NAME", "codebase-tooling-mcp").strip()
     or "codebase-tooling-mcp"
 )
+MCP_OTEL_BAGGAGE_ALLOWLIST_RAW = os.getenv("MCP_OTEL_BAGGAGE_ALLOWLIST", "").strip()
 MCP_SAMPLING_ENABLED = os.getenv("MCP_SAMPLING_ENABLED", "false").strip().lower() in {
     "1",
     "true",
@@ -222,6 +243,9 @@ MCP_SAMPLING_MODEL_HINTS_RAW = os.getenv("MCP_SAMPLING_MODEL_HINTS", "").strip()
 RELEASE_READINESS_DASHBOARD_RESOURCE_URI = "ui://codebase-tooling-mcp/release-readiness-dashboard"
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
+RESULT_REFERENCE_SCHEMA = "mcp_result_reference.v1"
+RESULT_REFERENCE_RESOLVE_SCHEMA = "mcp_result_reference.resolve.v1"
+RESULT_REFERENCE_DIR = REPORTS_DIR / "result-references"
 PROVENANCE_SCHEMA = "mcp_artifact_provenance.v1"
 PROVENANCE_SUFFIX = ".provenance.json"
 ATTESTATION_SCHEMA = "mcp_artifact_attestation.v1"
@@ -388,6 +412,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "workflow_policy_plan": {"categories": ["read-only", "governance"]},
+    "policy_governance_decision": {"categories": ["read-only", "governance"]},
     "workflow_reminder": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
@@ -401,8 +426,10 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
     "self_optimization_report": {"categories": ["read-only"]},
+    "observation_compression_report": {"categories": ["read-only"]},
     "agents_context_health": {"categories": ["read-only", "governance"]},
     "artifact_provenance": {"categories": ["read-only"]},
+    "result_reference_resolve": {"categories": ["read-only", "governance"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
@@ -522,11 +549,17 @@ _HTTP_REQUEST_AUTHORIZED: contextvars.ContextVar[bool | None] = contextvars.Cont
 _HTTP_REQUEST_GRANTED_SCOPES: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
     "http_request_granted_scopes", default=None
 )
+_HTTP_IDEMPOTENCY_KEY: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "http_idempotency_key", default=""
+)
 _OTEL_CURRENT_SPAN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "mcp_otel_current_span_id", default=""
 )
 _OTEL_CORRELATION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "mcp_otel_correlation_id", default=""
+)
+_OTEL_INCOMING_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "mcp_otel_incoming_trace_context", default=None
 )
 _OTEL_SPANS_LOCK = threading.Lock()
 _HTTP_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
@@ -632,6 +665,15 @@ MCP_AGENT_PROXY_COST_PER_1K_OUTPUT_USD = _env_float(
 MCP_AGENT_PROXY_ANONYMIZE_TERMS_RAW = os.getenv(
     "MCP_AGENT_PROXY_ANONYMIZE_TERMS", ""
 ).strip()
+MCP_AGENT_PROXY_ANONYMIZATION_MODE = os.getenv(
+    "MCP_AGENT_PROXY_ANONYMIZATION_MODE", "balanced"
+).strip().lower()
+MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS = _env_int(
+    "MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS", 512, minimum=1
+)
+MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED = _env_flag(
+    "MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED", True
+)
 MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT = _env_flag(
     "MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT", True
 )
@@ -650,8 +692,17 @@ MCP_AGENT_PROXY_MEMORY_CAPTURE_ENABLED = _env_flag(
 MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS = _env_flag(
     "MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS", True
 )
+MCP_TOOL_RESPONSE_SCANNER_MODE = os.getenv(
+    "MCP_TOOL_RESPONSE_SCANNER_MODE", "off"
+).strip()
+MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS = _env_int(
+    "MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS",
+    PROMPT_INJECTION_SIGNAL_SCAN_MAX_CHARS,
+    minimum=512,
+)
+MCP_TOOL_RESPONSE_SCANNER_SCHEMA = "mcp_tool_response_scanner.v1"
 MCP_AGENT_PROXY_POLICY_VERSION = "mcp_agent_proxy.policy.v1"
-MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "default-request-local-redaction.v1"
+MCP_AGENT_PROXY_ANONYMIZATION_PROFILE = "local-reversible-anonymization.v2"
 MCP_AGENT_PROXY_AGENT_FACADE_PROFILE = "chat-completions-controlled-facade.v1"
 _AGENT_PROXY_DISCLOSURE_AUDIT_LOCK = threading.Lock()
 AGENT_EXECUTION_MODE_PROMPT_TERMS = {
@@ -2022,6 +2073,19 @@ def _redact_audit_value(value: Any, depth: int = 0) -> Any:
                 redacted[key_str] = item
             elif SENSITIVE_AUDIT_KEY_RE.search(key_str):
                 redacted[key_str] = "<redacted>"
+            elif key_lower in {
+                "content",
+                "diff_text",
+                "replacement",
+                "patch",
+                "patch_text",
+                "new_content",
+                "old_content",
+                "stdin",
+                "env",
+                "environment",
+            }:
+                redacted[key_str] = "<redacted>"
             else:
                 redacted[key_str] = _redact_audit_value(item, depth + 1)
         return redacted
@@ -2048,6 +2112,127 @@ def _redact_untrusted_content_excerpt(value: str, *, max_chars: int = 180) -> st
         return redacted[:max_chars] + "...[truncated]"
     return redacted
 
+
+_SEP1303_VALIDATION_EXCEPTION_TYPES = (ValueError, ValidationError, FileNotFoundError)
+_SEP1303_VALIDATION_ERROR_MAX_CHARS = 360
+
+
+def _redact_tool_validation_error_text(value: str) -> str:
+    """Return bounded, model-visible validation text safe for MCP tool results."""
+    text = re.sub(r"\s+", " ", str(value).replace("\x00", " ")).strip()
+    repo_text = str(REPO_PATH)
+    if repo_text and repo_text in text:
+        text = text.replace(repo_text, "<repo>")
+    text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
+    text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", text)
+    text = re.sub(
+        r"(?i)authorization:\s*bearer\s+\S+",
+        "authorization: bearer <redacted:secret>",
+        text,
+    )
+    if len(text) > _SEP1303_VALIDATION_ERROR_MAX_CHARS:
+        text = text[:_SEP1303_VALIDATION_ERROR_MAX_CHARS] + "...[truncated]"
+    return text or "invalid tool arguments"
+
+
+def _tool_validation_exception_from(exc: BaseException) -> BaseException | None:
+    """Classify safe public-tool argument failures for SEP-1303 conversion."""
+    candidate: BaseException | None = exc
+    if isinstance(exc, ToolError) and isinstance(exc.__cause__, BaseException):
+        candidate = exc.__cause__
+    if isinstance(candidate, _SEP1303_VALIDATION_EXCEPTION_TYPES):
+        return candidate
+    return None
+
+
+def _make_tool_validation_error_result(tool_name: str, exc: BaseException) -> mcp_types.CallToolResult:
+    """Build an MCP SEP-1303 tool execution error for invalid-but-well-formed inputs.
+
+    SEP-1303 makes tool argument/input validation failures model-visible so agents can
+    self-correct. The text is deliberately concise and redacted: it includes the public
+    tool name and remediation, but not raw arguments, bearer tokens, host absolute paths,
+    repository file contents, or environment values.
+    """
+    safe_tool = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(tool_name))[:120] or "tool"
+    safe_message = _redact_tool_validation_error_text(str(exc))
+    text = (
+        f"Tool argument validation failed for `{safe_tool}`: {safe_message}. "
+        "Remediation: correct the arguments according to the tool input schema and retry."
+    )
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=text)],
+        isError=True,
+    )
+
+
+_ORIGINAL_MCP_CALL_TOOL = mcp.call_tool
+
+
+async def _sep1303_model_visible_call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    """Call public tools while returning validation failures as tool results.
+
+    Unknown tool names, malformed/non-object arguments, permission/auth failures, and
+    non-validation server failures still raise so the protocol/HTTP layer can handle
+    them as errors. Invalid-but-well-formed arguments raised as ValueError,
+    Pydantic ValidationError, or FileNotFoundError become `isError: true` tool results.
+    """
+    if not isinstance(arguments, dict):
+        raise ToolError("Invalid tool arguments: arguments must be a JSON object")
+    if mcp._tool_manager.get_tool(name) is None:  # type: ignore[attr-defined]
+        raise ToolError(f"Unknown tool: {name}")
+    try:
+        return await _ORIGINAL_MCP_CALL_TOOL(name, arguments)
+    except ToolError as exc:
+        validation_exc = _tool_validation_exception_from(exc)
+        if validation_exc is None:
+            raise
+        return _make_tool_validation_error_result(name, validation_exc)
+
+
+async def _sep1303_call_tool_request_handler(req: mcp_types.CallToolRequest) -> mcp_types.ServerResult:
+    """Low-level MCP handler preserving protocol errors outside SEP-1303 validation."""
+    tool_name = req.params.name
+    arguments = req.params.arguments or {}
+    tool = await mcp._mcp_server._get_cached_tool_definition(tool_name)  # type: ignore[attr-defined]
+    results = await mcp.call_tool(tool_name, arguments)
+    if isinstance(results, mcp_types.CallToolResult):
+        return mcp_types.ServerResult(results)
+    if isinstance(results, mcp_types.CreateTaskResult):
+        return mcp_types.ServerResult(results)
+    if isinstance(results, tuple) and len(results) == 2:
+        unstructured_content, maybe_structured_content = results
+    elif isinstance(results, dict):
+        maybe_structured_content = results
+        unstructured_content = [
+            mcp_types.TextContent(type="text", text=json.dumps(results, indent=2))
+        ]
+    elif hasattr(results, "__iter__"):
+        unstructured_content = results
+        maybe_structured_content = None
+    else:
+        raise RuntimeError(f"Unexpected return type from tool: {type(results).__name__}")
+    if tool and tool.outputSchema is not None:
+        if maybe_structured_content is None:
+            return mcp._mcp_server._make_error_result(  # type: ignore[attr-defined]
+                "Output validation error: outputSchema defined but no structured output returned"
+            )
+        try:
+            jsonschema.validate(instance=maybe_structured_content, schema=tool.outputSchema)
+        except jsonschema.ValidationError as exc:
+            return mcp._mcp_server._make_error_result(  # type: ignore[attr-defined]
+                f"Output validation error: {exc.message}"
+            )
+    return mcp_types.ServerResult(
+        mcp_types.CallToolResult(
+            content=list(unstructured_content),
+            structuredContent=maybe_structured_content,
+            isError=False,
+        )
+    )
+
+
+mcp.call_tool = _sep1303_model_visible_call_tool  # type: ignore[method-assign]
+mcp._mcp_server.request_handlers[mcp_types.CallToolRequest] = _sep1303_call_tool_request_handler  # type: ignore[attr-defined]
 
 def _prompt_injection_signal_negated(text: str, start: int) -> bool:
     prefix = text[max(0, start - 120) : start]
@@ -2339,8 +2524,34 @@ _AGENT_PROXY_SECRET_TOKEN_RE = re.compile(
     r"(?i)(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
 )
 _AGENT_PROXY_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_AGENT_PROXY_GIT_REMOTE_RE = re.compile(
+    r"(?ix)\b(?:git@|ssh://git@|https://)(?:[A-Za-z0-9.-]+)[/:][A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?"
+)
+_AGENT_PROXY_URL_RE = re.compile(r"(?i)\bhttps?://[^\s<>\"']+")
+_AGENT_PROXY_DOMAIN_RE = re.compile(
+    r"(?i)(?<![@/\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|net|io|ai|dev|app|cloud|co|de|uk|us|biz|info)(?![/\w.-])"
+)
 _AGENT_PROXY_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
+)
+_AGENT_PROXY_REPO_SLUG_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])(?:github\.com[:/])?([A-Za-z0-9_.-]{2,39}/[A-Za-z0-9_.-]{2,80})(?:\.git)?(?![A-Za-z0-9_.-])"
+)
+_AGENT_PROXY_TICKET_RE = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Z][A-Z0-9]{1,12}-\d{1,7}|#\d{2,7})(?![A-Za-z0-9_])")
+_AGENT_PROXY_BRANCH_RE = re.compile(
+    r"(?ix)\b(?:branch|checkout|merge|rebase|from|onto|refs/heads/)\s+((?:feature|fix|bugfix|hotfix|release|chore|task|builder|origin)/[A-Za-z0-9._/-]{2,120}|[A-Za-z0-9._-]{2,80})"
+)
+_AGENT_PROXY_ORG_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){0,5}\s+(?:Corp|Corporation|Company|Inc|LLC|Ltd|Limited|GmbH|AG|SA|PLC|BV|Foundation|Labs|Systems|Technologies|Tech|Group|Studio|Studios))\b"
+)
+_AGENT_PROXY_PROJECT_RE = re.compile(
+    r"\b(?:Project|Customer|Client|Account|Program|Codename)\s+[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*){0,4}\b"
+)
+_AGENT_PROXY_PERSON_RE = re.compile(
+    r"\b(?:[A-Z][a-z]{1,30}\s+[A-Z][a-z]{1,30})(?:\s+[A-Z][a-z]{1,30})?\b"
+)
+_AGENT_PROXY_NDA_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:nda|confidential|customer|client|company|organisation|organization|project|codename|internal|private|proprietary)\b"
 )
 _AGENT_PROXY_PLACEHOLDER_RE = re.compile(r"__MCP_(?:ANON|REDACTED)_[A-Z_]+_\d{4}__")
 _AGENT_PROXY_PLACEHOLDER_FRAGMENT_RE = re.compile(r"__MCP(?:_[A-Z0-9_]*)?")
@@ -2725,12 +2936,32 @@ def _agent_proxy_error_payload(
     }, status_code
 
 
+def _agent_proxy_anonymization_mode() -> str:
+    mode = str(MCP_AGENT_PROXY_ANONYMIZATION_MODE or "balanced").strip().lower()
+    if mode in {"off", "disabled", "none"}:
+        return "off"
+    if mode in {"strict", "nda", "nda-strict", "fail-closed"}:
+        return "strict"
+    return "balanced"
+
+
+def _agent_proxy_anonymization_profile_id() -> str:
+    return f"{MCP_AGENT_PROXY_ANONYMIZATION_PROFILE}.{_agent_proxy_anonymization_mode()}"
+
+
 def _agent_proxy_new_placeholder(
     state: dict[str, Any], category: str, value: str, *, reversible: bool
 ) -> str:
     existing = state["by_value"].get((category, value, reversible))
     if existing:
         return existing
+    max_placeholders = int(state.get("max_placeholders", MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS))
+    total = sum(int(item) for item in state["counts"].values())
+    if total >= max_placeholders:
+        state["bounds_exceeded"] = True
+        category = "overflow"
+        reversible = False
+        value = ""
     count = int(state["counts"].get(category, 0)) + 1
     state["counts"][category] = count
     token = "ANON" if reversible else "REDACTED"
@@ -2773,18 +3004,46 @@ def _agent_proxy_configured_terms() -> list[str]:
 def _agent_proxy_replace_configured_terms(text: str, state: dict[str, Any]) -> str:
     result = text
     for term in _agent_proxy_configured_terms():
-        placeholder = _agent_proxy_new_placeholder(state, "term", term, reversible=True)
-        if re.fullmatch(r"[\w .-]+", term):
+        if re.fullmatch(r"[\w .:/@#-]+", term):
             pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE)
-            result = pattern.sub(placeholder, result)
-        else:
+            result = pattern.sub(
+                lambda _match, raw_term=term: _agent_proxy_new_placeholder(
+                    state, "term", raw_term, reversible=True
+                ),
+                result,
+            )
+        elif term in result:
+            placeholder = _agent_proxy_new_placeholder(state, "term", term, reversible=True)
             result = result.replace(term, placeholder)
     return result
+
+
+def _agent_proxy_replace_pattern(
+    text: str,
+    state: dict[str, Any],
+    pattern: re.Pattern[str],
+    category: str,
+    *,
+    reversible: bool = True,
+) -> str:
+    return pattern.sub(
+        lambda match: _agent_proxy_new_placeholder(
+            state, category, match.group(0), reversible=reversible
+        ),
+        text,
+    )
+
+
+def _agent_proxy_replace_branch_match(match: re.Match[str], state: dict[str, Any]) -> str:
+    branch = match.group(1)
+    placeholder = _agent_proxy_new_placeholder(state, "branch", branch, reversible=True)
+    return match.group(0).replace(branch, placeholder, 1)
 
 
 def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
     if not text:
         return text
+    mode = str(state.get("mode") or _agent_proxy_anonymization_mode())
     state["seen_text"] += "\n" + text[:10000]
     result = _AGENT_PROXY_SECRET_ASSIGNMENT_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), text
@@ -2795,15 +3054,38 @@ def _agent_proxy_anonymize_text(text: str, state: dict[str, Any]) -> str:
     result = _AGENT_PROXY_SECRET_TOKEN_RE.sub(
         lambda match: _agent_proxy_redact_secret_match(match, state), result
     )
-    result = _AGENT_PROXY_EMAIL_RE.sub(
-        lambda match: _agent_proxy_new_placeholder(state, "email", match.group(0), reversible=True),
-        result,
+    if mode == "off":
+        return result
+    result = _agent_proxy_replace_configured_terms(result, state)
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_EMAIL_RE, "email")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_GIT_REMOTE_RE, "repo")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_URL_RE, "url")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_ABSOLUTE_PATH_RE, "path")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_REPO_SLUG_RE, "repo")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_DOMAIN_RE, "domain")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_TICKET_RE, "ticket")
+    result = _AGENT_PROXY_BRANCH_RE.sub(
+        lambda match: _agent_proxy_replace_branch_match(match, state), result
     )
-    result = _AGENT_PROXY_ABSOLUTE_PATH_RE.sub(
-        lambda match: _agent_proxy_new_placeholder(state, "path", match.group(0), reversible=True),
-        result,
-    )
-    return _agent_proxy_replace_configured_terms(result, state)
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_PROJECT_RE, "project")
+    result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_ORG_RE, "org")
+    if mode == "strict":
+        result = _agent_proxy_replace_pattern(result, state, _AGENT_PROXY_PERSON_RE, "person")
+    else:
+        # Balanced mode pseudonymizes high-confidence likely people in common
+        # assignment/introduction phrasing while avoiding broad title-case rewrites.
+        result = re.sub(
+            r"(?i:\b(?:owner|contact|author|by|from|for)\s+)("
+            + _AGENT_PROXY_PERSON_RE.pattern[2:-2]
+            + r")",
+            lambda match: match.group(0).replace(
+                match.group(1),
+                _agent_proxy_new_placeholder(state, "person", match.group(1), reversible=True),
+                1,
+            ),
+            result,
+        )
+    return result
 
 
 def _agent_proxy_anonymize_value(value: Any, state: dict[str, Any]) -> Any:
@@ -2816,21 +3098,65 @@ def _agent_proxy_anonymize_value(value: Any, state: dict[str, Any]) -> Any:
     return value
 
 
+def _agent_proxy_payload_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return "\n".join(_agent_proxy_payload_text(item) for item in value.values())
+    if isinstance(value, list):
+        return "\n".join(_agent_proxy_payload_text(item) for item in value)
+    return str(value) if value is not None else ""
+
+
+def _agent_proxy_anonymization_confidence(
+    original: dict[str, Any], anonymized: dict[str, Any], state: dict[str, Any]
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    mode = str(state.get("mode") or _agent_proxy_anonymization_mode())
+    counts = state.get("counts", {}) if isinstance(state.get("counts"), dict) else {}
+    transformed = sum(int(item) for item in counts.values()) if counts else 0
+    original_text = _agent_proxy_payload_text(_agent_proxy_request_text_digest_input(original))
+    anonymized_text = _agent_proxy_payload_text(_agent_proxy_request_text_digest_input(anonymized))
+    if state.get("bounds_exceeded"):
+        reasons.append("placeholder_bound_exceeded")
+    configured_terms = _agent_proxy_configured_terms()
+    if configured_terms and any(term and term in anonymized_text for term in configured_terms):
+        reasons.append("configured_terms_remain")
+    if mode == "off" and (_AGENT_PROXY_NDA_SIGNAL_RE.search(original_text) or configured_terms):
+        reasons.append("anonymization_off_for_sensitive_input")
+    if mode == "strict" and _AGENT_PROXY_NDA_SIGNAL_RE.search(original_text) and transformed == 0:
+        reasons.append("strict_sensitive_input_without_transform")
+    return ("low" if reasons else "high"), reasons
+
+
 def _agent_proxy_anonymize_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    mode = _agent_proxy_anonymization_mode()
     state: dict[str, Any] = {
+        "mode": mode,
         "counts": {},
         "by_value": {},
         "reversible": {},
         "irreversible": set(),
         "seen_text": "",
+        "bounds_exceeded": False,
+        "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
     }
     anonymized = _agent_proxy_anonymize_value(payload, state)
+    confidence, confidence_reasons = _agent_proxy_anonymization_confidence(payload, anonymized, state)
     inventory = {
         "counts": dict(sorted(state["counts"].items())),
         "reversible_placeholders": len(state["reversible"]),
         "irreversible_placeholders": len(state["irreversible"]),
         "placeholder_categories": sorted(state["counts"].keys()),
         "mapping_persisted": False,
+        "mapping_scope": "request_local_process_memory",
+        "profile": _agent_proxy_anonymization_profile_id(),
+        "mode": mode,
+        "version": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
+        "confidence": confidence,
+        "confidence_reasons": confidence_reasons,
+        "fail_closed_required": bool(mode == "strict" and MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED),
     }
     return anonymized, {
         "reversible": dict(state["reversible"]),
@@ -2859,6 +3185,236 @@ def _agent_proxy_deanonymize_value(value: Any, mapping: dict[str, Any]) -> Any:
     if isinstance(value, dict):
         return {str(key): _agent_proxy_deanonymize_value(item, mapping) for key, item in value.items()}
     return value
+
+
+def _tool_response_scanner_mode() -> str:
+    raw = str(MCP_TOOL_RESPONSE_SCANNER_MODE or "off").strip().lower().replace("-", "_")
+    aliases = {
+        "": "OFF",
+        "0": "OFF",
+        "false": "OFF",
+        "off": "OFF",
+        "disabled": "OFF",
+        "disable": "OFF",
+        "none": "OFF",
+        "log": "LOG",
+        "audit": "LOG",
+        "report": "LOG",
+        "sanitize": "SANITIZE",
+        "sanitise": "SANITIZE",
+        "redact": "SANITIZE",
+        "block": "BLOCK",
+        "blocked": "BLOCK",
+        "deny": "BLOCK",
+    }
+    return aliases.get(raw, "OFF")
+
+
+def _tool_response_message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif isinstance(item.get("content"), str):
+                    parts.append(str(item["content"]))
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    return ""
+
+
+def _tool_response_risk_summary(text: str, *, message_index: int) -> dict[str, Any]:
+    signals = _prompt_injection_signals_for_text(
+        text,
+        tool_name="agent_proxy.tool_response",
+        input_scope=f"messages[{message_index}].content",
+        max_chars=MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS,
+    )
+    counts = _prompt_injection_signal_counts(signals)
+    categories: dict[str, int] = {}
+    for key, value in counts.get("category_counts", {}).items():
+        categories[str(key)] = int(value or 0)
+    secret_detected = bool(
+        SENSITIVE_AUDIT_VALUE_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
+    )
+    path_detected = bool(
+        ABSOLUTE_PATH_VALUE_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
+    )
+    pii_detected = bool(
+        _AGENT_PROXY_EMAIL_RE.search(text[:MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS])
+    )
+    if secret_detected:
+        categories["credential_or_secret_leakage"] = (
+            categories.get("credential_or_secret_leakage", 0) + 1
+        )
+    if path_detected:
+        categories["sensitive_local_path"] = categories.get("sensitive_local_path", 0) + 1
+    if pii_detected:
+        categories["pii"] = categories.get("pii", 0) + 1
+    severity = str(counts.get("severity", "none") or "none")
+    if (
+        secret_detected
+        or categories.get("credential_exfiltration")
+        or categories.get("data_exfiltration")
+    ):
+        severity = "high"
+    elif (path_detected or pii_detected) and severity not in {"high", "medium"}:
+        severity = "medium"
+    return {
+        "detected": bool(categories),
+        "severity": severity,
+        "total_signals": (
+            int(counts.get("total_signals", 0) or 0)
+            + int(secret_detected)
+            + int(path_detected)
+            + int(pii_detected)
+        ),
+        "category_counts": dict(sorted(categories.items())),
+        "prompt_injection_signals": counts,
+        "secret_detected": secret_detected,
+        "pii_detected": pii_detected,
+        "sensitive_path_detected": path_detected,
+        "chars_total": len(text),
+        "chars_scanned": min(len(text), MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS),
+        "truncated": len(text) > MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS,
+    }
+
+
+def _tool_response_line_has_prompt_injection(text: str) -> bool:
+    for spec in _PROMPT_INJECTION_SIGNAL_PATTERNS:
+        for match in spec["regex"].finditer(text):
+            if not _prompt_injection_signal_negated(text, match.start()):
+                return True
+    return False
+
+
+def _sanitize_tool_response_text(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        lines = [text]
+    sanitized_lines: list[str] = []
+    for line in lines:
+        line_ending = ""
+        body = line
+        if line.endswith("\r\n"):
+            body, line_ending = line[:-2], "\r\n"
+        elif line.endswith("\n"):
+            body, line_ending = line[:-1], "\n"
+        if _tool_response_line_has_prompt_injection(body):
+            sanitized_lines.append(
+                "[sanitized: tool-response instruction content removed]" + line_ending
+            )
+            continue
+        redacted = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", body)
+        redacted = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", redacted)
+        redacted = _AGENT_PROXY_EMAIL_RE.sub("<redacted:email>", redacted)
+        sanitized_lines.append(redacted + line_ending)
+    return "".join(sanitized_lines)
+
+
+def _sanitize_tool_response_content(content: Any) -> Any:
+    if isinstance(content, str):
+        return _sanitize_tool_response_text(content)
+    if isinstance(content, list):
+        sanitized_items = []
+        for item in content:
+            if isinstance(item, str):
+                sanitized_items.append(_sanitize_tool_response_text(item))
+            elif isinstance(item, dict):
+                copy_item = dict(item)
+                if isinstance(copy_item.get("text"), str):
+                    copy_item["text"] = _sanitize_tool_response_text(
+                        str(copy_item["text"])
+                    )
+                elif isinstance(copy_item.get("content"), str):
+                    copy_item["content"] = _sanitize_tool_response_text(
+                        str(copy_item["content"])
+                    )
+                sanitized_items.append(copy_item)
+            else:
+                sanitized_items.append(item)
+        return sanitized_items
+    if isinstance(content, dict):
+        copy_content = dict(content)
+        if isinstance(copy_content.get("text"), str):
+            copy_content["text"] = _sanitize_tool_response_text(str(copy_content["text"]))
+        return copy_content
+    return content
+
+
+def _tool_response_scanner_apply(
+    payload: dict[str, Any],
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    mode = _tool_response_scanner_mode()
+    report: dict[str, Any] = {
+        "schema": MCP_TOOL_RESPONSE_SCANNER_SCHEMA,
+        "enabled": mode != "OFF",
+        "mode": mode,
+        "effective_outcome": "OFF" if mode == "OFF" else "ALLOW",
+        "scanned_message_count": 0,
+        "flagged_message_count": 0,
+        "findings": [],
+        "privacy": {
+            "raw_tool_responses_logged": False,
+            "raw_evidence_included": False,
+            "secrets_included": False,
+            "host_paths_included": False,
+        },
+    }
+    if mode == "OFF":
+        return True, payload, report
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return True, payload, report
+    scanned_payload = payload
+    blocked = False
+    for idx, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        report["scanned_message_count"] += 1
+        text = _tool_response_message_content_text(message.get("content"))
+        if not text:
+            continue
+        risk = _tool_response_risk_summary(text, message_index=idx)
+        if not risk["detected"]:
+            continue
+        outcome = mode
+        finding = {
+            "message_index": idx,
+            "tool_call_id_present": bool(str(message.get("tool_call_id", "")).strip()),
+            "outcome": outcome,
+            "severity": risk["severity"],
+            "category_counts": risk["category_counts"],
+            "total_signals": risk["total_signals"],
+            "chars_scanned": risk["chars_scanned"],
+            "truncated": risk["truncated"],
+        }
+        report["findings"].append(finding)
+        report["flagged_message_count"] += 1
+        if mode == "BLOCK":
+            blocked = True
+        elif mode == "SANITIZE":
+            if scanned_payload is payload:
+                scanned_payload = copy.deepcopy(payload)
+            scanned_payload["messages"][idx]["content"] = _sanitize_tool_response_content(
+                scanned_payload["messages"][idx].get("content")
+            )
+    if blocked:
+        report["effective_outcome"] = "BLOCK"
+        return False, payload, report
+    if report["flagged_message_count"] and mode == "SANITIZE":
+        report["effective_outcome"] = "SANITIZE"
+    elif report["flagged_message_count"] and mode == "LOG":
+        report["effective_outcome"] = "LOG"
+    return True, scanned_payload, report
 
 
 def _agent_proxy_policy_limits(payload: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
@@ -2974,7 +3530,7 @@ def _agent_proxy_audit_inventory(mapping: dict[str, Any] | None) -> dict[str, An
             except (TypeError, ValueError):
                 continue
             safe_counts[safe_key] = safe_counts.get(safe_key, 0) + count
-    safe_inventory["profile"] = MCP_AGENT_PROXY_ANONYMIZATION_PROFILE
+    safe_inventory["profile"] = _agent_proxy_anonymization_profile_id()
     safe_inventory["counts"] = dict(sorted(safe_counts.items()))
     safe_inventory["placeholder_categories"] = sorted(safe_counts.keys())
     safe_inventory["residual_sensitive_class_status"] = {
@@ -3026,7 +3582,7 @@ def _agent_proxy_policy_decision(route: dict[str, Any], policy: dict[str, Any]) 
         "decision": "online_allowed" if online_allowed else str(route.get("reason", "blocked")),
         "reason": route.get("reason"),
         "online_allowed": online_allowed,
-        "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "anonymizer_profile": _agent_proxy_anonymization_profile_id(),
         "anonymizer_required_before_online": route.get("backend") == "online",
         "offline_controls": {
             "no_network": bool(route.get("offline_no_network")),
@@ -3169,7 +3725,7 @@ def _agent_proxy_audit_base(
             "offline_no_network": route.get("offline_no_network"),
             "model_allowlist_configured": route.get("model_allowlist_configured"),
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
-            "anonymizer_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+            "anonymizer_profile": _agent_proxy_anonymization_profile_id(),
         },
         "anonymization": _agent_proxy_audit_inventory(mapping),
         "privacy": {
@@ -3807,6 +4363,233 @@ _OTEL_LOCAL_EXPORTERS = {"json", "jsonl", "local", "test"}
 _OTEL_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._~:+@%=-]+"
 )
+_OTEL_TRACEPARENT_RE = re.compile(
+    r"^(?P<version>[0-9a-f]{2})-(?P<trace_id>[0-9a-f]{32})-"
+    r"(?P<parent_span_id>[0-9a-f]{16})-(?P<trace_flags>[0-9a-f]{2})(?P<extra>-.+)?$"
+)
+_OTEL_TRACESTATE_KEY_RE = re.compile(
+    r"^[a-z0-9][_0-9a-z*\-/]{0,255}(?:@[a-z0-9][_0-9a-z*\-/]{0,240})?$"
+)
+_OTEL_BAGGAGE_KEY_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
+
+
+def _otel_baggage_allowlist() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in str(MCP_OTEL_BAGGAGE_ALLOWLIST_RAW or "").split(",")
+        if item.strip()
+    }
+
+
+def _otel_header_carrier(scope: dict[str, Any]) -> dict[str, str]:
+    carrier: dict[str, str] = {}
+    for key in ("traceparent", "tracestate", "baggage"):
+        values = _http_header_values(scope, key)
+        if values:
+            carrier[key] = values[-1]
+    return carrier
+
+
+def _otel_normalized_carrier_value(carrier: dict[str, Any], key: str) -> str:
+    for item_key, item_value in carrier.items():
+        if str(item_key).strip().lower() == key:
+            if isinstance(item_value, (list, tuple)):
+                item_value = item_value[-1] if item_value else ""
+            return str(item_value or "").strip()
+    return ""
+
+
+def _otel_parse_traceparent(value: str) -> tuple[dict[str, str] | None, int]:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None, 0
+    match = _OTEL_TRACEPARENT_RE.match(text)
+    if not match:
+        return None, 1
+    parsed = match.groupdict()
+    if (
+        parsed["version"] == "ff"
+        or (parsed["version"] == "00" and parsed.get("extra"))
+        or parsed["trace_id"] == "0" * 32
+        or parsed["parent_span_id"] == "0" * 16
+    ):
+        return None, 1
+    parsed.pop("extra", None)
+    return parsed, 0
+
+
+def _otel_parse_tracestate(value: str) -> tuple[int, int]:
+    text = str(value or "").strip()
+    if not text:
+        return 0, 0
+    members = [part.strip() for part in text.split(",")]
+    if len(members) > 32:
+        return 0, 1
+    seen: set[str] = set()
+    for member in members:
+        if not member or "=" not in member:
+            return 0, 1
+        key, member_value = member.split("=", 1)
+        if (
+            not _OTEL_TRACESTATE_KEY_RE.match(key)
+            or key in seen
+            or len(member_value) > 256
+            or "," in member_value
+            or any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in member_value)
+        ):
+            return 0, 1
+        seen.add(key)
+    return len(members), 0
+
+
+def _otel_parse_baggage(value: str) -> tuple[dict[str, str], int, int]:
+    text = str(value or "").strip()
+    if not text:
+        return {}, 0, 0
+    allowlist = _otel_baggage_allowlist()
+    allowed: dict[str, str] = {}
+    dropped = 0
+    invalid = 0
+    for raw_item in text.split(",")[:64]:
+        item = raw_item.strip()
+        if not item or "=" not in item:
+            invalid += 1
+            dropped += 1
+            continue
+        key, raw_value = item.split("=", 1)
+        key = key.strip()
+        raw_value = raw_value.split(";", 1)[0].strip()
+        if not _OTEL_BAGGAGE_KEY_RE.match(key):
+            invalid += 1
+            dropped += 1
+            continue
+        if key.lower() not in allowlist or len(allowed) >= 8:
+            dropped += 1
+            continue
+        decoded = urllib.parse.unquote(raw_value)[:160]
+        allowed[key.lower()] = str(_otel_safe_value(decoded))[:160]
+    return allowed, dropped, invalid
+
+
+def _otel_trace_context_from_carrier(carrier: dict[str, Any] | None, source: str) -> dict[str, Any]:
+    carrier = carrier or {}
+    traceparent = _otel_normalized_carrier_value(carrier, "traceparent")
+    tracestate = _otel_normalized_carrier_value(carrier, "tracestate")
+    baggage = _otel_normalized_carrier_value(carrier, "baggage")
+    parsed_traceparent, invalid_count = _otel_parse_traceparent(traceparent)
+    tracestate_count, tracestate_invalid = _otel_parse_tracestate(tracestate)
+    baggage_allowed, baggage_dropped, baggage_invalid = _otel_parse_baggage(baggage)
+    invalid_count += tracestate_invalid + baggage_invalid
+    context: dict[str, Any] = {
+        "source": source,
+        "valid": bool(parsed_traceparent),
+        "trace_id": "",
+        "parent_span_id": "",
+        "trace_flags": "",
+        "tracestate_member_count": tracestate_count,
+        "tracestate_present": bool(tracestate),
+        "baggage_allowed": baggage_allowed,
+        "baggage_dropped_count": baggage_dropped,
+        "invalid_count": invalid_count,
+    }
+    if parsed_traceparent:
+        context.update(
+            {
+                "trace_id": parsed_traceparent["trace_id"],
+                "parent_span_id": parsed_traceparent["parent_span_id"],
+                "trace_flags": parsed_traceparent["trace_flags"],
+            }
+        )
+    return context
+
+
+def _otel_object_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json", by_alias=True)
+            return dumped if isinstance(dumped, dict) else {}
+        except Exception:
+            return {}
+    attrs = getattr(value, "__dict__", None)
+    return attrs if isinstance(attrs, dict) else {}
+
+
+def _otel_context_from_active_mcp_meta() -> dict[str, Any] | None:
+    try:
+        context = mcp.get_context()
+    except Exception:
+        return None
+    try:
+        request_context = getattr(context, "request_context", None)
+    except Exception:
+        return None
+    meta = getattr(request_context, "meta", None) if request_context is not None else None
+    carrier = _otel_object_to_dict(meta)
+    if not carrier:
+        return None
+    nested = carrier.get("_meta")
+    if isinstance(nested, dict):
+        carrier = {**carrier, **nested}
+    parsed = _otel_trace_context_from_carrier(carrier, "mcp_meta")
+    if not parsed.get("valid") and not parsed.get("invalid_count") and not parsed.get("tracestate_present") and not parsed.get("baggage_allowed"):
+        return None
+    return parsed
+
+
+def _otel_current_trace_context() -> dict[str, Any]:
+    context = _OTEL_INCOMING_TRACE_CONTEXT.get()
+    if context is None:
+        context = _otel_context_from_active_mcp_meta()
+    return context if isinstance(context, dict) else {}
+
+
+def _otel_current_correlation_id() -> str:
+    if not MCP_OTEL_TRACING_ENABLED:
+        return ""
+    correlation_id = str(_OTEL_CORRELATION_ID.get() or "").strip()
+    if correlation_id:
+        return str(_otel_safe_value(correlation_id))
+    context = _otel_current_trace_context()
+    if context.get("valid") and context.get("trace_id"):
+        return str(_otel_safe_value(context.get("trace_id")))
+    return ""
+
+
+def _otel_apply_trace_context_to_span(span: "_OtelSpan", context: dict[str, Any]) -> None:
+    if not context:
+        return
+    valid = bool(context.get("valid") and context.get("trace_id"))
+    if valid:
+        span.trace_id = str(context.get("trace_id"))
+        remote_parent = str(context.get("parent_span_id") or "")
+        if remote_parent and not span.parent_span_id:
+            span.parent_span_id = remote_parent
+        span.attributes["mcp.trace_context.trace_id"] = _otel_safe_value(context.get("trace_id"))
+        span.attributes["mcp.trace_context.remote_parent_span_id"] = _otel_safe_value(remote_parent)
+        span.attributes["mcp.trace_context.trace_flags"] = _otel_safe_value(context.get("trace_flags"))
+    span.attributes["mcp.trace_context.valid"] = valid
+    span.attributes["mcp.trace_context.source"] = _otel_safe_value(context.get("source", ""))
+    if context.get("tracestate_present"):
+        span.attributes["mcp.trace_context.tracestate.member_count"] = int(
+            context.get("tracestate_member_count") or 0
+        )
+    baggage_allowed = context.get("baggage_allowed")
+    if isinstance(baggage_allowed, dict):
+        span.attributes["mcp.trace_context.baggage.allowed_count"] = len(baggage_allowed)
+        for key, value in sorted(baggage_allowed.items()):
+            if _OTEL_BAGGAGE_KEY_RE.match(str(key)):
+                span.attributes[f"mcp.trace_context.baggage.{key}"] = _otel_safe_value(value)
+    if context.get("baggage_dropped_count"):
+        span.attributes["mcp.trace_context.baggage.dropped_count"] = int(
+            context.get("baggage_dropped_count") or 0
+        )
+    if context.get("invalid_count"):
+        span.attributes["mcp.trace_context.invalid_count"] = int(context.get("invalid_count") or 0)
 
 
 def _otel_exporter_name() -> str:
@@ -3913,13 +4696,17 @@ class _OtelSpan:
         self.start_perf = time.perf_counter()
         self.span_id = uuid.uuid4().hex[:16]
         self.parent_span_id = _OTEL_CURRENT_SPAN_ID.get()
+        trace_context = _otel_current_trace_context()
+        incoming_trace_id = str(trace_context.get("trace_id") or "") if trace_context else ""
         self.correlation_id = (
             str(self.requested_correlation_id or "").strip()
             or str(self.attributes.get("mcp.correlation_id") or "").strip()
             or _OTEL_CORRELATION_ID.get()
+            or incoming_trace_id
             or self.span_id
         )
         self.trace_id = hashlib.sha256(self.correlation_id.encode("utf-8")).hexdigest()[:32]
+        _otel_apply_trace_context_to_span(self, trace_context)
         self.attributes["mcp.correlation_id"] = _otel_safe_value(self.correlation_id)
         self._span_token = _OTEL_CURRENT_SPAN_ID.set(self.span_id)
         self._correlation_token = _OTEL_CORRELATION_ID.set(self.correlation_id)
@@ -4195,6 +4982,13 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     sensitive_count = 0
     mutation_gate_failures = 0
     http_auth_denials = 0
+    mutation_replay_guard = {
+        "event_count": 0,
+        "recorded_count": 0,
+        "duplicate_suppressed_count": 0,
+        "conflict_count": 0,
+        "by_decision": {},
+    }
     clarification_gate = {
         "event_count": 0,
         "ok_to_continue_count": 0,
@@ -4237,6 +5031,20 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             mutation_gate_failures += 1
         if "http session not authorized" in reason_lower or "bearer token" in reason_lower or "not authorized" in reason_lower:
             http_auth_denials += 1
+        if tool == "mutation_replay_guard":
+            mutation_replay_guard["event_count"] += 1
+            args = event.get("arguments", {}) if isinstance(event.get("arguments"), dict) else {}
+            guard_args = args.get("replay_guard", {}) if isinstance(args.get("replay_guard"), dict) else {}
+            decision = str(guard_args.get("decision") or reason or "unknown")
+            by_decision = mutation_replay_guard["by_decision"]
+            if isinstance(by_decision, dict):
+                by_decision[decision] = int(by_decision.get(decision, 0)) + 1
+            if decision == "recorded":
+                mutation_replay_guard["recorded_count"] += 1
+            elif decision == "duplicate_suppressed":
+                mutation_replay_guard["duplicate_suppressed_count"] += 1
+            elif decision == "idempotency_key_conflict":
+                mutation_replay_guard["conflict_count"] += 1
         if tool == "clarification_gate":
             clarification_gate["event_count"] += 1
             args = event.get("arguments", {}) if isinstance(event.get("arguments"), dict) else {}
@@ -4277,6 +5085,12 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             "event_count": len(events),
             "chain_head": chain_head,
         },
+        "mutation_replay_guard": {
+            **mutation_replay_guard,
+            "by_decision": dict(sorted(mutation_replay_guard["by_decision"].items()))
+            if isinstance(mutation_replay_guard.get("by_decision"), dict)
+            else {},
+        },
         "clarification_gate": {
             **clarification_gate,
             "missing_fields": dict(sorted(clarification_gate["missing_fields"].items()))
@@ -4287,6 +5101,7 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 SELF_OPTIMIZATION_REPORT_SCHEMA = "self_optimization_report.v1"
+OBSERVATION_COMPRESSION_REPORT_SCHEMA = "observation_compression_report.v1"
 OPTIMIZATION_INTEGRITY_REPORT_SCHEMA = "optimization_integrity_report.v1"
 SELF_OPTIMIZATION_NO_ATTRIBUTION = "unattributed"
 SELF_OPTIMIZATION_NAME_PLACEHOLDER = "<redacted:name>"
@@ -4311,7 +5126,9 @@ SELF_OPTIMIZATION_SAFE_BOOLEAN_KEYS = {"contains_secrets", "records_secrets", "s
 SELF_OPTIMIZATION_SAFE_TOKEN_KEYS = {
     "compressed_tokens",
     "compression_estimated_saved_tokens",
+    "estimated_raw_tokens",
     "estimated_saved_tokens",
+    "estimated_token_savings",
     "explicit_token_record_count",
     "input_tokens",
     "output_tokens",
@@ -6754,6 +7571,8 @@ def _self_opt_build_recommendations(
     throughput = metrics.get("throughput", {}) if isinstance(metrics.get("throughput"), dict) else {}
     cache = metrics.get("cache", {}) if isinstance(metrics.get("cache"), dict) else {}
     compression = metrics.get("compression", {}) if isinstance(metrics.get("compression"), dict) else {}
+    observation_compression = metrics.get("observation_compression", {}) if isinstance(metrics.get("observation_compression"), dict) else {}
+    observation_opportunities = observation_compression.get("compression_opportunities", {}) if isinstance(observation_compression.get("compression_opportunities"), dict) else {}
     failures = metrics.get("failures", {}) if isinstance(metrics.get("failures"), dict) else {}
     candidates: list[dict[str, Any]] = []
     failed_or_noisy = int(totals.get("failed_or_noisy_count", 0) or 0)
@@ -6785,16 +7604,20 @@ def _self_opt_build_recommendations(
             )
         )
     if int(totals.get("verbose_tool_call_count", 0) or 0) > 0 and int(compression.get("compressed_observation_count", 0) or 0) == 0:
+        observation_saved_tokens = int(observation_opportunities.get("estimated_token_savings", 0) or 0)
         candidates.append(
             _self_opt_candidate(
                 "token-compression",
                 "Use compressed observations for verbose MCP outputs",
                 "Verbose report/search tools ran without local compressed-observation evidence.",
-                {"verbose_tool_call_count": totals.get("verbose_tool_call_count", 0)},
-                "Enable `compressed_observation=true` on supported verbose tools and keep raw artifacts behind repo-local resource links.",
-                estimated_saved_tokens=max(0, int(totals.get("tool_call_count", 0) or 0) * 120),
+                {
+                    "verbose_tool_call_count": totals.get("verbose_tool_call_count", 0),
+                    "observation_compression_estimated_saved_tokens": observation_saved_tokens,
+                },
+                "Enable `compressed_observation=true` on supported verbose tools and run `observation_compression_report` for advisory TACO-style bucket guidance before dropping any evidence from model context.",
+                estimated_saved_tokens=max(observation_saved_tokens, int(totals.get("tool_call_count", 0) or 0) * 120),
                 confidence="medium",
-                caveats=["Token impact is estimated unless raw/compressed token fields are recorded."],
+                caveats=["Token impact is estimated unless raw/compressed token fields are recorded; observation compression is advisory and never deletes raw evidence."],
             )
         )
     if int(totals.get("total_tokens", 0) or 0) == 0:
@@ -7144,6 +7967,604 @@ def _write_self_opt_report_exports(report: dict[str, Any]) -> dict[str, str]:
     return {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
 
 
+
+OBSERVATION_COMPRESSION_BUCKETS = (
+    "preserve_raw",
+    "summarize",
+    "deduplicate",
+    "drop_low_value",
+    "redact_blocked",
+)
+OBSERVATION_LOW_VALUE_RE = re.compile(
+    r"(={2,}\s*(?:test session starts|passed)|\b\d+\s+passed\b|\ball tests passed\b|"
+    r"\bcollecting\s+packages\b|\binstalling collected packages\b|\bsuccessfully installed\b|"
+    r"\brequirement already satisfied\b|\bnpm\s+(?:warn|notice)\b|\baudit\s+0\s+vulnerabilit)",
+    re.IGNORECASE,
+)
+OBSERVATION_STACK_TRACE_RE = re.compile(
+    r"(traceback \(most recent call last\)|\n\s*File \"[^\n]+\", line \d+|\n\s*at \S+\s*\([^\n]+:\d+:\d+\))",
+    re.IGNORECASE,
+)
+OBSERVATION_FAILURE_RE = re.compile(
+    r"(\bfailed\b|\berror\b|\bexception\b|\bexit(?:ed)?\s+(?:code|status)\s*[=:]?\s*[1-9]\d*|\breturn\s*code\s*[=:]?\s*[1-9]\d*)",
+    re.IGNORECASE,
+)
+OBSERVATION_SECURITY_RE = re.compile(
+    r"(\bsecurity\b|\bvulnerab|\bCVE-\d{4}-\d+\b|secret_exposure|\bfinding\b|\bseverity\b)",
+    re.IGNORECASE,
+)
+OBSERVATION_SNAPSHOT_RE = re.compile(r"\b(?:snapshot|rollback|restore)[_-]?(?:id|ref)?\b|state_snapshot|state_restore", re.IGNORECASE)
+OBSERVATION_POLICY_RE = re.compile(r"\b(?:policy|gate|blocking_policies|ok_to_mutate|mutation_step_guard|authorization|forbidden|denied)\b", re.IGNORECASE)
+OBSERVATION_CONSTRAINT_RE = re.compile(r"\b(?:constraint|must|do not|don't|never|requirement|required|acceptance criteria)\b", re.IGNORECASE)
+OBSERVATION_SECRET_OR_HOST_PATH_RE = re.compile(
+    r"(\bBearer\s+\S+|\b(?:token|secret|password|credential|authorization|api[_-]?key)\b\s*[:=]\s*\S+|"
+    r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{12,}\b|\bsk-[A-Za-z0-9_-]{16,}\b|"
+    r"\bAKIA[0-9A-Z]{16}\b|/(?:home|Users|var|etc|tmp|opt)/[^\s\"']+)",
+    re.IGNORECASE,
+)
+OBSERVATION_REPO_PATH_RE = re.compile(r"\b(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+)(?:\.[A-Za-z0-9_.-]+)?\b")
+OBSERVATION_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:[^\s\"'`<>|{}\[\],;:]+/)*[^\s\"'`<>|{}\[\],;:]+"
+)
+
+
+def _observation_safe_string(value: Any) -> str:
+    return _redact_audit_string(str(value or ""))
+
+
+def _observation_payload_text(value: Any, depth: int = 0) -> str:
+    if depth > 6:
+        return ""
+    parts: list[str] = []
+    if isinstance(value, dict):
+        for key, item in sorted(value.items(), key=lambda item: str(item[0])):
+            key_lower = str(key).lower()
+            if key_lower in {
+                "command",
+                "cmd",
+                "error",
+                "message",
+                "output",
+                "reason",
+                "result",
+                "stderr",
+                "stdout",
+                "summary",
+                "traceback",
+                "log",
+                "logs",
+                "status",
+            }:
+                parts.append(_observation_payload_text(item, depth + 1))
+            elif isinstance(item, (dict, list)):
+                parts.append(_observation_payload_text(item, depth + 1))
+            elif key_lower in {"exit_code", "returncode", "return_code"}:
+                parts.append(f"{key_lower}={item}")
+    elif isinstance(value, list):
+        for item in value[:80]:
+            parts.append(_observation_payload_text(item, depth + 1))
+    elif isinstance(value, str):
+        parts.append(value[:8000])
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        parts.append(str(value))
+    return "\n".join(part for part in parts if part)
+
+
+def _observation_canonical_fingerprint(value: Any) -> str:
+    safe_text = _observation_safe_string(_observation_payload_text(value)).lower()
+    safe_text = re.sub(r"\b0x[0-9a-f]+\b", "0x<hex>", safe_text)
+    safe_text = re.sub(r"\b\d{2,}\b", "<n>", safe_text)
+    safe_text = re.sub(r"\s+", " ", safe_text).strip()
+    if not safe_text:
+        safe_text = json.dumps(_redact_audit_value(value), sort_keys=True, ensure_ascii=True, default=str)[:8000]
+    return hashlib.sha256(safe_text.encode("utf-8")).hexdigest()
+
+
+def _observation_raw_token_estimate(value: Any) -> int:
+    payload = json.dumps(_redact_audit_value(value), sort_keys=True, ensure_ascii=True, default=str)
+    return max(1, int(math.ceil(len(payload) / 4.0)))
+
+
+def _observation_int_at_keys(value: Any, keys: set[str], depth: int = 0) -> int | None:
+    if depth > 5:
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower().replace("-", "_")
+            if key_lower in keys and isinstance(item, (int, float)) and not isinstance(item, bool):
+                return int(item)
+            found = _observation_int_at_keys(item, keys, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value[:80]:
+            found = _observation_int_at_keys(item, keys, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _observation_collect_values_for_keys(value: Any, key_terms: tuple[str, ...], depth: int = 0) -> list[Any]:
+    if depth > 5:
+        return []
+    found: list[Any] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower()
+            if any(term in key_lower for term in key_terms):
+                found.append(item)
+            found.extend(_observation_collect_values_for_keys(item, key_terms, depth + 1))
+    elif isinstance(value, list):
+        for item in value[:80]:
+            found.extend(_observation_collect_values_for_keys(item, key_terms, depth + 1))
+    return found
+
+
+def _observation_path_value_texts(value: Any, depth: int = 0) -> list[str]:
+    if depth > 5:
+        return []
+    if isinstance(value, dict):
+        texts: list[str] = []
+        for item in value.values():
+            texts.extend(_observation_path_value_texts(item, depth + 1))
+        return texts
+    if isinstance(value, list):
+        texts = []
+        for item in value[:80]:
+            texts.extend(_observation_path_value_texts(item, depth + 1))
+        return texts
+    if isinstance(value, (str, os.PathLike)):
+        return [str(value)]
+    return []
+
+
+def _observation_repo_relative_path_candidate(raw_path: str) -> str | None:
+    text = raw_path.strip().strip('"\'')
+    if not text or "\x00" in text:
+        return None
+    if text in {".", ".."} or text.startswith(("../", "..\\", "~/")):
+        return None
+    candidate = Path(text)
+    resolved = candidate.resolve(strict=False) if candidate.is_absolute() else (REPO_PATH / candidate).resolve(strict=False)
+    try:
+        rel = resolved.relative_to(REPO_PATH.resolve())
+    except ValueError:
+        return None
+    rel_text = str(rel).replace("\\", "/")
+    if not rel_text or rel_text == "." or "/.git/" in f"/{rel_text}/" or len(rel_text) > 160:
+        return None
+    return _observation_safe_string(rel_text)
+
+
+def _observation_repo_relative_paths(value: Any) -> list[str]:
+    candidates: set[str] = set()
+    # Preserve explicit changed-file/security path fields without treating every
+    # command argument or passing-test target as a safety-critical changed file.
+    direct_values = _observation_collect_values_for_keys(value, ("path", "file", "changed"))
+    for item in direct_values:
+        for text in _observation_path_value_texts(item):
+            absolute_matches = OBSERVATION_ABSOLUTE_PATH_RE.findall(text)
+            if absolute_matches:
+                for match in absolute_matches:
+                    rel = _observation_repo_relative_path_candidate(match)
+                    if rel:
+                        candidates.add(rel)
+                # Do not extract repo-looking substrings from absolute host
+                # paths such as /home/alice/private.txt after rejecting them.
+                continue
+            for match in OBSERVATION_REPO_PATH_RE.findall(text):
+                rel = _observation_repo_relative_path_candidate(match)
+                if rel:
+                    candidates.add(rel)
+    return sorted(candidates)[:20]
+
+
+def _observation_has_key_signal(value: Any, key_terms: tuple[str, ...]) -> bool:
+    return bool(_observation_collect_values_for_keys(value, key_terms))
+
+
+def _observation_source_records(
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    include_audit: bool,
+    include_traces: bool,
+    include_tasks: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    sources: dict[str, Any] = {}
+    if include_audit:
+        audit_events, audit_meta = _load_audit_events(start_dt, end_dt)
+        sources["audit"] = _self_opt_public_source_meta(audit_meta)
+        for index, event in enumerate(audit_events):
+            records.append({"source": "audit", "index": index, "payload": event, "timestamp": _self_opt_first_timestamp(event)})
+    else:
+        sources["audit"] = {"enabled": False}
+    if include_traces:
+        spans, span_meta = _self_opt_load_jsonl_records(MCP_OTEL_SPANS_FILE, start_dt, end_dt)
+        sources["traces"] = _self_opt_public_source_meta(span_meta)
+        for index, span in enumerate(spans):
+            safe_span = _redact_audit_value(span)
+            records.append({"source": "trace", "index": index, "payload": safe_span, "timestamp": _self_opt_first_timestamp(safe_span)})
+    else:
+        sources["traces"] = {"enabled": False}
+    if include_tasks:
+        task_dir = _resolve_repo_path(str(WORKFLOW_TASKS_DIR))
+        task_meta = {"path": str(WORKFLOW_TASKS_DIR), "exists": task_dir.exists(), "readable": False, "records_total": 0, "records_in_window": 0, "malformed_files": 0}
+        if task_dir.exists() and task_dir.is_dir():
+            task_meta["readable"] = True
+            for index, path in enumerate(sorted(task_dir.glob("*.json"), key=lambda item: item.name)):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    task_meta["malformed_files"] += 1
+                    continue
+                if not isinstance(payload, dict):
+                    task_meta["malformed_files"] += 1
+                    continue
+                task_meta["records_total"] += 1
+                ts = _self_opt_first_timestamp(payload)
+                if _self_opt_in_window(ts, start_dt, end_dt):
+                    task_meta["records_in_window"] += 1
+                    safe_payload = _redact_audit_value(payload)
+                    records.append({"source": "task", "index": index, "payload": safe_payload, "timestamp": ts, "path": str(WORKFLOW_TASKS_DIR / path.name)})
+        else:
+            task_meta["readable"] = True
+        sources["tasks"] = task_meta
+    else:
+        sources["tasks"] = {"enabled": False}
+    records.sort(key=lambda row: (row.get("timestamp") or datetime.min.replace(tzinfo=timezone.utc), str(row.get("source", "")), int(row.get("index", 0))))
+    return records, sources
+
+
+def _observation_signal_profile(payload: dict[str, Any], fingerprint: str, seen_error_fingerprints: set[str], duplicate_count: int) -> dict[str, Any]:
+    text = _observation_payload_text(payload)
+    safe_text = _observation_safe_string(text)
+    exit_code = _observation_int_at_keys(payload, {"exit_code", "returncode", "return_code", "status_code"})
+    success_value = payload.get("success", payload.get("ok", None)) if isinstance(payload, dict) else None
+    status_text = str(payload.get("status", "") if isinstance(payload, dict) else "").lower()
+    failing = (isinstance(exit_code, int) and exit_code != 0) or success_value is False or status_text in {"error", "failed", "failure"} or bool(OBSERVATION_FAILURE_RE.search(safe_text))
+    stack_trace = bool(OBSERVATION_STACK_TRACE_RE.search(safe_text))
+    security = bool(OBSERVATION_SECURITY_RE.search(safe_text)) or _observation_has_key_signal(payload, ("security", "vulnerab", "finding", "severity", "secret_exposure"))
+    snapshot = bool(OBSERVATION_SNAPSHOT_RE.search(safe_text)) or _observation_has_key_signal(payload, ("snapshot", "rollback", "restore"))
+    policy = bool(OBSERVATION_POLICY_RE.search(safe_text)) or _observation_has_key_signal(payload, ("blocking_policies", "policy", "gate"))
+    constraints = bool(OBSERVATION_CONSTRAINT_RE.search(safe_text)) or _observation_has_key_signal(payload, ("constraint", "requirement", "acceptance"))
+    encoded_payload = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+    sensitive = (
+        "<redacted" in encoded_payload
+        or bool(OBSERVATION_SECRET_OR_HOST_PATH_RE.search(text))
+        or bool(OBSERVATION_SECRET_OR_HOST_PATH_RE.search(encoded_payload))
+    )
+    low_value = bool(OBSERVATION_LOW_VALUE_RE.search(safe_text)) and not failing and not security
+    repo_paths = _observation_repo_relative_paths(payload)
+    novel_error = bool(failing or stack_trace) and fingerprint not in seen_error_fingerprints
+    if failing or stack_trace:
+        seen_error_fingerprints.add(fingerprint)
+    critical_signals = {
+        "failing_command": bool(failing),
+        "exit_code": exit_code if isinstance(exit_code, int) else None,
+        "changed_file_paths": repo_paths,
+        "security_finding": bool(security),
+        "rollback_or_snapshot_reference": bool(snapshot),
+        "policy_gate": bool(policy),
+        "user_constraint": bool(constraints),
+        "novel_error": bool(novel_error),
+        "stack_trace": bool(stack_trace),
+    }
+    retained_count = sum(
+        1
+        for key, value in critical_signals.items()
+        if (key == "exit_code" and value not in (None, 0))
+        or (key == "changed_file_paths" and bool(value))
+        or (key not in {"exit_code", "changed_file_paths"} and bool(value))
+    )
+    if sensitive:
+        bucket = "redact_blocked"
+        reason = "redaction_sensitive_content"
+    elif duplicate_count > 0:
+        bucket = "deduplicate"
+        reason = "duplicate_fingerprint"
+    elif retained_count > 0:
+        bucket = "preserve_raw"
+        reason = "safety_critical_signal"
+    elif low_value:
+        bucket = "drop_low_value"
+        reason = "low_value_boilerplate"
+    else:
+        bucket = "summarize"
+        reason = "unique_noncritical_observation"
+    return {
+        "bucket": bucket,
+        "reason_code": reason,
+        "critical_signals": critical_signals,
+        "retained_critical_signal_count": retained_count,
+        "low_value": low_value,
+        "sensitive": sensitive,
+        "duplicate_count": duplicate_count,
+    }
+
+
+def _observation_estimated_savings(bucket: str, raw_tokens: int) -> int:
+    if bucket == "preserve_raw":
+        return 0
+    targets = {
+        "summarize": 96,
+        "deduplicate": 24,
+        "drop_low_value": 12,
+        "redact_blocked": 32,
+    }
+    retained = targets.get(bucket, 96)
+    return max(0, raw_tokens - retained)
+
+
+def _observation_summary_text(row: dict[str, Any]) -> str:
+    signals = row.get("critical_signals", {}) if isinstance(row.get("critical_signals"), dict) else {}
+    bits: list[str] = []
+    if signals.get("failing_command"):
+        bits.append("failing command")
+    if signals.get("exit_code") not in (None, 0):
+        bits.append(f"exit_code={signals.get('exit_code')}")
+    if signals.get("changed_file_paths"):
+        bits.append(f"{len(signals.get('changed_file_paths') or [])} changed path(s)")
+    if signals.get("security_finding"):
+        bits.append("security finding")
+    if signals.get("rollback_or_snapshot_reference"):
+        bits.append("rollback/snapshot reference")
+    if signals.get("policy_gate"):
+        bits.append("policy gate")
+    if signals.get("user_constraint"):
+        bits.append("user constraint")
+    if signals.get("novel_error"):
+        bits.append("first novel error")
+    if not bits:
+        bits.append(str(row.get("reason_code", "observation")))
+    return "; ".join(bits[:6])
+
+
+def _observation_compression_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    buckets = summary.get("bucket_counts", {}) if isinstance(summary.get("bucket_counts"), dict) else {}
+    lines = [
+        f"# Observation compression report `{report.get('report_id', '')}`",
+        "",
+        "Advisory-only guidance for compressing stored workflow/task/tool observations. Raw evidence is not deleted.",
+        "",
+        "## Summary",
+        "",
+        f"- Observations: {summary.get('observation_count', 0)}",
+        f"- Estimated token savings: {summary.get('estimated_token_savings', 0)}",
+        f"- Retained critical signals: {summary.get('retained_critical_signal_count', 0)}",
+        f"- Low-confidence caveats: {len(report.get('low_confidence_caveats', []) if isinstance(report.get('low_confidence_caveats'), list) else [])}",
+        "",
+        "## Buckets",
+        "",
+    ]
+    for bucket in OBSERVATION_COMPRESSION_BUCKETS:
+        lines.append(f"- `{bucket}`: {int(buckets.get(bucket, 0) or 0)}")
+    lines.extend(["", "## Top fingerprints", ""])
+    for item in report.get("fingerprints", [])[:10] if isinstance(report.get("fingerprints"), list) else []:
+        lines.append(f"- `{item.get('fingerprint', '')[:16]}` x{item.get('count', 0)} -> `{item.get('recommended_bucket', '')}` / `{item.get('reason_code', '')}`")
+    if not report.get("fingerprints"):
+        lines.append("- None observed.")
+    lines.extend(["", "## Caveats", ""])
+    caveats = report.get("low_confidence_caveats", []) if isinstance(report.get("low_confidence_caveats"), list) else []
+    if caveats:
+        for caveat in caveats:
+            lines.append(f"- {caveat}")
+    else:
+        lines.append("- None.")
+    lines.extend(["", "Compression advice is advisory only; inspect raw references before destructive, release, or security decisions.", ""])
+    return "\n".join(lines)
+
+
+def _observation_report_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / report_id
+    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
+
+def _write_observation_compression_exports(report: dict[str, Any]) -> dict[str, str]:
+    paths = _observation_report_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    md = _observation_compression_markdown(report)
+    json_path.write_text(json.dumps({**report, "markdown": md}, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(md, encoding="utf-8")
+    return {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+
+
+def _observation_compression_report_impl(
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    include_tasks: bool = True,
+    max_observations: int = 500,
+    export: bool = False,
+) -> dict[str, Any]:
+    _ensure_repo_path_exists()
+    if max_observations < 0 or max_observations > 5000:
+        raise ValueError("max_observations must be between 0 and 5000")
+    start_dt, end_dt = _self_opt_parse_window(start_time, end_time, window_hours)
+    source_records, sources = _observation_source_records(
+        start_dt,
+        end_dt,
+        include_audit=include_audit,
+        include_traces=include_traces,
+        include_tasks=include_tasks,
+    )
+    if max_observations:
+        source_records = source_records[:max_observations]
+    fingerprint_counts: dict[str, int] = {}
+    seen_error_fingerprints: set[str] = set()
+    observations: list[dict[str, Any]] = []
+    bucket_counts = {bucket: 0 for bucket in OBSERVATION_COMPRESSION_BUCKETS}
+    reason_counts: dict[str, int] = {}
+    retained_critical_signal_count = 0
+    estimated_saved_tokens = 0
+    raw_token_estimate = 0
+    for record in source_records:
+        payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
+        fingerprint = _observation_canonical_fingerprint(payload)
+        duplicate_count = fingerprint_counts.get(fingerprint, 0)
+        fingerprint_counts[fingerprint] = duplicate_count + 1
+        profile = _observation_signal_profile(payload, fingerprint, seen_error_fingerprints, duplicate_count)
+        raw_tokens = _observation_raw_token_estimate(payload)
+        saved_tokens = _observation_estimated_savings(str(profile["bucket"]), raw_tokens)
+        raw_token_estimate += raw_tokens
+        estimated_saved_tokens += saved_tokens
+        retained_critical_signal_count += int(profile["retained_critical_signal_count"])
+        bucket = str(profile["bucket"])
+        reason = str(profile["reason_code"])
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        source = str(record.get("source", "unknown"))
+        index = int(record.get("index", 0) or 0)
+        observation_id = f"obs-{source}-{index}-{fingerprint[:12]}"
+        raw_reference = {
+            "source": source,
+            "index": index,
+            "retention_policy": "existing evidence only; no deletion or mutation is performed",
+        }
+        if record.get("path"):
+            raw_reference["path"] = str(record["path"])
+        row = {
+            "observation_id": observation_id,
+            "source": source,
+            "timestamp": (record.get("timestamp").isoformat() if isinstance(record.get("timestamp"), datetime) else ""),
+            "bucket": bucket,
+            "reason_code": reason,
+            "fingerprint": fingerprint,
+            "duplicate_count_before": duplicate_count,
+            "raw_token_estimate": raw_tokens,
+            "estimated_saved_tokens": saved_tokens,
+            "retained_critical_signal_count": int(profile["retained_critical_signal_count"]),
+            "critical_signals": profile["critical_signals"],
+            "summary": "",
+            "raw_reference": raw_reference,
+        }
+        row["summary"] = _observation_summary_text(row)
+        observations.append(row)
+    fingerprint_rows: list[dict[str, Any]] = []
+    by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+    for row in observations:
+        by_fingerprint.setdefault(str(row["fingerprint"]), []).append(row)
+    for fingerprint, rows in sorted(by_fingerprint.items(), key=lambda item: (-len(item[1]), item[0])):
+        first = rows[0]
+        fingerprint_rows.append(
+            {
+                "fingerprint": fingerprint,
+                "count": len(rows),
+                "recommended_bucket": first.get("bucket", "summarize") if len(rows) == 1 else "deduplicate",
+                "reason_code": "duplicate_fingerprint" if len(rows) > 1 else first.get("reason_code", "unique_noncritical_observation"),
+                "raw_excerpt_included": False,
+            }
+        )
+    caveats: list[str] = []
+    if not source_records:
+        caveats.append("No stored audit, trace, or task observations were available in the selected window.")
+    caveats.append("Token savings are conservative character-count estimates, not tokenizer-specific measurements.")
+    if any(row.get("bucket") == "redact_blocked" for row in observations):
+        caveats.append("Some observations matched secret or host-path redaction heuristics; inspect the original secured raw reference if authorized.")
+    if len(source_records) >= max_observations > 0:
+        caveats.append("The report reached max_observations; later records were not classified.")
+    summary = {
+        "observation_count": len(observations),
+        "bucket_counts": bucket_counts,
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "estimated_raw_tokens": raw_token_estimate,
+        "estimated_token_savings": estimated_saved_tokens,
+        "retained_critical_signal_count": retained_critical_signal_count,
+        "fingerprint_count": len(fingerprint_rows),
+        "duplicate_fingerprint_count": sum(1 for item in fingerprint_rows if int(item.get("count", 0) or 0) > 1),
+    }
+    report_seed = json.dumps(
+        {
+            "window": [start_dt.isoformat(), end_dt.isoformat()],
+            "summary": summary,
+            "fingerprints": fingerprint_rows[:50],
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+        default=str,
+    )
+    report_id = f"observation-compression-report-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}"
+    report: dict[str, Any] = {
+        "schema": OBSERVATION_COMPRESSION_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": end_dt.isoformat(),
+        "read_only": True,
+        "advisory_only": True,
+        "window": {
+            "start_time": start_dt.isoformat(),
+            "end_time": end_dt.isoformat(),
+            "window_hours": round((end_dt - start_dt).total_seconds() / 3600.0, 3),
+        },
+        "summary": summary,
+        "classification_buckets": [
+            {"bucket": "preserve_raw", "stable_reason": "safety_critical_signal", "guidance": "Keep raw evidence reachable for critical signals."},
+            {"bucket": "summarize", "stable_reason": "unique_noncritical_observation", "guidance": "Replace verbose unique non-critical content with deterministic structured summary."},
+            {"bucket": "deduplicate", "stable_reason": "duplicate_fingerprint", "guidance": "Keep the first occurrence and refer to duplicates by fingerprint/count."},
+            {"bucket": "drop_low_value", "stable_reason": "low_value_boilerplate", "guidance": "Omit boilerplate such as package-install or passing-test noise from model context."},
+            {"bucket": "redact_blocked", "stable_reason": "redaction_sensitive_content", "guidance": "Do not include raw sensitive excerpts; keep only redacted metadata and secured raw reference."},
+        ],
+        "observations": observations,
+        "fingerprints": fingerprint_rows[:100],
+        "compression_opportunities": {
+            "estimated_token_savings": estimated_saved_tokens,
+            "conservative": True,
+            "no_evidence_deleted": True,
+            "raw_references_required_before_destructive_or_security_decisions": True,
+        },
+        "low_confidence_caveats": caveats,
+        "sources": sources,
+        "security": {
+            "offline_capable": True,
+            "network_used": False,
+            "repo_boundary_enforced": True,
+            "redaction_applied": True,
+            "raw_logs_exposed": False,
+            "raw_secret_excerpts_included": False,
+            "automatic_deletion": False,
+        },
+        "exports": {},
+        "resource_links": [],
+    }
+    report["markdown"] = _observation_compression_markdown(report)
+    if export:
+        exports = _write_observation_compression_exports(report)
+        report["exports"] = exports
+        links = [
+            _artifact_resource_link(
+                title="Observation compression report JSON",
+                rel_path=exports["json"],
+                mime_type="application/json",
+                created_at=report["generated_at"],
+                redacted=True,
+                safety_note="JSON export contains redacted compression classifications and fingerprints only.",
+            ),
+            _artifact_resource_link(
+                title="Observation compression report Markdown",
+                rel_path=exports["markdown"],
+                mime_type="text/markdown",
+                created_at=report["generated_at"],
+                redacted=True,
+                safety_note="Markdown export contains advisory compression guidance only.",
+            ),
+        ]
+        for link in links:
+            if isinstance(link.get("path"), str):
+                path = _resolve_repo_path(str(link["path"]))
+                if path.exists():
+                    link["size_bytes"] = path.stat().st_size
+        report["resource_links"] = links
+        report["_meta"] = _artifact_meta(links)
+        _write_observation_compression_exports(report)
+    else:
+        report["_meta"] = _artifact_meta([])
+    return report
+
 def _self_optimization_report_impl(
     start_time: str = "",
     end_time: str = "",
@@ -7214,6 +8635,28 @@ def _self_optimization_report_impl(
         sources["cache"] = {"readable": False, "reason": exc.__class__.__name__}
 
     metrics = _self_opt_aggregate_records(records, cache_stats)
+    try:
+        observation_compression = _observation_compression_report_impl(
+            start_time=start_dt.isoformat(),
+            end_time=end_dt.isoformat(),
+            include_audit=include_audit,
+            include_traces=include_traces,
+            include_tasks=True,
+            max_observations=500,
+            export=False,
+        )
+        metrics["observation_compression"] = {
+            "schema": OBSERVATION_COMPRESSION_REPORT_SCHEMA,
+            "summary": observation_compression.get("summary", {}),
+            "compression_opportunities": observation_compression.get("compression_opportunities", {}),
+            "low_confidence_caveats": observation_compression.get("low_confidence_caveats", []),
+        }
+    except Exception as exc:
+        metrics["observation_compression"] = {
+            "schema": OBSERVATION_COMPRESSION_REPORT_SCHEMA,
+            "status": "unavailable",
+            "reason": exc.__class__.__name__,
+        }
     generated_at = _now_iso()
     report_seed = json.dumps(
         {
@@ -7350,7 +8793,24 @@ WORKFLOW_FAILURE_CATEGORIES = {
     "missing_snapshot_rollback",
     "failed_readiness_test_gate",
     "malformed_tool_output",
+    "context",
+    "clarification",
+    "policy",
+    "mutation-snapshot",
+    "test",
+    "tool-output-security",
+    "rollback",
     "unknown_failure",
+}
+
+WORKFLOW_FAILURE_LOCALIZATION_TAXONOMY = {
+    "context": "Stale, missing, or contradicted context before the failed decision.",
+    "clarification": "The run needed unresolved user/operator clarification before proceeding.",
+    "policy": "A policy, authorization, path-scope, or required-gate constraint blocked the step.",
+    "mutation-snapshot": "A mutating step lacked pre-mutation snapshot or rollback-point evidence.",
+    "test": "Required validation, readiness, or selected-test evidence was missing or failed.",
+    "tool-output-security": "Untrusted tool output or injection/security findings were not safely handled.",
+    "rollback": "Recovery evidence was missing or rollback/recovery failed after an unsafe change.",
 }
 
 
@@ -7369,6 +8829,12 @@ def _workflow_failure_category(step: dict[str, Any]) -> str:
     flags = step.get("policy_flags", [])
     outputs = step.get("key_outputs", {})
     blob = _diagnostic_text_blob(tool, category, reason, flags, outputs, step.get("redacted_args", {}))
+    if any(term in blob for term in ("needs_clarification", "missing clarification", "clarification required", "ask the user", "operator clarification")):
+        return "clarification"
+    if any(term in blob for term in ("stale context", "context stale", "missing context", "fresh_context=false", "context_fresh=false", "tests_fresh=false")):
+        return "context"
+    if any(term in blob for term in ("blocked untrusted", "prompt injection", "prompt_injection", "tool-output injection", "untrusted content", "unsafe tool output")):
+        return "tool-output-security"
     if any(term in blob for term in ("mutations disabled", "mutation disabled", "allow_mutations=false")):
         return "mutation_disabled"
     if any(term in blob for term in ("mutation_step_guard", "mutating_decisive_deviation", "decisive deviation", "ok_to_mutate=false", "intent drift before mutation", "scope drift before mutation")):
@@ -7377,9 +8843,13 @@ def _workflow_failure_category(step: dict[str, Any]) -> str:
         return "auth_policy_denial"
     if any(term in blob for term in ("outside repo", "outside repository", "repo boundary", "path boundary", "path/scope", "not under repo", "scope violation")):
         return "path_scope_violation"
-    if any(term in blob for term in ("missing snapshot", "snapshot missing", "rollback missing", "rollback required", "state_snapshot", "state_restore")):
+    if any(term in blob for term in ("missing snapshot", "snapshot missing", "snapshot before mutation", "pre-mutation snapshot")):
+        return "mutation-snapshot"
+    if any(term in blob for term in ("rollback failed", "recovery failed", "state_restore failed")):
+        return "rollback"
+    if any(term in blob for term in ("rollback missing", "rollback required", "state_snapshot", "state_restore")):
         return "missing_snapshot_rollback"
-    if any(term in blob for term in ("readiness failed", "release_readiness", "test failed", "tests failed", "gate skipped", "required gate skipped", "required_tool_chain", "self_test")):
+    if any(term in blob for term in ("readiness failed", "release_readiness", "test failed", "tests failed", "gate skipped", "required gate skipped", "required_tool_chain", "self_test", "missing tests", "validation missing")):
         return "failed_readiness_test_gate"
     if any(term in blob for term in ("malformed", "invalid schema", "schema invalid", "output schema", "jsondecode", "json decode", "parse error")):
         return "malformed_tool_output"
@@ -7418,6 +8888,7 @@ def _normalize_workflow_step(raw: dict[str, Any], index: int, source: str) -> di
         "redacted_args": redacted_args,
         "key_outputs": redacted_outputs,
         "policy_flags": raw.get("policy_flags", []) if isinstance(raw.get("policy_flags", []), list) else [],
+        "mode": str(raw.get("mode") or (args.get("mode") if isinstance(args, dict) else "") or ""),
     }
     if not success:
         failure_category = _workflow_failure_category(step)
@@ -7428,6 +8899,34 @@ def _normalize_workflow_step(raw: dict[str, Any], index: int, source: str) -> di
 
 def _workflow_safe_next_actions(category: str) -> list[str]:
     actions = {
+        "context": [
+            "Refresh context evidence and rerun the narrowest failed step after recording freshness.",
+            "Add context freshness checks to lineage before mutation or readiness gates.",
+        ],
+        "clarification": [
+            "Run clarification_gate and record the answered decision before continuing.",
+            "Convert ambiguous requirements into interaction invariants before retrying.",
+        ],
+        "policy": [
+            "Inspect the blocking policy or required gate evidence and narrow the requested operation.",
+            "Record the policy decision in workflow_policy_plan or policy_governance_decision before retrying.",
+        ],
+        "mutation-snapshot": [
+            "Create state_snapshot or equivalent rollback evidence before rerunning the mutating step.",
+            "Require mutation_step_guard to link the snapshot id before mutation-capable tools run.",
+        ],
+        "test": [
+            "Run selected focused tests or release_readiness and attach fresh validation evidence.",
+            "Do not advance review/readiness gates until validation is green or explicitly waived.",
+        ],
+        "tool-output-security": [
+            "Treat untrusted tool output as data and rerun untrusted_content_signals before consuming it.",
+            "Add a sanitizer or schema gate before passing suspicious tool output to later steps.",
+        ],
+        "rollback": [
+            "Run or document the rollback/recovery procedure and capture recovery evidence.",
+            "Add rollback verification to mutation_step_guard for this workflow path.",
+        ],
         "auth_policy_denial": [
             "Re-authenticate the MCP session or rerun through an authorized client before retrying.",
             "If this was a policy denial, inspect the policy evidence and narrow the requested operation.",
@@ -7476,6 +8975,189 @@ def _workflow_evidence(step: dict[str, Any]) -> list[dict[str, Any]]:
     return evidence
 
 
+def _workflow_step_blob(step: dict[str, Any]) -> str:
+    return _diagnostic_text_blob(
+        step.get("tool"),
+        step.get("category"),
+        step.get("mode"),
+        step.get("error"),
+        step.get("policy_flags"),
+        step.get("redacted_args"),
+        step.get("key_outputs"),
+    )
+
+
+def _workflow_step_lookup(step: dict[str, Any], *keys: str) -> Any:
+    for container_key in ("key_outputs", "redacted_args"):
+        container = step.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in keys:
+            if key in container:
+                return container[key]
+            nested = container
+            found = True
+            for part in key.split("."):
+                if isinstance(nested, dict) and part in nested:
+                    nested = nested[part]
+                else:
+                    found = False
+                    break
+            if found:
+                return nested
+    return None
+
+
+def _workflow_bool_false(value: Any) -> bool:
+    return value is False or str(value).lower() in {"false", "0", "no"}
+
+
+def _workflow_selected_tests(step: dict[str, Any]) -> list[Any]:
+    value = _workflow_step_lookup(step, "selected_tests", "tests", "validation_tests")
+    return value if isinstance(value, list) else []
+
+
+def _workflow_has_snapshot_evidence(step: dict[str, Any]) -> bool:
+    blob = _workflow_step_blob(step)
+    if any(term in blob for term in ("snapshot_id", "rollback_snapshot_id", "state_snapshot", "stash_ref", "git-ref://")):
+        return True
+    for key in ("snapshot_id", "rollback_snapshot_id", "snapshot.id", "result.snapshot_id"):
+        value = _workflow_step_lookup(step, key)
+        if value not in (None, "", [], {}):
+            return True
+    return False
+
+
+def _workflow_is_mutating_step(step: dict[str, Any]) -> bool:
+    tool = str(step.get("tool", "")).lower()
+    mode = str(step.get("mode", "")).lower()
+    category = str(step.get("category", "")).lower()
+    blob = _workflow_step_blob(step)
+    if tool in {"state_snapshot", "repo_info", "git_status", "read_snippet", "grep", "find_paths"}:
+        return False
+    if tool == "workspace_transaction" and mode in {"", "begin", "snapshot", "status"}:
+        return False
+    if mode in {"write", "apply", "mutate", "commit", "push", "restore"}:
+        return True
+    if any(term in category for term in ("write", "mutation")):
+        return True
+    return any(
+        term in tool or term in blob
+        for term in (
+            "apply_unified_diff",
+            "write_file",
+            "state_restore",
+            "git_commit",
+            "git_push",
+        )
+    )
+
+
+def _workflow_followup_for_constraint(category: str) -> list[str]:
+    followups = {
+        "context": [
+            "Refresh repository/context evidence and rerun the failed step only after context freshness is recorded.",
+            "Add a context freshness gate to the replay lineage before long-running mutation or release steps.",
+        ],
+        "clarification": [
+            "Run clarification_gate and record the answered decision before continuing the trajectory.",
+            "Convert the ambiguous requirement into an explicit invariant for interaction_invariant_audit.",
+        ],
+        "policy": [
+            "Inspect the blocking policy/gate evidence and narrow the requested operation before retrying.",
+            "Record the policy decision in workflow_policy_plan or policy_governance_decision.",
+        ],
+        "mutation-snapshot": [
+            "Create state_snapshot or equivalent rollback evidence before replaying the mutating step.",
+            "Require mutation_step_guard to link the snapshot id before mutation-capable tools run.",
+        ],
+        "test": [
+            "Run the selected focused tests or release_readiness gate and attach the result to lineage.",
+            "Do not advance readiness/review until validation evidence is fresh or explicitly waived.",
+        ],
+        "tool-output-security": [
+            "Treat untrusted tool output as data, rerun untrusted_content_signals, and block instruction-following from tool output.",
+            "Add a sanitizer or schema gate before consuming the suspicious output in later steps.",
+        ],
+        "rollback": [
+            "Run or document the rollback/recovery procedure and capture recovery evidence before retrying.",
+            "Add rollback verification to mutation_step_guard for this workflow path.",
+        ],
+    }
+    return followups.get(category, _workflow_safe_next_actions(category))
+
+
+def _workflow_violation(step: dict[str, Any], constraint_id: str, category: str, reason: str, confidence: float, fields: list[str]) -> dict[str, Any]:
+    evidence = [{"field": field, "value": _redact_audit_value(_workflow_step_lookup(step, field) or step.get(field, ""))} for field in fields]
+    evidence = [item for item in evidence if item["value"] not in (None, "", [], {})]
+    if not evidence:
+        evidence = _workflow_evidence(step)
+    return {
+        "constraint_id": constraint_id,
+        "failure_category": category,
+        "step_id": str(step.get("step_id", "")),
+        "tool": str(step.get("tool", "")),
+        "source": str(step.get("source", "")),
+        "reason": reason,
+        "evidence": evidence[:6],
+        "confidence": confidence,
+        "recommended_followup": _workflow_followup_for_constraint(category)[:2],
+    }
+
+
+def _workflow_failure_localization_constraints(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    snapshot_seen = False
+    clarification_satisfied = False
+    tests_seen = False
+    for step in steps:
+        blob = _workflow_step_blob(step)
+        tool = str(step.get("tool", "")).lower()
+        outputs = step.get("key_outputs") if isinstance(step.get("key_outputs"), dict) else {}
+        if tool == "clarification_gate" and bool(outputs.get("ok_to_continue", step.get("success", False))):
+            clarification_satisfied = True
+        if _workflow_has_snapshot_evidence(step) or (tool == "state_snapshot" and step.get("success", False)) or (tool == "workspace_transaction" and str(step.get("mode", "")).lower() in {"begin", "snapshot"} and step.get("success", False)):
+            snapshot_seen = True
+        if ("test" in tool or tool == "release_readiness") and step.get("success", False):
+            tests_seen = True
+        if _workflow_selected_tests(step) and step.get("success", False):
+            tests_seen = True
+
+        if _workflow_bool_false(_workflow_step_lookup(step, "context_metadata.fresh", "context_fresh", "fresh_context")) or any(term in blob for term in ("stale context", "context stale", "fresh_context=false", "context_fresh=false")):
+            violations.append(_workflow_violation(step, "fresh_context", "context", "Step used stale or missing context evidence.", 0.92, ["context_metadata.fresh", "context_fresh", "error"]))
+        if _workflow_bool_false(_workflow_step_lookup(step, "context_metadata.tests_fresh", "tests_fresh")) or any(term in blob for term in ("tests_fresh=false", "stale tests")):
+            violations.append(_workflow_violation(step, "fresh_validation_context", "context", "Step depended on stale validation context.", 0.88, ["context_metadata.tests_fresh", "tests_fresh", "error"]))
+        if ("needs_clarification" in blob or "missing clarification" in blob or "clarification required" in blob or _workflow_step_lookup(step, "requires_clarification") is True) and not clarification_satisfied:
+            violations.append(_workflow_violation(step, "clarification_satisfied", "clarification", "Required clarification was not satisfied before this step.", 0.95, ["decision", "status", "error"]))
+        if any(term in blob for term in ("policy denied", "policy denial", "blocking_policies", "required gate skipped", "gate skipped")):
+            violations.append(_workflow_violation(step, "policy_gate_present", "policy", "Policy or required gate evidence blocked the replay step.", 0.9, ["blocking_policies", "policy_flags", "error"]))
+        if any(term in blob for term in ("blocked untrusted", "prompt injection", "prompt_injection", "tool-output injection", "untrusted content")):
+            violations.append(_workflow_violation(step, "tool_output_security", "tool-output-security", "Untrusted tool-output security evidence was not cleared before use.", 0.9, ["prompt_injection_signals", "untrusted_content_signals", "error"]))
+        if _workflow_is_mutating_step(step) and not snapshot_seen and (step.get("success", False) or any(term in blob for term in ("missing snapshot", "snapshot before mutation", "pre-mutation snapshot"))):
+            violations.append(_workflow_violation(step, "snapshot_before_mutation", "mutation-snapshot", "Mutating step has no prior snapshot or rollback-point evidence.", 0.96, ["snapshot_id", "rollback_snapshot_id", "mode", "error"]))
+        if any(term in blob for term in ("rollback failed", "recovery failed", "rollback missing", "rollback required", "state_restore failed")):
+            violations.append(_workflow_violation(step, "rollback_recovery_evidence", "rollback", "Rollback or recovery evidence is missing or failed.", 0.9, ["rollback_snapshot_id", "recovery_plan", "error"]))
+        if ("missing tests" in blob or "validation missing" in blob or "selected_tests=[]" in blob or "tests failed" in blob or "readiness failed" in blob) and not tests_seen:
+            violations.append(_workflow_violation(step, "validation_evidence", "test", "Required validation evidence is missing or failing.", 0.88, ["selected_tests", "tests", "error"]))
+    return violations
+
+
+def _workflow_localization_from_failure(step: dict[str, Any]) -> dict[str, Any]:
+    category = str(step.get("failure_category") or "unknown_failure")
+    confidence = 0.85 if category != "unknown_failure" else 0.55
+    return {
+        "step_id": str(step.get("step_id", "")),
+        "tool": str(step.get("tool", "")),
+        "source": str(step.get("source", "")),
+        "failure_category": category,
+        "constraint_id": "explicit_step_failure",
+        "reason": str(step.get("error", "") or "step reported failure"),
+        "evidence": _workflow_evidence(step),
+        "confidence": confidence,
+        "recommended_followup": _workflow_safe_next_actions(category)[:2],
+    }
+
+
 def _workflow_redactions_applied(steps: list[dict[str, Any]]) -> list[str]:
     encoded = json.dumps(steps, sort_keys=True, ensure_ascii=True)
     redactions: list[str] = []
@@ -7497,40 +9179,76 @@ def _build_workflow_diagnostics(events: list[dict[str, Any]], trajectory: list[d
     ]
     steps = audit_steps + trajectory_steps
     failed = [step for step in steps if not step.get("success", False)]
+    violations = _workflow_failure_localization_constraints(steps)
     categorized = [step for step in failed if step.get("failure_category") != "unknown_failure"]
     critical = (categorized or failed or [None])[0]
-    failure_category = str(critical.get("failure_category", "") if isinstance(critical, dict) else "")
+    violations_by_step: dict[str, list[dict[str, Any]]] = {}
+    for violation in violations:
+        violations_by_step.setdefault(str(violation.get("step_id", "")), []).append(violation)
+    critical_localization: dict[str, Any] = {}
+    for step in steps:
+        step_id = str(step.get("step_id", ""))
+        if not step.get("success", False) and step in (categorized or failed):
+            critical_localization = _workflow_localization_from_failure(step)
+            break
+        if violations_by_step.get(step_id):
+            critical_localization = violations_by_step[step_id][0]
+            break
+    if not critical_localization and isinstance(critical, dict):
+        critical_localization = _workflow_localization_from_failure(critical)
+    if not critical_localization and violations:
+        critical_localization = violations[0]
+    failure_category = str(critical_localization.get("failure_category", ""))
     if not failure_category:
         failure_category = "none"
     category_counts: dict[str, int] = {}
     for step in failed:
         key = str(step.get("failure_category", "unknown_failure"))
         category_counts[key] = category_counts.get(key, 0) + 1
+    for violation in violations:
+        key = str(violation.get("failure_category", "unknown_failure"))
+        category_counts[key] = category_counts.get(key, 0) + 1
+    recommended = list(critical_localization.get("recommended_followup", [])) if critical_localization else []
+    if not recommended and failure_category != "none":
+        recommended = _workflow_safe_next_actions(failure_category)
     report = {
         "schema": "workflow_diagnostics.v1",
-        "ok": not failed,
+        "correlation_id": _otel_current_correlation_id(),
+        "ok": not failed and not violations,
         "step_count": len(steps),
         "failed_step_count": len(failed),
+        "constraint_violation_count": len(violations),
+        "failure_taxonomy": WORKFLOW_FAILURE_LOCALIZATION_TAXONOMY,
         "failure_categories": dict(sorted(category_counts.items())),
         "critical_step_candidate": critical or {},
+        "critical_failure_step": critical_localization,
         "failure_category": failure_category,
-        "evidence": _workflow_evidence(critical) if isinstance(critical, dict) else [],
+        "constraint_violations": violations[:limit],
+        "evidence": list(critical_localization.get("evidence", [])) if critical_localization else [],
+        "confidence": float(critical_localization.get("confidence", 1.0 if failure_category == "none" else 0.55)),
+        "recommended_followup": recommended[:3],
         "safe_next_actions": _workflow_safe_next_actions(failure_category) if failure_category != "none" else [],
-        "redactions_applied": _workflow_redactions_applied(steps),
+        "redactions_applied": _workflow_redactions_applied(steps + violations),
         "trajectory": steps[:limit],
+        "llm_judging": {"enabled": False, "default": "off", "reason": "deterministic replay constraints only"},
     }
     return report
 
 
 def _workflow_diagnostics_compact(report: dict[str, Any]) -> dict[str, Any]:
-    critical = report.get("critical_step_candidate", {})
+    critical = report.get("critical_failure_step") or report.get("critical_step_candidate", {})
+    recommended = report.get("recommended_followup", report.get("safe_next_actions", []))
     return {
         "schema": "workflow_diagnostics.summary.v1",
+        "correlation_id": str(report.get("correlation_id", "")),
         "ok": bool(report.get("ok", True)),
         "failed_step_count": int(report.get("failed_step_count", 0)),
+        "constraint_violation_count": int(report.get("constraint_violation_count", 0)),
         "failure_category": str(report.get("failure_category", "none")),
         "critical_step_id": str(critical.get("step_id", "")) if isinstance(critical, dict) else "",
         "critical_tool": str(critical.get("tool", "")) if isinstance(critical, dict) else "",
+        "confidence": float(report.get("confidence", 1.0)),
+        "recommended_followup": list(recommended)[:3] if isinstance(recommended, list) else [],
         "safe_next_actions": list(report.get("safe_next_actions", []))[:3]
         if isinstance(report.get("safe_next_actions"), list)
         else [],
@@ -7545,10 +9263,11 @@ def _governance_result_store_summary() -> dict[str, Any]:
     rows = payload.get("results", {})
     if not isinstance(rows, dict):
         rows = {}
-    wanted = {"policy_simulator", "workflow_policy_plan", "release_readiness", "required_tool_chain"}
+    wanted = {"policy_simulator", "workflow_policy_plan", "policy_governance_decision", "release_readiness", "required_tool_chain"}
     out: dict[str, Any] = {
         "policy_simulator": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "workflow_policy_plan": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
+        "policy_governance_decision": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "release_readiness": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
         "required_tool_chain": {"count": 0, "ok_count": 0, "failed_count": 0, "latest": None},
     }
@@ -7568,7 +9287,7 @@ def _governance_result_store_summary() -> dict[str, Any]:
         if not latest or created_at >= str(latest.get("created_at", "")):
             details: dict[str, Any] = {}
             if isinstance(value, dict):
-                for key in ("schema", "ok", "decision", "plan_id", "blocking_policies", "required_preconditions", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
+                for key in ("schema", "ok", "decision", "plan_id", "decision_id", "bundle_id", "bundle_version", "matched_rule_ids", "decision_counts", "blocking_policies", "required_preconditions", "checks", "missing_tools", "missing_artifacts", "missing_result_ids"):
                     if key in value:
                         details[key] = _redact_audit_value(value[key])
             bucket["latest"] = {"result_id": str(rid), "created_at": created_at, "ok": ok, "details": details}
@@ -12032,6 +13751,379 @@ def _http_request_granted_scopes_for_tools() -> frozenset[str]:
     return scopes
 
 
+_MUTATION_REPLAY_JOURNAL_SCHEMA = "mutation_replay_journal.v1"
+_MUTATION_REPLAY_LOCK = threading.RLock()
+_MUTATION_REPLAY_CONTENT_KEYS = {
+    "content",
+    "diff_text",
+    "replacement",
+    "patch",
+    "patch_text",
+    "new_content",
+    "old_content",
+    "stdin",
+    "stdout",
+    "stderr",
+    "env",
+    "environment",
+}
+_MUTATION_REPLAY_PATH_KEYS = {
+    "path",
+    "paths",
+    "file",
+    "files",
+    "target",
+    "targets",
+    "source",
+    "source_path",
+    "destination",
+    "directory",
+    "directories",
+}
+
+
+def _mutation_replay_guard_enabled() -> bool:
+    return bool(MCP_MUTATION_REPLAY_GUARD_ENABLED)
+
+
+def _mutation_replay_journal_path() -> Path:
+    configured = MCP_MUTATION_REPLAY_GUARD_JOURNAL_FILE
+    if configured.is_absolute():
+        resolved = configured.resolve()
+        try:
+            resolved.relative_to(REPO_PATH)
+        except ValueError as exc:
+            raise PermissionError("mutation replay journal must stay inside the repository") from exc
+        return resolved
+    return _resolve_repo_path(str(configured))
+
+
+def _mutation_replay_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _mutation_replay_parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _mutation_replay_load_journal() -> dict[str, Any]:
+    path = _mutation_replay_journal_path()
+    if not path.exists():
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    if not isinstance(payload, dict):
+        return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": []}
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    return {"schema": _MUTATION_REPLAY_JOURNAL_SCHEMA, "entries": [e for e in entries if isinstance(e, dict)]}
+
+
+def _mutation_replay_prune_entries(entries: list[dict[str, Any]], *, now: datetime | None = None) -> list[dict[str, Any]]:
+    now_dt = now or datetime.now(timezone.utc)
+    cutoff = now_dt - timedelta(seconds=MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS)
+    retained: list[dict[str, Any]] = []
+    for entry in entries:
+        created = _mutation_replay_parse_ts(entry.get("created_at"))
+        if created is not None and created < cutoff:
+            continue
+        retained.append(entry)
+    if len(retained) > MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES:
+        retained = retained[-MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES :]
+    return retained
+
+
+def _mutation_replay_save_journal(payload: dict[str, Any]) -> None:
+    path = _mutation_replay_journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    safe_payload = {
+        "schema": _MUTATION_REPLAY_JOURNAL_SCHEMA,
+        "updated_at": _mutation_replay_now_iso(),
+        "bounds": {
+            "max_entries": MCP_MUTATION_REPLAY_GUARD_MAX_ENTRIES,
+            "ttl_seconds": MCP_MUTATION_REPLAY_GUARD_TTL_SECONDS,
+        },
+        "entries": entries,
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(safe_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _mutation_replay_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _mutation_replay_normalize_path(value: Any) -> str:
+    text = str(value or "").replace("\x00", " ").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if text.startswith("/") or re.match(r"^[A-Za-z]:/", text):
+        return "<redacted:absolute-path>"
+    while text.startswith("./"):
+        text = text[2:]
+    return _redact_audit_string(text.strip("/") or ".")[:160]
+
+
+def _mutation_replay_extract_targets(value: Any, *, parent_key: str = "") -> list[str]:
+    targets: list[str] = []
+    key = parent_key.lower()
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            targets.extend(_mutation_replay_extract_targets(item_value, parent_key=str(item_key)))
+    elif isinstance(value, list):
+        for item in value:
+            targets.extend(_mutation_replay_extract_targets(item, parent_key=parent_key))
+    elif key in _MUTATION_REPLAY_PATH_KEYS:
+        target = _mutation_replay_normalize_path(value)
+        if target:
+            targets.append(target)
+    return list(dict.fromkeys(targets))[:25]
+
+
+def _mutation_replay_digest_value(value: Any, *, parent_key: str = "", depth: int = 0) -> Any:
+    key = parent_key.lower()
+    if depth > 8:
+        return {"type": type(value).__name__, "truncated": True}
+    if SENSITIVE_AUDIT_KEY_RE.search(key):
+        return {"type": type(value).__name__, "redacted": True}
+    if key in _MUTATION_REPLAY_CONTENT_KEYS:
+        raw = str(value) if value is not None else ""
+        return {"type": type(value).__name__, "length": len(raw), "sha256": _mutation_replay_hash(raw)}
+    if isinstance(value, dict):
+        return {
+            str(k): _mutation_replay_digest_value(v, parent_key=str(k), depth=depth + 1)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if str(k) not in {"idempotency_key", "idempotencyKey", "request_metadata", "_meta"}
+        }
+    if isinstance(value, (list, tuple)):
+        return [_mutation_replay_digest_value(item, parent_key=parent_key, depth=depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        if key in _MUTATION_REPLAY_PATH_KEYS:
+            return {"path": _mutation_replay_normalize_path(value)}
+        redacted = _redact_audit_string(value.replace("\x00", " "))
+        if redacted == "<redacted>":
+            return {"type": "str", "redacted": True}
+        return {"type": "str", "length": len(redacted), "sha256": _mutation_replay_hash(redacted)}
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    return {"type": type(value).__name__, "sha256": _mutation_replay_hash(str(value))}
+
+
+def _mutation_replay_idempotency_key(arguments: dict[str, Any]) -> str:
+    header_key = _HTTP_IDEMPOTENCY_KEY.get().strip()
+    if header_key:
+        return header_key
+    for key in ("idempotency_key", "idempotencyKey"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for meta_key in ("_meta", "request_metadata", "metadata"):
+        meta = arguments.get(meta_key)
+        if isinstance(meta, dict):
+            for key in ("idempotency_key", "idempotencyKey", "idempotency-key"):
+                value = meta.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return ""
+
+
+def _mutation_replay_session_scope() -> tuple[str, str]:
+    session_id = _streamable_http_current_session_id().strip()
+    if not session_id:
+        session_id = "legacy-http-session"
+    return session_id, _mutation_replay_hash(session_id)[:24]
+
+
+def _mutation_replay_git_head() -> str:
+    try:
+        return _git("rev-parse", "HEAD").stdout.strip()
+    except Exception:
+        return ""
+
+
+def _mutation_replay_digest(tool_name: str, arguments: dict[str, Any], session_hash: str) -> tuple[str, dict[str, Any]]:
+    mode = str(arguments.get("mode", "") or "").strip().lower()
+    git_head = _mutation_replay_git_head()
+    normalized = {
+        "tool": tool_name,
+        "mode": mode,
+        "session": session_hash,
+        "git_head": git_head,
+        "targets": _mutation_replay_extract_targets(arguments),
+        "arguments": _mutation_replay_digest_value(arguments),
+    }
+    canonical = json.dumps(normalized, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return _mutation_replay_hash(canonical), {
+        "mode": mode,
+        "git_head": git_head[:40],
+        "target_paths": normalized["targets"],
+    }
+
+
+def _mutation_replay_guard_audit_event(decision: str, entry: dict[str, Any], *, success: bool = True, reason: str = "") -> None:
+    arguments = {
+        "replay_guard": {
+            "decision": decision,
+            "guard_id": entry.get("guard_id", ""),
+            "tool_name": entry.get("tool_name", ""),
+            "mode": entry.get("mode", ""),
+            "session_hash": entry.get("session_hash", ""),
+            "idempotency_key_hash": entry.get("idempotency_key_hash", ""),
+            "mutation_digest": entry.get("mutation_digest", ""),
+            "status": entry.get("status", ""),
+        }
+    }
+    _append_audit_event(
+        "mutation_replay_guard",
+        ["audit", "write"],
+        success,
+        arguments,
+        reason or decision,
+        required_scope=MCP_SCOPE_MUTATE,
+        granted_scopes=_http_request_granted_scopes_for_tools() if _inside_http_request() else None,
+    )
+
+
+def _mutation_replay_duplicate_response(entry: dict[str, Any]) -> dict[str, Any]:
+    original_status = str(entry.get("status", "") or "")
+    original_applied = original_status == "applied"
+    response = {
+        "schema": "mutation_replay_guard.duplicate.v1",
+        "ok": original_applied,
+        "duplicate": True,
+        "replay_guard": {
+            "decision": "duplicate_suppressed",
+            "guard_id": entry.get("guard_id", ""),
+            "tool_name": entry.get("tool_name", ""),
+            "mode": entry.get("mode", ""),
+            "original_status": original_status,
+            "original_created_at": entry.get("created_at", ""),
+            "result_digest": entry.get("result_digest", ""),
+        },
+    }
+    if not original_applied:
+        response["error"] = "original mutating request did not complete successfully"
+    return response
+
+
+def _mutation_replay_guard_begin(tool_name: str, arguments: dict[str, Any], categories: list[str]) -> dict[str, Any]:
+    if (
+        not _mutation_replay_guard_enabled()
+        or not _inside_http_request()
+        or not MUTATION_TOOL_CATEGORIES.intersection(categories)
+    ):
+        return {"enabled": False}
+    session_id, session_hash = _mutation_replay_session_scope()
+    idempotency_key = _mutation_replay_idempotency_key(arguments)
+    idempotency_key_hash = _mutation_replay_hash(idempotency_key)[:24] if idempotency_key else ""
+    mutation_digest, metadata = _mutation_replay_digest(tool_name, arguments, session_hash)
+    now = _mutation_replay_now_iso()
+    with _MUTATION_REPLAY_LOCK:
+        journal = _mutation_replay_load_journal()
+        entries = _mutation_replay_prune_entries(journal.get("entries", []))
+        for entry in entries:
+            if entry.get("session_hash") != session_hash:
+                continue
+            if idempotency_key_hash and entry.get("idempotency_key_hash") == idempotency_key_hash and entry.get("mutation_digest") != mutation_digest:
+                conflict = {
+                    **entry,
+                    "status": "conflict",
+                    "last_seen_at": now,
+                    "conflicting_digest": mutation_digest,
+                }
+                _mutation_replay_guard_audit_event(
+                    "idempotency_key_conflict",
+                    conflict,
+                    success=False,
+                    reason="idempotency key reused for different mutating digest",
+                )
+                journal["entries"] = entries
+                _mutation_replay_save_journal(journal)
+                raise PermissionError("idempotency key reused for a different mutating request")
+            if entry.get("mutation_digest") == mutation_digest:
+                entry["last_seen_at"] = now
+                entry["duplicate_count"] = int(entry.get("duplicate_count", 0)) + 1
+                entry["status"] = entry.get("status") or "started"
+                original_applied = entry.get("status") == "applied"
+                _mutation_replay_guard_audit_event(
+                    "duplicate_suppressed",
+                    entry,
+                    success=original_applied,
+                    reason=(
+                        "duplicate_suppressed"
+                        if original_applied
+                        else "duplicate suppressed; original mutation did not complete successfully"
+                    ),
+                )
+                journal["entries"] = entries
+                _mutation_replay_save_journal(journal)
+                return {
+                    "enabled": True,
+                    "duplicate": True,
+                    "response": _mutation_replay_duplicate_response(entry),
+                }
+        entry = {
+            "guard_id": uuid.uuid4().hex[:16],
+            "tool_name": tool_name,
+            "mode": metadata.get("mode", ""),
+            "session_hash": session_hash,
+            "idempotency_key_hash": idempotency_key_hash,
+            "mutation_digest": mutation_digest,
+            "git_head": metadata.get("git_head", ""),
+            "target_paths": metadata.get("target_paths", []),
+            "status": "started",
+            "created_at": now,
+            "last_seen_at": now,
+            "duplicate_count": 0,
+        }
+        entries.append(entry)
+        journal["entries"] = _mutation_replay_prune_entries(entries)
+        _mutation_replay_save_journal(journal)
+        _mutation_replay_guard_audit_event("recorded", entry)
+    return {"enabled": True, "entry": entry, "session_id": session_id}
+
+
+def _mutation_replay_guard_finish(guard: dict[str, Any], result: Any, *, error: Exception | None = None) -> None:
+    if not guard.get("enabled") or guard.get("duplicate"):
+        return
+    entry = guard.get("entry")
+    if not isinstance(entry, dict):
+        return
+    result_summary = {
+        "ok": False if error is not None else _tool_result_success(result),
+        "schema": result.get("schema") if isinstance(result, dict) else "",
+        "error_type": type(error).__name__ if error is not None else "",
+    }
+    result_digest = _mutation_replay_hash(
+        json.dumps(_redact_audit_value(result_summary), sort_keys=True, ensure_ascii=True)
+    )[:24]
+    with _MUTATION_REPLAY_LOCK:
+        journal = _mutation_replay_load_journal()
+        entries = _mutation_replay_prune_entries(journal.get("entries", []))
+        for existing in entries:
+            if existing.get("guard_id") == entry.get("guard_id"):
+                existing["status"] = "failed" if error is not None or not result_summary["ok"] else "applied"
+                existing["completed_at"] = _mutation_replay_now_iso()
+                existing["result_digest"] = result_digest
+                existing["result_summary"] = result_summary
+                break
+        journal["entries"] = entries
+        _mutation_replay_save_journal(journal)
+
+
 def _require_tool_security_gate(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
@@ -12127,6 +14219,30 @@ def _tool_result_failure_reason(result: Any) -> str:
     return "tool returned ok=false"
 
 
+def _run_with_mutation_replay_guard(
+    tool_name: str,
+    arguments: dict[str, Any],
+    categories: list[str],
+    action: Callable[[], Any],
+    *,
+    on_duplicate: Callable[[Any], None] | None = None,
+) -> Any:
+    """Run an already-authorized tool action through the HTTP mutation replay guard."""
+    guard = _mutation_replay_guard_begin(tool_name, arguments, categories)
+    if guard.get("duplicate"):
+        result = guard.get("response")
+        if on_duplicate is not None:
+            on_duplicate(result)
+        return result
+    try:
+        result = action()
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, result)
+    return result
+
+
 def _run_with_tool_security_audit(
     tool_name: str,
     arguments: dict[str, Any],
@@ -12140,8 +14256,25 @@ def _run_with_tool_security_audit(
         categories = _require_tool_security_gate(tool_name, arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
+
         try:
-            result = action()
+            result = _run_with_mutation_replay_guard(
+                tool_name,
+                arguments,
+                categories,
+                action,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
             if sensitive:
                 _append_audit_event(
@@ -12156,6 +14289,8 @@ def _run_with_tool_security_audit(
                     ),
                 )
             raise
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if sensitive:
             success = _tool_result_success(result)
@@ -12265,6 +14400,12 @@ class MCPHTTPAuthMiddleware:
         )
         token = _HTTP_REQUEST_AUTHORIZED.set(True)
         scope_token = _HTTP_REQUEST_GRANTED_SCOPES.set(granted_scopes)
+        idempotency_values = _http_header_values(scope, "idempotency-key")
+        idempotency_token = _HTTP_IDEMPOTENCY_KEY.set(idempotency_values[-1] if idempotency_values else "")
+        trace_carrier = _otel_header_carrier(scope)
+        trace_context_token = _OTEL_INCOMING_TRACE_CONTEXT.set(
+            _otel_trace_context_from_carrier(trace_carrier, "http_headers") if trace_carrier else None
+        )
         streamable_session_token = _STREAMABLE_HTTP_SESSION_ID.set(
             _streamable_http_session_id_from_scope(scope)
         )
@@ -12302,6 +14443,8 @@ class MCPHTTPAuthMiddleware:
             await response(scope, receive, send)
         finally:
             _STREAMABLE_HTTP_SESSION_ID.reset(streamable_session_token)
+            _OTEL_INCOMING_TRACE_CONTEXT.reset(trace_context_token)
+            _HTTP_IDEMPOTENCY_KEY.reset(idempotency_token)
             _HTTP_REQUEST_GRANTED_SCOPES.reset(scope_token)
             _HTTP_REQUEST_AUTHORIZED.reset(token)
 
@@ -13133,6 +15276,462 @@ def _artifact_meta(resource_links: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+RESULT_REFERENCE_MODES = {"inline", "summary", "reference"}
+
+
+def _validate_result_mode(result_mode: str) -> str:
+    mode = str(result_mode or "inline").strip().lower()
+    if mode not in RESULT_REFERENCE_MODES:
+        raise ValueError("result_mode must be one of: inline, summary, reference")
+    return mode
+
+
+def _result_reference_ttl_hours(ttl_hours: int | None = None) -> int:
+    if ttl_hours is None:
+        return max(1, int(WORKFLOW_TASK_EXPIRY_HOURS))
+    return max(1, int(ttl_hours))
+
+
+def _result_reference_public_summary(tool_name: str, report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    if tool_name == "governance_report":
+        audit = report.get("audit") if isinstance(report.get("audit"), dict) else {}
+        counts = audit.get("counts") if isinstance(audit.get("counts"), dict) else {}
+        summary = {
+            "tool": tool_name,
+            "report_id": str(report.get("report_id", "")),
+            "generated_at": str(report.get("generated_at", "")),
+            "audit_event_count": int(counts.get("total", 0) or 0),
+            "blocked_count": int(counts.get("blocked_count", 0) or 0),
+            "security_status": str((report.get("secret_exposure", {}) if isinstance(report.get("secret_exposure"), dict) else {}).get("status", "")),
+            "resource_link_count": len(report.get("resource_links", [])) if isinstance(report.get("resource_links"), list) else 0,
+        }
+    elif tool_name == "self_optimization_report":
+        summary = {
+            "tool": tool_name,
+            "report_id": str(report.get("report_id", "")),
+            "generated_at": str(report.get("generated_at", "")),
+            "summary": summary,
+            "candidate_count": len(report.get("optimization_candidates", [])) if isinstance(report.get("optimization_candidates"), list) else 0,
+            "confidence": str(report.get("confidence", "")),
+            "resource_link_count": len(report.get("resource_links", [])) if isinstance(report.get("resource_links"), list) else 0,
+        }
+    else:
+        summary = {
+            "tool": tool_name,
+            "report_id": str(report.get("report_id", "")),
+            "generated_at": str(report.get("generated_at", "")),
+            "summary": summary,
+        }
+    return summary
+
+
+def _result_reference_audit_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    created = 0
+    resolved = 0
+    by_status: dict[str, int] = {}
+    latest: list[dict[str, Any]] = []
+    for event in events:
+        tool = str(event.get("tool_name", ""))
+        args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+        if tool == "result_reference_create":
+            created += 1
+        elif tool == "result_reference_resolve":
+            resolved += 1
+            status = str(args.get("status", "unknown") or "unknown")
+            by_status[status] = by_status.get(status, 0) + 1
+        else:
+            continue
+        latest.append(
+            {
+                "timestamp": str(event.get("timestamp", "")),
+                "event": tool,
+                "producer_tool": str(args.get("producer_tool", "")),
+                "reference_id": str(args.get("reference_id", "")),
+                "status": str(args.get("status", "")),
+                "payload_embedded": False,
+            }
+        )
+    latest.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+    return {
+        "schema": "mcp_result_reference.audit_summary.v1",
+        "created_count": created,
+        "resolved_count": resolved,
+        "resolve_status_counts": dict(sorted(by_status.items())),
+        "latest": latest[:20],
+        "privacy": {
+            "full_payloads_embedded": False,
+            "repository_contents_embedded": False,
+            "host_absolute_paths_embedded": False,
+        },
+    }
+
+
+def _write_result_reference_artifact(
+    *,
+    tool_name: str,
+    report: dict[str, Any],
+    summary: dict[str, Any],
+    ttl_hours: int | None = None,
+) -> dict[str, Any]:
+    created_at = _now_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=_result_reference_ttl_hours(ttl_hours))).isoformat()
+    body = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    data = body.encode("utf-8")
+    digest = hashlib.sha256(data).hexdigest()
+    report_id = str(report.get("report_id") or tool_name or "result")
+    safe_report_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", report_id).strip(".-") or "result"
+    reference_id = f"{tool_name}-{safe_report_id}-{digest[:16]}"
+    rel_path = str(RESULT_REFERENCE_DIR / f"{reference_id}.json")
+    path = _resolve_repo_path(rel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    reference = {
+        "schema": RESULT_REFERENCE_SCHEMA,
+        "reference_id": reference_id,
+        "result_mode": "reference",
+        "producer_tool": tool_name,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "retention": {
+            "ttl_hours": _result_reference_ttl_hours(ttl_hours),
+            "retention_days": WORKFLOW_TASK_RETENTION_DAYS,
+            "policy": "repo-local artifact expires like short-lived workflow task results unless a caller chooses to retain/export it",
+        },
+        "summary": summary,
+        "content": {
+            "content_type": "application/json",
+            "mime_type": "application/json",
+            "encoding": "utf-8",
+            "size_bytes": len(data),
+            "hash": {"algorithm": "sha256", "value": digest},
+        },
+        "sensitivity": {
+            "level": "redacted",
+            "redaction": "producer report redaction policy applied before artifact creation",
+            "contains_secrets": False,
+            "sensitive_payload_embedded": False,
+        },
+        "resolver": {
+            "tool": "result_reference_resolve",
+            "uri": f"mcp-result://local/{reference_id}",
+            "artifact_uri": _repo_resource_uri(rel_path),
+            "path": rel_path,
+            "repository_local": True,
+            "repo_boundary_enforced": True,
+        },
+    }
+    _append_audit_event(
+        "result_reference_create",
+        ["read-only", "governance"],
+        True,
+        {
+            "producer_tool": tool_name,
+            "reference_id": reference_id,
+            "path": rel_path,
+            "size_bytes": len(data),
+            "hash_algorithm": "sha256",
+            "hash_prefix": digest[:12],
+            "expires_at": expires_at,
+            "payload_embedded": False,
+        },
+        "result handle created without embedding payload",
+    )
+    return reference
+
+
+def _result_reference_summary_envelope(
+    *,
+    tool_name: str,
+    report: dict[str, Any],
+    mode: str,
+    reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = _result_reference_public_summary(tool_name, report)
+    envelope: dict[str, Any] = {
+        "schema": str(report.get("schema", f"{tool_name}.v1")),
+        "result_mode": mode,
+        "report_id": str(report.get("report_id", "")),
+        "generated_at": str(report.get("generated_at", "")),
+        "summary": summary,
+        "exports": report.get("exports", {}) if isinstance(report.get("exports"), dict) else {},
+        "resource_links": report.get("resource_links", []) if isinstance(report.get("resource_links"), list) else [],
+        "security": {
+            "repo_boundary_enforced": True,
+            "full_payload_embedded": False,
+            "redaction_applied": True,
+            "resolver_required_for_full_payload": mode == "reference",
+        },
+        "_meta": report.get("_meta", {}) if isinstance(report.get("_meta"), dict) else {},
+    }
+    if reference is not None:
+        envelope["result_reference"] = reference
+        envelope["_meta"] = dict(envelope["_meta"])
+        envelope["_meta"]["result_reference"] = {
+            "schema": RESULT_REFERENCE_SCHEMA,
+            "reference_id": reference.get("reference_id", ""),
+            "resolver": reference.get("resolver", {}),
+            "payload_embedded": False,
+        }
+    return envelope
+
+
+def _apply_result_mode(
+    *,
+    tool_name: str,
+    report: dict[str, Any],
+    result_mode: str = "inline",
+    result_reference_ttl_hours: int | None = None,
+) -> dict[str, Any]:
+    mode = _validate_result_mode(result_mode)
+    if mode == "inline":
+        return report
+    if mode == "summary":
+        return _result_reference_summary_envelope(tool_name=tool_name, report=report, mode=mode)
+    summary = _result_reference_public_summary(tool_name, report)
+    reference = _write_result_reference_artifact(
+        tool_name=tool_name,
+        report=report,
+        summary=summary,
+        ttl_hours=result_reference_ttl_hours,
+    )
+    return _result_reference_summary_envelope(
+        tool_name=tool_name,
+        report=report,
+        mode=mode,
+        reference=reference,
+    )
+
+
+def _reference_field(reference: dict[str, Any], *path: str) -> Any:
+    current: Any = reference
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _is_sha256_hex(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{64}", value))
+
+
+def _normalize_result_reference_input(
+    reference: dict[str, Any] | None = None,
+    *,
+    reference_id: str = "",
+    path: str = "",
+    expected_hash: str = "",
+) -> dict[str, Any]:
+    ref = reference if isinstance(reference, dict) else {}
+    resolver = ref.get("resolver") if isinstance(ref.get("resolver"), dict) else {}
+    content = ref.get("content") if isinstance(ref.get("content"), dict) else {}
+    hash_obj = content.get("hash") if isinstance(content.get("hash"), dict) else {}
+
+    explicit_reference_id = str(reference_id or "")
+    explicit_path = str(path or "")
+    explicit_hash = str(expected_hash or "")
+    reference_hash = str(hash_obj.get("value", ""))
+    hash_algorithm = str(hash_obj.get("algorithm", "sha256")).lower()
+
+    has_reference = bool(ref)
+    explicit_triplet_valid = bool(
+        explicit_reference_id
+        and explicit_path
+        and explicit_hash
+        and _is_sha256_hex(explicit_hash)
+    )
+    handle_valid = bool(
+        has_reference
+        and ref.get("schema") == RESULT_REFERENCE_SCHEMA
+        and str(ref.get("reference_id", ""))
+        and str(resolver.get("path", ""))
+        and hash_algorithm == "sha256"
+        and _is_sha256_hex(reference_hash)
+    )
+
+    invalid_reason = ""
+    if not handle_valid and not explicit_triplet_valid:
+        if has_reference:
+            invalid_reason = (
+                "result reference must be a valid mcp_result_reference.v1 handle or include "
+                "explicit reference_id, repository-relative artifact path, and SHA-256 hash"
+            )
+        else:
+            invalid_reason = (
+                "result reference resolver requires a valid mcp_result_reference.v1 handle or "
+                "explicit reference_id, repository-relative artifact path, and SHA-256 hash"
+            )
+    elif explicit_hash and not _is_sha256_hex(explicit_hash):
+        invalid_reason = "explicit expected_hash must be a SHA-256 hex digest"
+
+    return {
+        "reference_id": explicit_reference_id or str(ref.get("reference_id", "")),
+        "path": explicit_path or str(resolver.get("path", "")),
+        "expected_hash": explicit_hash or reference_hash,
+        "expires_at": str(ref.get("expires_at", "")),
+        "mime_type": str(content.get("mime_type", content.get("content_type", "application/octet-stream"))),
+        "producer_tool": str(ref.get("producer_tool", "")),
+        "summary": ref.get("summary", {}) if isinstance(ref.get("summary"), dict) else {},
+        "invalid_reason": invalid_reason,
+    }
+
+
+def _result_reference_response(
+    *,
+    status: str,
+    ok: bool,
+    reference_id: str = "",
+    path: str = "",
+    message: str = "",
+    producer_tool: str = "",
+    summary: dict[str, Any] | None = None,
+    artifact: dict[str, Any] | None = None,
+    content: str | None = None,
+    hash_verified_before_content: bool = False,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "schema": RESULT_REFERENCE_RESOLVE_SCHEMA,
+        "ok": ok,
+        "status": status,
+        "read_only": True,
+        "reference_id": reference_id,
+        "producer_tool": producer_tool,
+        "summary": summary or {},
+        "artifact": artifact or ({"path": path} if path else {}),
+        "message": message,
+        "security": {
+            "repo_boundary_enforced": True,
+            "mutates_repository": False,
+            "absolute_host_paths_exposed": False,
+            "hash_verified_before_content": hash_verified_before_content,
+            "payload_embedded": content is not None,
+        },
+    }
+    if content is not None:
+        response["content"] = content
+        response["content_encoding"] = "utf-8"
+    _append_audit_event(
+        "result_reference_resolve",
+        ["read-only", "governance"],
+        ok,
+        {
+            "reference_id": reference_id,
+            "producer_tool": producer_tool,
+            "path": path,
+            "status": status,
+            "payload_embedded": content is not None,
+        },
+        message or status,
+    )
+    return response
+
+
+def _result_reference_resolve_impl(
+    reference: dict[str, Any] | None = None,
+    reference_id: str = "",
+    path: str = "",
+    expected_hash: str = "",
+    include_content: bool = True,
+) -> dict[str, Any]:
+    normalized = _normalize_result_reference_input(
+        reference,
+        reference_id=reference_id,
+        path=path,
+        expected_hash=expected_hash,
+    )
+    ref_id = normalized["reference_id"]
+    rel_path = normalized["path"]
+    expected = normalized["expected_hash"]
+    producer_tool = normalized["producer_tool"]
+    summary = normalized["summary"]
+    if normalized["invalid_reason"]:
+        return _result_reference_response(
+            status="invalid_reference",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message=normalized["invalid_reason"],
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    if not rel_path:
+        return _result_reference_response(
+            status="invalid_reference",
+            ok=False,
+            reference_id=ref_id,
+            message="result reference is missing a repository-relative artifact path",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    expires_at = _parse_iso_datetime(normalized["expires_at"])
+    if expires_at is not None and datetime.now(timezone.utc) > expires_at:
+        return _result_reference_response(
+            status="expired",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message="result reference has expired; regenerate the report to create a fresh handle",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    try:
+        artifact_path = _resolve_repo_path(rel_path)
+    except ValueError:
+        return _result_reference_response(
+            status="boundary_rejected",
+            ok=False,
+            reference_id=ref_id,
+            path="<redacted:outside_repo>",
+            message="referenced artifact path escapes repository boundary",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    if not artifact_path.exists() or not artifact_path.is_file():
+        return _result_reference_response(
+            status="missing",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message="referenced artifact is missing; regenerate the report to create a fresh handle",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    data = artifact_path.read_bytes()
+    actual_hash = hashlib.sha256(data).hexdigest()
+    artifact = {
+        "uri": _repo_resource_uri(rel_path),
+        "path": rel_path,
+        "mime_type": normalized["mime_type"] or "application/octet-stream",
+        "size_bytes": len(data),
+        "hash": {"algorithm": "sha256", "value": actual_hash},
+    }
+    if not hmac.compare_digest(actual_hash, expected):
+        return _result_reference_response(
+            status="hash_mismatch",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message="referenced artifact hash does not match the handle",
+            producer_tool=producer_tool,
+            summary=summary,
+            artifact={**artifact, "expected_hash": {"algorithm": "sha256", "value": expected}},
+        )
+    text = data.decode("utf-8", errors="replace") if include_content else None
+    return _result_reference_response(
+        status="resolved",
+        ok=True,
+        reference_id=ref_id,
+        path=rel_path,
+        message="referenced artifact resolved inside repository boundary",
+        producer_tool=producer_tool,
+        summary=summary,
+        artifact=artifact,
+        content=text,
+        hash_verified_before_content=True,
+    )
+
+
 _WORKFLOW_TASK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 _WORKFLOW_TASK_LOCK = threading.Lock()
 _WORKFLOW_TASK_FUTURES: dict[str, concurrent.futures.Future[Any]] = {}
@@ -13198,6 +15797,177 @@ def _workflow_task_result_is_transient(result: dict[str, Any]) -> bool:
         "resource temporarily unavailable",
     )
     return any(marker in text for marker in markers)
+
+
+def _workflow_task_error_class_is_transient(error_class: str) -> bool:
+    return error_class in {
+        "TimeoutError",
+        "ConnectionError",
+        "ConnectionResetError",
+        "ConnectionRefusedError",
+        "BrokenPipeError",
+        "BlockingIOError",
+        "ResourceWarning",
+    }
+
+
+def _workflow_task_is_mutating(workflow: str) -> bool:
+    return "write" in _workflow_task_categories(workflow)
+
+
+def _workflow_task_retention_seconds() -> int:
+    return max(1, WORKFLOW_TASK_RETENTION_DAYS) * 24 * 60 * 60
+
+
+def _workflow_task_idempotency_key(workflow: str, arguments: dict[str, Any]) -> str:
+    if _workflow_task_is_mutating(workflow):
+        return ""
+    canonical = json.dumps(
+        {"workflow": workflow, "arguments": _redact_audit_value(arguments)},
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return "readonly-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+
+
+def _workflow_task_last_error_class(payload: dict[str, Any]) -> str:
+    value = payload.get("last_error_class")
+    if isinstance(value, str) and value:
+        return _redact_audit_reason(value)[:80]
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("type", "class", "error_class"):
+            value = error.get(key)
+            if isinstance(value, str) and value:
+                return _redact_audit_reason(value)[:80]
+    if isinstance(error, str) and error:
+        return _redact_audit_reason(error.split(":", 1)[0])[:80]
+    result = payload.get("result")
+    if isinstance(result, dict):
+        nested_error = result.get("error")
+        if isinstance(nested_error, dict):
+            value = nested_error.get("type") or nested_error.get("class")
+            if isinstance(value, str) and value:
+                return _redact_audit_reason(value)[:80]
+        if result.get("timeout") is True:
+            return "TimeoutError"
+    return ""
+
+
+def _workflow_task_expired_result_action(workflow: str) -> str:
+    if _workflow_task_is_mutating(workflow):
+        return "rerun_requires_approval"
+    return "rerun_allowed"
+
+
+def _workflow_task_retry_policy(payload: dict[str, Any], *, transient_failure: bool | None = None) -> tuple[str, int]:
+    workflow = str(payload.get("workflow") or "")
+    status = str(payload.get("status") or "")
+    if _workflow_task_is_mutating(workflow):
+        if status in {"failed", "expired", "cancelled"}:
+            return "human_required", 0
+        return "none", 0
+    if status == "failed":
+        if transient_failure is None:
+            result = payload.get("result")
+            transient_failure = isinstance(result, dict) and _workflow_task_result_is_transient(result)
+            if not transient_failure:
+                transient_failure = _workflow_task_error_class_is_transient(
+                    _workflow_task_last_error_class(payload)
+                )
+        return ("client_may_retry", 30) if transient_failure else ("human_required", 0)
+    if status == "expired":
+        return "client_may_retry", 0
+    return "none", 0
+
+
+def _workflow_task_has_audit_event(
+    payload: dict[str, Any],
+    event: str,
+    fields: dict[str, Any] | None = None,
+) -> bool:
+    safe_fields = _redact_audit_value(fields or {})
+    if not isinstance(safe_fields, dict):
+        safe_fields = {}
+    for item in payload.get("audit_events", []):
+        if not isinstance(item, dict) or item.get("event") != event:
+            continue
+        if all(item.get(key) == value for key, value in safe_fields.items()):
+            return True
+    return False
+
+
+def _workflow_task_add_audit_event_once(
+    payload: dict[str, Any],
+    event: str,
+    fields: dict[str, Any] | None = None,
+) -> None:
+    safe_fields = _redact_audit_value(fields or {})
+    if not isinstance(safe_fields, dict):
+        safe_fields = {}
+    if _workflow_task_has_audit_event(payload, event, safe_fields):
+        return
+    payload.setdefault("audit_events", []).append({"event": event, "at": _now_iso(), **safe_fields})
+
+
+def _workflow_task_apply_lifecycle_metadata(
+    payload: dict[str, Any],
+    *,
+    transient_failure: bool | None = None,
+    persist_decision_events: bool = False,
+) -> dict[str, Any]:
+    updated = dict(payload)
+    workflow = str(updated.get("workflow") or "")
+    arguments = updated.get("arguments") if isinstance(updated.get("arguments"), dict) else {}
+    retry_policy, retry_after_seconds = _workflow_task_retry_policy(
+        updated, transient_failure=transient_failure
+    )
+    max_retries = max(0, int(updated.get("max_retries") or 0))
+    no_auto_retry = _workflow_task_is_mutating(workflow)
+    last_error_class = _workflow_task_last_error_class(updated)
+    expired_result_action = _workflow_task_expired_result_action(workflow)
+    retry_of = str(updated.get("retry_of") or "")
+    lifecycle: dict[str, Any] = {
+        "retry_policy": retry_policy,
+        "retry_after_seconds": retry_after_seconds,
+        "max_attempts": max_retries + 1,
+        "attempt": int(updated.get("attempt") or 0),
+        "last_error_class": last_error_class,
+        "no_auto_retry": no_auto_retry,
+        "retention_seconds": _workflow_task_retention_seconds(),
+        "expired_result_action": expired_result_action,
+    }
+    idempotency_key = _workflow_task_idempotency_key(workflow, arguments)
+    if idempotency_key:
+        lifecycle["idempotency_key"] = idempotency_key
+    if retry_of:
+        lifecycle["replay"] = {
+            "retry_of": retry_of,
+            "source_status": str(WORKFLOW_TASKS_DIR / f"{retry_of}.json"),
+        }
+    updated.update(lifecycle)
+    if persist_decision_events:
+        _workflow_task_add_audit_event_once(
+            updated,
+            "retry_decision",
+            {
+                "retry_policy": retry_policy,
+                "retry_after_seconds": retry_after_seconds,
+                "no_auto_retry": no_auto_retry,
+                "last_error_class": last_error_class,
+            },
+        )
+        _workflow_task_add_audit_event_once(
+            updated,
+            "expiry_decision",
+            {
+                "expires_at": updated.get("expires_at", ""),
+                "retention_seconds": _workflow_task_retention_seconds(),
+                "expired_result_action": expired_result_action,
+            },
+        )
+    return updated
 
 
 def _workflow_task_context_progress_bridge() -> dict[str, Any] | None:
@@ -13825,6 +16595,14 @@ def _workflow_task_artifact_link(task_id: str, created_at: str = "") -> dict[str
 
 
 def _write_workflow_task_status(status: dict[str, Any]) -> dict[str, Any]:
+    persist_decisions = (
+        str(status.get("status") or "") in _WORKFLOW_TASK_FINAL_STATUSES
+        or bool(status.get("result_expired"))
+        or bool(status.get("retry_of"))
+    )
+    status = _workflow_task_apply_lifecycle_metadata(
+        status, persist_decision_events=persist_decisions
+    )
     redacted = _redact_audit_value(status)
     path = _workflow_task_path(str(redacted["task_id"]))
     tmp = path.with_suffix(".json.tmp")
@@ -13866,11 +16644,18 @@ def _expire_workflow_task_if_needed(payload: dict[str, Any]) -> dict[str, Any]:
         *payload.get("audit_events", []),
         {"event": "expired", "at": payload["finished_at"]},
     ]
+    payload = _workflow_task_apply_lifecycle_metadata(payload, persist_decision_events=True)
     _append_audit_event(
         "workflow_task",
-        ["read-only", "async"],
+        _workflow_task_categories(str(payload.get("workflow") or "")),
         False,
-        {"task_id": payload.get("task_id"), "workflow": payload.get("workflow"), "event": "expired"},
+        {
+            "task_id": payload.get("task_id"),
+            "workflow": payload.get("workflow"),
+            "event": "expired",
+            "retry_policy": payload.get("retry_policy"),
+            "expired_result_action": payload.get("expired_result_action"),
+        },
         "expired",
     )
     _otel_record_workflow_lifecycle(
@@ -13885,6 +16670,54 @@ def _expire_workflow_task_if_needed(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _workflow_task_status_payload(task_id: str) -> dict[str, Any]:
     payload = _expire_workflow_task_if_needed(_read_workflow_task_status(task_id))
+    payload = _workflow_task_apply_lifecycle_metadata(payload)
+    status = str(payload.get("status") or "")
+    result_expired = status in _WORKFLOW_TASK_FINAL_STATUSES and _workflow_task_expired(payload)
+    if result_expired and not payload.get("result_expired"):
+        persisted = dict(payload)
+        persisted["result_expired"] = True
+        persisted["result_expired_at"] = str(persisted.get("expires_at") or _now_iso())
+        persisted = _workflow_task_apply_lifecycle_metadata(persisted, persist_decision_events=True)
+        _workflow_task_add_audit_event_once(
+            persisted,
+            "result_expired",
+            {
+                "expired_result_action": persisted.get("expired_result_action"),
+                "result_available": False,
+            },
+        )
+        _write_workflow_task_status(persisted)
+        _append_audit_event(
+            "workflow_task",
+            _workflow_task_categories(str(persisted.get("workflow") or "")),
+            False,
+            {
+                "task_id": persisted.get("task_id"),
+                "workflow": persisted.get("workflow"),
+                "event": "result_expired",
+                "expired_result_action": persisted.get("expired_result_action"),
+            },
+            "result_expired",
+        )
+        payload = persisted
+    if result_expired:
+        payload = dict(payload)
+        payload["result_expired"] = True
+        payload["result_available"] = False
+        payload["result"] = {
+            "schema": "workflow_task.expired_result.v1",
+            "available": False,
+            "expired_at": str(payload.get("expires_at") or ""),
+            "expired_result_action": payload.get("expired_result_action"),
+        }
+        payload["safe_next_actions"] = [
+            "Start a new read-only retry with workflow_task(retry_of=...)"
+            if payload.get("expired_result_action") == "rerun_allowed"
+            else "Request human approval before rerunning this mutating workflow."
+        ]
+    else:
+        payload["result_expired"] = False
+        payload["result_available"] = bool(payload.get("result"))
     created_at = str(payload.get("created_at") or "")
     payload["resource_links"] = [_workflow_task_artifact_link(task_id, created_at=created_at)]
     payload["_meta"] = _artifact_meta(payload["resource_links"])
@@ -13999,6 +16832,7 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             "state": "running",
             "started_at": started_at,
             "updated_at": started_at,
+            "attempt": 1,
             "progress": 0.25,
             "progress_detail": {"phase": "running", "percent": 25},
             "audit_events": [
@@ -14065,6 +16899,7 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
                 ],
             }
         )
+        payload = _workflow_task_apply_lifecycle_metadata(payload, persist_decision_events=True)
         _append_audit_event(
             "workflow_task",
             ["read-only", "async"],
@@ -14074,6 +16909,11 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
                 "workflow": "governance_report",
                 "report_id": result.get("report_id"),
                 "event": "completed",
+                "retry_policy": payload.get("retry_policy"),
+                "retry_after_seconds": payload.get("retry_after_seconds"),
+                "expires_at": payload.get("expires_at"),
+                "retention_seconds": payload.get("retention_seconds"),
+                "expired_result_action": payload.get("expired_result_action"),
             },
             "completed",
         )
@@ -14089,21 +16929,29 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
         _workflow_task_cleanup_runtime(task_id)
     except Exception as exc:  # pragma: no cover - defensive background failure path
         finished_at = _now_iso()
+        error_class = _redact_audit_reason(type(exc).__name__)
         payload.update(
             {
                 "status": "failed",
                 "state": "failed",
                 "ok": False,
+                "attempt": max(1, int(payload.get("attempt") or 1)),
                 "finished_at": finished_at,
                 "updated_at": finished_at,
                 "progress": 1.0,
                 "progress_detail": {"phase": "failed", "percent": 100},
-                "error": _redact_audit_reason(type(exc).__name__),
+                "error": error_class,
+                "last_error_class": error_class,
                 "audit_events": [
                     *payload.get("audit_events", []),
-                    {"event": "failed", "at": finished_at, "reason": type(exc).__name__},
+                    {"event": "failed", "at": finished_at, "reason": error_class},
                 ],
             }
+        )
+        payload = _workflow_task_apply_lifecycle_metadata(
+            payload,
+            transient_failure=_workflow_task_error_class_is_transient(error_class),
+            persist_decision_events=True,
         )
         _write_workflow_task_status(payload)
         _workflow_task_emit_progress(task_id, payload, force=True)
@@ -14112,8 +16960,18 @@ def _run_governance_report_task_inner(task_id: str, args: dict[str, Any]) -> Non
             "workflow_task",
             ["read-only", "async"],
             False,
-            {"task_id": task_id, "workflow": "governance_report", "event": "failed"},
-            type(exc).__name__,
+            {
+                "task_id": task_id,
+                "workflow": "governance_report",
+                "event": "failed",
+                "retry_policy": payload.get("retry_policy"),
+                "retry_after_seconds": payload.get("retry_after_seconds"),
+                "last_error_class": payload.get("last_error_class"),
+                "expires_at": payload.get("expires_at"),
+                "retention_seconds": payload.get("retention_seconds"),
+                "expired_result_action": payload.get("expired_result_action"),
+            },
+            error_class,
         )
         _otel_record_workflow_lifecycle(
             task_id,
@@ -14144,6 +17002,7 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
             "state": "running",
             "started_at": started_at,
             "updated_at": started_at,
+            "attempt": 1,
             "progress": 0.25,
             "progress_detail": {"phase": "running", "percent": 25},
             "audit_events": [
@@ -14249,6 +17108,13 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
             ],
         }
     )
+    if not ok and not cancelled:
+        payload["last_error_class"] = _workflow_task_last_error_class({**payload, "result": result})
+    payload = _workflow_task_apply_lifecycle_metadata(
+        payload,
+        transient_failure=_workflow_task_result_is_transient(result) if not ok and not cancelled else None,
+        persist_decision_events=True,
+    )
     if cancelled:
         payload = _workflow_task_mark_cancel_requested(
             payload,
@@ -14275,7 +17141,18 @@ def _run_vscode_task_inner(task_id: str, args: dict[str, Any], max_retries: int 
         "workflow_task",
         _workflow_task_categories("vscode_task_run"),
         ok and not cancelled,
-        {"task_id": task_id, "workflow": "vscode_task_run", "event": terminal_event},
+        {
+            "task_id": task_id,
+            "workflow": "vscode_task_run",
+            "event": terminal_event,
+            "retry_policy": payload.get("retry_policy"),
+            "retry_after_seconds": payload.get("retry_after_seconds"),
+            "last_error_class": payload.get("last_error_class"),
+            "no_auto_retry": payload.get("no_auto_retry"),
+            "expires_at": payload.get("expires_at"),
+            "retention_seconds": payload.get("retention_seconds"),
+            "expired_result_action": payload.get("expired_result_action"),
+        },
         terminal_event,
     )
     _otel_record_workflow_lifecycle(
@@ -14338,6 +17215,7 @@ def _start_workflow_task(
     retention_expires_at = (
         datetime.now(timezone.utc) + timedelta(days=max(1, WORKFLOW_TASK_RETENTION_DAYS))
     ).isoformat()
+    effective_max_retries = max(0, min(3, max_retries))
     payload: dict[str, Any] = {
         "schema": "workflow_task.v1",
         "task_id": task_id,
@@ -14347,7 +17225,7 @@ def _start_workflow_task(
         "started": True,
         "ok": False,
         "attempt": 0,
-        "max_retries": max(0, min(3, max_retries)),
+        "max_retries": effective_max_retries,
         "retries": [],
         "created_at": created_at,
         "started_at": "",
@@ -14378,6 +17256,7 @@ def _start_workflow_task(
             "repo_boundary_enforced": True,
         },
     }
+    payload = _workflow_task_apply_lifecycle_metadata(payload, persist_decision_events=True)
     if retry_of:
         payload["audit_events"].append(
             {"event": "retry", "at": created_at, "retry_of": retry_of}
@@ -14389,7 +17268,7 @@ def _start_workflow_task(
         _WORKFLOW_TASK_CANCEL_EVENTS[task_id] = threading.Event()
     runner = _run_vscode_task if workflow == "vscode_task_run" else _run_governance_report_task
     if workflow == "vscode_task_run":
-        future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args, max(0, min(3, max_retries)))
+        future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args, effective_max_retries)
     else:
         future = _WORKFLOW_TASK_EXECUTOR.submit(runner, task_id, args)
     with _WORKFLOW_TASK_LOCK:
@@ -14398,7 +17277,17 @@ def _start_workflow_task(
         "workflow_task",
         _workflow_task_categories(workflow),
         True,
-        {"task_id": task_id, "workflow": workflow, "retry_of": retry_of, "event": "start"},
+        {
+            "task_id": task_id,
+            "workflow": workflow,
+            "retry_of": retry_of,
+            "event": "start",
+            "retry_policy": payload.get("retry_policy"),
+            "no_auto_retry": payload.get("no_auto_retry"),
+            "expires_at": payload.get("expires_at"),
+            "retention_seconds": payload.get("retention_seconds"),
+            "expired_result_action": payload.get("expired_result_action"),
+        },
         "start",
     )
     _otel_record_workflow_lifecycle(task_id, workflow, "start", status="pending")
@@ -19391,6 +22280,7 @@ def _current_tool_catalog_baseline() -> dict[str, Any]:
 
 def _tool_catalog_integrity_impl(include_tools: bool = False) -> dict[str, Any]:
     current = _current_tool_catalog_baseline()
+    repeated_current = _current_tool_catalog_baseline()
     try:
         baseline = load_tool_catalog_baseline(TOOL_CATALOG_BASELINE_FILE)
         baseline_error = ""
@@ -19405,6 +22295,7 @@ def _tool_catalog_integrity_impl(include_tools: bool = False) -> dict[str, Any]:
         current=current,
         baseline_error=baseline_error,
         include_tools=include_tools,
+        repeated_current=repeated_current,
     )
 
 
@@ -20222,9 +23113,49 @@ async def model_assisted_summary(
                         context_text=context_text,
                         execution_mode=resolved_mode,
                     )
+                    sampling_payload_for_anonymizer = {
+                        "model": "mcp-client-sampling",
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                    anonymized_sampling_payload, sampling_mapping = _agent_proxy_anonymize_payload(
+                        sampling_payload_for_anonymizer
+                    )
+                    anonymized_messages = anonymized_sampling_payload.get("messages", [])
+                    if anonymized_messages and isinstance(anonymized_messages[0], dict):
+                        prompt = str(anonymized_messages[0].get("content", prompt))
+                    sampling_anonymization = _agent_proxy_audit_inventory(sampling_mapping)
+                    if (
+                        sampling_anonymization.get("confidence") == "low"
+                        and sampling_anonymization.get("fail_closed_required")
+                    ):
+                        result = _sampling_base_result(
+                            status="denied",
+                            reason="anonymization_confidence_too_low",
+                            purpose=purpose_norm,
+                            execution_mode=resolved_mode,
+                            execution_mode_source=mode_source,
+                            policy=policy,
+                            capability=capability,
+                            context=context_meta,
+                            request={
+                                "would_call_client": False,
+                                "dry_run": bool(dry_run),
+                                "human_review_expected": True,
+                                "include_context": "none",
+                                "metadata": {
+                                    "anonymization_result": sampling_anonymization,
+                                    "raw_prompt_stored": False,
+                                },
+                            },
+                        )
+                        _otel_set_result_attributes(span, result)
+                        span.set_attribute("mcp.sampling.status", result.get("status", ""))
+                        return result
                     for code in question_redactions:
                         if code not in context_meta["redactions_applied"]:
                             context_meta["redactions_applied"].append(code)
+                    if sampling_anonymization.get("counts"):
+                        context_meta["redactions_applied"].append("local_reversible_anonymization")
                     prompt_digest = _sampling_digest_text(prompt)
                     metadata = {
                         "schema": "mcp_sampling_request_metadata.v1",
@@ -20235,6 +23166,8 @@ async def model_assisted_summary(
                         "advisory_only": True,
                         "repository_boundary_enforced": True,
                         "redaction_applied": True,
+                        "anonymization_result": sampling_anonymization,
+                        "placeholder_mapping_sent": False,
                         "prompt_digest": prompt_digest,
                         "context_source_count": len(context_meta.get("sources", [])),
                         "forbidden_decisions": [
@@ -20312,6 +23245,7 @@ async def model_assisted_summary(
                             )
                         else:
                             raw_output = _sampling_extract_response_text(response)
+                            raw_output = _agent_proxy_deanonymize_text(raw_output, sampling_mapping)
                             safe_output, output_redactions = _sampling_redact_text(raw_output)
                             for code in output_redactions:
                                 if code not in context_meta["redactions_applied"]:
@@ -27935,6 +30869,44 @@ def task_router(
         "sandbox_mode": sandbox_mode,
         "sandbox_action": sandbox_action,
     }
+    replay_args = {
+        "mode": mode,
+        "prompt": prompt,
+        "task": task,
+        "prefix": prefix,
+        "suffix": suffix,
+        "language": language,
+        "texts": texts or [],
+        "query": query,
+        "execution_mode": execution_mode,
+        "candidates": candidates or [],
+        "backend": backend,
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system,
+        "stop": stop or [],
+        "normalize": normalize,
+        "top_k": top_k,
+        "output_profile": output_profile,
+        "offset": offset,
+        "limit": limit,
+        "compress": compress,
+        "store_result": store_result,
+        "memory_session": memory_session,
+        "check_profile": check_profile,
+        "check_target": check_target,
+        "check_timeout_seconds": check_timeout_seconds,
+        "run_checks": run_checks,
+        "packages": packages or [],
+        "pip_upgrade": pip_upgrade,
+        "sandbox_mode": sandbox_mode,
+        "sandbox_id": sandbox_id,
+        "sandbox_action": sandbox_action,
+        "prompts": prompts or [],
+        "max_parallel": max_parallel,
+        "auto_parallel_when_possible": auto_parallel_when_possible,
+    }
     categories = _tool_categories("task_router", audit_args)
     span_attrs = _otel_tool_attributes("task_router", audit_args, categories)
     span_attrs.update(
@@ -27948,8 +30920,19 @@ def task_router(
         categories = _require_tool_security_gate("task_router", audit_args)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
         sensitive = bool(SENSITIVE_TOOL_CATEGORIES.intersection(categories))
-        try:
-            result = _TASK_ROUTER_SERVICE.route(
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
+            _otel_set_result_attributes(span, result)
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
+            )
+
+        def _route_task() -> dict[str, Any]:
+            return _TASK_ROUTER_SERVICE.route(
                 mode=mode,
                 prompt=prompt,
                 task=task,
@@ -27987,10 +30970,21 @@ def task_router(
                 max_parallel=max_parallel,
                 auto_parallel_when_possible=auto_parallel_when_possible,
             )
+
+        try:
+            result = _run_with_mutation_replay_guard(
+                "task_router",
+                replay_args,
+                categories,
+                _route_task,
+                on_duplicate=_on_duplicate,
+            )
         except Exception as exc:
             if sensitive:
                 _append_audit_event("task_router", categories, False, audit_args, type(exc).__name__)
             raise
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         if isinstance(result, dict) and isinstance(result.get("execution_mode"), str):
             span.set_attribute("mcp.execution_mode", result["execution_mode"])
@@ -30769,6 +33763,7 @@ def _governance_report_impl(
     report: dict[str, Any] = {
         "schema": "governance_report.v1",
         "report_id": report_id,
+        "correlation_id": _otel_current_correlation_id(),
         "generated_at": generated_at,
         "window": {
             "start_time": start_dt.isoformat() if start_dt else "",
@@ -30781,7 +33776,9 @@ def _governance_report_impl(
         ),
         "governance_hooks": _governance_result_store_summary(),
         "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
+        "policy_governance_decision": _latest_policy_governance_decision_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
+        "result_references": _result_reference_audit_summary(events),
         "agents_context_health": summarize_agents_context_health(
             analyze_agents_context(REPO_PATH)
         ),
@@ -31160,6 +34157,8 @@ def self_optimization_report(
     github_issue_update_mode: str = "off",
     github_repository: str = "",
     github_token_env: str = "GITHUB_TOKEN",
+    result_mode: str = "inline",
+    result_reference_ttl_hours: int | None = None,
 ) -> dict[str, Any]:
     """Build a repo-local efficiency report for MCP usage, token savings, throughput, bottlenecks, and optimization candidates."""
     arguments = {
@@ -31176,6 +34175,8 @@ def self_optimization_report(
         "github_issue_update_mode": github_issue_update_mode,
         "github_repository_configured": bool(github_repository),
         "github_token_env": github_token_env,
+        "result_mode": result_mode,
+        "result_reference_ttl_hours": result_reference_ttl_hours,
     }
     categories = _tool_categories("self_optimization_report", arguments)
     with _otel_span(
@@ -31184,20 +34185,78 @@ def self_optimization_report(
     ) as span:
         categories = _require_tool_security_gate("self_optimization_report", arguments)
         span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
-        result = _self_optimization_report_impl(
+
+        def _run_self_optimization_report() -> dict[str, Any]:
+            return _self_optimization_report_impl(
+                start_time=start_time,
+                end_time=end_time,
+                window_hours=window_hours,
+                export=export,
+                recommendation_limit=recommendation_limit,
+                include_git=include_git,
+                include_audit=include_audit,
+                include_traces=include_traces,
+                redact_terms=redact_terms,
+                github_issue_metadata=github_issue_metadata,
+                github_issue_update_mode=github_issue_update_mode,
+                github_repository=github_repository,
+                github_token_env=github_token_env,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "self_optimization_report",
+            arguments,
+            categories,
+            _run_self_optimization_report,
+        )
+        result = _apply_result_mode(
+            tool_name="self_optimization_report",
+            report=result,
+            result_mode=result_mode,
+            result_reference_ttl_hours=result_reference_ttl_hours,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
+def observation_compression_report(
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    include_tasks: bool = True,
+    max_observations: int = 500,
+    export: bool = False,
+) -> dict[str, Any]:
+    """Build an advisory TACO-style compression report for stored workflow/task/tool observations without deleting raw evidence."""
+    arguments = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "window_hours": window_hours,
+        "include_audit": include_audit,
+        "include_traces": include_traces,
+        "include_tasks": include_tasks,
+        "max_observations": max_observations,
+        "export": export,
+    }
+    categories = _tool_categories("observation_compression_report", arguments)
+    with _otel_span(
+        "mcp.tool.observation_compression_report",
+        _otel_tool_attributes("observation_compression_report", arguments, categories),
+    ) as span:
+        categories = _require_tool_security_gate("observation_compression_report", arguments)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        result = _observation_compression_report_impl(
             start_time=start_time,
             end_time=end_time,
             window_hours=window_hours,
-            export=export,
-            recommendation_limit=recommendation_limit,
-            include_git=include_git,
             include_audit=include_audit,
             include_traces=include_traces,
-            redact_terms=redact_terms,
-            github_issue_metadata=github_issue_metadata,
-            github_issue_update_mode=github_issue_update_mode,
-            github_repository=github_repository,
-            github_token_env=github_token_env,
+            include_tasks=include_tasks,
+            max_observations=max_observations,
+            export=export,
         )
         _otel_set_result_attributes(span, result)
         return result
@@ -31331,6 +34390,8 @@ def governance_report(
     head_ref: str = "HEAD",
     export: bool = True,
     compressed_observation: bool = False,
+    result_mode: str = "inline",
+    result_reference_ttl_hours: int | None = None,
 ) -> dict[str, Any]:
     """Build and optionally export a redacted audit/governance report."""
     arguments = {
@@ -31340,6 +34401,8 @@ def governance_report(
         "head_ref": head_ref,
         "export": export,
         "compressed_observation": compressed_observation,
+        "result_mode": result_mode,
+        "result_reference_ttl_hours": result_reference_ttl_hours,
     }
     with _otel_span(
         "mcp.tool.governance_report",
@@ -31353,9 +34416,45 @@ def governance_report(
             export=export,
             compressed_observation=compressed_observation,
         )
+        result = _apply_result_mode(
+            tool_name="governance_report",
+            report=result,
+            result_mode=result_mode,
+            result_reference_ttl_hours=result_reference_ttl_hours,
+        )
         _otel_set_result_attributes(span, result)
         return result
 
+
+
+@mcp.tool()
+def result_reference_resolve(
+    reference: dict[str, Any] | None = None,
+    reference_id: str = "",
+    path: str = "",
+    expected_hash: str = "",
+    include_content: bool = True,
+) -> dict[str, Any]:
+    """Resolve a repository-local mcp_result_reference.v1 artifact handle."""
+    arguments = {
+        "reference_id": reference_id or str(reference.get("reference_id", "")) if isinstance(reference, dict) else reference_id,
+        "path_configured": bool(path or (reference.get("resolver", {}) if isinstance(reference, dict) and isinstance(reference.get("resolver"), dict) else {}).get("path")),
+        "expected_hash_configured": bool(expected_hash),
+        "include_content": include_content,
+    }
+    with _otel_span(
+        "mcp.tool.result_reference_resolve",
+        _otel_tool_attributes("result_reference_resolve", arguments),
+    ) as span:
+        result = _result_reference_resolve_impl(
+            reference=reference,
+            reference_id=reference_id,
+            path=path,
+            expected_hash=expected_hash,
+            include_content=include_content,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 @mcp.tool()
@@ -31481,7 +34580,27 @@ def workflow_task(
     action = str(action or "start").strip().lower() or "start"
     workflow = str(workflow or "vscode_task_run").strip()
     trace_task_id = task_id.strip()
-    trace_categories = ["read-only"] if action == "status" else _workflow_task_categories(workflow)
+    security_args = {
+        "mode": action,
+        "action": action,
+        "workflow": workflow,
+        "task_id": trace_task_id,
+        "label": label,
+        "tasks_path": tasks_path,
+        "control_profile": control_profile,
+        "timeout_seconds": timeout_seconds,
+        "max_output_chars": max_output_chars,
+        "max_retries": max_retries,
+        "restart": restart,
+        "start_time": start_time,
+        "end_time": end_time,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "export": export,
+        "retry_of": retry_of,
+        "cancel_reason": cancel_reason,
+    }
+    trace_categories = _tool_categories("workflow_task", security_args)
     attrs = _otel_tool_attributes(
         "workflow_task",
         {"action": action, "workflow": workflow, "task_id": trace_task_id},
@@ -31498,62 +34617,84 @@ def workflow_task(
         _require_git_repo()
         if action not in {"start", "status", "cancel"}:
             raise ValueError("action must be one of: start, status, cancel")
-        if action == "cancel":
-            _require_mutations()
-            if not task_id:
-                raise ValueError("task_id is required for cancel")
-            result = _cancel_workflow_task(task_id, reason=cancel_reason)
+        categories = _require_tool_security_gate("workflow_task", security_args)
+        span.set_attribute("mcp.tool.categories", sorted(str(item) for item in categories))
+        duplicate_guarded = False
+
+        def _on_duplicate(result: Any) -> None:
+            nonlocal duplicate_guarded
+            duplicate_guarded = True
             _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if action == "status":
-            if not task_id:
-                raise ValueError("task_id is required for status")
-            result = _workflow_task_status_payload(task_id)
-            _otel_set_result_attributes(span, result)
-            span.set_attribute("mcp.workflow.task_id", task_id)
-            return result
-        if workflow == "vscode_task_run":
-            _require_mutations()
-            if not label.strip():
-                raise ValueError("label is required for vscode_task_run")
-            if timeout_seconds < 1:
-                raise ValueError("timeout_seconds must be >= 1")
-            args = {
-                "label": label.strip(),
-                "tasks_path": tasks_path,
-                "control_profile": control_profile,
-                "timeout_seconds": timeout_seconds,
-                "max_output_chars": max_output_chars,
-            }
-        elif workflow == "governance_report":
-            args = {
-                "start_time": start_time,
-                "end_time": end_time,
-                "base_ref": base_ref,
-                "head_ref": head_ref,
-                "export": export,
-            }
-        else:
-            raise ValueError(
-                "workflow must be one of: "
-                + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+            span.set_attribute("mcp.response.ok", _tool_result_success(result))
+            span.set_attribute(
+                "mcp.mutation_replay_guard.decision", "duplicate_suppressed"
             )
-        id_args = dict(args)
-        if retry_of:
-            id_args["retry_of"] = retry_of
-        resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
-        span.set_attribute("mcp.workflow.task_id", resolved_task_id)
-        if not trace_task_id:
-            span.set_attribute("mcp.workflow.task_id.generated", True)
-        result = _start_workflow_task(
-            workflow,
-            args,
-            retry_of=retry_of,
-            task_id=task_id,
-            max_retries=max_retries if workflow == "vscode_task_run" else 0,
-            restart=restart,
+
+        def _run_workflow_task() -> dict[str, Any]:
+            if action == "cancel":
+                _require_mutations()
+                if not task_id:
+                    raise ValueError("task_id is required for cancel")
+                result = _cancel_workflow_task(task_id, reason=cancel_reason)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if action == "status":
+                if not task_id:
+                    raise ValueError("task_id is required for status")
+                result = _workflow_task_status_payload(task_id)
+                span.set_attribute("mcp.workflow.task_id", task_id)
+                return result
+            if workflow == "vscode_task_run":
+                _require_mutations()
+                if not label.strip():
+                    raise ValueError("label is required for vscode_task_run")
+                if timeout_seconds < 1:
+                    raise ValueError("timeout_seconds must be >= 1")
+                args = {
+                    "label": label.strip(),
+                    "tasks_path": tasks_path,
+                    "control_profile": control_profile,
+                    "timeout_seconds": timeout_seconds,
+                    "max_output_chars": max_output_chars,
+                }
+            elif workflow == "governance_report":
+                args = {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "base_ref": base_ref,
+                    "head_ref": head_ref,
+                    "export": export,
+                }
+            else:
+                raise ValueError(
+                    "workflow must be one of: "
+                    + ", ".join(sorted(_WORKFLOW_TASK_ALLOWED_WORKFLOWS))
+                )
+            id_args = dict(args)
+            if retry_of:
+                id_args["retry_of"] = retry_of
+            resolved_task_id = _workflow_task_stable_id(workflow, id_args, task_id)
+            span.set_attribute("mcp.workflow.task_id", resolved_task_id)
+            if not trace_task_id:
+                span.set_attribute("mcp.workflow.task_id.generated", True)
+            return _start_workflow_task(
+                workflow,
+                args,
+                retry_of=retry_of,
+                task_id=task_id,
+                max_retries=max_retries if workflow == "vscode_task_run" else 0,
+                restart=restart,
+            )
+
+        result = _run_with_mutation_replay_guard(
+            "workflow_task",
+            security_args,
+            categories,
+            _run_workflow_task,
+            on_duplicate=_on_duplicate,
         )
+        if duplicate_guarded:
+            return result
         _otel_set_result_attributes(span, result)
         return result
 
@@ -33327,6 +36468,13 @@ def release_readiness(
         preflight_check["warning_reason"] = "latest workflow policy preflight did not allow the declared sequence"
     result["checks"]["workflow_policy_plan"] = preflight_check
 
+    policy_decision_check = _latest_policy_governance_decision_from_result_store()
+    policy_decision_check["ok"] = policy_decision_check.get("ok", True) if policy_decision_check.get("present") else True
+    if policy_decision_check.get("present") and policy_decision_check.get("decision") != "allow":
+        policy_decision_check["warning"] = True
+        policy_decision_check["warning_reason"] = "latest policy-governance decision did not allow the declared sequence"
+    result["checks"]["policy_governance_decision"] = policy_decision_check
+
     result["finished_at"] = _now_iso()
     if summary_mode == "quick":
         quick_result = {
@@ -33780,6 +36928,106 @@ def state_restore(
 
 @mcp.tool()
 def workspace_transaction(
+
+    mode: str = "begin",
+    transaction_id: str = "",
+    label: str = "",
+    changes: list[dict[str, Any]] | None = None,
+    create_dirs: bool = True,
+    delete_metadata: bool = False,
+    snapshot_id: str = "",
+    include_build_dir: bool = False,
+    path: str = "",
+    content: str = "",
+    overwrite: bool = True,
+    encoding: str = "utf-8",
+    pattern: str = "",
+    replacement: str = "",
+    regex: bool = False,
+    case_insensitive: bool = False,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    include_hidden: bool = False,
+    max_file_bytes: int = 1048576,
+    max_files: int = 1000,
+    max_replacements: int = 1000,
+    source_path: str = "",
+    destination: str = "",
+    recursive: bool = False,
+    diff_text: str = "",
+    cached: bool = False,
+    idempotency_key: str = "",
+    request_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Strict workspace mutation router for transactional edits, snapshots, and direct file mutations."""
+    arguments = {
+        "mode": mode,
+        "transaction_id": transaction_id,
+        "label": label,
+        "changes": changes,
+        "create_dirs": create_dirs,
+        "delete_metadata": delete_metadata,
+        "snapshot_id": snapshot_id,
+        "include_build_dir": include_build_dir,
+        "path": path,
+        "content": content,
+        "overwrite": overwrite,
+        "encoding": encoding,
+        "pattern": pattern,
+        "replacement": replacement,
+        "regex": regex,
+        "case_insensitive": case_insensitive,
+        "include_globs": include_globs,
+        "exclude_globs": exclude_globs,
+        "include_hidden": include_hidden,
+        "max_file_bytes": max_file_bytes,
+        "max_files": max_files,
+        "max_replacements": max_replacements,
+        "source_path": source_path,
+        "destination": destination,
+        "recursive": recursive,
+        "diff_text": diff_text,
+        "cached": cached,
+        "idempotency_key": idempotency_key,
+        "request_metadata": request_metadata or {},
+    }
+    return _run_with_tool_security_audit(
+        "workspace_transaction",
+        arguments,
+        lambda: _workspace_transaction_impl(
+            mode=mode,
+            transaction_id=transaction_id,
+            label=label,
+            changes=changes,
+            create_dirs=create_dirs,
+            delete_metadata=delete_metadata,
+            snapshot_id=snapshot_id,
+            include_build_dir=include_build_dir,
+            path=path,
+            content=content,
+            overwrite=overwrite,
+            encoding=encoding,
+            pattern=pattern,
+            replacement=replacement,
+            regex=regex,
+            case_insensitive=case_insensitive,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            include_hidden=include_hidden,
+            max_file_bytes=max_file_bytes,
+            max_files=max_files,
+            max_replacements=max_replacements,
+            source_path=source_path,
+            destination=destination,
+            recursive=recursive,
+            diff_text=diff_text,
+            cached=cached,
+        ),
+    )
+
+
+def _workspace_transaction_impl(
+
     mode: str = "begin",
     transaction_id: str = "",
     label: str = "",
@@ -33808,7 +37056,6 @@ def workspace_transaction(
     diff_text: str = "",
     cached: bool = False,
 ) -> dict[str, Any]:
-    """Strict workspace mutation router for transactional edits, snapshots, and direct file mutations."""
     allowed = {
         "begin",
         "apply",
@@ -33933,6 +37180,7 @@ _WORKFLOW_POLICY_READ_TOOLS = {
     "interaction_invariant_audit",
     "agents_context_health",
     "test_impact_map",
+    "policy_governance_decision",
 }
 _WORKFLOW_POLICY_RELEASE_TOOLS = {
     "release_readiness",
@@ -34386,6 +37634,465 @@ def workflow_policy_plan(
         allowed_targets=allowed_targets or [],
         data_classification=data_classification,
         planned_steps=planned_steps or [],
+    )
+
+
+
+POLICY_GOVERNANCE_BUNDLE_SCHEMA = "mcp_governance_policy_bundle.v1"
+POLICY_GOVERNANCE_DECISION_SCHEMA = "policy_governance_decision.v1"
+POLICY_GOVERNANCE_DEFAULT_BUNDLE = ".config/codebase-tooling-mcp/policies/mcp-governance.example.json"
+_POLICY_GOVERNANCE_ALLOWED_ROOTS = (
+    ".config/codebase-tooling-mcp/policies",
+    ".codebase-tooling-mcp/policies",
+)
+_POLICY_GOVERNANCE_EFFECTS = {"allow", "deny", "requires_approval"}
+_POLICY_GOVERNANCE_DECISION_ORDER = {"allow": 0, "requires_approval": 1, "deny": 2}
+
+
+def _policy_governance_decision_id(payload: dict[str, Any]) -> str:
+    stable = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return "policy-decision-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+
+
+def _policy_governance_bundle_path(policy_bundle_path: str) -> Path:
+    rel_path = (policy_bundle_path or POLICY_GOVERNANCE_DEFAULT_BUNDLE).strip()
+    if not rel_path:
+        rel_path = POLICY_GOVERNANCE_DEFAULT_BUNDLE
+    candidate = _resolve_repo_path(rel_path)
+    rel = str(candidate.relative_to(REPO_PATH)).replace("\\", "/")
+    if not any(rel == root or rel.startswith(root + "/") for root in _POLICY_GOVERNANCE_ALLOWED_ROOTS):
+        raise ValueError("policy bundle path must stay under a repository policy directory")
+    return candidate
+
+
+def _policy_governance_bundle_error(code: str, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": code,
+        "message": _workflow_policy_redact_string(message, max_chars=240),
+    }
+
+
+def _policy_governance_load_bundle(policy_bundle_path: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    try:
+        path = _policy_governance_bundle_path(policy_bundle_path)
+    except ValueError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_path_out_of_scope", str(exc))
+    rel = str(path.relative_to(REPO_PATH)).replace("\\", "/")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, _policy_governance_bundle_error("policy_bundle_missing", f"policy bundle not found: {rel}")
+    except OSError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_unreadable", f"policy bundle could not be read: {rel}: {exc}")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, _policy_governance_bundle_error("policy_bundle_malformed", f"policy bundle JSON is malformed: {rel}: {exc.msg}")
+    if not isinstance(payload, dict):
+        return None, _policy_governance_bundle_error("policy_bundle_malformed", "policy bundle root must be an object")
+    if payload.get("schema") != POLICY_GOVERNANCE_BUNDLE_SCHEMA:
+        return None, _policy_governance_bundle_error("policy_bundle_unknown_schema", "policy bundle schema is unsupported")
+    bundle_id = str(payload.get("bundle_id", "")).strip()
+    version = str(payload.get("version", "")).strip()
+    trust = payload.get("trust") if isinstance(payload.get("trust"), dict) else {}
+    if not bundle_id or not version:
+        return None, _policy_governance_bundle_error("policy_bundle_missing_metadata", "policy bundle requires bundle_id and version")
+    if trust.get("source") != "repository" or trust.get("reviewed") is not True:
+        return None, _policy_governance_bundle_error("policy_bundle_untrusted", "policy bundle trust metadata must mark a reviewed repository source")
+    rules = payload.get("rules")
+    if not isinstance(rules, list) or not rules:
+        return None, _policy_governance_bundle_error("policy_bundle_missing_rules", "policy bundle requires at least one rule")
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {index} must be an object")
+        rule_id = str(rule.get("id", "")).strip()
+        effect = str(rule.get("effect", "")).strip()
+        if not rule_id or effect not in _POLICY_GOVERNANCE_EFFECTS:
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {index} requires id and allow/deny/requires_approval effect")
+        when = rule.get("when")
+        if when is not None and not isinstance(when, dict):
+            return None, _policy_governance_bundle_error("policy_bundle_malformed_rule", f"policy rule {rule_id} when clause must be an object")
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    meta = {
+        "ok": True,
+        "path": rel,
+        "digest": digest,
+        "schema": POLICY_GOVERNANCE_BUNDLE_SCHEMA,
+        "bundle_id": bundle_id,
+        "bundle_version": version,
+        "rule_count": len(rules),
+    }
+    return payload, meta
+
+
+def _policy_governance_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def _policy_governance_bool_matches(expected: Any, actual: bool) -> bool:
+    if expected is None:
+        return True
+    return bool(expected) == actual
+
+
+def _policy_governance_any_match(patterns: list[str], value: str) -> bool:
+    if not patterns:
+        return True
+    lowered = value.lower()
+    return any(fnmatch.fnmatch(lowered, pattern.lower()) for pattern in patterns)
+
+
+def _policy_governance_targets_match(patterns: list[str], targets: list[str]) -> bool:
+    if not patterns:
+        return True
+    if not targets:
+        return any(pattern in {"*", ".", ""} for pattern in patterns)
+    for target in targets:
+        lowered = str(target).lower()
+        for pattern in patterns:
+            candidate = pattern.lower()
+            if fnmatch.fnmatch(lowered, candidate) or lowered.startswith(candidate.rstrip("/") + "/"):
+                return True
+    return False
+
+
+def _policy_governance_step_matches_rule(
+    step: dict[str, Any],
+    rule: dict[str, Any],
+    *,
+    data_classification: str,
+    execution_mode: str,
+) -> bool:
+    when = rule.get("when") if isinstance(rule.get("when"), dict) else {}
+    tool = str(step.get("tool", ""))
+    mode = str(step.get("mode", ""))
+    categories = [str(item) for item in step.get("categories", [])]
+    if not _policy_governance_any_match(_policy_governance_list(when.get("tools")), tool):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("modes")), mode):
+        return False
+    category_any = _policy_governance_list(when.get("categories_any"))
+    if category_any and not any(cat in categories for cat in category_any):
+        return False
+    category_all = _policy_governance_list(when.get("categories_all"))
+    if category_all and not all(cat in categories for cat in category_all):
+        return False
+    if not _policy_governance_bool_matches(when.get("mutates"), bool(step.get("mutates"))):
+        return False
+    if not _policy_governance_bool_matches(when.get("network"), bool(step.get("network"))):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("data_classifications")), data_classification):
+        return False
+    if not _policy_governance_any_match(_policy_governance_list(when.get("execution_modes")), execution_mode):
+        return False
+    if not _policy_governance_targets_match(_policy_governance_list(when.get("target_globs")), [str(item) for item in step.get("targets", [])]):
+        return False
+    return True
+
+
+def _policy_governance_rule_priority(rule: dict[str, Any]) -> int:
+    try:
+        return int(rule.get("priority", 1000))
+    except (TypeError, ValueError):
+        return 1000
+
+
+def _policy_governance_rule_result(rule: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+    evidence_terms = [
+        _workflow_policy_redact_string(str(item), max_chars=120)
+        for item in _policy_governance_list(rule.get("evidence"))[:8]
+    ]
+    actions = [
+        _workflow_policy_redact_string(str(item), max_chars=180)
+        for item in _policy_governance_list(rule.get("safe_next_actions"))[:6]
+    ]
+    targets = [str(item) for item in step.get("targets", []) if str(item).strip()]
+    return {
+        "rule_id": _workflow_policy_redact_string(str(rule.get("id", "")), max_chars=120),
+        "effect": str(rule.get("effect", "")),
+        "step_index": int(step.get("index", 0)),
+        "rationale": _workflow_policy_redact_string(str(rule.get("rationale", rule.get("description", ""))), max_chars=240),
+        "evidence": {
+            "terms": evidence_terms,
+            "step": {
+                "tool": _workflow_policy_redact_string(str(step.get("tool", "")), max_chars=120),
+                "mode": _workflow_policy_redact_string(str(step.get("mode", "")), max_chars=80),
+                "categories": [str(item) for item in step.get("categories", [])[:10]],
+                "mutates": bool(step.get("mutates")),
+                "network": bool(step.get("network")),
+                "target_count": len(targets),
+                "targets_redacted": bool(targets),
+            },
+        },
+        "safe_next_actions": actions,
+    }
+
+
+def _policy_governance_hard_gate_results(preflight: dict[str, Any], normalized_steps: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    results: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    preflight_decision = str(preflight.get("decision", ""))
+    if preflight_decision in {"deny", "needs_approval", "needs_clarification"}:
+        effect = "deny" if preflight_decision in {"deny", "needs_clarification"} else "requires_approval"
+        results.append(
+            {
+                "rule_id": "hard_gate.workflow_policy_plan",
+                "effect": effect,
+                "step_index": None,
+                "rationale": "Existing workflow_policy_plan preflight remains authoritative for scope, shadow-tool, release, mutation, and dataflow checks.",
+                "evidence": {
+                    "decision": preflight_decision,
+                    "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
+                    "finding_codes": [str(item.get("code", "")) for item in preflight.get("findings", [])[:20] if isinstance(item, dict)],
+                },
+                "safe_next_actions": _workflow_policy_safe_next_actions(preflight_decision, preflight.get("findings", [])),
+            }
+        )
+    if any(bool(step.get("mutates")) for step in normalized_steps) and not ALLOW_MUTATIONS:
+        finding = _workflow_policy_finding(
+            code="allow_mutations_disabled",
+            severity="block",
+            policy="hard_gate.allow_mutations",
+            message="mutation-capable planned steps cannot be allowed while ALLOW_MUTATIONS is false",
+            required_precondition="explicit_mutation_mode",
+        )
+        findings.append(finding)
+        results.append(
+            {
+                "rule_id": "hard_gate.allow_mutations",
+                "effect": "deny",
+                "step_index": None,
+                "rationale": "The policy adapter is read-only and cannot grant mutation permission or bypass ALLOW_MUTATIONS.",
+                "evidence": {"allow_mutations": False, "mutating_step_count": sum(1 for step in normalized_steps if step.get("mutates"))},
+                "safe_next_actions": ["Keep the workflow read-only or obtain explicit operator approval before enabling mutation mode."],
+            }
+        )
+    return results, findings
+
+
+def _policy_governance_counts(rule_results: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"allow": 0, "requires_approval": 0, "deny": 0}
+    for result in rule_results:
+        effect = str(result.get("effect", ""))
+        if effect in counts:
+            counts[effect] += 1
+    return counts
+
+
+def _policy_governance_decision_from_results(rule_results: list[dict[str, Any]]) -> str:
+    if not rule_results:
+        return "deny"
+    decision = "allow"
+    for result in rule_results:
+        effect = str(result.get("effect", ""))
+        if _POLICY_GOVERNANCE_DECISION_ORDER.get(effect, 2) > _POLICY_GOVERNANCE_DECISION_ORDER[decision]:
+            decision = effect
+    return decision
+
+
+def _policy_governance_payload(
+    *,
+    intent: str,
+    planned_steps: list[dict[str, Any]],
+    execution_mode: str,
+    allowed_targets: list[str],
+    data_classification: str,
+    policy_bundle_path: str,
+) -> dict[str, Any]:
+    normalized_execution_mode = _workflow_policy_redact_string(execution_mode or "auto", max_chars=80)
+    normalized_data_classification = _workflow_policy_redact_string(data_classification or "unspecified", max_chars=80).lower()
+    preflight = _workflow_policy_plan_payload(
+        intent=intent,
+        execution_mode=execution_mode,
+        allowed_targets=allowed_targets,
+        data_classification=data_classification,
+        planned_steps=planned_steps,
+    )
+    normalized_steps = preflight.get("steps", []) if isinstance(preflight.get("steps"), list) else []
+    bundle, bundle_meta = _policy_governance_load_bundle(policy_bundle_path)
+    if bundle is None:
+        finding = _workflow_policy_finding(
+            code=str(bundle_meta.get("code", "policy_bundle_invalid")),
+            severity="block",
+            policy="policy_bundle",
+            message=str(bundle_meta.get("message", "policy bundle invalid")),
+        )
+        result = {
+            "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+            "read_only": True,
+            "executed_plan": False,
+            "decision": "deny",
+            "ok": False,
+            "decision_id": _policy_governance_decision_id({"bundle_error": bundle_meta, "preflight_plan_id": preflight.get("plan_id", "")}),
+            "policy_bundle": bundle_meta,
+            "matched_rule_ids": [],
+            "decision_counts": {"allow": 0, "requires_approval": 0, "deny": 1},
+            "rule_results": [],
+            "findings": [finding],
+            "safe_next_actions": ["Fix the repository-local reviewed policy bundle and rerun the policy decision before executing planned tools."],
+            "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
+            "workflow_policy_plan": {"decision": preflight.get("decision"), "plan_id": preflight.get("plan_id"), "ok": preflight.get("ok")},
+            "security": {
+                "redacted": True,
+                "read_only": True,
+                "contains_raw_policy_inputs": False,
+                "contains_file_contents": False,
+                "contains_host_absolute_paths": False,
+                "external_services_called": False,
+                "dynamic_code_loaded": False,
+                "can_grant_mutation_permission": False,
+            },
+        }
+        return result
+
+    rule_results: list[dict[str, Any]] = []
+    rules = sorted(bundle.get("rules", []), key=_policy_governance_rule_priority)
+    for step in normalized_steps:
+        for rule in rules:
+            if _policy_governance_step_matches_rule(
+                step,
+                rule,
+                data_classification=normalized_data_classification,
+                execution_mode=normalized_execution_mode,
+            ):
+                rule_results.append(_policy_governance_rule_result(rule, step))
+    hard_gate_results, hard_gate_findings = _policy_governance_hard_gate_results(preflight, normalized_steps)
+    rule_results.extend(hard_gate_results)
+    findings = list(preflight.get("findings", []))[:25] + hard_gate_findings
+    if not rule_results:
+        findings.append(
+            _workflow_policy_finding(
+                code="policy_no_matching_rule",
+                severity="block",
+                policy="policy_bundle",
+                message="no policy bundle rule matched the declared MCP action sequence",
+            )
+        )
+    decision = _policy_governance_decision_from_results(rule_results)
+    counts = _policy_governance_counts(rule_results)
+    if not rule_results:
+        counts["deny"] = 1
+    safe_next_actions: list[str] = []
+    for result in rule_results:
+        for action in result.get("safe_next_actions", []):
+            if isinstance(action, str) and action not in safe_next_actions:
+                safe_next_actions.append(action)
+    for action in _workflow_policy_safe_next_actions("allow" if decision == "allow" else "deny", findings):
+        if action not in safe_next_actions:
+            safe_next_actions.append(action)
+    basis = {
+        "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+        "bundle_digest": bundle_meta.get("digest", ""),
+        "plan_id": preflight.get("plan_id", ""),
+        "matched_rule_ids": [str(item.get("rule_id", "")) for item in rule_results],
+        "decision": decision,
+    }
+    return {
+        "schema": POLICY_GOVERNANCE_DECISION_SCHEMA,
+        "read_only": True,
+        "executed_plan": False,
+        "decision": decision,
+        "ok": decision == "allow",
+        "decision_id": _policy_governance_decision_id(basis),
+        "intent": _workflow_policy_redact_string(intent, max_chars=240),
+        "execution_mode": normalized_execution_mode,
+        "data_classification": normalized_data_classification,
+        "step_count": len(normalized_steps),
+        "policy_bundle": bundle_meta,
+        "bundle_id": bundle_meta.get("bundle_id", ""),
+        "bundle_version": bundle_meta.get("bundle_version", ""),
+        "matched_rule_ids": [str(item.get("rule_id", "")) for item in rule_results],
+        "decision_counts": counts,
+        "rule_results": rule_results[:50],
+        "findings": findings,
+        "safe_next_actions": safe_next_actions[:10],
+        "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
+        "workflow_policy_plan": {
+            "schema": preflight.get("schema", ""),
+            "decision": preflight.get("decision", ""),
+            "ok": bool(preflight.get("ok", False)),
+            "plan_id": preflight.get("plan_id", ""),
+            "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
+            "required_preconditions": _redact_audit_value(preflight.get("required_preconditions", [])),
+        },
+        "security": {
+            "redacted": True,
+            "read_only": True,
+            "contains_raw_policy_inputs": False,
+            "contains_file_contents": False,
+            "contains_host_absolute_paths": False,
+            "external_services_called": False,
+            "dynamic_code_loaded": False,
+            "agent_authored_runtime_policy_mutation": False,
+            "can_grant_mutation_permission": False,
+        },
+    }
+
+
+def _latest_policy_governance_decision_from_result_store() -> dict[str, Any]:
+    payload = _result_store_load()
+    rows = payload.get("results", {})
+    if not isinstance(rows, dict):
+        return {"present": False, "required": False}
+    latest: dict[str, Any] | None = None
+    counts = {"allow": 0, "requires_approval": 0, "deny": 0}
+    total = 0
+    for rid, row in rows.items():
+        if not isinstance(row, dict) or row.get("tool") != "policy_governance_decision":
+            continue
+        value = row.get("value")
+        if not isinstance(value, dict) or value.get("schema") != POLICY_GOVERNANCE_DECISION_SCHEMA:
+            continue
+        total += 1
+        decision = str(value.get("decision", ""))
+        if decision in counts:
+            counts[decision] += 1
+        created_at = str(row.get("created_at", ""))
+        entry = {
+            "present": True,
+            "required": False,
+            "result_id": str(rid),
+            "created_at": created_at,
+            "schema": str(value.get("schema", "")),
+            "decision": decision,
+            "ok": bool(value.get("ok", False)),
+            "decision_id": str(value.get("decision_id", "")),
+            "bundle_id": str(value.get("bundle_id", "")),
+            "bundle_version": str(value.get("bundle_version", "")),
+            "matched_rule_ids": [str(item) for item in value.get("matched_rule_ids", [])[:20]],
+            "decision_counts": dict(counts),
+            "total_count": total,
+        }
+        if latest is None or created_at >= str(latest.get("created_at", "")):
+            latest = entry
+    if latest:
+        latest["decision_counts"] = counts
+        latest["total_count"] = total
+        return latest
+    return {"present": False, "required": False}
+
+
+@mcp.tool()
+def policy_governance_decision(
+    intent: str,
+    planned_steps: list[dict[str, Any]],
+    execution_mode: str = "auto",
+    allowed_targets: list[str] | None = None,
+    data_classification: str = "unspecified",
+    policy_bundle_path: str = POLICY_GOVERNANCE_DEFAULT_BUNDLE,
+) -> dict[str, Any]:
+    """Evaluate declared MCP tool steps against a reviewed repo-local policy bundle without executing them."""
+    return _policy_governance_payload(
+        intent=intent,
+        planned_steps=planned_steps or [],
+        execution_mode=execution_mode,
+        allowed_targets=allowed_targets or [],
+        data_classification=data_classification,
+        policy_bundle_path=policy_bundle_path,
     )
 
 
@@ -35755,55 +39462,73 @@ def test_impact_map(
     output_profile: str | None = None,
 ) -> dict[str, Any]:
     """Read or refresh the static Python test impact map and query impacted tests."""
-    _require_git_repo()
-    if max_tests < 1:
-        raise ValueError("max_tests must be >= 1")
-    if max_age_hours < 0:
-        raise ValueError("max_age_hours must be >= 0")
-    profile = _default_output_profile(output_profile)
-    artifact_path = str(TEST_IMPACT_MAP_FILE)
-    if refresh:
-        _require_mutations()
-        payload = _build_test_impact_map_payload()
-        path = _resolve_repo_path(artifact_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        status = "fresh"
-    else:
-        payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+    arguments = {
+        "mode": "refresh" if refresh else "query",
+        "changed_files": changed_files or [],
+        "refresh": refresh,
+        "max_age_hours": max_age_hours,
+        "max_tests": max_tests,
+        "output_profile": output_profile or "",
+    }
+    categories = _require_tool_security_gate("test_impact_map", arguments)
 
-    changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
-    query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
-        "tests": [],
-        "test_details": [],
-        "impacted_sources": [],
-        "unmapped_changed_files": changed if changed and status != "fresh" else [],
-        "coverage_gaps": [],
-        "confidence": 0.0,
-    }
-    result = {
-        "schema": "test_impact_map.query.v1",
-        "artifact_path": artifact_path,
-        "artifact_status": status,
-        "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
-        "changed_files": changed,
-        "selected_tests": query["tests"],
-        "test_details": query["test_details"],
-        "impacted_sources": query["impacted_sources"],
-        "unmapped_changed_files": query["unmapped_changed_files"],
-        "coverage_gaps": query["coverage_gaps"],
-        "confidence": query["confidence"],
-    }
-    if profile == "compact":
-        return {
-            "schema": "test_impact_map.query.compact.v1",
+    def _run_test_impact_map() -> dict[str, Any]:
+        _require_git_repo()
+        if max_tests < 1:
+            raise ValueError("max_tests must be >= 1")
+        if max_age_hours < 0:
+            raise ValueError("max_age_hours must be >= 0")
+        profile = _default_output_profile(output_profile)
+        artifact_path = str(TEST_IMPACT_MAP_FILE)
+        if refresh:
+            _require_mutations()
+            payload = _build_test_impact_map_payload()
+            path = _resolve_repo_path(artifact_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            status = "fresh"
+        else:
+            payload, status = _load_test_impact_map(max_age_hours=max_age_hours)
+
+        changed = [str(path).strip() for path in (changed_files or []) if str(path).strip()]
+        query = _query_test_impact_map(payload, changed, max_tests=max_tests) if payload and changed else {
+            "tests": [],
+            "test_details": [],
+            "impacted_sources": [],
+            "unmapped_changed_files": changed if changed and status != "fresh" else [],
+            "coverage_gaps": [],
+            "confidence": 0.0,
+        }
+        result = {
+            "schema": "test_impact_map.query.v1",
+            "artifact_path": artifact_path,
             "artifact_status": status,
-            "test_count": len(query["tests"]),
+            "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
+            "changed_files": changed,
             "selected_tests": query["tests"],
+            "test_details": query["test_details"],
+            "impacted_sources": query["impacted_sources"],
             "unmapped_changed_files": query["unmapped_changed_files"],
+            "coverage_gaps": query["coverage_gaps"],
             "confidence": query["confidence"],
         }
-    return result
+        if profile == "compact":
+            return {
+                "schema": "test_impact_map.query.compact.v1",
+                "artifact_status": status,
+                "test_count": len(query["tests"]),
+                "selected_tests": query["tests"],
+                "unmapped_changed_files": query["unmapped_changed_files"],
+                "confidence": query["confidence"],
+            }
+        return result
+
+    return _run_with_mutation_replay_guard(
+        "test_impact_map",
+        arguments,
+        categories,
+        _run_test_impact_map,
+    )
 
 
 @mcp.tool()
@@ -38137,7 +41862,7 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         "enabled": bool(config.get("enabled")),
         "endpoint": "/v1/chat/completions",
         "policy_version": MCP_AGENT_PROXY_POLICY_VERSION,
-        "anonymization_profile": MCP_AGENT_PROXY_ANONYMIZATION_PROFILE,
+        "anonymization_profile": _agent_proxy_anonymization_profile_id(),
         "agent_facade_profile": MCP_AGENT_PROXY_AGENT_FACADE_PROFILE,
         "disabled_by_default": True,
         "explicit_proxy_only": True,
@@ -38168,9 +41893,16 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
         },
         "privacy_controls": {
             "strict_disclosure_audit": MCP_AGENT_PROXY_STRICT_DISCLOSURE_AUDIT,
+            "anonymization_profile": _agent_proxy_anonymization_profile_id(),
+            "anonymization_mode": _agent_proxy_anonymization_mode(),
+            "anonymization_modes": ["strict", "balanced", "off"],
+            "default_online_mode": "balanced",
             "anonymize_configured_terms": bool(_agent_proxy_configured_terms()),
             "irreversible_secret_redaction": True,
             "local_only_placeholder_mapping": True,
+            "placeholder_mapping_scope": "request_local_process_memory",
+            "max_placeholders": MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS,
+            "strict_nda_fail_closed": MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED,
             "raw_prompt_storage_default": False,
             "raw_response_storage_default": False,
         },
@@ -38178,6 +41910,14 @@ def _agent_proxy_status_payload() -> dict[str, Any]:
             "capture_enabled": MCP_AGENT_PROXY_MEMORY_CAPTURE_ENABLED,
             "requires_mutations": MCP_AGENT_PROXY_MEMORY_CAPTURE_REQUIRE_MUTATIONS,
             "raw_conversation_storage": False,
+        },
+        "tool_response_scanner": {
+            "schema": MCP_TOOL_RESPONSE_SCANNER_SCHEMA,
+            "mode": _tool_response_scanner_mode(),
+            "enabled": _tool_response_scanner_mode() != "OFF",
+            "max_chars": MCP_TOOL_RESPONSE_SCANNER_MAX_CHARS,
+            "default_behavior": "preserve existing behavior when mode is OFF",
+            "supported_outcomes": ["LOG", "SANITIZE", "BLOCK"],
         },
     }
 
@@ -38249,6 +41989,40 @@ async def openai_chat_completions(request):
         )
         return JSONResponse(error, status_code=status)
 
+    scanner_ok, scanned_payload, scanner_report = _tool_response_scanner_apply(payload)
+    if scanner_report.get("enabled"):
+        policy["tool_response_scanner"] = scanner_report
+    if not scanner_ok:
+        _append_audit_event(
+            "tool_response_scanner",
+            ["network", "audit"],
+            False,
+            {
+                "trace_id": trace_id,
+                "mode": scanner_report.get("mode"),
+                "flagged_message_count": scanner_report.get("flagged_message_count"),
+                "categories": sorted(
+                    {
+                        str(category)
+                        for finding in scanner_report.get("findings", [])
+                        if isinstance(finding, dict)
+                        for category in (finding.get("category_counts", {}) or {}).keys()
+                    }
+                ),
+            },
+            "tool response scanner blocked risky tool content before model context forwarding",
+        )
+        error, status = _agent_proxy_error_payload(
+            "tool response scanner blocked risky tool content before model context forwarding",
+            error_type="invalid_request_error",
+            code="tool_response_scanner_blocked",
+            trace_id=trace_id,
+            status_code=403,
+        )
+        error["tool_response_scanner"] = scanner_report
+        return JSONResponse(error, status_code=status)
+    payload = scanned_payload
+
     route = _agent_proxy_route(payload)
     stream = bool(payload.get("stream", False))
     if route.get("backend") == "blocked":
@@ -38290,6 +42064,33 @@ async def openai_chat_completions(request):
         return JSONResponse(response_payload)
 
     anonymized_payload, mapping = _agent_proxy_anonymize_payload(payload)
+    anonymization_inventory = _agent_proxy_audit_inventory(mapping)
+    confidence = str(anonymization_inventory.get("confidence", "high"))
+    fail_closed = bool(anonymization_inventory.get("fail_closed_required"))
+    if confidence == "low" and fail_closed:
+        _append_audit_event(
+            "agent_proxy_anonymization",
+            ["network", "audit"],
+            False,
+            {
+                "trace_id": trace_id,
+                "model": str(payload.get("model", "")),
+                "profile": anonymization_inventory.get("profile"),
+                "categories": anonymization_inventory.get("placeholder_categories", []),
+                "confidence": confidence,
+                "reasons": anonymization_inventory.get("confidence_reasons", []),
+            },
+            "anonymization confidence too low for online provider call",
+        )
+        error, status = _agent_proxy_error_payload(
+            "agent proxy anonymization confidence too low; use local/no-network mode or a stricter configured profile",
+            error_type="invalid_request_error",
+            code="agent_proxy_anonymization_low_confidence",
+            trace_id=trace_id,
+            status_code=403,
+        )
+        return JSONResponse(error, status_code=status)
+
     provider_url = _agent_proxy_provider_url()
     try:
         _agent_proxy_record_online_request_audit(
@@ -38958,12 +42759,17 @@ async def continue_model_fallback_configure(request):
     files_for_gate = [str(profile_rel), str(routing_rel), str(agent_proxy_rel)]
     if config.get("api_key"):
         files_for_gate.append(str(secret_rel))
-    _require_tool_security_gate(
+    security_args = {
+        "mode": "write",
+        "files": files_for_gate,
+        "provider": config["provider"],
+        "model": config["model"],
+        "needs_secret": config.get("needs_secret", ""),
+        "has_api_key": bool(config.get("api_key")),
+    }
+    categories = _require_tool_security_gate(
         "continue_model_fallback_configure",
-        {
-            "mode": "write",
-            "files": files_for_gate,
-        },
+        security_args,
         enforce_mutation_permission=False,
     )
     changes = [
@@ -39040,27 +42846,34 @@ async def continue_model_fallback_configure(request):
             status_code=403,
         )
 
-    profile_path = (REPO_PATH / profile_rel).resolve()
-    routing_path = (REPO_PATH / routing_rel).resolve()
-    secret_path = (REPO_PATH / secret_rel).resolve()
-    profile_path.relative_to(REPO_PATH)
-    routing_path.relative_to(REPO_PATH)
-    secret_path.relative_to(REPO_PATH)
-    agent_proxy_path.relative_to(REPO_PATH)
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    routing_path.parent.mkdir(parents=True, exist_ok=True)
-    agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(profile_text, encoding="utf-8")
-    routing_path.write_text(routing_text, encoding="utf-8")
-    agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
-    if config.get("api_key"):
-        _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
-    written_secret_state = _agent_proxy_secret_state(
-        _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+    guard = _mutation_replay_guard_begin(
+        "continue_model_fallback_configure",
+        security_args,
+        categories,
     )
-    written_summary = {**summary, "secret_state": written_secret_state}
-    return JSONResponse(
-        {
+    if guard.get("duplicate"):
+        return JSONResponse(guard.get("response", {}))
+    try:
+        profile_path = (REPO_PATH / profile_rel).resolve()
+        routing_path = (REPO_PATH / routing_rel).resolve()
+        secret_path = (REPO_PATH / secret_rel).resolve()
+        profile_path.relative_to(REPO_PATH)
+        routing_path.relative_to(REPO_PATH)
+        secret_path.relative_to(REPO_PATH)
+        agent_proxy_path.relative_to(REPO_PATH)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        routing_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_proxy_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(profile_text, encoding="utf-8")
+        routing_path.write_text(routing_text, encoding="utf-8")
+        agent_proxy_path.write_text(agent_proxy_text, encoding="utf-8")
+        if config.get("api_key"):
+            _continue_upsert_secret(config["api_key_secret_name"], config["api_key"])
+        written_secret_state = _agent_proxy_secret_state(
+            _agent_proxy_runtime_config_payload(config)["agent_proxy"]
+        )
+        written_summary = {**summary, "secret_state": written_secret_state}
+        response_payload = {
             "schema": "continue_model_fallback.configure.v1",
             "status": "written",
             "summary": written_summary,
@@ -39074,7 +42887,11 @@ async def continue_model_fallback_configure(request):
             "apiBase": config["api_base"],
             "secret_state": written_secret_state,
         }
-    )
+    except Exception as exc:
+        _mutation_replay_guard_finish(guard, None, error=exc)
+        raise
+    _mutation_replay_guard_finish(guard, response_payload)
+    return JSONResponse(response_payload)
 
 
 async def mcp_server_manifest(_request):

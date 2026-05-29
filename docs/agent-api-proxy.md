@@ -70,17 +70,32 @@ export MCP_AGENT_PROXY_MAX_COST_USD=0.25
 
 No provider URL is configured by default. Online calls are blocked unless online mode is explicitly enabled, a provider endpoint is configured, the requested model matches the provider-style YAML `model` (or the legacy YAML/env allowlist), and any required provider secret resolves from a Continue secret or `MCP_AGENT_PROXY_PROVIDER_API_KEY`.
 
-## Privacy behavior
+## Local reversible anonymisation profile
 
-Before an online provider call, the proxy applies local-only prompt transformation:
+Before online target-LLM forwarding, the proxy applies `local-reversible-anonymization.v2`. This is a deterministic local transformer, not a remote service dependency. It runs before disclosure audit persistence and before the provider request is made. The default online mode is `balanced`.
 
-- configured sensitive terms from `MCP_AGENT_PROXY_ANONYMIZE_TERMS` become request-local placeholders;
-- email addresses and absolute host paths become request-local placeholders;
-- secrets, passwords, API keys, bearer/JWT-like tokens, and common provider token shapes are irreversibly redacted;
-- placeholder mappings remain in process memory only and are never written to audit logs;
-- safe placeholders are de-anonymized on return, while redacted secret placeholders remain `[REDACTED_SECRET]`.
+Operator controls:
 
-The proxy stores no raw prompts or raw responses in disclosure audit events by default.
+```bash
+export MCP_AGENT_PROXY_ANONYMIZATION_MODE=balanced   # balanced | strict | off
+export MCP_AGENT_PROXY_ANONYMIZE_TERMS="Customer Alpha,NDA Codename"
+export MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS=512
+export MCP_AGENT_PROXY_STRICT_NDA_FAIL_CLOSED=true
+```
+
+Modes:
+
+- `balanced` (default): anonymises configured NDA terms and high-confidence identifiers while preserving code, prose, role hints, and task shape for useful model quality.
+- `strict`: additionally anonymises broader likely person-name matches and fails closed for NDA-sensitive inputs when no safe transformation happened or placeholder bounds are exceeded. Use this for high-NDA workflows.
+- `off`: disables reversible anonymisation. Secret redaction still applies, but online use with NDA-sensitive inputs should be avoided unless an operator has made an explicit risk decision.
+
+The transformer replaces configured NDA terms plus likely organisations, people, project/customer names, emails, host paths, URLs/domains, repository remotes/slugs, branch names, and ticket IDs with stable typed placeholders within the request, such as `__MCP_ANON_ORG_0001__`, `__MCP_ANON_PERSON_0001__`, `__MCP_ANON_REPO_0001__`, `__MCP_ANON_PATH_0001__`, and `__MCP_ANON_TICKET_0001__`. Typed placeholders keep enough signal for the target model to reason about roles and relationships without receiving raw customer/company identifiers. Secrets, passwords, API keys, bearer/JWT-like tokens, and common provider token shapes become irreversible `__MCP_REDACTED_SECRET_*__` placeholders and are never deanonymised.
+
+Mappings are request-local, process-memory only, bounded by `MCP_AGENT_PROXY_ANONYMIZATION_MAX_PLACEHOLDERS`, and never sent to target LLMs or written to audit/disclosure files. Normal and streaming responses are deanonymised locally before reaching the caller; streaming deanonymisation keeps a small local placeholder-boundary buffer so placeholders split across chunks are restored. Redacted secret placeholders remain `[REDACTED_SECRET]`.
+
+This differs from disclosure audit redaction: audit redaction protects persisted evidence/log records, while the anonymisation profile protects data before it leaves the host for a target LLM. The audit stores compact privacy evidence only (profile/mode/version, counts/categories, confidence status, digests, and disclosure receipts) and stores no raw prompts, raw responses, configured NDA terms, secrets, or reversible mappings.
+
+Known limits: deterministic local detection is conservative. Generic nouns, ambiguous short names, values embedded in unusual encodings, or domain-specific identifiers may require `MCP_AGENT_PROXY_ANONYMIZE_TERMS` or strict/local-only operation. For maximum NDA protection, configure sensitive customer/project terms and use `strict` or `MCP_AGENT_PROXY_NO_NETWORK=true` when confidence is low.
 
 ## Disclosure audit and fail-closed mode
 
@@ -99,6 +114,21 @@ Summaries are available through the protected endpoint. The summary returns even
 ```text
 GET /v1/agent-proxy/disclosures?trace_id=<trace>&since=<iso8601>&until=<iso8601>
 ```
+
+
+## Tool-response scanner
+
+Tool-response scanning is disabled by default. When enabled, it scans `role: "tool"` chat messages before they are forwarded into model context.
+
+```bash
+export MCP_TOOL_RESPONSE_SCANNER_MODE=log       # observe only
+export MCP_TOOL_RESPONSE_SCANNER_MODE=sanitize  # redact/remove risky content
+export MCP_TOOL_RESPONSE_SCANNER_MODE=block     # fail closed before provider call
+```
+
+`log` includes bounded redacted scanner metadata in `agent_proxy.policy` without changing forwarded content. `sanitize` redacts secret-looking values, local absolute paths, and email-address PII, and replaces prompt-injection-like instruction lines. `block` returns `403` with scanner metadata and does not call the provider.
+
+The scanner is deterministic and offline-safe. Reports include categories, severity, counts, and privacy flags only; raw tool responses, secrets, host paths, and raw excerpts are not logged. See [MCP tool-response scanner](./tool-response-scanner.md).
 
 ## Memory capture gate
 

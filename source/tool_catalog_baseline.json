@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 40,
+  "tool_count": 43,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -3692,7 +3692,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:90e896594dbd13fee276a374c986e9ac0828cdb6a964f1c5b94a15666c5408ac",
+      "digest": "sha256:1f1668751779df5563d51b26c646259d65504bad4447ba8dd31192585ff89bf8",
       "metadata": {
         "documentation": [
           {
@@ -3734,6 +3734,23 @@
                 "default": "HEAD",
                 "title": "Head Ref",
                 "type": "string"
+              },
+              "result_mode": {
+                "default": "inline",
+                "title": "Result Mode",
+                "type": "string"
+              },
+              "result_reference_ttl_hours": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Result Reference Ttl Hours"
               },
               "start_time": {
                 "default": "",
@@ -3849,6 +3866,95 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
+              "result_references": {
+                "type": "object"
+              },
               "schema": {
                 "const": "governance_report.v1",
                 "type": "string"
@@ -3875,11 +3981,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "audit",
-              "governance_hooks",
-              "agents_context_health",
-              "exports"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -3923,6 +4025,12 @@
             "type": "object"
           },
           "experimentalFields": [
+            "audit",
+            "governance_hooks",
+            "agents_context_health",
+            "exports",
+            "resource_links",
+            "summary",
             "window",
             "git",
             "snapshots",
@@ -3934,6 +4042,9 @@
             "secret_exposure",
             "untrusted_content_signals",
             "memory_governance",
+            "result_references",
+            "result_mode",
+            "result_reference",
             "lineage",
             "provenance",
             "compressed_observation",
@@ -4041,6 +4152,95 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
+              "result_references": {
+                "type": "object"
+              },
               "schema": {
                 "const": "governance_report.v1",
                 "type": "string"
@@ -4067,11 +4267,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "audit",
-              "governance_hooks",
-              "agents_context_health",
-              "exports"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -4079,12 +4275,7 @@
           "stableFields": [
             "schema",
             "report_id",
-            "generated_at",
-            "audit",
-            "governance_hooks",
-            "agents_context_health",
-            "exports",
-            "resource_links"
+            "generated_at"
           ],
           "tool": "governance_report"
         },
@@ -6858,6 +7049,828 @@
       "name": "mutation_step_guard"
     },
     {
+      "digest": "sha256:2f3e4de8aa73481ca38abac515ff5bbe0e2dc29e6c692e7269f3b43672989643",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Observation compression report",
+            "path": "docs/observation-compression-report.md"
+          },
+          {
+            "label": "Adaptive observation compression",
+            "path": "docs/observation-compression.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Build an advisory TACO-style compression report for stored workflow/task/tool observations without deleting raw evidence.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "end_time": {
+                "default": "",
+                "title": "End Time",
+                "type": "string"
+              },
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              },
+              "include_audit": {
+                "default": true,
+                "title": "Include Audit",
+                "type": "boolean"
+              },
+              "include_tasks": {
+                "default": true,
+                "title": "Include Tasks",
+                "type": "boolean"
+              },
+              "include_traces": {
+                "default": true,
+                "title": "Include Traces",
+                "type": "boolean"
+              },
+              "max_observations": {
+                "default": 500,
+                "title": "Max Observations",
+                "type": "integer"
+              },
+              "start_time": {
+                "default": "",
+                "title": "Start Time",
+                "type": "string"
+              },
+              "window_hours": {
+                "default": 168,
+                "title": "Window Hours",
+                "type": "integer"
+              }
+            },
+            "title": "observation_compression_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "observation_compression_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "classification_buckets": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "compression_opportunities": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "fingerprints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "low_confidence_caveats": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "markdown": {
+                "type": "string"
+              },
+              "observations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "observation_compression_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "sources": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "window": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "window",
+              "summary",
+              "classification_buckets",
+              "observations",
+              "fingerprints",
+              "compression_opportunities",
+              "low_confidence_caveats",
+              "security"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "sources",
+            "resource_links",
+            "exports",
+            "markdown",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "classification_buckets": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "compression_opportunities": {
+                "type": "object"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "fingerprints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "low_confidence_caveats": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "markdown": {
+                "type": "string"
+              },
+              "observations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "observation_compression_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "sources": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "window": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "window",
+              "summary",
+              "classification_buckets",
+              "observations",
+              "fingerprints",
+              "compression_opportunities",
+              "low_confidence_caveats",
+              "security"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "read_only",
+            "advisory_only",
+            "window",
+            "summary",
+            "classification_buckets",
+            "observations",
+            "fingerprints",
+            "compression_opportunities",
+            "low_confidence_caveats",
+            "security"
+          ],
+          "tool": "observation_compression_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "observation_compression_report"
+        }
+      },
+      "name": "observation_compression_report"
+    },
+    {
+      "digest": "sha256:32d16aa355dff9571ee2d5a5770dff38f67020b80d5ea365f654b72c47d027c2",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Evaluate declared MCP tool steps against a reviewed repo-local policy bundle without executing them.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "allowed_targets": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Allowed Targets"
+              },
+              "data_classification": {
+                "default": "unspecified",
+                "title": "Data Classification",
+                "type": "string"
+              },
+              "execution_mode": {
+                "default": "auto",
+                "title": "Execution Mode",
+                "type": "string"
+              },
+              "intent": {
+                "title": "Intent",
+                "type": "string"
+              },
+              "planned_steps": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Planned Steps",
+                "type": "array"
+              },
+              "policy_bundle_path": {
+                "default": ".config/codebase-tooling-mcp/policies/mcp-governance.example.json",
+                "title": "Policy Bundle Path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "intent",
+              "planned_steps"
+            ],
+            "title": "policy_governance_decisionArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "policy_governance_decision",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "authoritative_hard_gates": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "bundle_id": {
+                "type": "string"
+              },
+              "bundle_version": {
+                "type": "string"
+              },
+              "data_classification": {
+                "type": "string"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "requires_approval"
+                ],
+                "type": "string"
+              },
+              "decision_counts": {
+                "type": "object"
+              },
+              "decision_id": {
+                "type": "string"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "execution_mode": {
+                "type": "string"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "matched_rule_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "policy_bundle": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "rule_results": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "policy_governance_decision.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "step_count": {
+                "type": "integer"
+              },
+              "workflow_policy_plan": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "decision",
+              "ok",
+              "decision_id",
+              "policy_bundle",
+              "matched_rule_ids",
+              "decision_counts",
+              "rule_results",
+              "findings",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "intent",
+            "execution_mode",
+            "data_classification",
+            "step_count",
+            "bundle_id",
+            "bundle_version",
+            "authoritative_hard_gates",
+            "workflow_policy_plan",
+            "security"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "authoritative_hard_gates": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "bundle_id": {
+                "type": "string"
+              },
+              "bundle_version": {
+                "type": "string"
+              },
+              "data_classification": {
+                "type": "string"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "requires_approval"
+                ],
+                "type": "string"
+              },
+              "decision_counts": {
+                "type": "object"
+              },
+              "decision_id": {
+                "type": "string"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "execution_mode": {
+                "type": "string"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "matched_rule_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "policy_bundle": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "rule_results": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "policy_governance_decision.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "step_count": {
+                "type": "integer"
+              },
+              "workflow_policy_plan": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "decision",
+              "ok",
+              "decision_id",
+              "policy_bundle",
+              "matched_rule_ids",
+              "decision_counts",
+              "rule_results",
+              "findings",
+              "safe_next_actions"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "executed_plan",
+            "decision",
+            "ok",
+            "decision_id",
+            "policy_bundle",
+            "matched_rule_ids",
+            "decision_counts",
+            "rule_results",
+            "findings",
+            "safe_next_actions"
+          ],
+          "tool": "policy_governance_decision"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "policy_governance_decision"
+        }
+      },
+      "name": "policy_governance_decision"
+    },
+    {
       "digest": "sha256:3f6cd6b499d0e504f385076aa7e9d8d427e77d6e19f8785953f1c492da565cce",
       "metadata": {
         "documentation": [
@@ -8002,6 +9015,264 @@
       "name": "repo_info"
     },
     {
+      "digest": "sha256:c67cdeec084986f555d7d64a3ee918a1b10d59e037372d4812490f84d368ab35",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Resolve a repository-local mcp_result_reference.v1 artifact handle.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "expected_hash": {
+                "default": "",
+                "title": "Expected Hash",
+                "type": "string"
+              },
+              "include_content": {
+                "default": true,
+                "title": "Include Content",
+                "type": "boolean"
+              },
+              "path": {
+                "default": "",
+                "title": "Path",
+                "type": "string"
+              },
+              "reference": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Reference"
+              },
+              "reference_id": {
+                "default": "",
+                "title": "Reference Id",
+                "type": "string"
+              }
+            },
+            "title": "result_reference_resolveArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "result_reference_resolve",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "artifact": {
+                "type": "object"
+              },
+              "content": {
+                "type": "string"
+              },
+              "content_encoding": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "producer_tool": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "reference_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "mcp_result_reference.resolve.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "resolved",
+                  "expired",
+                  "missing",
+                  "boundary_rejected",
+                  "hash_mismatch",
+                  "invalid_reference"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "ok",
+              "status",
+              "read_only",
+              "reference_id",
+              "artifact",
+              "security"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "producer_tool",
+            "summary",
+            "message",
+            "content",
+            "content_encoding"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "artifact": {
+                "type": "object"
+              },
+              "content": {
+                "type": "string"
+              },
+              "content_encoding": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "producer_tool": {
+                "type": "string"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "reference_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "mcp_result_reference.resolve.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "resolved",
+                  "expired",
+                  "missing",
+                  "boundary_rejected",
+                  "hash_mismatch",
+                  "invalid_reference"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "ok",
+              "status",
+              "read_only",
+              "reference_id",
+              "artifact",
+              "security"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "ok",
+            "status",
+            "read_only",
+            "reference_id",
+            "artifact",
+            "security"
+          ],
+          "tool": "result_reference_resolve"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "result_reference_resolve"
+        }
+      },
+      "name": "result_reference_resolve"
+    },
+    {
       "digest": "sha256:b28e0e1511723da075de569de2995337bc3dc203cc04184fa2d489016aeee6f5",
       "metadata": {
         "documentation": [
@@ -9121,7 +10392,7 @@
       "name": "secret_exposure_report"
     },
     {
-      "digest": "sha256:6f60e0bd083f5173770b84b3bef5bddea33901c15a24683c75235b96ca77901d",
+      "digest": "sha256:ba1f798aab75c9a66212bd28c9f6d0f20faca56a648e9087e55210e7d7231397",
       "metadata": {
         "documentation": [
           {
@@ -9214,6 +10485,23 @@
                 ],
                 "default": null,
                 "title": "Redact Terms"
+              },
+              "result_mode": {
+                "default": "inline",
+                "title": "Result Mode",
+                "type": "string"
+              },
+              "result_reference_ttl_hours": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Result Reference Ttl Hours"
               },
               "start_time": {
                 "default": "",
@@ -9346,6 +10634,92 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
               "schema": {
                 "const": "self_optimization_report.v1",
                 "type": "string"
@@ -9369,14 +10743,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "window",
-              "summary",
-              "metrics",
-              "optimization_candidates",
-              "optimization_integrity_report",
-              "agents_context_health",
-              "security"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -9420,6 +10787,13 @@
             "type": "object"
           },
           "experimentalFields": [
+            "window",
+            "summary",
+            "metrics",
+            "optimization_candidates",
+            "optimization_integrity_report",
+            "agents_context_health",
+            "security",
             "sources",
             "bottlenecks",
             "usage_guidance",
@@ -9430,6 +10804,9 @@
             "github_issue_gate",
             "patch_survivorship",
             "optimization_candidates[].anti_gaming",
+            "metrics.observation_compression",
+            "result_mode",
+            "result_reference",
             "_meta"
           ],
           "outputSchema": {
@@ -9546,6 +10923,92 @@
                 },
                 "type": "array"
               },
+              "result_mode": {
+                "enum": [
+                  "inline",
+                  "summary",
+                  "reference"
+                ],
+                "type": "string"
+              },
+              "result_reference": {
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "type": "string"
+                      },
+                      "hash": {
+                        "type": "object"
+                      },
+                      "mime_type": {
+                        "type": "string"
+                      },
+                      "size_bytes": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "content_type",
+                      "mime_type",
+                      "size_bytes",
+                      "hash"
+                    ],
+                    "type": "object"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string"
+                  },
+                  "producer_tool": {
+                    "type": "string"
+                  },
+                  "reference_id": {
+                    "type": "string"
+                  },
+                  "resolver": {
+                    "type": "object"
+                  },
+                  "result_mode": {
+                    "enum": [
+                      "reference"
+                    ],
+                    "type": "string"
+                  },
+                  "retention": {
+                    "type": "object"
+                  },
+                  "schema": {
+                    "const": "mcp_result_reference.v1",
+                    "type": "string"
+                  },
+                  "sensitivity": {
+                    "type": "object"
+                  },
+                  "summary": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "schema",
+                  "reference_id",
+                  "producer_tool",
+                  "created_at",
+                  "expires_at",
+                  "summary",
+                  "content",
+                  "sensitivity",
+                  "resolver"
+                ],
+                "type": "object"
+              },
               "schema": {
                 "const": "self_optimization_report.v1",
                 "type": "string"
@@ -9569,14 +11032,7 @@
             "required": [
               "schema",
               "report_id",
-              "generated_at",
-              "window",
-              "summary",
-              "metrics",
-              "optimization_candidates",
-              "optimization_integrity_report",
-              "agents_context_health",
-              "security"
+              "generated_at"
             ],
             "type": "object"
           },
@@ -9584,14 +11040,7 @@
           "stableFields": [
             "schema",
             "report_id",
-            "generated_at",
-            "window",
-            "summary",
-            "metrics",
-            "optimization_candidates",
-            "optimization_integrity_report",
-            "agents_context_health",
-            "security"
+            "generated_at"
           ],
           "tool": "self_optimization_report"
         },
@@ -10619,7 +12068,7 @@
       "name": "task_router"
     },
     {
-      "digest": "sha256:edbdb833656c073767a837a1fb5ca6dad3d126c91d56f031b5124f6c47efac0d",
+      "digest": "sha256:b35d21dd3e0ec7f8359c7a8edb181a227d0bed375e4556592a358593bc6d7bcf",
       "metadata": {
         "documentation": [
           {
@@ -10653,12 +12102,656 @@
           "name": "task_status",
           "output_schema": {
             "additionalProperties": true,
-            "title": "task_statusDictOutput",
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "arguments": {
+                "type": "object"
+              },
+              "artifact_references": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "attempt": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "audit_events": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "cancellation": {
+                "type": "object"
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "expired_result_action": {
+                "enum": [
+                  "rerun_allowed",
+                  "rerun_requires_approval",
+                  "unavailable"
+                ],
+                "type": "string"
+              },
+              "expires_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              },
+              "idempotency_key": {
+                "type": "string"
+              },
+              "last_error_class": {
+                "type": "string"
+              },
+              "max_attempts": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "no_auto_retry": {
+                "type": "boolean"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "progress": {
+                "type": "number"
+              },
+              "progress_detail": {
+                "type": "object"
+              },
+              "replay": {
+                "type": "object"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "result": {
+                "type": "object"
+              },
+              "result_available": {
+                "type": "boolean"
+              },
+              "result_expired": {
+                "type": "boolean"
+              },
+              "retention_expires_at": {
+                "type": "string"
+              },
+              "retention_seconds": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "retry_after_seconds": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "retry_of": {
+                "type": "string"
+              },
+              "retry_policy": {
+                "enum": [
+                  "none",
+                  "client_may_retry",
+                  "server_retrying",
+                  "human_required"
+                ],
+                "type": "string"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_task.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "started": {
+                "type": "boolean"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "cancel_requested",
+                  "succeeded",
+                  "failed",
+                  "cancelled",
+                  "expired"
+                ],
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "task_id",
+              "workflow",
+              "status",
+              "state",
+              "retry_policy",
+              "retry_after_seconds",
+              "max_attempts",
+              "attempt",
+              "last_error_class",
+              "no_auto_retry",
+              "expires_at",
+              "retention_seconds",
+              "expired_result_action",
+              "audit_events"
+            ],
             "type": "object"
           },
           "title": null
         },
-        "output_contract": null,
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "started",
+            "created_at",
+            "started_at",
+            "updated_at",
+            "finished_at",
+            "retention_expires_at",
+            "retry_of",
+            "replay",
+            "idempotency_key",
+            "result",
+            "result_expired",
+            "result_available",
+            "safe_next_actions",
+            "progress",
+            "progress_detail",
+            "arguments",
+            "artifact_references",
+            "resource_links",
+            "cancellation",
+            "security",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "arguments": {
+                "type": "object"
+              },
+              "artifact_references": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "attempt": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "audit_events": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "cancellation": {
+                "type": "object"
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "expired_result_action": {
+                "enum": [
+                  "rerun_allowed",
+                  "rerun_requires_approval",
+                  "unavailable"
+                ],
+                "type": "string"
+              },
+              "expires_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              },
+              "idempotency_key": {
+                "type": "string"
+              },
+              "last_error_class": {
+                "type": "string"
+              },
+              "max_attempts": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "no_auto_retry": {
+                "type": "boolean"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "progress": {
+                "type": "number"
+              },
+              "progress_detail": {
+                "type": "object"
+              },
+              "replay": {
+                "type": "object"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "result": {
+                "type": "object"
+              },
+              "result_available": {
+                "type": "boolean"
+              },
+              "result_expired": {
+                "type": "boolean"
+              },
+              "retention_expires_at": {
+                "type": "string"
+              },
+              "retention_seconds": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "retry_after_seconds": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "retry_of": {
+                "type": "string"
+              },
+              "retry_policy": {
+                "enum": [
+                  "none",
+                  "client_may_retry",
+                  "server_retrying",
+                  "human_required"
+                ],
+                "type": "string"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_task.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "started": {
+                "type": "boolean"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "cancel_requested",
+                  "succeeded",
+                  "failed",
+                  "cancelled",
+                  "expired"
+                ],
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "task_id",
+              "workflow",
+              "status",
+              "state",
+              "retry_policy",
+              "retry_after_seconds",
+              "max_attempts",
+              "attempt",
+              "last_error_class",
+              "no_auto_retry",
+              "expires_at",
+              "retention_seconds",
+              "expired_result_action",
+              "audit_events"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "task_id",
+            "workflow",
+            "status",
+            "state",
+            "retry_policy",
+            "retry_after_seconds",
+            "max_attempts",
+            "attempt",
+            "last_error_class",
+            "no_auto_retry",
+            "expires_at",
+            "retention_seconds",
+            "expired_result_action",
+            "audit_events"
+          ],
+          "tool": "task_status"
+        },
         "security": {
           "annotations": {
             "destructiveHint": false,
@@ -10846,7 +12939,7 @@
       "name": "tool_annotations"
     },
     {
-      "digest": "sha256:815d571a41d6cc9463291dd255a0fb7928a46241e58467abdefca66b1e596107",
+      "digest": "sha256:cbf1e74db272847c3a448fbff8c7f097a9be132bb0d6fe71a0db9fe14b95eacb",
       "metadata": {
         "documentation": [
           {
@@ -10885,6 +12978,9 @@
               "current": {
                 "type": "object"
               },
+              "draft_tool_metadata_lint": {
+                "type": "object"
+              },
               "drift": {
                 "type": "object"
               },
@@ -10917,6 +13013,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -10965,7 +13062,8 @@
             "baseline.per_tool",
             "current.per_tool",
             "drift.changed[].metadata_diff",
-            "lint.findings"
+            "lint.findings",
+            "draft_tool_metadata_lint.findings"
           ],
           "outputSchema": {
             "additionalProperties": true,
@@ -10974,6 +13072,9 @@
                 "type": "object"
               },
               "current": {
+                "type": "object"
+              },
+              "draft_tool_metadata_lint": {
                 "type": "object"
               },
               "drift": {
@@ -11008,6 +13109,7 @@
               "current",
               "drift",
               "lint",
+              "draft_tool_metadata_lint",
               "security"
             ],
             "type": "object"
@@ -11021,6 +13123,7 @@
             "current",
             "drift",
             "lint",
+            "draft_tool_metadata_lint",
             "security"
           ],
           "tool": "tool_catalog_integrity"
@@ -11102,7 +13205,7 @@
       "name": "tool_output_contracts"
     },
     {
-      "digest": "sha256:c53e75b0e927ac4238023ecab0e5f11ed3557e9b0f96b13de37bf12a25dc9879",
+      "digest": "sha256:0ca67e7edeb84f29e6fde1ce39ab28f779f370cce333c32e04a7dee1be2d2097",
       "metadata": {
         "documentation": [
           {
@@ -11164,6 +13267,21 @@
               "audit_source": {
                 "type": "object"
               },
+              "confidence": {
+                "type": "number"
+              },
+              "constraint_violation_count": {
+                "type": "integer"
+              },
+              "constraint_violations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "critical_failure_step": {
+                "type": "object"
+              },
               "critical_step_candidate": {
                 "type": "object"
               },
@@ -11182,11 +13300,23 @@
               "failure_category": {
                 "type": "string"
               },
+              "failure_taxonomy": {
+                "type": "object"
+              },
+              "llm_judging": {
+                "type": "object"
+              },
               "ok": {
                 "type": "boolean"
               },
               "read_only": {
                 "type": "boolean"
+              },
+              "recommended_followup": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "redactions_applied": {
                 "items": {
@@ -11220,10 +13350,12 @@
             "required": [
               "schema",
               "ok",
-              "critical_step_candidate",
+              "critical_failure_step",
               "failure_category",
+              "constraint_violations",
               "evidence",
-              "safe_next_actions",
+              "confidence",
+              "recommended_followup",
               "redactions_applied"
             ],
             "type": "object"
@@ -11272,12 +13404,31 @@
             "read_only",
             "security",
             "trajectory",
-            "failure_categories"
+            "failure_categories",
+            "critical_step_candidate",
+            "safe_next_actions",
+            "failure_taxonomy",
+            "llm_judging"
           ],
           "outputSchema": {
             "additionalProperties": true,
             "properties": {
               "audit_source": {
+                "type": "object"
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "constraint_violation_count": {
+                "type": "integer"
+              },
+              "constraint_violations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "critical_failure_step": {
                 "type": "object"
               },
               "critical_step_candidate": {
@@ -11298,11 +13449,23 @@
               "failure_category": {
                 "type": "string"
               },
+              "failure_taxonomy": {
+                "type": "object"
+              },
+              "llm_judging": {
+                "type": "object"
+              },
               "ok": {
                 "type": "boolean"
               },
               "read_only": {
                 "type": "boolean"
+              },
+              "recommended_followup": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "redactions_applied": {
                 "items": {
@@ -11336,10 +13499,12 @@
             "required": [
               "schema",
               "ok",
-              "critical_step_candidate",
+              "critical_failure_step",
               "failure_category",
+              "constraint_violations",
               "evidence",
-              "safe_next_actions",
+              "confidence",
+              "recommended_followup",
               "redactions_applied"
             ],
             "type": "object"
@@ -11348,10 +13513,12 @@
           "stableFields": [
             "schema",
             "ok",
-            "critical_step_candidate",
+            "critical_failure_step",
             "failure_category",
+            "constraint_violations",
             "evidence",
-            "safe_next_actions",
+            "confidence",
+            "recommended_followup",
             "redactions_applied"
           ],
           "tool": "workflow_diagnostics"
@@ -12299,7 +14466,7 @@
       "name": "workflow_reminder"
     },
     {
-      "digest": "sha256:e199cb762da20e888e714e893250d30a2682801cf05dc33251583fab92795f85",
+      "digest": "sha256:9ad906b715123859fe84d4cefdd11be919b2f14f6f289059fc4c2ca673edb4d6",
       "metadata": {
         "documentation": [
           {
@@ -12411,12 +14578,656 @@
           "name": "workflow_task",
           "output_schema": {
             "additionalProperties": true,
-            "title": "workflow_taskDictOutput",
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "arguments": {
+                "type": "object"
+              },
+              "artifact_references": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "attempt": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "audit_events": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "cancellation": {
+                "type": "object"
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "expired_result_action": {
+                "enum": [
+                  "rerun_allowed",
+                  "rerun_requires_approval",
+                  "unavailable"
+                ],
+                "type": "string"
+              },
+              "expires_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              },
+              "idempotency_key": {
+                "type": "string"
+              },
+              "last_error_class": {
+                "type": "string"
+              },
+              "max_attempts": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "no_auto_retry": {
+                "type": "boolean"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "progress": {
+                "type": "number"
+              },
+              "progress_detail": {
+                "type": "object"
+              },
+              "replay": {
+                "type": "object"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "result": {
+                "type": "object"
+              },
+              "result_available": {
+                "type": "boolean"
+              },
+              "result_expired": {
+                "type": "boolean"
+              },
+              "retention_expires_at": {
+                "type": "string"
+              },
+              "retention_seconds": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "retry_after_seconds": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "retry_of": {
+                "type": "string"
+              },
+              "retry_policy": {
+                "enum": [
+                  "none",
+                  "client_may_retry",
+                  "server_retrying",
+                  "human_required"
+                ],
+                "type": "string"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_task.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "started": {
+                "type": "boolean"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "cancel_requested",
+                  "succeeded",
+                  "failed",
+                  "cancelled",
+                  "expired"
+                ],
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "task_id",
+              "workflow",
+              "status",
+              "state",
+              "retry_policy",
+              "retry_after_seconds",
+              "max_attempts",
+              "attempt",
+              "last_error_class",
+              "no_auto_retry",
+              "expires_at",
+              "retention_seconds",
+              "expired_result_action",
+              "audit_events"
+            ],
             "type": "object"
           },
           "title": null
         },
-        "output_contract": null,
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "started",
+            "created_at",
+            "started_at",
+            "updated_at",
+            "finished_at",
+            "retention_expires_at",
+            "retry_of",
+            "replay",
+            "idempotency_key",
+            "result",
+            "result_expired",
+            "result_available",
+            "safe_next_actions",
+            "progress",
+            "progress_detail",
+            "arguments",
+            "artifact_references",
+            "resource_links",
+            "cancellation",
+            "security",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "arguments": {
+                "type": "object"
+              },
+              "artifact_references": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "attempt": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "audit_events": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "cancellation": {
+                "type": "object"
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "expired_result_action": {
+                "enum": [
+                  "rerun_allowed",
+                  "rerun_requires_approval",
+                  "unavailable"
+                ],
+                "type": "string"
+              },
+              "expires_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              },
+              "idempotency_key": {
+                "type": "string"
+              },
+              "last_error_class": {
+                "type": "string"
+              },
+              "max_attempts": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "no_auto_retry": {
+                "type": "boolean"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "progress": {
+                "type": "number"
+              },
+              "progress_detail": {
+                "type": "object"
+              },
+              "replay": {
+                "type": "object"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "result": {
+                "type": "object"
+              },
+              "result_available": {
+                "type": "boolean"
+              },
+              "result_expired": {
+                "type": "boolean"
+              },
+              "retention_expires_at": {
+                "type": "string"
+              },
+              "retention_seconds": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "retry_after_seconds": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "retry_of": {
+                "type": "string"
+              },
+              "retry_policy": {
+                "enum": [
+                  "none",
+                  "client_may_retry",
+                  "server_retrying",
+                  "human_required"
+                ],
+                "type": "string"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "workflow_task.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "started": {
+                "type": "boolean"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "cancel_requested",
+                  "succeeded",
+                  "failed",
+                  "cancelled",
+                  "expired"
+                ],
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema",
+              "task_id",
+              "workflow",
+              "status",
+              "state",
+              "retry_policy",
+              "retry_after_seconds",
+              "max_attempts",
+              "attempt",
+              "last_error_class",
+              "no_auto_retry",
+              "expires_at",
+              "retention_seconds",
+              "expired_result_action",
+              "audit_events"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "task_id",
+            "workflow",
+            "status",
+            "state",
+            "retry_policy",
+            "retry_after_seconds",
+            "max_attempts",
+            "attempt",
+            "last_error_class",
+            "no_auto_retry",
+            "expires_at",
+            "retention_seconds",
+            "expired_result_action",
+            "audit_events"
+          ],
+          "tool": "workflow_task"
+        },
         "security": {
           "annotations": {
             "destructiveHint": false,
@@ -12486,7 +15297,7 @@
       "name": "workflow_task"
     },
     {
-      "digest": "sha256:bef4f51c6ecbb842af1ea4a2f44255f47e9368ea82f83083b667df182fdb2c16",
+      "digest": "sha256:98e914dfe0efa1cab77adfaab825ee2e4eefda28520896645136ccdb36929d93",
       "metadata": {
         "documentation": [
           {
@@ -12575,6 +15386,11 @@
                 "default": null,
                 "title": "Exclude Globs"
               },
+              "idempotency_key": {
+                "default": "",
+                "title": "Idempotency Key",
+                "type": "string"
+              },
               "include_build_dir": {
                 "default": false,
                 "title": "Include Build Dir",
@@ -12654,6 +15470,19 @@
                 "default": "",
                 "title": "Replacement",
                 "type": "string"
+              },
+              "request_metadata": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Request Metadata"
               },
               "snapshot_id": {
                 "default": "",
@@ -13302,5 +16131,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:b77111a18590c8a795fd60400b6a6e136119c147883db60af7d745922870477c"
+  "whole_catalog_digest": "sha256:6f6d3f8315c8e786060df81bcee0c9db7e1be78a618bed71d2f19b1b34840659"
 }
