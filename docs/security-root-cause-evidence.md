@@ -24,6 +24,11 @@ security_root_cause_evidence(
     base_ref="origin/main",
     head_ref="WORKTREE",
     vulnerability_hint="path traversal in uploaded file handling",
+    local_evidence={
+        "tests": [{"test_id": "tests/test_upload.py::test_blocks_traversal", "status": "failing-before passing-after"}],
+        "sanitizer_traces": [{"path": "src/upload.py", "summary": "trace reaches upload boundary"}],
+        "fixtures": [{"fixture_id": "upload-traversal-local-fixture"}],
+    },
 )
 ```
 
@@ -35,6 +40,7 @@ Supported inputs:
 - `max_locations`: capped number of ranked locations.
 - `include_security_delta`: when true, the report generates an offline `agent_security_delta_report(export=False)` and consumes only compact findings.
 - `security_delta_report`: optional caller-provided `agent_security_delta_report.v1`; when supplied it is used instead of generating a new one.
+- `local_evidence`: optional bounded caller-provided local reproducer/test metadata. Accepted shapes include `items`, `tests`, `failing_tests`, `passing_tests`, `sanitizer_traces`, `error_traces`, `fixtures`, or `reproducers`. Values are never read as files; they are redacted, capped to 20 items, and reported only as compact metadata such as test IDs, repo-relative paths, status, summaries, fixture IDs, and trace excerpts.
 
 ## Stable schema
 
@@ -56,7 +62,7 @@ Each `ranked_locations[]` entry includes:
 - `reasons[]` with a reason type, weight, line, and redacted evidence
 - optional `security_delta_finding_ids[]`
 
-Reason types currently include removed/active security-delta findings, changed security-sensitive paths, input sources, sinks, validators/boundary checks, related tests, vulnerability-hint matches, and import-neighbor signals.
+Reason types currently include removed/active security-delta findings, changed security-sensitive paths, input sources, sinks, validators/boundary checks, related tests, caller-provided local test/reproducer/trace evidence, vulnerability-hint matches, and import-neighbor signals.
 
 The report also emits advisory `shallow_fix_warnings[]` and summary counters/status when the diff looks like a shallow security fix:
 
@@ -64,7 +70,9 @@ The report also emits advisory `shallow_fix_warnings[]` and summary counters/sta
 - `warning_suppression_only`: added security/static-analysis suppression such as `# nosec`, `# noqa`, `type: ignore`, pylint disables, or semgrep ignores.
 - `missing_regression_evidence`: changed code lacks related changed tests and removed security-delta findings.
 
-`release_readiness` includes a compact `security_root_cause_evidence` check with `pass`, `warn`, or `needs-review` status plus ranked-location, related-test, and shallow-warning counts.
+`evidence_inputs.local_evidence` summarizes the accepted/rejected local metadata count, how many entries matched changed files, and the redacted bounded items. Local test evidence can also appear in `related_tests[]` with `source="caller_local_evidence"`, and matched local reproducer/trace metadata can add ranked-location reasons without exposing raw logs or absolute host paths.
+
+`release_readiness` includes a compact `security_root_cause_evidence` check with `pass`, `warn`, or `needs-review` status plus ranked-location, related-test, local-evidence, and shallow-warning counts.
 
 ## How it differs from `agent_security_delta_report`
 

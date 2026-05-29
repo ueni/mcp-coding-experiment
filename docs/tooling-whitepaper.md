@@ -251,7 +251,7 @@ Restore:
 
 `agent_security_delta` / `agent_security_delta_report` adds a local/offline security-regression gate for agent-generated feature changes. It compares changed files between refs or the worktree, flags newly introduced command-injection, path-traversal, dynamic-evaluation, unsafe-deserialization, weak-tempfile, HTTP-auth, and privileged/container-boundary patterns, emits redacted repository-relative evidence, and can export no-upload SARIF/provenance artifacts for release and governance review.
 
-`security_root_cause_evidence` adds a distinct local/offline reviewer evidence pack for security-sensitive agent fixes. It ranks likely root-cause files/functions using changed security-sensitive paths, input/source and sink signals, validators or boundary checks, related tests, import neighbors, vulnerability-hint matches, and optional compact security-delta findings. It also flags wrapper/symptom-only and warning-suppression-only shallow-fix smells and feeds a compact `release_readiness` pass/warn/needs-review summary. It is read-only/advisory-only and avoids exploit-proof or fix-proof claims from shallow static evidence.
+`security_root_cause_evidence` adds a distinct local/offline reviewer evidence pack for security-sensitive agent fixes. It ranks likely root-cause files/functions using changed security-sensitive paths, input/source and sink signals, validators or boundary checks, related tests, import neighbors, vulnerability-hint matches, optional compact security-delta findings, and bounded/redacted caller-provided local reproducer/test metadata. It also flags wrapper/symptom-only and warning-suppression-only shallow-fix smells and feeds a compact `release_readiness` pass/warn/needs-review summary. It is read-only/advisory-only and avoids exploit-proof or fix-proof claims from shallow static evidence.
 
 ### 8.2 Release Governance
 
@@ -264,7 +264,7 @@ Restore:
 - CI workflow posture from `ci_workflow_security_report`, including missing workflow evidence, parser failures, and active high-risk findings.
 - Secret-exposure posture from `secret_exposure_report`, including newly introduced high-confidence blockers and suppressed allowlisted canaries.
 - Agent-generated feature security delta from `agent_security_delta` / `agent_security_delta_report`, including newly introduced high/medium vulnerability-pattern regressions and local SARIF evidence.
-- Root-cause review support from `security_root_cause_evidence` for security-sensitive fixes, including ranked files/functions, reasons, confidence, shallow-fix warnings, and related tests without exploit-proof claims.
+- Root-cause review support from `security_root_cause_evidence` for security-sensitive fixes, including ranked files/functions, reasons, confidence, shallow-fix warnings, related tests, and bounded local reproducer/test metadata without exploit-proof claims.
 - Risk score thresholds.
 - Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
 - First-slice replay lineage for `governance_report` via redacted `workflow_lineage.v1` manifests and read-only `workflow_lineage(mode="verify")` drift reports.

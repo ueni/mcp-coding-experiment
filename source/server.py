@@ -18314,13 +18314,18 @@ SECURITY_ROOT_CAUSE_REASON_WEIGHTS = {
     "security_delta_finding": 38,
     "removed_security_delta_finding": 34,
     "security_sink": 24,
+    "local_trace_evidence": 22,
+    "local_reproducer_evidence": 20,
     "input_source": 18,
     "validator_or_boundary_check": 18,
+    "local_test_evidence": 16,
     "security_sensitive_path": 14,
     "changed_test": 12,
     "vulnerability_hint_match": 10,
     "call_import_neighbor": 8,
 }
+SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS = 20
+SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS = 240
 SECURITY_ROOT_CAUSE_SECURITY_PATH_RE = re.compile(
     r"(^|[/_.-])(auth|authorize|permission|security|secret|token|credential|path|file|sandbox|container|"
     r"docker|command|shell|exec|deserialize|yaml|pickle|sql|query|validation|validator|sanitize|policy|guard)([/_.-]|$)",
@@ -18499,6 +18504,160 @@ def _security_root_cause_related_tests(changed_paths: list[str], text_by_path: d
             }
         )
     return tests[:100]
+
+
+def _security_root_cause_redact_local_evidence(value: Any, *, max_chars: int = SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").replace("\x00", " ")).strip()
+    if not text:
+        return ""
+    return _agent_security_delta_redact_evidence(text, max_chars=max_chars)
+
+
+def _security_root_cause_local_evidence_path(value: Any) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw or "://" in raw or "\x00" in raw:
+        return ""
+    try:
+        candidate = Path(raw)
+        resolved = candidate.resolve() if candidate.is_absolute() else _resolve_repo_path(raw)
+        return str(resolved.relative_to(REPO_PATH)).replace("\\", "/")
+    except (OSError, ValueError):
+        parts = [part for part in raw.split("/") if part and part != "."]
+        if raw.startswith("/") or any(part == ".." for part in parts):
+            return ""
+        return "/".join(parts)[:240]
+
+
+def _security_root_cause_iter_local_evidence_items(local_evidence: Any) -> tuple[list[dict[str, Any]], int]:
+    raw_items: list[dict[str, Any]] = []
+    rejected = 0
+    if not local_evidence:
+        return [], 0
+    if isinstance(local_evidence, list):
+        source_items = local_evidence
+    elif isinstance(local_evidence, dict):
+        source_items = []
+        if isinstance(local_evidence.get("items"), list):
+            source_items.extend(local_evidence.get("items", []))
+        for key, inferred_kind in (
+            ("tests", "test"),
+            ("failing_tests", "failing_test"),
+            ("passing_tests", "passing_test"),
+            ("traces", "error_trace"),
+            ("error_traces", "error_trace"),
+            ("sanitizer_traces", "sanitizer_trace"),
+            ("fixtures", "fixture_reproducer"),
+            ("reproducers", "fixture_reproducer"),
+        ):
+            value = local_evidence.get(key)
+            if isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, dict):
+                        source_items.append({"kind": inferred_kind, **entry})
+                    elif isinstance(entry, str):
+                        source_items.append({"kind": inferred_kind, "id": entry})
+            elif isinstance(value, dict):
+                source_items.append({"kind": inferred_kind, **value})
+            elif isinstance(value, str):
+                source_items.append({"kind": inferred_kind, "id": value})
+    else:
+        return [], 1
+
+    for raw_item in source_items[: SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS * 2]:
+        if not isinstance(raw_item, dict):
+            rejected += 1
+            continue
+        kind = _security_root_cause_redact_local_evidence(raw_item.get("kind") or raw_item.get("type") or "local_evidence", max_chars=60).lower()
+        status = _security_root_cause_redact_local_evidence(raw_item.get("status") or raw_item.get("result") or "", max_chars=80)
+        test_id = _security_root_cause_redact_local_evidence(raw_item.get("test_id") or raw_item.get("test") or raw_item.get("id") or "", max_chars=180)
+        fixture_id = _security_root_cause_redact_local_evidence(raw_item.get("fixture_id") or raw_item.get("fixture") or raw_item.get("reproducer_id") or "", max_chars=180)
+        summary = _security_root_cause_redact_local_evidence(raw_item.get("summary") or raw_item.get("reason") or raw_item.get("description") or "", max_chars=SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS)
+        trace_excerpt = _security_root_cause_redact_local_evidence(raw_item.get("trace") or raw_item.get("error") or raw_item.get("stderr") or raw_item.get("log") or "", max_chars=SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS)
+        path = _security_root_cause_local_evidence_path(raw_item.get("path") or raw_item.get("file") or raw_item.get("source_path") or "")
+        line = 1
+        try:
+            line = max(1, int(raw_item.get("line") or raw_item.get("line_start") or 1))
+        except (TypeError, ValueError):
+            line = 1
+        if not any((test_id, fixture_id, summary, trace_excerpt, path)):
+            rejected += 1
+            continue
+        raw_items.append(
+            {
+                "schema": "security_root_cause_local_evidence.v1",
+                "kind": kind[:60] or "local_evidence",
+                "status": status,
+                "test_id": test_id,
+                "fixture_id": fixture_id,
+                "path": path,
+                "line": line,
+                "summary": summary,
+                "trace_excerpt": trace_excerpt,
+                "raw_returned": False,
+            }
+        )
+        if len(raw_items) >= SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS:
+            break
+    if len(source_items) > SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS:
+        rejected += len(source_items) - SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS
+    return raw_items, rejected
+
+
+def _security_root_cause_local_evidence_input(
+    local_evidence: Any,
+    *,
+    changed_paths: list[str],
+    vulnerability_hint: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    items, rejected = _security_root_cause_iter_local_evidence_items(local_evidence)
+    changed = list(dict.fromkeys(changed_paths))
+    hint_tokens = set(re.findall(r"[a-z0-9_]{4,}", vulnerability_hint.lower()))
+    for item in items:
+        blob = " ".join(
+            str(item.get(key, ""))
+            for key in ("kind", "status", "test_id", "fixture_id", "path", "summary", "trace_excerpt")
+        ).lower()
+        matched = ""
+        item_path = str(item.get("path") or "")
+        if item_path in changed:
+            matched = item_path
+        else:
+            for rel in changed:
+                stem = Path(rel).stem.lower()
+                if rel.lower() in blob or (stem and stem in blob):
+                    matched = rel
+                    break
+        matched_terms = sorted(token for token in hint_tokens if token in blob)[:12]
+        if matched:
+            item["matched_changed_file"] = matched
+        if matched_terms:
+            item["matched_hint_terms"] = matched_terms
+    test_count = sum(1 for item in items if "test" in str(item.get("kind", "")) or item.get("test_id"))
+    trace_count = sum(1 for item in items if "trace" in str(item.get("kind", "")) or item.get("trace_excerpt"))
+    fixture_count = sum(1 for item in items if "fixture" in str(item.get("kind", "")) or "reproducer" in str(item.get("kind", "")) or item.get("fixture_id"))
+    meta = {
+        "source": "caller_provided" if items else "not_provided",
+        "schema": "security_root_cause_local_evidence.v1",
+        "accepted_count": len(items),
+        "rejected_count": rejected,
+        "max_items": SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS,
+        "test_evidence_count": test_count,
+        "trace_evidence_count": trace_count,
+        "fixture_evidence_count": fixture_count,
+        "matched_changed_file_count": len({item.get("matched_changed_file") for item in items if item.get("matched_changed_file")}),
+        "raw_returned": False,
+        "items": items,
+    }
+    return items, meta
+
+
+def _security_root_cause_local_evidence_reason_type(item: dict[str, Any]) -> str:
+    kind = str(item.get("kind", "")).lower()
+    if "trace" in kind or item.get("trace_excerpt"):
+        return "local_trace_evidence"
+    if "fixture" in kind or "reproducer" in kind or item.get("fixture_id"):
+        return "local_reproducer_evidence"
+    return "local_test_evidence"
 
 
 def _security_root_cause_confidence(score: int, reason_types: set[str]) -> tuple[str, float]:
@@ -18742,6 +18901,8 @@ def _security_root_cause_compact_status(report: dict[str, Any]) -> dict[str, Any
         "report_id": report.get("report_id", ""),
         "ranked_location_count": summary.get("ranked_location_count", 0),
         "related_test_count": summary.get("related_test_count", 0),
+        "local_evidence_count": summary.get("local_evidence_count", 0),
+        "local_evidence_matched_changed_file_count": summary.get("local_evidence_matched_changed_file_count", 0),
         "shallow_fix_warning_count": warning_count,
         "warning": status in {"warn", "needs-review"},
         "warning_reason": "; ".join(str(item.get("summary", "")) for item in warnings[:2] if isinstance(item, dict))
@@ -18758,6 +18919,7 @@ def _security_root_cause_evidence_impl(
     max_locations: int = 20,
     include_security_delta: bool = True,
     security_delta_report: dict[str, Any] | None = None,
+    local_evidence: dict[str, Any] | list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _require_git_repo()
     max_locations = max(1, min(int(max_locations or 20), 100))
@@ -18787,6 +18949,11 @@ def _security_root_cause_evidence_impl(
         exclude_globs,
         security_delta_report,
         include_security_delta,
+    )
+    local_evidence_items, local_evidence_meta = _security_root_cause_local_evidence_input(
+        local_evidence,
+        changed_paths=changed_paths,
+        vulnerability_hint=vulnerability_hint,
     )
     candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
     changed_set = set(changed_paths)
@@ -18874,15 +19041,61 @@ def _security_root_cause_evidence_impl(
             call_import_neighbors.extend(_security_root_cause_import_neighbors(text, rel, changed_set))
 
     related_tests = _security_root_cause_related_tests(changed_paths, text_by_path, vulnerability_hint)
+    seen_related_tests = {str(test.get("path", "")) + "\0" + str(test.get("test_id", "")) for test in related_tests if isinstance(test, dict)}
+    for item in local_evidence_items:
+        kind = str(item.get("kind", ""))
+        if "test" not in kind and not item.get("test_id"):
+            continue
+        rel_path = str(item.get("path") or item.get("matched_changed_file") or "")
+        signature = rel_path + "\0" + str(item.get("test_id", ""))
+        if signature in seen_related_tests:
+            continue
+        seen_related_tests.add(signature)
+        related_tests.append(
+            {
+                "path": rel_path,
+                "test_id": item.get("test_id", ""),
+                "status": item.get("status", ""),
+                "security_relevant": True,
+                "matched_terms": item.get("matched_hint_terms", []),
+                "source": "caller_local_evidence",
+                "matched_changed_file": item.get("matched_changed_file", ""),
+                "reason": item.get("summary", "") or item.get("trace_excerpt", ""),
+                "raw_contents_returned": False,
+            }
+        )
+    related_tests = related_tests[:100]
     for test in related_tests:
+        reason_type = "local_test_evidence" if test.get("source") == "caller_local_evidence" else "changed_test"
+        target_path = str(test.get("matched_changed_file") or test.get("path") or "")
+        if not target_path:
+            continue
         _security_root_cause_add_reason(
             candidates,
-            str(test["path"]),
+            target_path,
             None,
             _security_root_cause_reason(
-                "changed_test",
-                "Changed test file may carry regression evidence for the security-sensitive fix path.",
-                evidence=", ".join(test.get("matched_terms", [])) if test.get("matched_terms") else str(test["path"]),
+                reason_type,
+                "Caller-provided local test/reproducer metadata references this location." if reason_type == "local_test_evidence" else "Changed test file may carry regression evidence for the security-sensitive fix path.",
+                evidence=str(test.get("reason") or ", ".join(test.get("matched_terms", [])) or test.get("test_id") or test.get("path") or ""),
+            ),
+        )
+
+    for item in local_evidence_items:
+        matched = str(item.get("matched_changed_file") or "")
+        if not matched:
+            continue
+        reason_type = _security_root_cause_local_evidence_reason_type(item)
+        evidence = item.get("summary") or item.get("trace_excerpt") or item.get("test_id") or item.get("fixture_id") or item.get("path") or ""
+        _security_root_cause_add_reason(
+            candidates,
+            matched,
+            None,
+            _security_root_cause_reason(
+                reason_type,
+                "Caller-provided bounded local reproducer/test metadata references this changed location.",
+                line=int(item.get("line", 1) or 1),
+                evidence=str(evidence),
             ),
         )
 
@@ -18978,6 +19191,8 @@ def _security_root_cause_evidence_impl(
         "high_confidence_location_count": high_conf,
         "medium_confidence_location_count": medium_conf,
         "related_test_count": len(related_tests),
+        "local_evidence_count": local_evidence_meta.get("accepted_count", 0),
+        "local_evidence_matched_changed_file_count": local_evidence_meta.get("matched_changed_file_count", 0),
         "security_delta_findings_used": sum(len(row.get("security_delta_finding_ids", [])) for row in ranked),
         "shallow_fix_warning_count": len(shallow_fix_warnings),
         "shallow_fix_status": shallow_fix_status,
@@ -19010,6 +19225,7 @@ def _security_root_cause_evidence_impl(
         "evidence_inputs": {
             "diff": diff_meta,
             "security_delta": delta_meta,
+            "local_evidence": local_evidence_meta,
             "vulnerability_hint_provided": bool(vulnerability_hint.strip()),
             "include_globs": include_globs or AGENT_SECURITY_DELTA_DEFAULT_INCLUDE_GLOBS,
             "exclude_globs": AGENT_SECURITY_DELTA_DEFAULT_EXCLUDE_GLOBS + list(exclude_globs or []),
@@ -34632,6 +34848,7 @@ def security_root_cause_evidence(
     max_locations: int = 20,
     include_security_delta: bool = True,
     security_delta_report: dict[str, Any] | None = None,
+    local_evidence: dict[str, Any] | list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a local, read-only evidence pack ranking likely root-cause locations for security-sensitive agent fixes."""
     arguments = {
@@ -34643,6 +34860,7 @@ def security_root_cause_evidence(
         "max_locations": max_locations,
         "include_security_delta": include_security_delta,
         "security_delta_report_provided": isinstance(security_delta_report, dict),
+        "local_evidence_provided": bool(local_evidence),
     }
     with _otel_span(
         "mcp.tool.security_root_cause_evidence",
@@ -34657,6 +34875,7 @@ def security_root_cause_evidence(
             max_locations=max_locations,
             include_security_delta=include_security_delta,
             security_delta_report=security_delta_report,
+            local_evidence=local_evidence,
         )
         _otel_set_result_attributes(span, result)
         return result

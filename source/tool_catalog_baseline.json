@@ -9944,7 +9944,7 @@
       "name": "secret_exposure_report"
     },
     {
-      "digest": "sha256:4a19d6e54c62598a1415dcbde0fdd90ec6468f58f467e46b381bb7dfeb6680bf",
+      "digest": "sha256:0a940bf5a1d699bc7b8a8f54f6c0eadff9525a0907404cc48a603eeaaa64b9dc",
       "metadata": {
         "documentation": [
           {
@@ -10006,6 +10006,26 @@
                 "default": true,
                 "title": "Include Security Delta",
                 "type": "boolean"
+              },
+              "local_evidence": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Local Evidence"
               },
               "max_locations": {
                 "default": 20,
@@ -15876,5 +15896,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:72039b9d90e2a0aec08649135bf61f9b3a6cf08cae5b537b993e4cffb58b91b5"
+  "whole_catalog_digest": "sha256:45cdd8ec81ae714a4420e119292b951f35979d1a1553cd4df13c745bd036c856"
 }

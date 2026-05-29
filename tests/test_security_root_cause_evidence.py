@@ -151,6 +151,71 @@ class SecurityRootCauseEvidenceTests(ServerToolsTestBase):
         self.assertIn("ranked_location_count", root_cause_check)
         self.assertIn("shallow_fix_warning_count", root_cause_check)
 
+    def test_accepts_bounded_local_reproducer_metadata(self):
+        self.write_repo_text(
+            "src/upload.py",
+            "def read_upload(path):\n"
+            "    return open(path).read()\n",
+        )
+        self.commit_all("add unsafe upload fixture")
+
+        self.write_repo_text(
+            "src/upload.py",
+            "from pathlib import Path\n\n"
+            "def read_upload(path):\n"
+            "    safe = Path(path).name\n"
+            "    return Path('/tmp/uploads', safe).read_text()\n",
+        )
+        local_evidence = {
+            "tests": [
+                {
+                    "test_id": "tests/test_upload.py::test_blocks_path_traversal",
+                    "status": "failing-before passing-after",
+                    "path": "tests/test_upload.py",
+                    "summary": "Regression reproduces traversal against src/upload.py without storing raw payloads.",
+                }
+            ],
+            "sanitizer_traces": [
+                {
+                    "path": "src/upload.py",
+                    "line": 4,
+                    "summary": "Sanitizer trace reaches read_upload boundary.",
+                    "trace": "/home/user/private/repo/src/upload.py:4: sanitizer rejected traversal payload",
+                }
+            ],
+            "fixtures": [
+                {"fixture_id": "upload-traversal-local-fixture", "path": "tests/fixtures/upload_traversal.json"}
+            ],
+        }
+
+        report = self.server.security_root_cause_evidence(
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            vulnerability_hint="path traversal upload",
+            local_evidence=local_evidence,
+            include_security_delta=False,
+        )
+
+        local_meta = report["evidence_inputs"]["local_evidence"]
+        self.assertEqual(local_meta["source"], "caller_provided")
+        self.assertEqual(local_meta["accepted_count"], 3)
+        self.assertGreaterEqual(local_meta["matched_changed_file_count"], 1)
+        self.assertFalse(local_meta["raw_returned"])
+        self.assertNotIn(str(self.repo_path), self.server.json.dumps(local_meta))
+        self.assertIn("<redacted", self.server.json.dumps(local_meta))
+        self.assertTrue(
+            any(test.get("source") == "caller_local_evidence" for test in report["related_tests"])
+        )
+        reason_types = {
+            reason["type"]
+            for location in report["ranked_locations"]
+            for reason in location["reasons"]
+        }
+        self.assertIn("local_test_evidence", reason_types)
+        self.assertIn("local_trace_evidence", reason_types)
+        self.assertEqual(report["summary"]["local_evidence_count"], 3)
+        validate_against_schema(report, TOOL_OUTPUT_SCHEMAS["security_root_cause_evidence"])
+
     def test_can_disable_generated_security_delta_input(self):
         self.write_repo_text(
             "src/path_guard.py",
