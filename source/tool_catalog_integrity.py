@@ -118,6 +118,10 @@ _DOC_REFS_BY_TOOL: dict[str, tuple[dict[str, str], ...]] = {
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Interaction invariant audit", "path": "docs/interaction-invariant-audit.md"},
     ),
+    "trajectory_trust_guard": (
+        {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
+        {"label": "Trajectory trust guard", "path": "docs/trajectory-trust-guard.md"},
+    ),
 }
 _DEFAULT_DOC_REFS: tuple[dict[str, str], ...] = (
     {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},

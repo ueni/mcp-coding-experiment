@@ -26,6 +26,7 @@ SPDX-License-Identifier: MIT
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [AGENTS.md context health report](./agents-context-health.md) - read-only minimal-context budget, duplication, stale guidance, risky global instruction, and move-candidate lint.
 - [Mutation step guard](./mutation-step-guard.md) - read-only final checkpoint before workspace/git mutation steps.
+- [Trajectory trust guard](./trajectory-trust-guard.md) - read-only advisory report for over-trusting untrusted tool trajectories before sensitive final actions.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) - read-only `skill_pack_score` risk/fit decisions for workflow cards and offline imported-skill fixtures.
 - [Context retrieval regression suite](./context-retrieval-regression.md) - offline ContextBench-style fixtures and metrics for task-router workflow-card retrieval.
@@ -86,6 +87,7 @@ This index lists documentation ownership and status.
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`
 - [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`
+- [Trajectory trust guard](./trajectory-trust-guard.md) (`docs/trajectory-trust-guard.md`) - Status: `prototype`
 - [Context retrieval regression suite](./context-retrieval-regression.md) (`docs/context-retrieval-regression.md`) - Status: `prototype`
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) (`docs/e2e-mcp-workflow-benchmarks.md`) - Status: `prototype`
 - [Agent execution modes](./execution-modes.md) (`docs/execution-modes.md`) - Status: `operational guidance`
