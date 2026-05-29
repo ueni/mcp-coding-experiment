@@ -31767,6 +31767,13 @@ TRAJECTORY_TRUST_GUARD_BLOCK_DECISIONS = {"block", "deny", "blocked"}
 
 def _trajectory_guard_safe_text(value: Any, max_chars: int = 180) -> str:
     text = re.sub(r"\s+", " ", str(value).replace("\x00", " ")).strip()
+    text = re.sub(
+        r"\bauthorization\b\s*[:= ]\s*bearer\s+\S+",
+        "<redacted:secret>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bbearer\s+\S+", "<redacted:secret>", text, flags=re.IGNORECASE)
     text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
     text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", text)
     text = re.sub(r"https?://[^\s<>\"']+", "<redacted:url>", text, flags=re.IGNORECASE)
@@ -31820,7 +31827,7 @@ def _trajectory_guard_redacted_ref(value: Any, *, default_kind: str = "evidence"
         "line_start",
         "fingerprint",
     )
-    redacted: dict[str, Any] = {"kind": str(value.get("kind") or default_kind)[:60]}
+    redacted: dict[str, Any] = {"kind": _trajectory_guard_safe_text(value.get("kind") or default_kind, max_chars=60)}
     for key in allowed:
         if key not in value:
             continue

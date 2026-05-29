@@ -148,6 +148,7 @@ class TrajectoryTrustGuardTests(ServerToolsTestBase):
         self.assertNotIn("/home/user", encoded)
         self.assertNotIn("/tmp/host-file", encoded)
         self.assertNotIn("/var/log", encoded)
+        self.assertNotIn("SECRET", encoded)
         self.assertFalse(report["privacy_metadata"]["raw_prompts_persisted"])
         self.assertFalse(report["privacy_metadata"]["raw_tool_outputs_persisted"])
         self.assertTrue(report["privacy_metadata"]["host_absolute_paths_redacted"])
