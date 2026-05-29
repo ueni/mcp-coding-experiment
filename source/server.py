@@ -243,6 +243,9 @@ MCP_SAMPLING_MODEL_HINTS_RAW = os.getenv("MCP_SAMPLING_MODEL_HINTS", "").strip()
 RELEASE_READINESS_DASHBOARD_RESOURCE_URI = "ui://codebase-tooling-mcp/release-readiness-dashboard"
 LABS_DIR = Path("source/labs")
 REPORTS_DIR = Path(".codebase-tooling-mcp/reports")
+RESULT_REFERENCE_SCHEMA = "mcp_result_reference.v1"
+RESULT_REFERENCE_RESOLVE_SCHEMA = "mcp_result_reference.resolve.v1"
+RESULT_REFERENCE_DIR = REPORTS_DIR / "result-references"
 PROVENANCE_SCHEMA = "mcp_artifact_provenance.v1"
 PROVENANCE_SUFFIX = ".provenance.json"
 ATTESTATION_SCHEMA = "mcp_artifact_attestation.v1"
@@ -426,6 +429,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "observation_compression_report": {"categories": ["read-only"]},
     "agents_context_health": {"categories": ["read-only", "governance"]},
     "artifact_provenance": {"categories": ["read-only"]},
+    "result_reference_resolve": {"categories": ["read-only", "governance"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
@@ -15271,6 +15275,462 @@ def _artifact_meta(resource_links: list[dict[str, Any]]) -> dict[str, Any]:
             },
         }
     }
+
+
+RESULT_REFERENCE_MODES = {"inline", "summary", "reference"}
+
+
+def _validate_result_mode(result_mode: str) -> str:
+    mode = str(result_mode or "inline").strip().lower()
+    if mode not in RESULT_REFERENCE_MODES:
+        raise ValueError("result_mode must be one of: inline, summary, reference")
+    return mode
+
+
+def _result_reference_ttl_hours(ttl_hours: int | None = None) -> int:
+    if ttl_hours is None:
+        return max(1, int(WORKFLOW_TASK_EXPIRY_HOURS))
+    return max(1, int(ttl_hours))
+
+
+def _result_reference_public_summary(tool_name: str, report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    if tool_name == "governance_report":
+        audit = report.get("audit") if isinstance(report.get("audit"), dict) else {}
+        counts = audit.get("counts") if isinstance(audit.get("counts"), dict) else {}
+        summary = {
+            "tool": tool_name,
+            "report_id": str(report.get("report_id", "")),
+            "generated_at": str(report.get("generated_at", "")),
+            "audit_event_count": int(counts.get("total", 0) or 0),
+            "blocked_count": int(counts.get("blocked_count", 0) or 0),
+            "security_status": str((report.get("secret_exposure", {}) if isinstance(report.get("secret_exposure"), dict) else {}).get("status", "")),
+            "resource_link_count": len(report.get("resource_links", [])) if isinstance(report.get("resource_links"), list) else 0,
+        }
+    elif tool_name == "self_optimization_report":
+        summary = {
+            "tool": tool_name,
+            "report_id": str(report.get("report_id", "")),
+            "generated_at": str(report.get("generated_at", "")),
+            "summary": summary,
+            "candidate_count": len(report.get("optimization_candidates", [])) if isinstance(report.get("optimization_candidates"), list) else 0,
+            "confidence": str(report.get("confidence", "")),
+            "resource_link_count": len(report.get("resource_links", [])) if isinstance(report.get("resource_links"), list) else 0,
+        }
+    else:
+        summary = {
+            "tool": tool_name,
+            "report_id": str(report.get("report_id", "")),
+            "generated_at": str(report.get("generated_at", "")),
+            "summary": summary,
+        }
+    return summary
+
+
+def _result_reference_audit_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    created = 0
+    resolved = 0
+    by_status: dict[str, int] = {}
+    latest: list[dict[str, Any]] = []
+    for event in events:
+        tool = str(event.get("tool_name", ""))
+        args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+        if tool == "result_reference_create":
+            created += 1
+        elif tool == "result_reference_resolve":
+            resolved += 1
+            status = str(args.get("status", "unknown") or "unknown")
+            by_status[status] = by_status.get(status, 0) + 1
+        else:
+            continue
+        latest.append(
+            {
+                "timestamp": str(event.get("timestamp", "")),
+                "event": tool,
+                "producer_tool": str(args.get("producer_tool", "")),
+                "reference_id": str(args.get("reference_id", "")),
+                "status": str(args.get("status", "")),
+                "payload_embedded": False,
+            }
+        )
+    latest.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+    return {
+        "schema": "mcp_result_reference.audit_summary.v1",
+        "created_count": created,
+        "resolved_count": resolved,
+        "resolve_status_counts": dict(sorted(by_status.items())),
+        "latest": latest[:20],
+        "privacy": {
+            "full_payloads_embedded": False,
+            "repository_contents_embedded": False,
+            "host_absolute_paths_embedded": False,
+        },
+    }
+
+
+def _write_result_reference_artifact(
+    *,
+    tool_name: str,
+    report: dict[str, Any],
+    summary: dict[str, Any],
+    ttl_hours: int | None = None,
+) -> dict[str, Any]:
+    created_at = _now_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=_result_reference_ttl_hours(ttl_hours))).isoformat()
+    body = json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    data = body.encode("utf-8")
+    digest = hashlib.sha256(data).hexdigest()
+    report_id = str(report.get("report_id") or tool_name or "result")
+    safe_report_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", report_id).strip(".-") or "result"
+    reference_id = f"{tool_name}-{safe_report_id}-{digest[:16]}"
+    rel_path = str(RESULT_REFERENCE_DIR / f"{reference_id}.json")
+    path = _resolve_repo_path(rel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    reference = {
+        "schema": RESULT_REFERENCE_SCHEMA,
+        "reference_id": reference_id,
+        "result_mode": "reference",
+        "producer_tool": tool_name,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "retention": {
+            "ttl_hours": _result_reference_ttl_hours(ttl_hours),
+            "retention_days": WORKFLOW_TASK_RETENTION_DAYS,
+            "policy": "repo-local artifact expires like short-lived workflow task results unless a caller chooses to retain/export it",
+        },
+        "summary": summary,
+        "content": {
+            "content_type": "application/json",
+            "mime_type": "application/json",
+            "encoding": "utf-8",
+            "size_bytes": len(data),
+            "hash": {"algorithm": "sha256", "value": digest},
+        },
+        "sensitivity": {
+            "level": "redacted",
+            "redaction": "producer report redaction policy applied before artifact creation",
+            "contains_secrets": False,
+            "sensitive_payload_embedded": False,
+        },
+        "resolver": {
+            "tool": "result_reference_resolve",
+            "uri": f"mcp-result://local/{reference_id}",
+            "artifact_uri": _repo_resource_uri(rel_path),
+            "path": rel_path,
+            "repository_local": True,
+            "repo_boundary_enforced": True,
+        },
+    }
+    _append_audit_event(
+        "result_reference_create",
+        ["read-only", "governance"],
+        True,
+        {
+            "producer_tool": tool_name,
+            "reference_id": reference_id,
+            "path": rel_path,
+            "size_bytes": len(data),
+            "hash_algorithm": "sha256",
+            "hash_prefix": digest[:12],
+            "expires_at": expires_at,
+            "payload_embedded": False,
+        },
+        "result handle created without embedding payload",
+    )
+    return reference
+
+
+def _result_reference_summary_envelope(
+    *,
+    tool_name: str,
+    report: dict[str, Any],
+    mode: str,
+    reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = _result_reference_public_summary(tool_name, report)
+    envelope: dict[str, Any] = {
+        "schema": str(report.get("schema", f"{tool_name}.v1")),
+        "result_mode": mode,
+        "report_id": str(report.get("report_id", "")),
+        "generated_at": str(report.get("generated_at", "")),
+        "summary": summary,
+        "exports": report.get("exports", {}) if isinstance(report.get("exports"), dict) else {},
+        "resource_links": report.get("resource_links", []) if isinstance(report.get("resource_links"), list) else [],
+        "security": {
+            "repo_boundary_enforced": True,
+            "full_payload_embedded": False,
+            "redaction_applied": True,
+            "resolver_required_for_full_payload": mode == "reference",
+        },
+        "_meta": report.get("_meta", {}) if isinstance(report.get("_meta"), dict) else {},
+    }
+    if reference is not None:
+        envelope["result_reference"] = reference
+        envelope["_meta"] = dict(envelope["_meta"])
+        envelope["_meta"]["result_reference"] = {
+            "schema": RESULT_REFERENCE_SCHEMA,
+            "reference_id": reference.get("reference_id", ""),
+            "resolver": reference.get("resolver", {}),
+            "payload_embedded": False,
+        }
+    return envelope
+
+
+def _apply_result_mode(
+    *,
+    tool_name: str,
+    report: dict[str, Any],
+    result_mode: str = "inline",
+    result_reference_ttl_hours: int | None = None,
+) -> dict[str, Any]:
+    mode = _validate_result_mode(result_mode)
+    if mode == "inline":
+        return report
+    if mode == "summary":
+        return _result_reference_summary_envelope(tool_name=tool_name, report=report, mode=mode)
+    summary = _result_reference_public_summary(tool_name, report)
+    reference = _write_result_reference_artifact(
+        tool_name=tool_name,
+        report=report,
+        summary=summary,
+        ttl_hours=result_reference_ttl_hours,
+    )
+    return _result_reference_summary_envelope(
+        tool_name=tool_name,
+        report=report,
+        mode=mode,
+        reference=reference,
+    )
+
+
+def _reference_field(reference: dict[str, Any], *path: str) -> Any:
+    current: Any = reference
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _is_sha256_hex(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{64}", value))
+
+
+def _normalize_result_reference_input(
+    reference: dict[str, Any] | None = None,
+    *,
+    reference_id: str = "",
+    path: str = "",
+    expected_hash: str = "",
+) -> dict[str, Any]:
+    ref = reference if isinstance(reference, dict) else {}
+    resolver = ref.get("resolver") if isinstance(ref.get("resolver"), dict) else {}
+    content = ref.get("content") if isinstance(ref.get("content"), dict) else {}
+    hash_obj = content.get("hash") if isinstance(content.get("hash"), dict) else {}
+
+    explicit_reference_id = str(reference_id or "")
+    explicit_path = str(path or "")
+    explicit_hash = str(expected_hash or "")
+    reference_hash = str(hash_obj.get("value", ""))
+    hash_algorithm = str(hash_obj.get("algorithm", "sha256")).lower()
+
+    has_reference = bool(ref)
+    explicit_triplet_valid = bool(
+        explicit_reference_id
+        and explicit_path
+        and explicit_hash
+        and _is_sha256_hex(explicit_hash)
+    )
+    handle_valid = bool(
+        has_reference
+        and ref.get("schema") == RESULT_REFERENCE_SCHEMA
+        and str(ref.get("reference_id", ""))
+        and str(resolver.get("path", ""))
+        and hash_algorithm == "sha256"
+        and _is_sha256_hex(reference_hash)
+    )
+
+    invalid_reason = ""
+    if not handle_valid and not explicit_triplet_valid:
+        if has_reference:
+            invalid_reason = (
+                "result reference must be a valid mcp_result_reference.v1 handle or include "
+                "explicit reference_id, repository-relative artifact path, and SHA-256 hash"
+            )
+        else:
+            invalid_reason = (
+                "result reference resolver requires a valid mcp_result_reference.v1 handle or "
+                "explicit reference_id, repository-relative artifact path, and SHA-256 hash"
+            )
+    elif explicit_hash and not _is_sha256_hex(explicit_hash):
+        invalid_reason = "explicit expected_hash must be a SHA-256 hex digest"
+
+    return {
+        "reference_id": explicit_reference_id or str(ref.get("reference_id", "")),
+        "path": explicit_path or str(resolver.get("path", "")),
+        "expected_hash": explicit_hash or reference_hash,
+        "expires_at": str(ref.get("expires_at", "")),
+        "mime_type": str(content.get("mime_type", content.get("content_type", "application/octet-stream"))),
+        "producer_tool": str(ref.get("producer_tool", "")),
+        "summary": ref.get("summary", {}) if isinstance(ref.get("summary"), dict) else {},
+        "invalid_reason": invalid_reason,
+    }
+
+
+def _result_reference_response(
+    *,
+    status: str,
+    ok: bool,
+    reference_id: str = "",
+    path: str = "",
+    message: str = "",
+    producer_tool: str = "",
+    summary: dict[str, Any] | None = None,
+    artifact: dict[str, Any] | None = None,
+    content: str | None = None,
+    hash_verified_before_content: bool = False,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "schema": RESULT_REFERENCE_RESOLVE_SCHEMA,
+        "ok": ok,
+        "status": status,
+        "read_only": True,
+        "reference_id": reference_id,
+        "producer_tool": producer_tool,
+        "summary": summary or {},
+        "artifact": artifact or ({"path": path} if path else {}),
+        "message": message,
+        "security": {
+            "repo_boundary_enforced": True,
+            "mutates_repository": False,
+            "absolute_host_paths_exposed": False,
+            "hash_verified_before_content": hash_verified_before_content,
+            "payload_embedded": content is not None,
+        },
+    }
+    if content is not None:
+        response["content"] = content
+        response["content_encoding"] = "utf-8"
+    _append_audit_event(
+        "result_reference_resolve",
+        ["read-only", "governance"],
+        ok,
+        {
+            "reference_id": reference_id,
+            "producer_tool": producer_tool,
+            "path": path,
+            "status": status,
+            "payload_embedded": content is not None,
+        },
+        message or status,
+    )
+    return response
+
+
+def _result_reference_resolve_impl(
+    reference: dict[str, Any] | None = None,
+    reference_id: str = "",
+    path: str = "",
+    expected_hash: str = "",
+    include_content: bool = True,
+) -> dict[str, Any]:
+    normalized = _normalize_result_reference_input(
+        reference,
+        reference_id=reference_id,
+        path=path,
+        expected_hash=expected_hash,
+    )
+    ref_id = normalized["reference_id"]
+    rel_path = normalized["path"]
+    expected = normalized["expected_hash"]
+    producer_tool = normalized["producer_tool"]
+    summary = normalized["summary"]
+    if normalized["invalid_reason"]:
+        return _result_reference_response(
+            status="invalid_reference",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message=normalized["invalid_reason"],
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    if not rel_path:
+        return _result_reference_response(
+            status="invalid_reference",
+            ok=False,
+            reference_id=ref_id,
+            message="result reference is missing a repository-relative artifact path",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    expires_at = _parse_iso_datetime(normalized["expires_at"])
+    if expires_at is not None and datetime.now(timezone.utc) > expires_at:
+        return _result_reference_response(
+            status="expired",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message="result reference has expired; regenerate the report to create a fresh handle",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    try:
+        artifact_path = _resolve_repo_path(rel_path)
+    except ValueError:
+        return _result_reference_response(
+            status="boundary_rejected",
+            ok=False,
+            reference_id=ref_id,
+            path="<redacted:outside_repo>",
+            message="referenced artifact path escapes repository boundary",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    if not artifact_path.exists() or not artifact_path.is_file():
+        return _result_reference_response(
+            status="missing",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message="referenced artifact is missing; regenerate the report to create a fresh handle",
+            producer_tool=producer_tool,
+            summary=summary,
+        )
+    data = artifact_path.read_bytes()
+    actual_hash = hashlib.sha256(data).hexdigest()
+    artifact = {
+        "uri": _repo_resource_uri(rel_path),
+        "path": rel_path,
+        "mime_type": normalized["mime_type"] or "application/octet-stream",
+        "size_bytes": len(data),
+        "hash": {"algorithm": "sha256", "value": actual_hash},
+    }
+    if not hmac.compare_digest(actual_hash, expected):
+        return _result_reference_response(
+            status="hash_mismatch",
+            ok=False,
+            reference_id=ref_id,
+            path=rel_path,
+            message="referenced artifact hash does not match the handle",
+            producer_tool=producer_tool,
+            summary=summary,
+            artifact={**artifact, "expected_hash": {"algorithm": "sha256", "value": expected}},
+        )
+    text = data.decode("utf-8", errors="replace") if include_content else None
+    return _result_reference_response(
+        status="resolved",
+        ok=True,
+        reference_id=ref_id,
+        path=rel_path,
+        message="referenced artifact resolved inside repository boundary",
+        producer_tool=producer_tool,
+        summary=summary,
+        artifact=artifact,
+        content=text,
+        hash_verified_before_content=True,
+    )
 
 
 _WORKFLOW_TASK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -33712,6 +34172,7 @@ def _governance_report_impl(
         "workflow_policy_plan": _latest_workflow_policy_plan_from_result_store(),
         "policy_governance_decision": _latest_policy_governance_decision_from_result_store(),
         "untrusted_content_signals": untrusted_content_summary,
+        "result_references": _result_reference_audit_summary(events),
         "agents_context_health": summarize_agents_context_health(
             analyze_agents_context(REPO_PATH)
         ),
@@ -34090,6 +34551,8 @@ def self_optimization_report(
     github_issue_update_mode: str = "off",
     github_repository: str = "",
     github_token_env: str = "GITHUB_TOKEN",
+    result_mode: str = "inline",
+    result_reference_ttl_hours: int | None = None,
 ) -> dict[str, Any]:
     """Build a repo-local efficiency report for MCP usage, token savings, throughput, bottlenecks, and optimization candidates."""
     arguments = {
@@ -34106,6 +34569,8 @@ def self_optimization_report(
         "github_issue_update_mode": github_issue_update_mode,
         "github_repository_configured": bool(github_repository),
         "github_token_env": github_token_env,
+        "result_mode": result_mode,
+        "result_reference_ttl_hours": result_reference_ttl_hours,
     }
     categories = _tool_categories("self_optimization_report", arguments)
     with _otel_span(
@@ -34137,6 +34602,12 @@ def self_optimization_report(
             arguments,
             categories,
             _run_self_optimization_report,
+        )
+        result = _apply_result_mode(
+            tool_name="self_optimization_report",
+            report=result,
+            result_mode=result_mode,
+            result_reference_ttl_hours=result_reference_ttl_hours,
         )
         _otel_set_result_attributes(span, result)
         return result
@@ -34313,6 +34784,8 @@ def governance_report(
     head_ref: str = "HEAD",
     export: bool = True,
     compressed_observation: bool = False,
+    result_mode: str = "inline",
+    result_reference_ttl_hours: int | None = None,
 ) -> dict[str, Any]:
     """Build and optionally export a redacted audit/governance report."""
     arguments = {
@@ -34322,6 +34795,8 @@ def governance_report(
         "head_ref": head_ref,
         "export": export,
         "compressed_observation": compressed_observation,
+        "result_mode": result_mode,
+        "result_reference_ttl_hours": result_reference_ttl_hours,
     }
     with _otel_span(
         "mcp.tool.governance_report",
@@ -34335,9 +34810,45 @@ def governance_report(
             export=export,
             compressed_observation=compressed_observation,
         )
+        result = _apply_result_mode(
+            tool_name="governance_report",
+            report=result,
+            result_mode=result_mode,
+            result_reference_ttl_hours=result_reference_ttl_hours,
+        )
         _otel_set_result_attributes(span, result)
         return result
 
+
+
+@mcp.tool()
+def result_reference_resolve(
+    reference: dict[str, Any] | None = None,
+    reference_id: str = "",
+    path: str = "",
+    expected_hash: str = "",
+    include_content: bool = True,
+) -> dict[str, Any]:
+    """Resolve a repository-local mcp_result_reference.v1 artifact handle."""
+    arguments = {
+        "reference_id": reference_id or str(reference.get("reference_id", "")) if isinstance(reference, dict) else reference_id,
+        "path_configured": bool(path or (reference.get("resolver", {}) if isinstance(reference, dict) and isinstance(reference.get("resolver"), dict) else {}).get("path")),
+        "expected_hash_configured": bool(expected_hash),
+        "include_content": include_content,
+    }
+    with _otel_span(
+        "mcp.tool.result_reference_resolve",
+        _otel_tool_attributes("result_reference_resolve", arguments),
+    ) as span:
+        result = _result_reference_resolve_impl(
+            reference=reference,
+            reference_id=reference_id,
+            path=path,
+            expected_hash=expected_hash,
+            include_content=include_content,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 @mcp.tool()

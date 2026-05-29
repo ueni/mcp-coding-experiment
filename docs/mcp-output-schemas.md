@@ -41,6 +41,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `observation_compression_report`
 - `agents_context_health`
 - `artifact_provenance`
+- `result_reference_resolve`
 - `workflow_diagnostics`
 - `workflow_lineage`
 - `interaction_invariant_audit`
@@ -81,6 +82,18 @@ The selected-test contract is intentionally conservative: `selected_tests` lists
 
 `impact_tests` consumes a fresh artifact first and otherwise falls back to dependency/naming heuristics. Its normal output includes `impact_map.artifact_status`, optional `impact_map.fallback_used`, artifact `coverage_gaps`, and `unmapped_changed_files`; compact output keeps `test_count`/`tests` and adds `impact_map_status` plus `unmapped_changed_files`. `change_impact_gate` and `quality_router(mode="change_impact")` expose the same selected tests and unmapped files under their gate result.
 
+
+### Reference-based result handles
+
+Large read-only reports can opt into `result_mode` values:
+
+- `inline` (default) preserves the existing full response.
+- `summary` returns the report schema, report id, generated time, compact summary, export/resource metadata, and no full bulky payload.
+- `reference` returns the same compact summary plus a local `mcp_result_reference.v1` handle.
+
+The `mcp_result_reference.v1` envelope includes a summary, `content_type`/MIME, byte size, SHA-256 hash, expiry/retention metadata aligned with short-lived workflow task retention defaults, sensitivity/redaction metadata, and repository-local resolver information (`result_reference_resolve`, `repo://file/...`, and repository-relative artifact path). Current first adopters are `governance_report` and `self_optimization_report`; their default remains inline/backward-compatible.
+
+`result_reference_resolve` is read-only. It resolves only repository-relative artifacts that pass the normal repository boundary check, verifies the recorded SHA-256 before returning content, and returns explicit `expired`, `missing`, `boundary_rejected`, `hash_mismatch`, or `invalid_reference` statuses without exposing host absolute paths. Result-handle creation/resolution is recorded in audit events with reference id, producer tool, size/hash prefix, status, and `payload_embedded=false`; `governance_report` summarizes those events under `result_references` without embedding referenced payloads.
 
 ### Adaptive observation compression
 
@@ -214,12 +227,13 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `agent_security_delta` | `schema`, `report_id`, `generated_at`, `base_ref`, `head_ref`, `status`, `ok`, `summary`, `findings`, `gate`, `exports` | read-only flag, changed files, skipped files, security, resource links, SARIF/provenance sidecars, and redacted evidence |
 | `agent_security_delta_report` | `schema`, `report_id`, `generated_at`, `base_ref`, `head_ref`, `status`, `ok`, `summary`, `findings`, `gate`, `exports` | read-only flag, changed files, skipped files, security, resource links, SARIF/provenance sidecars, and redacted evidence |
 | `mcp_threat_model_report` | `schema`, `report_id`, `generated_at`, `status`, `ok`, `summary`, `components`, `trust_boundaries`, `dread_rubric`, `threats`, `findings`, `exports` | controls, fixture/baseline metadata, temporal catalog mutation evidence, resource links, and offline STRIDE/DREAD evidence |
-| `governance_report` | `schema`, `report_id`, `generated_at`, `audit`, `governance_hooks`, `agents_context_health`, `exports`, `resource_links` | `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `tool_catalog_integrity`, `ci_workflow_security`, `secret_exposure`, `agent_security_delta`, aggregate `untrusted_content_signals`, compact `memory_governance`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
+| `governance_report` | `schema`, `report_id`, `generated_at` | mode-specific inline/compact fields including `audit`, `governance_hooks`, `agents_context_health`, `exports`, `resource_links`, `summary`, `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `tool_catalog_integrity`, `ci_workflow_security`, `secret_exposure`, `agent_security_delta`, aggregate `untrusted_content_signals`, compact `memory_governance`, `result_references`, `result_mode`, `result_reference`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
 | `memory_governance_report` | `schema`, `generated_at`, `read_only`, `policy_version`, `summary`, `stores`, `findings`, `security` | `inputs`, redacted metadata-only `entries`, `advisory_only` |
-| `self_optimization_report` | `schema`, `report_id`, `generated_at`, `window`, `summary`, `metrics`, `optimization_candidates`, `optimization_integrity_report`, `agents_context_health`, `security` | `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `patch_survivorship`, `optimization_candidates[].anti_gaming`, `metrics.observation_compression`, `_meta` |
+| `self_optimization_report` | `schema`, `report_id`, `generated_at` | mode-specific inline/compact fields including `window`, `summary`, `metrics`, `optimization_candidates`, `optimization_integrity_report`, `agents_context_health`, `security`, `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `patch_survivorship`, `optimization_candidates[].anti_gaming`, `metrics.observation_compression`, `result_mode`, `result_reference`, `_meta` |
 | `observation_compression_report` | `schema`, `report_id`, `generated_at`, `read_only`, `advisory_only`, `window`, `summary`, `classification_buckets`, `observations`, `fingerprints`, `compression_opportunities`, `low_confidence_caveats`, `security` | `sources`, `resource_links`, `exports`, `markdown`, `_meta` |
 | `agents_context_health` | `schema`, `read_only`, `advisory_only`, `target`, `budget`, `summary`, `instruction_categories`, `duplicate_guidance`, `stale_guidance`, `risky_global_instructions`, `move_candidates`, `safety` | bounded finding list and budget/severity convenience counts |
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
+| `result_reference_resolve` | `schema`, `ok`, `status`, `read_only`, `reference_id`, `artifact`, `security` | producer tool, summary, message, optional content, content encoding |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_failure_step`, `failure_category`, `constraint_violations`, `evidence`, `confidence`, `recommended_followup`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories`, `critical_step_candidate`, `safe_next_actions`, `failure_taxonomy`, `llm_judging` |
 | `workflow_lineage` | `schema`, `read_only`, `manifest_path`, `plan_id`, `status`, `ok`, `checks`, `conditions` | `mode`, `security` |
 | `interaction_invariant_audit` | `schema`, `read_only`, `advisory_only`, `ok_to_continue`, `confidence`, `extracted_invariants`, `suspected_smells`, `safe_next_actions`, `linked_gates` | `security`, `redactions_applied`, `input_summary` |
