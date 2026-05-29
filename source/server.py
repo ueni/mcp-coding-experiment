@@ -283,6 +283,8 @@ SECRET_EXPOSURE_REPORT_SCHEMA = "secret_exposure_report.v1"
 SECRET_EXPOSURE_DEFAULT_ALLOWLIST = Path(".codebase-tooling-mcp/secret-exposure-allowlist.json")
 AGENT_SECURITY_DELTA_REPORT_PREFIX = "agent-security-delta-report"
 AGENT_SECURITY_DELTA_REPORT_SCHEMA = "agent_security_delta_report.v1"
+SECURITY_ROOT_CAUSE_EVIDENCE_PREFIX = "security-root-cause-evidence"
+SECURITY_ROOT_CAUSE_EVIDENCE_SCHEMA = "security_root_cause_evidence.v1"
 MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
 MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
 MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
@@ -419,6 +421,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "secret_exposure_report": {"categories": ["read-only", "governance"]},
     "agent_security_delta": {"categories": ["read-only", "governance"]},
     "agent_security_delta_report": {"categories": ["read-only", "governance"]},
+    "security_root_cause_evidence": {"categories": ["read-only", "governance"]},
     "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
@@ -12144,6 +12147,7 @@ def _governance_workflow_lineage_plan_inputs(
             "ci_workflow_security_report": CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
             "secret_exposure_report": SECRET_EXPOSURE_REPORT_SCHEMA,
             "agent_security_delta_report": AGENT_SECURITY_DELTA_REPORT_SCHEMA,
+            "security_root_cause_evidence": SECURITY_ROOT_CAUSE_EVIDENCE_SCHEMA,
             "execution_mode": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
         },
     }
@@ -18303,6 +18307,539 @@ def _agent_security_delta_compact(report: dict[str, Any]) -> dict[str, Any]:
             "warning_finding_count": gate.get("warning_finding_count", 0),
         },
     }
+
+
+SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS = AGENT_SECURITY_DELTA_WORKTREE_REFS
+SECURITY_ROOT_CAUSE_REASON_WEIGHTS = {
+    "security_delta_finding": 38,
+    "removed_security_delta_finding": 34,
+    "security_sink": 24,
+    "input_source": 18,
+    "validator_or_boundary_check": 18,
+    "security_sensitive_path": 14,
+    "changed_test": 12,
+    "vulnerability_hint_match": 10,
+    "call_import_neighbor": 8,
+}
+SECURITY_ROOT_CAUSE_SECURITY_PATH_RE = re.compile(
+    r"(^|[/_.-])(auth|authorize|permission|security|secret|token|credential|path|file|sandbox|container|"
+    r"docker|command|shell|exec|deserialize|yaml|pickle|sql|query|validation|validator|sanitize|policy|guard)([/_.-]|$)",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_SOURCE_RE = re.compile(
+    r"\b(request\.(args|form|json|files|headers|cookies)|input\s*\(|sys\.argv|os\.environ|getenv\s*\(|uploaded_file|user_input)\b",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_SINK_RE = re.compile(
+    r"\b(subprocess\.|os\.(system|popen)|eval\s*\(|exec\s*\(|pickle\.loads?\b|yaml\.load\b|open\s*\(|send_file\s*\(|\.execute\s*\(|docker\.sock|privileged\s*[:=]\s*true)\b",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_VALIDATOR_RE = re.compile(
+    r"\b(validate|validator|sanitize|canonical|resolve\s*\(|relative_to\s*\(|normpath\s*\(|abspath\s*\(|safe_join|allowed|auth|authorize|permission|SafeLoader|parameterized|escape)\b",
+    re.IGNORECASE,
+)
+
+
+def _security_root_cause_report_id(seed: dict[str, Any]) -> str:
+    payload = json.dumps(seed, sort_keys=True, ensure_ascii=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{SECURITY_ROOT_CAUSE_EVIDENCE_PREFIX}-{_now_stamp()}-{digest}"
+
+
+def _security_root_cause_text_for_path(rel_path: str, ref: str) -> str | None:
+    return _agent_security_delta_current_text(rel_path, ref)
+
+
+def _security_root_cause_line(text: str, line_no: int) -> str:
+    lines = text.splitlines()
+    if 1 <= line_no <= len(lines):
+        return _agent_security_delta_redact_evidence(lines[line_no - 1], max_chars=180)
+    return ""
+
+
+def _security_root_cause_symbol_ranges(text: str, rel_path: str) -> list[dict[str, Any]]:
+    if Path(rel_path).suffix.lower() != ".py":
+        return []
+    try:
+        tree = ast.parse(text or "\n", filename=rel_path)
+    except SyntaxError:
+        return []
+    symbols: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = getattr(node, "name", "")
+            if not name:
+                continue
+            symbols.append(
+                {
+                    "name": name,
+                    "kind": "class" if isinstance(node, ast.ClassDef) else "function",
+                    "line_start": int(getattr(node, "lineno", 1) or 1),
+                    "line_end": int(
+                        getattr(node, "end_lineno", getattr(node, "lineno", 1))
+                        or getattr(node, "lineno", 1)
+                        or 1
+                    ),
+                }
+            )
+    symbols.sort(key=lambda row: (int(row["line_start"]), str(row["name"])))
+    return symbols
+
+
+def _security_root_cause_symbol_for_line(symbols: list[dict[str, Any]], line_no: int) -> dict[str, Any] | None:
+    matches = [
+        symbol
+        for symbol in symbols
+        if int(symbol.get("line_start", 1)) <= line_no <= int(symbol.get("line_end", 1))
+    ]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda row: int(row.get("line_end", 1)) - int(row.get("line_start", 1)))[0]
+
+
+def _security_root_cause_reason(reason_type: str, description: str, *, line: int = 1, evidence: str = "") -> dict[str, Any]:
+    return {
+        "type": reason_type,
+        "description": description,
+        "weight": SECURITY_ROOT_CAUSE_REASON_WEIGHTS.get(reason_type, 1),
+        "line": max(1, int(line or 1)),
+        "evidence": evidence,
+        "raw_returned": False,
+    }
+
+
+def _security_root_cause_location_key(rel_path: str, symbol: dict[str, Any] | None) -> tuple[str, str, str]:
+    if symbol:
+        return (rel_path, str(symbol.get("kind", "function")), str(symbol.get("name", "")))
+    return (rel_path, "file", "")
+
+
+def _security_root_cause_add_reason(
+    candidates: dict[tuple[str, str, str], dict[str, Any]],
+    rel_path: str,
+    symbol: dict[str, Any] | None,
+    reason: dict[str, Any],
+) -> None:
+    key = _security_root_cause_location_key(rel_path, symbol)
+    if key not in candidates:
+        candidates[key] = {
+            "schema": "security_root_cause_location.v1",
+            "path": rel_path,
+            "kind": key[1],
+            "symbol": key[2],
+            "line_start": int(symbol.get("line_start", reason.get("line", 1))) if symbol else int(reason.get("line", 1)),
+            "line_end": int(symbol.get("line_end", reason.get("line", 1))) if symbol else int(reason.get("line", 1)),
+            "reasons": [],
+            "signals": {},
+            "security_delta_finding_ids": [],
+        }
+    row = candidates[key]
+    existing = {(item.get("type"), item.get("line"), item.get("description")) for item in row["reasons"]}
+    signature = (reason.get("type"), reason.get("line"), reason.get("description"))
+    if signature not in existing:
+        row["reasons"].append(reason)
+    signals = row.setdefault("signals", {})
+    signals[str(reason.get("type", "unknown"))] = signals.get(str(reason.get("type", "unknown")), 0) + 1
+
+
+def _security_root_cause_import_neighbors(text: str, rel_path: str, changed_paths: set[str]) -> list[dict[str, Any]]:
+    if Path(rel_path).suffix.lower() != ".py":
+        return []
+    try:
+        tree = ast.parse(text or "\n", filename=rel_path)
+    except SyntaxError:
+        return []
+    neighbors: list[dict[str, Any]] = []
+    changed_stems = {Path(path).stem for path in changed_paths}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [str(node.module or ""), *[alias.name for alias in node.names]]
+        else:
+            continue
+        matched = sorted({name for name in names if name.split(".")[-1] in changed_stems})
+        if matched:
+            neighbors.append({"path": rel_path, "line": int(getattr(node, "lineno", 1) or 1), "imports_changed_module": matched[:5]})
+    return neighbors[:25]
+
+
+def _security_root_cause_related_tests(changed_paths: list[str], text_by_path: dict[str, str], vulnerability_hint: str) -> list[dict[str, Any]]:
+    hint = vulnerability_hint.lower().strip()
+    tests: list[dict[str, Any]] = []
+    for rel in changed_paths:
+        path = Path(rel)
+        is_test = rel.startswith("tests/") or path.name.startswith("test_") or path.name.endswith("_test.py")
+        if not is_test:
+            continue
+        text = text_by_path.get(rel, "")
+        matched_terms: list[str] = []
+        lowered = text.lower()
+        for term in ("security", "auth", "path", "traversal", "command", "shell", "injection", "secret", "permission", "sanitize", "validate"):
+            if term in lowered or term in rel.lower():
+                matched_terms.append(term)
+        if hint:
+            for token in re.findall(r"[a-z0-9_]{4,}", hint):
+                if token in lowered or token in rel.lower():
+                    matched_terms.append(token)
+        tests.append(
+            {
+                "path": rel,
+                "security_relevant": bool(matched_terms),
+                "matched_terms": sorted(set(matched_terms))[:12],
+                "raw_contents_returned": False,
+            }
+        )
+    return tests[:100]
+
+
+def _security_root_cause_confidence(score: int, reason_types: set[str]) -> tuple[str, float]:
+    independent = len(reason_types)
+    if score >= 80 and independent >= 3:
+        return "high", 0.85
+    if score >= 42 and independent >= 2:
+        return "medium", 0.62
+    if score >= 18:
+        return "low", 0.36
+    return "low", 0.2
+
+
+def _security_root_cause_changed_paths(
+    base_ref: str,
+    head_ref: str,
+    *,
+    include_globs: list[str] | None,
+    exclude_globs: list[str] | None,
+) -> tuple[list[str], dict[str, Any]]:
+    changed_paths, meta = _agent_security_delta_changed_paths(
+        base_ref,
+        head_ref,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+    )
+    candidates = set(changed_paths)
+    diff_args = ["diff", "--name-only", f"{base_ref}...{head_ref}"]
+    if str(head_ref or "").strip() in SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS:
+        diff_args = ["diff", "--name-only", base_ref]
+    result = _git(*diff_args, "--", ".", check=False)
+    if result.returncode != 0 and "..." in " ".join(diff_args):
+        result = _git("diff", "--name-only", base_ref, head_ref, "--", ".", check=False)
+    if result.returncode == 0:
+        candidates.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    if str(head_ref or "").strip() in SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS:
+        other = _git("ls-files", "--others", "--exclude-standard", check=False)
+        if other.returncode == 0:
+            candidates.update(line.strip() for line in other.stdout.splitlines() if line.strip())
+    exclude = [".git/**", ".codebase-tooling-mcp/**", "**/__pycache__/**", "**/.venv/**", "**/node_modules/**", *list(exclude_globs or [])]
+    related_test_paths = sorted(
+        rel for rel in candidates
+        if (rel.startswith("tests/") or Path(rel).name.startswith("test_") or Path(rel).name.endswith("_test.py"))
+        and _allowed_by_globs(rel, include_globs or ["*.py", "**/*.py", "*.md", "**/*.md"], exclude)
+    )[:200]
+    merged = sorted({*changed_paths, *related_test_paths})[:700]
+    meta["related_test_changed_count"] = len(related_test_paths)
+    return merged, meta
+
+
+def _security_root_cause_security_delta_input(
+    base_ref: str,
+    head_ref: str,
+    include_globs: list[str] | None,
+    exclude_globs: list[str] | None,
+    provided: dict[str, Any] | None,
+    enabled: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if isinstance(provided, dict) and provided.get("schema") == AGENT_SECURITY_DELTA_REPORT_SCHEMA:
+        return provided, {"source": "provided", "schema": provided.get("schema", ""), "report_id": provided.get("report_id", "")}
+    if not enabled:
+        return None, {"source": "disabled", "schema": "", "report_id": ""}
+    try:
+        report = _agent_security_delta_report_impl(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            export=False,
+        )
+        return report, {"source": "generated_offline", "schema": report.get("schema", ""), "report_id": report.get("report_id", "")}
+    except Exception as exc:
+        return None, {"source": "unavailable", "schema": "", "report_id": "", "error": _agent_security_delta_redact_evidence(str(exc))}
+
+
+def _security_root_cause_evidence_impl(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    vulnerability_hint: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    max_locations: int = 20,
+    include_security_delta: bool = True,
+    security_delta_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    _require_git_repo()
+    max_locations = max(1, min(int(max_locations or 20), 100))
+    changed_paths, diff_meta = _security_root_cause_changed_paths(
+        base_ref,
+        head_ref,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+    )
+    text_by_path: dict[str, str] = {}
+    skipped: list[dict[str, Any]] = []
+    for rel in changed_paths:
+        text = _security_root_cause_text_for_path(rel, head_ref)
+        if text is None:
+            baseline = _agent_security_delta_git_blob(base_ref, rel)
+            if baseline is not None:
+                text = baseline
+            else:
+                skipped.append({"path": rel, "reason": "unreadable_or_binary"})
+                continue
+        text_by_path[rel] = text
+
+    delta_report, delta_meta = _security_root_cause_security_delta_input(
+        base_ref,
+        head_ref,
+        include_globs,
+        exclude_globs,
+        security_delta_report,
+        include_security_delta,
+    )
+    candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
+    changed_set = set(changed_paths)
+    call_import_neighbors: list[dict[str, Any]] = []
+    hint_lower = vulnerability_hint.lower().strip()
+    hint_tokens = set(re.findall(r"[a-z0-9_]{4,}", hint_lower))
+
+    for rel, text in text_by_path.items():
+        symbols = _security_root_cause_symbol_ranges(text, rel)
+        suffix = Path(rel).suffix.lower()
+        if SECURITY_ROOT_CAUSE_SECURITY_PATH_RE.search(rel):
+            _security_root_cause_add_reason(
+                candidates,
+                rel,
+                None,
+                _security_root_cause_reason(
+                    "security_sensitive_path",
+                    "Changed path name is security-sensitive or boundary-adjacent.",
+                    evidence=_agent_security_delta_redact_evidence(rel),
+                ),
+            )
+        if hint_tokens and any(token in rel.lower() for token in hint_tokens):
+            _security_root_cause_add_reason(
+                candidates,
+                rel,
+                None,
+                _security_root_cause_reason(
+                    "vulnerability_hint_match",
+                    "Changed path matches the caller-supplied vulnerability hint.",
+                    evidence=_agent_security_delta_redact_evidence(rel),
+                ),
+            )
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            symbol = _security_root_cause_symbol_for_line(symbols, line_no)
+            redacted = _security_root_cause_line(text, line_no)
+            if SECURITY_ROOT_CAUSE_SOURCE_RE.search(line):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "input_source",
+                        "Code references a user/tool-controlled input source.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+            if SECURITY_ROOT_CAUSE_SINK_RE.search(line):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "security_sink",
+                        "Code touches a security-sensitive sink or boundary.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+            if SECURITY_ROOT_CAUSE_VALIDATOR_RE.search(line):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "validator_or_boundary_check",
+                        "Patch touches validation, authorization, sanitization, or boundary-check logic.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+            if hint_tokens and any(token in line.lower() for token in hint_tokens):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "vulnerability_hint_match",
+                        "Line matches the caller-supplied vulnerability hint.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+        if suffix == ".py":
+            call_import_neighbors.extend(_security_root_cause_import_neighbors(text, rel, changed_set))
+
+    related_tests = _security_root_cause_related_tests(changed_paths, text_by_path, vulnerability_hint)
+    for test in related_tests:
+        _security_root_cause_add_reason(
+            candidates,
+            str(test["path"]),
+            None,
+            _security_root_cause_reason(
+                "changed_test",
+                "Changed test file may carry regression evidence for the security-sensitive fix path.",
+                evidence=", ".join(test.get("matched_terms", [])) if test.get("matched_terms") else str(test["path"]),
+            ),
+        )
+
+    if delta_report:
+        for section, reason_type, description in (
+            ("findings", "security_delta_finding", "Existing agent-security-delta signal overlaps this location."),
+            ("removed_findings", "removed_security_delta_finding", "Security-delta finding was removed by the patch, suggesting a candidate fixed root-cause area."),
+        ):
+            findings = delta_report.get(section, []) if isinstance(delta_report.get(section), list) else []
+            for finding in findings[:200]:
+                if not isinstance(finding, dict):
+                    continue
+                rel = str(finding.get("path", ""))
+                if not rel:
+                    continue
+                text = text_by_path.get(rel) or _security_root_cause_text_for_path(rel, head_ref) or ""
+                symbols = _security_root_cause_symbol_ranges(text, rel) if text else []
+                line_no = int(finding.get("line_start", 1) or 1)
+                symbol = _security_root_cause_symbol_for_line(symbols, line_no)
+                evidence = finding.get("evidence", {}) if isinstance(finding.get("evidence"), dict) else {}
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        reason_type,
+                        description,
+                        line=line_no,
+                        evidence=str(evidence.get("redacted_excerpt") or finding.get("rule_id") or ""),
+                    ),
+                )
+                key = _security_root_cause_location_key(rel, symbol)
+                if key in candidates:
+                    fid = str(finding.get("id") or finding.get("fingerprint") or finding.get("rule_id") or "")
+                    if fid and fid not in candidates[key]["security_delta_finding_ids"]:
+                        candidates[key]["security_delta_finding_ids"].append(fid)
+
+    for neighbor in call_import_neighbors[:100]:
+        rel = str(neighbor.get("path", ""))
+        if not rel:
+            continue
+        _security_root_cause_add_reason(
+            candidates,
+            rel,
+            None,
+            _security_root_cause_reason(
+                "call_import_neighbor",
+                "Import graph touches another changed module; inspect call path before claiming a root-cause fix.",
+                line=int(neighbor.get("line", 1) or 1),
+                evidence=", ".join(neighbor.get("imports_changed_module", [])),
+            ),
+        )
+
+    ranked: list[dict[str, Any]] = []
+    for row in candidates.values():
+        reason_types = {str(reason.get("type", "")) for reason in row.get("reasons", []) if isinstance(reason, dict)}
+        score = sum(int(reason.get("weight", 0) or 0) for reason in row.get("reasons", []) if isinstance(reason, dict))
+        confidence, confidence_score = _security_root_cause_confidence(score, reason_types)
+        row["score"] = score
+        row["confidence"] = confidence
+        row["confidence_score"] = confidence_score
+        row["reasons"] = sorted(
+            row.get("reasons", []),
+            key=lambda item: (
+                -int(item.get("weight", 0) or 0),
+                int(item.get("line", 1) or 1),
+                str(item.get("type", "")),
+            ),
+        )[:12]
+        row["security_delta_finding_ids"] = row.get("security_delta_finding_ids", [])[:12]
+        ranked.append(row)
+    ranked.sort(key=lambda row: (-int(row.get("score", 0)), str(row.get("path", "")), int(row.get("line_start", 1))))
+    for index, row in enumerate(ranked[:max_locations], start=1):
+        row["rank"] = index
+    ranked = ranked[:max_locations]
+
+    high_conf = sum(1 for row in ranked if row.get("confidence") == "high")
+    medium_conf = sum(1 for row in ranked if row.get("confidence") == "medium")
+    status = "no_changed_files" if not changed_paths else "evidence_found" if ranked else "insufficient_evidence"
+    generated_at = _now_iso()
+    summary = {
+        "changed_file_count": len(changed_paths),
+        "ranked_location_count": len(ranked),
+        "high_confidence_location_count": high_conf,
+        "medium_confidence_location_count": medium_conf,
+        "related_test_count": len(related_tests),
+        "security_delta_findings_used": sum(len(row.get("security_delta_finding_ids", [])) for row in ranked),
+        "status_reason": "ranked_static_evidence" if ranked else "no_changed_files" if not changed_paths else "changed_files_lacked_root_cause_signals",
+    }
+    report: dict[str, Any] = {
+        "schema": SECURITY_ROOT_CAUSE_EVIDENCE_SCHEMA,
+        "report_id": _security_root_cause_report_id(
+            {
+                "generated_at": generated_at,
+                "base_ref": base_ref,
+                "head_ref": head_ref,
+                "summary": summary,
+                "changed_paths": changed_paths,
+            }
+        ),
+        "generated_at": generated_at,
+        "read_only": True,
+        "advisory_only": True,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "status": status,
+        "ok": status != "insufficient_evidence",
+        "summary": summary,
+        "changed_files": changed_paths,
+        "ranked_locations": ranked,
+        "related_tests": related_tests,
+        "call_import_neighbors": call_import_neighbors[:100],
+        "evidence_inputs": {
+            "diff": diff_meta,
+            "security_delta": delta_meta,
+            "vulnerability_hint_provided": bool(vulnerability_hint.strip()),
+            "include_globs": include_globs or AGENT_SECURITY_DELTA_DEFAULT_INCLUDE_GLOBS,
+            "exclude_globs": AGENT_SECURITY_DELTA_DEFAULT_EXCLUDE_GLOBS + list(exclude_globs or []),
+        },
+        "skipped": skipped[:200],
+        "limitations": [
+            "Deterministic static evidence ranks likely root-cause locations; it does not prove exploitability or prove a vulnerability is fixed.",
+            "Confidence requires multiple shallow signals and should be reviewed with tests, code review, and threat context.",
+            "No network access, model calls, auto-fixing, or raw file-content disclosure are performed by this report.",
+        ],
+        "security": {
+            "read_only": True,
+            "advisory_only": True,
+            "network_access": False,
+            "auto_fix": False,
+            "repo_boundary_enforced": True,
+            "raw_file_contents_returned": False,
+            "redacted_evidence": True,
+            "host_absolute_paths_exposed": False,
+            "exploit_proof_claimed": False,
+        },
+        "_meta": _artifact_meta([]),
+    }
+    return report
+
 
 def _truncate_with_flag(text: str, max_chars: int) -> tuple[str, bool]:
     if max_chars < 1:
@@ -33888,6 +34425,46 @@ def agent_security_delta(
         warn_on_severity=warn_on_severity,
         export=export,
     )
+
+
+@mcp.tool()
+def security_root_cause_evidence(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    vulnerability_hint: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    max_locations: int = 20,
+    include_security_delta: bool = True,
+    security_delta_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a local, read-only evidence pack ranking likely root-cause locations for security-sensitive agent fixes."""
+    arguments = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "vulnerability_hint_provided": bool(vulnerability_hint.strip()),
+        "include_globs": include_globs or [],
+        "exclude_globs": exclude_globs or [],
+        "max_locations": max_locations,
+        "include_security_delta": include_security_delta,
+        "security_delta_report_provided": isinstance(security_delta_report, dict),
+    }
+    with _otel_span(
+        "mcp.tool.security_root_cause_evidence",
+        _otel_tool_attributes("security_root_cause_evidence", arguments),
+    ) as span:
+        result = _security_root_cause_evidence_impl(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            vulnerability_hint=vulnerability_hint,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            max_locations=max_locations,
+            include_security_delta=include_security_delta,
+            security_delta_report=security_delta_report,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
 
 
 @mcp.tool()

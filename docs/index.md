@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 - [GitHub Actions workflow security report](./ci-workflow-security.md) - offline read-only workflow posture checks for permissions, action refs, risky triggers, runners, Docker/secrets/artifacts, suppressions, and local no-upload SARIF export.
 - [Secret exposure report](./secret-exposure-report.md) - offline read-only redacted repository/diff secret exposure scanning with allowlist and gate evidence.
 - [Agent security delta report](./agent-security-delta-report.md) - offline read-only security-regression pack and SARIF export for agent-generated feature changes.
+- [Security root-cause evidence report](./security-root-cause-evidence.md) - offline read-only evidence pack ranking likely root-cause files/functions for security-sensitive agent fixes.
 - [Dependency security report](./dependency-security.md) - read-only dependency inventory, SBOM/SARIF export, and vulnerability-gate evidence with offline/caller-provided advisory sources.
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) - checked-in public MCP tool-catalog digests, drift diffs, and advisory metadata lint for rug-pull detection.
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) - deterministic read-only ToolFuzz-style runtime checks for public tool contracts, error paths, and redaction invariants.
@@ -61,6 +62,7 @@ This index lists documentation ownership and status.
 - [GitHub Actions workflow security report](./ci-workflow-security.md) (`docs/ci-workflow-security.md`) - Status: `prototype`
 - [Secret exposure report](./secret-exposure-report.md) (`docs/secret-exposure-report.md`) - Status: `prototype`
 - [Agent security delta report](./agent-security-delta-report.md) (`docs/agent-security-delta-report.md`) - Status: `prototype`
+- [Security root-cause evidence report](./security-root-cause-evidence.md) (`docs/security-root-cause-evidence.md`) - Status: `prototype`
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) (`docs/tool-catalog-integrity.md`) - Status: `prototype`
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) (`docs/tool-contract-fuzzing.md`) - Status: `prototype`
 - [Workflow lineage manifests](./workflow-lineage.md) (`docs/workflow-lineage.md`) - Status: `prototype`

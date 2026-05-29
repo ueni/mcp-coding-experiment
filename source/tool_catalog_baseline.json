@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 42,
+  "tool_count": 43,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -9943,6 +9943,375 @@
       "name": "secret_exposure_report"
     },
     {
+      "digest": "sha256:5a6a503f7deb8ea701d5bdac7977ef553d1a143c8a698f360b87e526383749c0",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Build a local, read-only evidence pack ranking likely root-cause locations for security-sensitive agent fixes.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "base_ref": {
+                "default": "HEAD~1",
+                "title": "Base Ref",
+                "type": "string"
+              },
+              "exclude_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Exclude Globs"
+              },
+              "head_ref": {
+                "default": "HEAD",
+                "title": "Head Ref",
+                "type": "string"
+              },
+              "include_globs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Include Globs"
+              },
+              "include_security_delta": {
+                "default": true,
+                "title": "Include Security Delta",
+                "type": "boolean"
+              },
+              "max_locations": {
+                "default": 20,
+                "title": "Max Locations",
+                "type": "integer"
+              },
+              "security_delta_report": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Security Delta Report"
+              },
+              "vulnerability_hint": {
+                "default": "",
+                "title": "Vulnerability Hint",
+                "type": "string"
+              }
+            },
+            "title": "security_root_cause_evidenceArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "security_root_cause_evidence",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "call_import_neighbors": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "evidence_inputs": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "ranked_locations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "related_tests": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "security_root_cause_evidence.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "evidence_found",
+                  "insufficient_evidence",
+                  "no_changed_files"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "base_ref",
+              "head_ref",
+              "status",
+              "ok",
+              "summary",
+              "ranked_locations",
+              "evidence_inputs",
+              "security"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "read_only",
+            "advisory_only",
+            "changed_files",
+            "related_tests",
+            "call_import_neighbors",
+            "limitations",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": "string"
+              },
+              "call_import_neighbors": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "changed_files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "evidence_inputs": {
+                "type": "object"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "head_ref": {
+                "type": "string"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "ranked_locations": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "related_tests": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "security_root_cause_evidence.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "evidence_found",
+                  "insufficient_evidence",
+                  "no_changed_files"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "base_ref",
+              "head_ref",
+              "status",
+              "ok",
+              "summary",
+              "ranked_locations",
+              "evidence_inputs",
+              "security"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "base_ref",
+            "head_ref",
+            "status",
+            "ok",
+            "summary",
+            "ranked_locations",
+            "evidence_inputs",
+            "security"
+          ],
+          "tool": "security_root_cause_evidence"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "security_root_cause_evidence"
+        }
+      },
+      "name": "security_root_cause_evidence"
+    },
+    {
       "digest": "sha256:f9ca4c40bad3589b36e5abcd9a0e4bc5a26a04858b4ebf293e2fbc65831419ac",
       "metadata": {
         "documentation": [
@@ -15505,5 +15874,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:c9e70243b6cb245fa3c735d2a62536645e6ca53ba5c76a025308e96677a73013"
+  "whole_catalog_digest": "sha256:d8c46917a9243280b648db4b5572bd9c73971122c1a8fbe69c4edeb12639cab7"
 }
