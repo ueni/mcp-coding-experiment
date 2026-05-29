@@ -51,6 +51,7 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "observation_compression_report",
     "agents_context_health",
     "artifact_provenance",
+    "result_reference_resolve",
     "workflow_diagnostics",
     "workflow_lineage",
     "interaction_invariant_audit",
@@ -85,12 +86,13 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "agent_security_delta": ("schema", "report_id", "generated_at", "base_ref", "head_ref", "status", "ok", "summary", "findings", "gate", "exports"),
     "agent_security_delta_report": ("schema", "report_id", "generated_at", "base_ref", "head_ref", "status", "ok", "summary", "findings", "gate", "exports"),
     "mcp_threat_model_report": ("schema", "report_id", "generated_at", "status", "ok", "summary", "components", "trust_boundaries", "dread_rubric", "threats", "findings", "exports"),
-    "governance_report": ("schema", "report_id", "generated_at", "audit", "governance_hooks", "agents_context_health", "exports", "resource_links"),
+    "governance_report": ("schema", "report_id", "generated_at"),
     "memory_governance_report": ("schema", "generated_at", "read_only", "policy_version", "summary", "stores", "findings", "security"),
-    "self_optimization_report": ("schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "optimization_integrity_report", "agents_context_health", "security"),
+    "self_optimization_report": ("schema", "report_id", "generated_at"),
     "observation_compression_report": ("schema", "report_id", "generated_at", "read_only", "advisory_only", "window", "summary", "classification_buckets", "observations", "fingerprints", "compression_opportunities", "low_confidence_caveats", "security"),
     "agents_context_health": ("schema", "read_only", "advisory_only", "target", "budget", "summary", "instruction_categories", "duplicate_guidance", "stale_guidance", "risky_global_instructions", "move_candidates", "safety"),
     "artifact_provenance": ("schema", "provenance_schema", "attestation_schema", "artifact_count", "ok", "checks"),
+    "result_reference_resolve": ("schema", "ok", "status", "read_only", "reference_id", "artifact", "security"),
     "workflow_diagnostics": ("schema", "ok", "critical_failure_step", "failure_category", "constraint_violations", "evidence", "confidence", "recommended_followup", "redactions_applied"),
     "workflow_lineage": ("schema", "read_only", "manifest_path", "plan_id", "status", "ok", "checks", "conditions"),
     "interaction_invariant_audit": ("schema", "read_only", "advisory_only", "ok_to_continue", "confidence", "extracted_invariants", "suspected_smells", "safe_next_actions", "linked_gates"),
@@ -125,12 +127,13 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "agent_security_delta": ("read_only", "changed_files", "skipped", "security", "resource_links", "provenance", "_meta"),
     "agent_security_delta_report": ("read_only", "changed_files", "skipped", "security", "resource_links", "provenance", "_meta"),
     "mcp_threat_model_report": ("controls", "baseline", "fixtures", "security", "resource_links", "_meta"),
-    "governance_report": ("window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "agent_security_delta", "secret_exposure", "untrusted_content_signals", "memory_governance", "lineage", "provenance", "compressed_observation", "_meta"),
+    "governance_report": ("audit", "governance_hooks", "agents_context_health", "exports", "resource_links", "summary", "window", "git", "snapshots", "security", "workflow_diagnostics", "tool_catalog_integrity", "ci_workflow_security", "agent_security_delta", "secret_exposure", "untrusted_content_signals", "memory_governance", "result_references", "result_mode", "result_reference", "lineage", "provenance", "compressed_observation", "_meta"),
     "memory_governance_report": ("inputs", "entries", "advisory_only"),
-    "self_optimization_report": ("sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "patch_survivorship", "optimization_candidates[].anti_gaming", "metrics.observation_compression", "_meta"),
+    "self_optimization_report": ("window", "summary", "metrics", "optimization_candidates", "optimization_integrity_report", "agents_context_health", "security", "sources", "bottlenecks", "usage_guidance", "resource_links", "exports", "confidence", "caveats", "github_issue_gate", "patch_survivorship", "optimization_candidates[].anti_gaming", "metrics.observation_compression", "result_mode", "result_reference", "_meta"),
     "observation_compression_report": ("sources", "resource_links", "exports", "markdown", "_meta"),
     "agents_context_health": ("findings", "summary.severity_counts", "budget.remaining_bytes", "budget.remaining_tokens"),
     "artifact_provenance": ("checks[].attestation",),
+    "result_reference_resolve": ("producer_tool", "summary", "message", "content", "content_encoding"),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories", "critical_step_candidate", "safe_next_actions", "failure_taxonomy", "llm_judging"),
     "workflow_lineage": ("mode", "security"),
     "interaction_invariant_audit": ("security", "redactions_applied", "input_summary"),
@@ -251,6 +254,50 @@ RESOURCE_LINK_SCHEMA: dict[str, Any] = _object_schema(
                 "note": {"type": "string"},
             },
         ),
+    },
+)
+
+RESULT_REFERENCE_SCHEMA: dict[str, Any] = _object_schema(
+    ["schema", "reference_id", "producer_tool", "created_at", "expires_at", "summary", "content", "sensitivity", "resolver"],
+    {
+        "schema": {"type": "string", "const": "mcp_result_reference.v1"},
+        "reference_id": {"type": "string"},
+        "result_mode": {"type": "string", "enum": ["reference"]},
+        "producer_tool": {"type": "string"},
+        "created_at": {"type": "string"},
+        "expires_at": {"type": "string"},
+        "retention": {"type": "object"},
+        "summary": {"type": "object"},
+        "content": _object_schema(
+            ["content_type", "mime_type", "size_bytes", "hash"],
+            {
+                "content_type": {"type": "string"},
+                "mime_type": {"type": "string"},
+                "encoding": {"type": "string"},
+                "size_bytes": {"type": "integer"},
+                "hash": {"type": "object"},
+            },
+        ),
+        "sensitivity": {"type": "object"},
+        "resolver": {"type": "object"},
+    },
+)
+
+RESULT_REFERENCE_RESOLVE_SCHEMA: dict[str, Any] = _object_schema(
+    ["schema", "ok", "status", "read_only", "reference_id", "artifact", "security"],
+    {
+        "schema": {"type": "string", "const": "mcp_result_reference.resolve.v1"},
+        "ok": {"type": "boolean"},
+        "status": {"type": "string", "enum": ["resolved", "expired", "missing", "boundary_rejected", "hash_mismatch", "invalid_reference"]},
+        "read_only": {"type": "boolean", "const": True},
+        "reference_id": {"type": "string"},
+        "producer_tool": {"type": "string"},
+        "summary": {"type": "object"},
+        "artifact": {"type": "object"},
+        "message": {"type": "string"},
+        "content": {"type": "string"},
+        "content_encoding": {"type": "string"},
+        "security": {"type": "object"},
     },
 )
 
@@ -769,7 +816,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "governance_report": _object_schema(
-        ["schema", "report_id", "generated_at", "audit", "governance_hooks", "agents_context_health", "exports"],
+        ["schema", "report_id", "generated_at"],
         {
             "schema": {"type": "string", "const": "governance_report.v1"},
             "report_id": {"type": "string"},
@@ -783,6 +830,9 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "agent_security_delta": {"type": "object"},
             "secret_exposure": {"type": "object"},
             "untrusted_content_signals": {"type": "object"},
+            "result_references": {"type": "object"},
+            "result_mode": {"type": "string", "enum": ["inline", "summary", "reference"]},
+            "result_reference": RESULT_REFERENCE_SCHEMA,
             "agents_context_health": {"type": "object"},
             "snapshots": {"type": "object"},
             "security": {"type": "object"},
@@ -810,7 +860,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "self_optimization_report": _object_schema(
-        ["schema", "report_id", "generated_at", "window", "summary", "metrics", "optimization_candidates", "optimization_integrity_report", "agents_context_health", "security"],
+        ["schema", "report_id", "generated_at"],
         {
             "schema": {"type": "string", "const": "self_optimization_report.v1"},
             "report_id": {"type": "string"},
@@ -829,6 +879,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "patch_survivorship": {"type": "object"},
             "usage_guidance": {"type": "object"},
             "security": {"type": "object"},
+            "result_mode": {"type": "string", "enum": ["inline", "summary", "reference"]},
+            "result_reference": RESULT_REFERENCE_SCHEMA,
             "exports": {"type": "object"},
             "resource_links": {"type": "array", "items": RESOURCE_LINK_SCHEMA},
             "_meta": {"type": "object"},
@@ -886,6 +938,7 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "checks": {"type": "array", "items": {"type": "object"}},
         },
     ),
+    "result_reference_resolve": RESULT_REFERENCE_RESOLVE_SCHEMA,
     "workflow_diagnostics": _object_schema(
         ["schema", "ok", "critical_failure_step", "failure_category", "constraint_violations", "evidence", "confidence", "recommended_followup", "redactions_applied"],
         {
