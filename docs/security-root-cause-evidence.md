@@ -58,6 +58,14 @@ Each `ranked_locations[]` entry includes:
 
 Reason types currently include removed/active security-delta findings, changed security-sensitive paths, input sources, sinks, validators/boundary checks, related tests, vulnerability-hint matches, and import-neighbor signals.
 
+The report also emits advisory `shallow_fix_warnings[]` and summary counters/status when the diff looks like a shallow security fix:
+
+- `wrapper_symptom_only`: wrapper, adapter, service, handler, or error-path code changed while an imported sink remains reachable.
+- `warning_suppression_only`: added security/static-analysis suppression such as `# nosec`, `# noqa`, `type: ignore`, pylint disables, or semgrep ignores.
+- `missing_regression_evidence`: changed code lacks related changed tests and removed security-delta findings.
+
+`release_readiness` includes a compact `security_root_cause_evidence` check with `pass`, `warn`, or `needs-review` status plus ranked-location, related-test, and shallow-warning counts.
+
 ## How it differs from `agent_security_delta_report`
 
 `agent_security_delta_report` is a regression gate: it asks whether a patch introduced or removed known heuristic security findings, and can export SARIF.

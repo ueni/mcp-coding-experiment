@@ -59,6 +59,98 @@ class SecurityRootCauseEvidenceTests(ServerToolsTestBase):
         self.assertNotIn(str(self.repo_path), self.server.json.dumps(report))
         validate_against_schema(report, TOOL_OUTPUT_SCHEMAS["security_root_cause_evidence"])
 
+    def test_flags_wrapper_symptom_only_fix_with_reachable_sink(self):
+        self.write_repo_text(
+            "src/shell_backend.py",
+            "import os\n\n"
+            "def run(command):\n"
+            "    return os.system(command)\n",
+        )
+        self.write_repo_text(
+            "src/command_service.py",
+            "from src import shell_backend\n\n"
+            "def run_user_command(command):\n"
+            "    return shell_backend.run(command)\n",
+        )
+        self.commit_all("add unsafe wrapper fixture")
+
+        self.write_repo_text(
+            "src/command_service.py",
+            "from src import shell_backend\n\n"
+            "def run_user_command(command):\n"
+            "    if command == 'rm -rf /':\n"
+            "        raise ValueError('blocked command')\n"
+            "    return shell_backend.run(command)\n",
+        )
+
+        report = self.server.security_root_cause_evidence(
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            vulnerability_hint="command injection wrapper",
+        )
+
+        warning_types = {warning["type"] for warning in report["shallow_fix_warnings"]}
+        self.assertIn("wrapper_symptom_only", warning_types)
+        self.assertEqual(report["summary"]["shallow_fix_status"], "warn")
+        self.assertTrue(any("src/command_service.py" in warning["paths"] for warning in report["shallow_fix_warnings"]))
+        validate_against_schema(report, TOOL_OUTPUT_SCHEMAS["security_root_cause_evidence"])
+
+    def test_flags_warning_suppression_only_change(self):
+        self.write_repo_text(
+            "src/command_runner.py",
+            "import os\n\n"
+            "def run_user_command(command):\n"
+            "    return os.system(command)\n",
+        )
+        self.commit_all("add unsafe command fixture")
+
+        self.write_repo_text(
+            "src/command_runner.py",
+            "import os\n\n"
+            "def run_user_command(command):\n"
+            "    return os.system(command)  # nosec: legacy command runner\n",
+        )
+
+        report = self.server.security_root_cause_evidence(
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            vulnerability_hint="command injection",
+        )
+
+        warning_types = {warning["type"] for warning in report["shallow_fix_warnings"]}
+        self.assertIn("warning_suppression_only", warning_types)
+        self.assertEqual(report["summary"]["shallow_fix_status"], "warn")
+        self.assertGreaterEqual(report["summary"]["shallow_fix_warning_count"], 1)
+        validate_against_schema(report, TOOL_OUTPUT_SCHEMAS["security_root_cause_evidence"])
+
+    def test_release_readiness_surfaces_compact_root_cause_summary(self):
+        self.write_repo_text(
+            "src/command_runner.py",
+            "import os\n\n"
+            "def run_user_command(command):\n"
+            "    return os.system(command)\n",
+        )
+
+        readiness = self.server.release_readiness(
+            base_ref="HEAD",
+            head_ref="WORKTREE",
+            run_tests=False,
+            run_docs_check=False,
+            run_security_check=False,
+            run_dependency_security_check=False,
+            run_ci_workflow_security_check=False,
+            run_secret_exposure_check=False,
+            run_license_check=False,
+            run_risk_check=False,
+            run_impact_check=False,
+            summary_mode="full",
+        )
+
+        root_cause_check = readiness["checks"]["security_root_cause_evidence"]
+        self.assertIn(root_cause_check["status"], {"pass", "warn", "needs-review"})
+        self.assertIn("ranked_location_count", root_cause_check)
+        self.assertIn("shallow_fix_warning_count", root_cause_check)
+
     def test_can_disable_generated_security_delta_input(self):
         self.write_repo_text(
             "src/path_guard.py",

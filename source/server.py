@@ -18338,6 +18338,14 @@ SECURITY_ROOT_CAUSE_VALIDATOR_RE = re.compile(
     r"\b(validate|validator|sanitize|canonical|resolve\s*\(|relative_to\s*\(|normpath\s*\(|abspath\s*\(|safe_join|allowed|auth|authorize|permission|SafeLoader|parameterized|escape)\b",
     re.IGNORECASE,
 )
+SECURITY_ROOT_CAUSE_SUPPRESSION_RE = re.compile(
+    r"(#\s*(noqa|nosec|pragma:\s*no cover|type:\s*ignore)|pylint:\s*disable|bandit:\s*skip|semgrep\s*:\s*ignore|security\s*[:=-]\s*ignore)",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_WRAPPER_SYMPTOM_RE = re.compile(
+    r"\b(wrapper|adapter|proxy|service|handler|catch|except|try:|fallback|return\s+None|raise\s+(ValueError|RuntimeError|HTTPException)|error\s*handling)\b",
+    re.IGNORECASE,
+)
 
 
 def _security_root_cause_report_id(seed: dict[str, Any]) -> str:
@@ -18566,6 +18574,181 @@ def _security_root_cause_security_delta_input(
         return None, {"source": "unavailable", "schema": "", "report_id": "", "error": _agent_security_delta_redact_evidence(str(exc))}
 
 
+def _security_root_cause_diff_added_lines(base_ref: str, head_ref: str) -> dict[str, list[str]]:
+    diff_args = ["diff", "--unified=0", f"{base_ref}...{head_ref}"]
+    if str(head_ref or "").strip() in SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS:
+        diff_args = ["diff", "--unified=0", base_ref]
+    result = _git(*diff_args, "--", ".", check=False)
+    if result.returncode != 0 and "..." in " ".join(diff_args):
+        result = _git("diff", "--unified=0", base_ref, head_ref, "--", ".", check=False)
+    added: dict[str, list[str]] = {}
+    current_path = ""
+    if result.returncode != 0:
+        return added
+    for line in result.stdout.splitlines():
+        if line.startswith("+++ "):
+            raw = line[4:].strip()
+            current_path = raw[2:] if raw.startswith("b/") else raw
+            if current_path == "/dev/null":
+                current_path = ""
+            continue
+        if not current_path or line.startswith("+++") or line.startswith("@@"):
+            continue
+        if line.startswith("+") and not line.startswith("++"):
+            added.setdefault(current_path, []).append(line[1:])
+    return added
+
+
+def _security_root_cause_is_test_path(rel_path: str) -> bool:
+    path = Path(rel_path)
+    return rel_path.startswith("tests/") or path.name.startswith("test_") or path.name.endswith("_test.py")
+
+
+def _security_root_cause_imported_modules(text: str, rel_path: str) -> set[str]:
+    if Path(rel_path).suffix.lower() != ".py":
+        return set()
+    try:
+        tree = ast.parse(text or "\n", filename=rel_path)
+    except SyntaxError:
+        return set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names if alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(str(node.module))
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names if alias.name and alias.name != "*")
+    return modules
+
+
+def _security_root_cause_module_candidates(module: str) -> list[str]:
+    rel = module.replace(".", "/").strip("/")
+    if not rel:
+        return []
+    return [f"{rel}.py", f"{rel}/__init__.py"]
+
+
+def _security_root_cause_shallow_fix_warnings(
+    *,
+    base_ref: str,
+    head_ref: str,
+    changed_paths: list[str],
+    text_by_path: dict[str, str],
+    related_tests: list[dict[str, Any]],
+    ranked: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    added_by_path = _security_root_cause_diff_added_lines(base_ref, head_ref)
+    changed_set = set(changed_paths)
+    non_test_changed = [path for path in changed_paths if not _security_root_cause_is_test_path(path)]
+
+    suppression_paths: list[str] = []
+    suppression_evidence: list[str] = []
+    for rel, lines in added_by_path.items():
+        if _security_root_cause_is_test_path(rel):
+            continue
+        matched = [line for line in lines if SECURITY_ROOT_CAUSE_SUPPRESSION_RE.search(line)]
+        if matched:
+            suppression_paths.append(rel)
+            suppression_evidence.extend(_agent_security_delta_redact_evidence(line, max_chars=160) for line in matched[:3])
+    if suppression_paths:
+        warnings.append(
+            {
+                "schema": "security_root_cause_shallow_fix_warning.v1",
+                "type": "warning_suppression_only",
+                "severity": "warning",
+                "status": "needs-review",
+                "summary": "Changed code adds static-analysis or security-warning suppression; verify the vulnerable path is fixed rather than silenced.",
+                "paths": sorted(set(suppression_paths))[:20],
+                "evidence": suppression_evidence[:5],
+                "raw_returned": False,
+            }
+        )
+
+    wrapper_paths: list[str] = []
+    wrapper_evidence: list[str] = []
+    for rel in non_test_changed:
+        text = text_by_path.get(rel, "")
+        added_lines = "\n".join(added_by_path.get(rel, []))
+        if not (SECURITY_ROOT_CAUSE_WRAPPER_SYMPTOM_RE.search(rel) or SECURITY_ROOT_CAUSE_WRAPPER_SYMPTOM_RE.search(added_lines)):
+            continue
+        for module in sorted(_security_root_cause_imported_modules(text, rel)):
+            for candidate in _security_root_cause_module_candidates(module):
+                if candidate in changed_set:
+                    continue
+                neighbor_text = _security_root_cause_text_for_path(candidate, head_ref)
+                if neighbor_text is None:
+                    neighbor_text = _agent_security_delta_git_blob(base_ref, candidate)
+                if neighbor_text and SECURITY_ROOT_CAUSE_SINK_RE.search(neighbor_text):
+                    wrapper_paths.append(rel)
+                    wrapper_evidence.append(
+                        _agent_security_delta_redact_evidence(
+                            f"{rel} changes wrapper/error-handling while imported sink remains in {candidate}",
+                            max_chars=180,
+                        )
+                    )
+                    break
+            if rel in wrapper_paths:
+                break
+    if wrapper_paths:
+        warnings.append(
+            {
+                "schema": "security_root_cause_shallow_fix_warning.v1",
+                "type": "wrapper_symptom_only",
+                "severity": "warning",
+                "status": "needs-review",
+                "summary": "Patch appears to change a wrapper, adapter, service, or error path while an imported sink remains reachable.",
+                "paths": sorted(set(wrapper_paths))[:20],
+                "evidence": wrapper_evidence[:5],
+                "raw_returned": False,
+            }
+        )
+
+    ranked_reason_types = {
+        str(reason.get("type", ""))
+        for location in ranked
+        for reason in location.get("reasons", [])
+        if isinstance(reason, dict)
+    }
+    if changed_paths and not related_tests and "removed_security_delta_finding" not in ranked_reason_types:
+        warnings.append(
+            {
+                "schema": "security_root_cause_shallow_fix_warning.v1",
+                "type": "missing_regression_evidence",
+                "severity": "note",
+                "status": "warn",
+                "summary": "No changed security-relevant regression test or removed security-delta finding was observed for this suspected fix.",
+                "paths": non_test_changed[:20],
+                "evidence": [],
+                "raw_returned": False,
+            }
+        )
+    return warnings[:20]
+
+
+def _security_root_cause_compact_status(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    warnings = report.get("shallow_fix_warnings", []) if isinstance(report.get("shallow_fix_warnings"), list) else []
+    warning_count = len(warnings)
+    if report.get("status") == "insufficient_evidence":
+        status = "needs-review"
+    elif warning_count:
+        status = "warn"
+    else:
+        status = "pass"
+    return {
+        "ok": True,
+        "status": status,
+        "report_id": report.get("report_id", ""),
+        "ranked_location_count": summary.get("ranked_location_count", 0),
+        "related_test_count": summary.get("related_test_count", 0),
+        "shallow_fix_warning_count": warning_count,
+        "warning": status in {"warn", "needs-review"},
+        "warning_reason": "; ".join(str(item.get("summary", "")) for item in warnings[:2] if isinstance(item, dict))
+        or ("insufficient root-cause evidence for security-sensitive change" if status == "needs-review" else ""),
+    }
+
+
 def _security_root_cause_evidence_impl(
     base_ref: str = "HEAD~1",
     head_ref: str = "HEAD",
@@ -18776,9 +18959,18 @@ def _security_root_cause_evidence_impl(
         row["rank"] = index
     ranked = ranked[:max_locations]
 
+    shallow_fix_warnings = _security_root_cause_shallow_fix_warnings(
+        base_ref=base_ref,
+        head_ref=head_ref,
+        changed_paths=changed_paths,
+        text_by_path=text_by_path,
+        related_tests=related_tests,
+        ranked=ranked,
+    )
     high_conf = sum(1 for row in ranked if row.get("confidence") == "high")
     medium_conf = sum(1 for row in ranked if row.get("confidence") == "medium")
     status = "no_changed_files" if not changed_paths else "evidence_found" if ranked else "insufficient_evidence"
+    shallow_fix_status = "needs-review" if status == "insufficient_evidence" else "warn" if shallow_fix_warnings else "pass"
     generated_at = _now_iso()
     summary = {
         "changed_file_count": len(changed_paths),
@@ -18787,6 +18979,8 @@ def _security_root_cause_evidence_impl(
         "medium_confidence_location_count": medium_conf,
         "related_test_count": len(related_tests),
         "security_delta_findings_used": sum(len(row.get("security_delta_finding_ids", [])) for row in ranked),
+        "shallow_fix_warning_count": len(shallow_fix_warnings),
+        "shallow_fix_status": shallow_fix_status,
         "status_reason": "ranked_static_evidence" if ranked else "no_changed_files" if not changed_paths else "changed_files_lacked_root_cause_signals",
     }
     report: dict[str, Any] = {
@@ -18812,6 +19006,7 @@ def _security_root_cause_evidence_impl(
         "ranked_locations": ranked,
         "related_tests": related_tests,
         "call_import_neighbors": call_import_neighbors[:100],
+        "shallow_fix_warnings": shallow_fix_warnings,
         "evidence_inputs": {
             "diff": diff_meta,
             "security_delta": delta_meta,
@@ -36442,6 +36637,23 @@ def release_readiness(
             result["checks"]["agent_security_delta"] = {"ok": False, "status": "scanner-unavailable", "error": str(exc)}
             result["ok"] = False
 
+    if run_security_check or run_agent_security_delta_check:
+        try:
+            root_cause_report = _security_root_cause_evidence_impl(
+                base_ref=base_ref,
+                head_ref=head_ref,
+                include_security_delta=run_agent_security_delta_check,
+            )
+            result["checks"]["security_root_cause_evidence"] = _security_root_cause_compact_status(root_cause_report)
+        except Exception as exc:
+            result["checks"]["security_root_cause_evidence"] = {
+                "ok": True,
+                "status": "needs-review",
+                "warning": True,
+                "warning_reason": str(exc),
+                "shallow_fix_warning_count": 0,
+            }
+
     if run_secret_exposure_check:
         try:
             secret_report = secret_exposure_report(
@@ -36576,6 +36788,9 @@ def release_readiness(
                         "new_finding_count",
                         "new_high_confidence_count",
                         "suppressed_count",
+                        "shallow_fix_warning_count",
+                        "ranked_location_count",
+                        "related_test_count",
                         "positive_static_finding_delta",
                         "max_cognitive_delta",
                         "max_cyclomatic_delta",

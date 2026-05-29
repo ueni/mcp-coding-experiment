@@ -8373,7 +8373,7 @@
       "name": "read_snippet"
     },
     {
-      "digest": "sha256:467d8684680477ea9c40de73433e03ae43d1014f0172400f17cdf922b1272237",
+      "digest": "sha256:8876d34ea36e1c515216d3f2775c120ffb762397d50281467590bfc8a4a0f4c6",
       "metadata": {
         "documentation": [
           {
@@ -8563,7 +8563,8 @@
           "experimentalFields": [
             "started_at",
             "finished_at",
-            "mcp_apps"
+            "mcp_apps",
+            "checks.security_root_cause_evidence"
           ],
           "outputSchema": {
             "additionalProperties": true,
@@ -9943,7 +9944,7 @@
       "name": "secret_exposure_report"
     },
     {
-      "digest": "sha256:5a6a503f7deb8ea701d5bdac7977ef553d1a143c8a698f360b87e526383749c0",
+      "digest": "sha256:4a19d6e54c62598a1415dcbde0fdd90ec6468f58f467e46b381bb7dfeb6680bf",
       "metadata": {
         "documentation": [
           {
@@ -10177,6 +10178,7 @@
             "changed_files",
             "related_tests",
             "call_import_neighbors",
+            "shallow_fix_warnings",
             "limitations",
             "_meta"
           ],
@@ -15874,5 +15876,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:d8c46917a9243280b648db4b5572bd9c73971122c1a8fbe69c4edeb12639cab7"
+  "whole_catalog_digest": "sha256:72039b9d90e2a0aec08649135bf61f9b3a6cf08cae5b537b993e4cffb58b91b5"
 }
