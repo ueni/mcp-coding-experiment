@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 43,
+  "tool_count": 44,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -13542,6 +13542,286 @@
       "name": "workflow_diagnostics"
     },
     {
+      "digest": "sha256:80a3655f0867d3a565a1d5e421874af3f5ed1548565d502aba69fb51fe319f2b",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Project a redacted workflow event log into checkpoints, timeline, lineage, and fork diff.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "event_log_path": {
+                "default": ".codebase-tooling-mcp/workflow-events.jsonl",
+                "title": "Event Log Path",
+                "type": "string"
+              },
+              "fork_id": {
+                "default": "",
+                "title": "Fork Id",
+                "type": "string"
+              },
+              "include_events": {
+                "default": true,
+                "title": "Include Events",
+                "type": "boolean"
+              },
+              "parent_fork_id": {
+                "default": "",
+                "title": "Parent Fork Id",
+                "type": "string"
+              }
+            },
+            "title": "workflow_event_log_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "workflow_event_log_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "checkpoints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "errors": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "event_log": {
+                "type": "object"
+              },
+              "events": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fork_diff": {
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "privacy": {
+                "type": "object"
+              },
+              "projection": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "workflow_checkpoint_report.v1",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "missing",
+                  "invalid",
+                  "corrupt"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "read_only",
+              "ok",
+              "status",
+              "event_log",
+              "summary",
+              "privacy",
+              "checkpoints",
+              "projection",
+              "fork_diff",
+              "errors"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "events",
+            "privacy.redaction_categories",
+            "projection.timeline",
+            "projection.artifact_lineage",
+            "fork_diff.changed_artifacts"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "checkpoints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "errors": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "event_log": {
+                "type": "object"
+              },
+              "events": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fork_diff": {
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "privacy": {
+                "type": "object"
+              },
+              "projection": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "workflow_checkpoint_report.v1",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "missing",
+                  "invalid",
+                  "corrupt"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "read_only",
+              "ok",
+              "status",
+              "event_log",
+              "summary",
+              "privacy",
+              "checkpoints",
+              "projection",
+              "fork_diff",
+              "errors"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "read_only",
+            "ok",
+            "status",
+            "event_log",
+            "summary",
+            "privacy",
+            "checkpoints",
+            "projection",
+            "fork_diff",
+            "errors"
+          ],
+          "tool": "workflow_event_log_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "workflow_event_log_report"
+        }
+      },
+      "name": "workflow_event_log_report"
+    },
+    {
       "digest": "sha256:0aee0e5397f5dfaa25485e908c5dd5cffe9986e61b9b652f3d6cdc5d2f88c600",
       "metadata": {
         "documentation": [
@@ -16131,5 +16411,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:6f6d3f8315c8e786060df81bcee0c9db7e1be78a618bed71d2f19b1b34840659"
+  "whole_catalog_digest": "sha256:60edf433cbbfbc38bcda9dcdb4d4bd019ce401b60443266989b47265e0fa752f"
 }

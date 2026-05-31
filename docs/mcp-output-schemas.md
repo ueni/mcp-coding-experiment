@@ -43,6 +43,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `artifact_provenance`
 - `result_reference_resolve`
 - `workflow_diagnostics`
+- `workflow_event_log_report`
 - `workflow_lineage`
 - `interaction_invariant_audit`
 - `mutation_step_guard`
@@ -232,6 +233,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
 | `result_reference_resolve` | `schema`, `ok`, `status`, `read_only`, `reference_id`, `artifact`, `security` | producer tool, summary, message, optional content, content encoding |
 | `workflow_diagnostics` | `schema`, `ok`, `critical_failure_step`, `failure_category`, `constraint_violations`, `evidence`, `confidence`, `recommended_followup`, `redactions_applied` | `audit_source`, `read_only`, `security`, `trajectory`, `failure_categories`, `critical_step_candidate`, `safe_next_actions`, `failure_taxonomy`, `llm_judging` |
+| `workflow_event_log_report` | `schema`, `report_id`, `read_only`, `ok`, `status`, `event_log`, `summary`, `privacy`, `checkpoints`, `projection`, `fork_diff`, `errors` | redacted `events`, privacy redaction categories, compact timeline/artifact lineage, changed artifacts in fork diff |
 | `workflow_lineage` | `schema`, `read_only`, `manifest_path`, `plan_id`, `status`, `ok`, `checks`, `conditions` | `mode`, `security` |
 | `interaction_invariant_audit` | `schema`, `read_only`, `advisory_only`, `ok_to_continue`, `confidence`, `extracted_invariants`, `suspected_smells`, `safe_next_actions`, `linked_gates` | `security`, `redactions_applied`, `input_summary` |
 | `mutation_step_guard` | `schema`, `read_only`, `ok_to_mutate`, `decision`, `decision_flags`, `decisive_deviation_risk`, `missing_preconditions`, `targeted_reflection_checklist`, `safe_next_actions` | `input_summary`, `security` |

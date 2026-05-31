@@ -59,6 +59,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "artifact_provenance",
                 "result_reference_resolve",
                 "workflow_diagnostics",
+                "workflow_event_log_report",
                 "workflow_lineage",
                 "interaction_invariant_audit",
                 "mutation_step_guard",
@@ -174,6 +175,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 reference=referenced_report["result_reference"], include_content=False
             ),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
+            "workflow_event_log_report": self.server.workflow_event_log_report(),
             "workflow_lineage": self.server.workflow_lineage(
                 manifest_path=lineage_report["exports"]["lineage"]
             ),
