@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 43,
+  "tool_count": 44,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -13796,6 +13796,324 @@
       "name": "workflow_lineage"
     },
     {
+      "digest": "sha256:0e3274ffc63692e0396cd0c8a7592e4639d767a3f626ea7c4a670fe06484c8d7",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Workflow phase telemetry",
+            "path": "docs/workflow-phase-telemetry.md"
+          },
+          {
+            "label": "Self-optimization efficiency report",
+            "path": "docs/self-optimization-report.md"
+          },
+          {
+            "label": "OpenTelemetry tracing",
+            "path": "docs/opentelemetry-tracing.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Build a read-only local phase telemetry report from redacted MCP workflow/tool-call summaries.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "end_time": {
+                "default": "",
+                "title": "End Time",
+                "type": "string"
+              },
+              "include_audit": {
+                "default": true,
+                "title": "Include Audit",
+                "type": "boolean"
+              },
+              "include_tasks": {
+                "default": true,
+                "title": "Include Tasks",
+                "type": "boolean"
+              },
+              "include_traces": {
+                "default": true,
+                "title": "Include Traces",
+                "type": "boolean"
+              },
+              "start_time": {
+                "default": "",
+                "title": "Start Time",
+                "type": "string"
+              },
+              "window_hours": {
+                "default": 168,
+                "title": "Window Hours",
+                "type": "integer"
+              },
+              "workflow_summary_json": {
+                "default": "",
+                "title": "Workflow Summary Json",
+                "type": "string"
+              }
+            },
+            "title": "workflow_phase_telemetryArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "workflow_phase_telemetry",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "anomalies": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "optimization_hints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "phase_order": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "phases": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "privacy": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "workflow_phase_telemetry.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "signals": {
+                "type": "object"
+              },
+              "sources": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "trace_context": {
+                "type": "object"
+              },
+              "window": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "summary",
+              "phase_order",
+              "phases",
+              "signals",
+              "privacy"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "window",
+            "anomalies",
+            "optimization_hints",
+            "trace_context",
+            "sources",
+            "security",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "anomalies": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "optimization_hints": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "phase_order": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "phases": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "privacy": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "schema": {
+                "const": "workflow_phase_telemetry.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "signals": {
+                "type": "object"
+              },
+              "sources": {
+                "type": "object"
+              },
+              "summary": {
+                "type": "object"
+              },
+              "trace_context": {
+                "type": "object"
+              },
+              "window": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "summary",
+              "phase_order",
+              "phases",
+              "signals",
+              "privacy"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "read_only",
+            "advisory_only",
+            "summary",
+            "phase_order",
+            "phases",
+            "signals",
+            "privacy"
+          ],
+          "tool": "workflow_phase_telemetry"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "workflow_phase_telemetry"
+        }
+      },
+      "name": "workflow_phase_telemetry"
+    },
+    {
       "digest": "sha256:5ce78e4e71ee2ee2ea9b43b2e7f872e6a6bd0c681ff0ea6df4a92dede0635651",
       "metadata": {
         "documentation": [
@@ -16131,5 +16449,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:6f6d3f8315c8e786060df81bcee0c9db7e1be78a618bed71d2f19b1b34840659"
+  "whole_catalog_digest": "sha256:57a81dba9facd1651ce93a24f7a7a21ae0ab0a2485f3de0c80af29b6caef0d7c"
 }

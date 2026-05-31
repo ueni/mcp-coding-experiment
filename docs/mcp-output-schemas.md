@@ -38,6 +38,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `governance_report`
 - `memory_governance_report`
 - `self_optimization_report`
+- `workflow_phase_telemetry`
 - `observation_compression_report`
 - `agents_context_health`
 - `artifact_provenance`
@@ -227,6 +228,7 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `governance_report` | `schema`, `report_id`, `generated_at` | mode-specific inline/compact fields including `audit`, `governance_hooks`, `agents_context_health`, `exports`, `resource_links`, `summary`, `window`, `git`, `snapshots`, `security`, `workflow_diagnostics`, `tool_catalog_integrity`, `ci_workflow_security`, `secret_exposure`, `agent_security_delta`, aggregate `untrusted_content_signals`, compact `memory_governance`, `result_references`, `result_mode`, `result_reference`, `lineage`, `provenance`, opt-in `compressed_observation`, `_meta` |
 | `memory_governance_report` | `schema`, `generated_at`, `read_only`, `policy_version`, `summary`, `stores`, `findings`, `security` | `inputs`, redacted metadata-only `entries`, `advisory_only` |
 | `self_optimization_report` | `schema`, `report_id`, `generated_at` | mode-specific inline/compact fields including `window`, `summary`, `metrics`, `optimization_candidates`, `optimization_integrity_report`, `agents_context_health`, `security`, `sources`, `bottlenecks`, `usage_guidance`, `resource_links`, `exports`, `confidence`, `caveats`, `github_issue_gate`, `patch_survivorship`, `optimization_candidates[].anti_gaming`, `metrics.observation_compression`, `result_mode`, `result_reference`, `_meta` |
+| `workflow_phase_telemetry` | `schema`, `report_id`, `generated_at`, `read_only`, `advisory_only`, `summary`, `phase_order`, `phases`, `signals`, `privacy` | `window`, `anomalies`, `optimization_hints`, `trace_context`, `sources`, `security`, `_meta` |
 | `observation_compression_report` | `schema`, `report_id`, `generated_at`, `read_only`, `advisory_only`, `window`, `summary`, `classification_buckets`, `observations`, `fingerprints`, `compression_opportunities`, `low_confidence_caveats`, `security` | `sources`, `resource_links`, `exports`, `markdown`, `_meta` |
 | `agents_context_health` | `schema`, `read_only`, `advisory_only`, `target`, `budget`, `summary`, `instruction_categories`, `duplicate_guidance`, `stale_guidance`, `risky_global_instructions`, `move_candidates`, `safety` | bounded finding list and budget/severity convenience counts |
 | `artifact_provenance` | `schema`, `provenance_schema`, `attestation_schema`, `artifact_count`, `ok`, `checks` | per-check `attestation` verification details |
@@ -240,6 +242,8 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 ## IDE/client smoke fixture
 
 [`docs/fixtures/mcp-structured-grep-response.json`](./fixtures/mcp-structured-grep-response.json) demonstrates an IDE-style client consuming a structured `grep` quick response while still displaying the fallback text content.
+
+`workflow_phase_telemetry` uses compact schema `workflow_phase_telemetry.v1` for read-only phase telemetry over redacted MCP workflow/tool-call summaries. It reports discover/read, analyze/plan, mutate/write, verify/test, review/release, cleanup, and other phase counts, optional durations, cacheability/repeated-read signals, guard/test/release markers, ordering anomalies, hashed trace references, and privacy metadata without exposing raw prompts, raw tool outputs, file contents, secrets, or absolute host paths.
 
 `self_optimization_report.optimization_integrity_report` uses compact schema `optimization_integrity_report.v1` for advisory anti-gaming checks over efficiency/release-gate metrics. It reports suspicious proxy wins from failed/skipped/stale/unknown gates, retries/rework, suppressions, unmapped changed files, missing denominators, low success rate, and patch-survivorship/review pushback; candidates inherit an `anti_gaming` gate before optional GitHub issue automation.
 

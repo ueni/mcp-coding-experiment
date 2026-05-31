@@ -54,6 +54,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "governance_report",
                 "memory_governance_report",
                 "self_optimization_report",
+                "workflow_phase_telemetry",
                 "observation_compression_report",
                 "agents_context_health",
                 "artifact_provenance",
