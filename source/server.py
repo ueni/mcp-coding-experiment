@@ -332,6 +332,7 @@ DEPENDENCY_LOCK_MANIFEST_FILE = "dependency-locks.json"
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
+    "skill_privilege_scope",
     "test_impact_map",
     "tool_annotations",
     "tool_output_contracts",
@@ -368,6 +369,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
             "coding_pip": ["write", "shell/process", "network"],
             "coding_sandbox": ["write", "shell/process"],
             "workflow_select": ["read-only"],
+            "skill_privilege_scope": ["read-only", "governance"],
         },
     },
     "tool_annotations": {"categories": ["read-only"]},
@@ -412,6 +414,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "workflow_policy_plan": {"categories": ["read-only", "governance"]},
+    "skill_privilege_scope": {"categories": ["read-only", "governance"]},
     "policy_governance_decision": {"categories": ["read-only", "governance"]},
     "workflow_reminder": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
@@ -1104,6 +1107,7 @@ WORKFLOW_CARD_TRUST_SCHEMA_VERSION = "workflow_card_trust.v1"
 WORKFLOW_CARD_LINT_SCHEMA_VERSION = "workflow_card_lint.v1"
 WORKFLOW_CARD_SAFETY_SCHEMA_VERSION = "workflow_card_safety.v1"
 SKILL_PACK_SCORE_SCHEMA_VERSION = "skill_pack_score.v1"
+SKILL_PRIVILEGE_SCOPE_SCHEMA_VERSION = "skill_privilege_scope.v1"
 WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED = False
 WORKFLOW_CARD_FIELDS = (
     "id",
@@ -30206,6 +30210,480 @@ def skill_pack_score(
         "scores": scores,
     }
 
+
+
+_SKILL_PRIVILEGE_SCOPE_CATEGORIES = (
+    "read_path",
+    "write_path",
+    "command",
+    "network",
+    "github_api",
+    "release_publish",
+    "secret_adjacent",
+)
+_SKILL_PRIVILEGE_SCOPE_MUTATING_CATEGORIES = {"write_path", "release_publish"}
+_SKILL_PRIVILEGE_SCOPE_PATTERN_SPECS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    (
+        "write_path",
+        (
+            r"\b(?:write|edit|modify|update|create|append|delete|remove|move|rename|chmod|apply\s+patch|commit)\b",
+            r"\b(?:rm|mv|cp|tee|chmod|mkdir|touch)\b",
+        ),
+        "Filesystem mutation or repository write requested by the imported item.",
+    ),
+    (
+        "read_path",
+        (r"\b(?:read|inspect|view|list|cat|grep|search|summarize|open)\b",),
+        "Repository read requested by the imported item.",
+    ),
+    (
+        "command",
+        (r"\b(?:run|execute|shell|command|bash|sh|python|pytest|npm|make|docker|git)\b",),
+        "Process or shell command requested by the imported item.",
+    ),
+    (
+        "network",
+        (r"https?://[^\s`\"')]+", r"\b(?:curl|wget|scp|sftp|rsync|webhook|download|upload|http)\b"),
+        "Network access requested by the imported item.",
+    ),
+    (
+        "github_api",
+        (r"\b(?:github|gh\s+(?:api|issue|pr|release)|pull request|issue comment|label)\b",),
+        "GitHub API or repository-host operation requested by the imported item.",
+    ),
+    (
+        "release_publish",
+        (r"\b(?:release|publish|deploy|upload artifact|docker\s+push|npm\s+publish|twine\s+upload)\b",),
+        "Release, deploy, or package publish operation requested by the imported item.",
+    ),
+    (
+        "secret_adjacent",
+        (r"\b(?:secret|token|credential|api[-_ ]?key|private[-_ ]?key|authorization|\.env)\b",),
+        "Secret-adjacent access or wording requested by the imported item.",
+    ),
+)
+_SKILL_PRIVILEGE_SCOPE_PATH_RE = re.compile(
+    r"(?P<path>(?:\.{1,2}/|[A-Za-z0-9_.-]+/)[A-Za-z0-9_./-]+|\.env(?:\.[A-Za-z0-9_.-]+)?|/[A-Za-z0-9_./-]+)"
+)
+
+
+def _skill_privilege_scope_item_id(item: dict[str, Any], index: int) -> str:
+    item_id = _skill_pack_item_id(item)
+    return item_id if item_id != "<unknown>" else f"item-{index}"
+
+
+def _skill_privilege_scope_iter_fields(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    fields: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        for key in sorted(value):
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            fields.append((child_prefix, value[key]))
+            fields.extend(_skill_privilege_scope_iter_fields(value[key], child_prefix))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            fields.append((child_prefix, item))
+            fields.extend(_skill_privilege_scope_iter_fields(item, child_prefix))
+    return fields
+
+
+def _skill_privilege_scope_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)) or value is None:
+        return str(value)
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _skill_privilege_scope_repo_path(raw: str) -> str:
+    candidate = str(raw or "").strip().strip("`'\".,;:()[]{}")
+    if not candidate:
+        return ""
+    if candidate.startswith("/repo/"):
+        return candidate.removeprefix("/repo/").strip("/") or "."
+    if candidate == "/repo":
+        return "."
+    if candidate.startswith("/") or candidate.startswith("../") or "/../" in candidate:
+        return "<outside-repo>"
+    return candidate.removeprefix("./") or "."
+
+
+def _skill_privilege_scope_paths(text: str) -> list[str]:
+    paths: list[str] = []
+    for match in _SKILL_PRIVILEGE_SCOPE_PATH_RE.finditer(text):
+        path = _skill_privilege_scope_repo_path(match.group("path"))
+        if path and path not in paths:
+            paths.append(path)
+    return paths[:8]
+
+
+def _skill_privilege_scope_declared_privileges(item: dict[str, Any]) -> set[str]:
+    declared: set[str] = set()
+    raw_values: list[Any] = []
+    for key in ("required_privileges", "declared_privileges", "permissions", "scopes"):
+        if key in item:
+            raw_values.append(item.get(key))
+    trust = item.get("trust") if isinstance(item.get("trust"), dict) else {}
+    if trust:
+        raw_values.append(trust.get("permissions"))
+    for raw in raw_values:
+        values = raw if isinstance(raw, list) else [raw]
+        for value in values:
+            text = str(value or "").strip().lower().replace("-", "_")
+            for category in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
+                if category in text:
+                    declared.add(category)
+            if text in {"write", "mutation", "mutate", "filesystem_write"}:
+                declared.add("write_path")
+            if text in {"read", "read_repository_context", "repository_read"}:
+                declared.add("read_path")
+            if text in {"shell", "process", "shell_process"}:
+                declared.add("command")
+            if "network" in text or "egress" in text:
+                declared.add("network")
+            if "secret" in text or "credential" in text or "token" in text:
+                declared.add("secret_adjacent")
+    return declared
+
+
+def _skill_privilege_scope_has_any(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _skill_privilege_scope_policy_text(workflow_policy_plan: dict[str, Any] | None) -> str:
+    if not isinstance(workflow_policy_plan, dict):
+        return ""
+    safe_keys = (
+        "intent",
+        "execution_mode",
+        "allowed_targets",
+        "data_classification",
+        "required_preconditions",
+        "blocking_policies",
+        "findings",
+        "steps",
+        "allowed_privileges",
+        "required_privileges",
+    )
+    filtered = {key: workflow_policy_plan.get(key) for key in safe_keys if key in workflow_policy_plan}
+    return json.dumps(filtered, sort_keys=True, ensure_ascii=True)
+
+
+def _skill_privilege_scope_intent_profile(
+    prompt: str,
+    workflow_policy_plan: dict[str, Any] | None,
+    declared_privileges: list[str] | None,
+) -> dict[str, Any]:
+    raw_prompt = str(prompt or "")
+    plan_text = _skill_privilege_scope_policy_text(workflow_policy_plan)
+    text = f"{raw_prompt}\n{plan_text}".lower()
+    allowed = {"read_path"}
+    reasons = {"read_path": "repository/context reads are the default minimum privilege"}
+    explicit_read_only = _skill_privilege_scope_has_any(
+        text,
+        (
+            r"\bread[- ]only\b",
+            r"\bno\s+(?:mutation|write|writes|changes?)\b",
+            r"\bwithout\s+mutat(?:ing|ion)\b",
+            r"\b(?:inspect|audit|review)\b",
+        ),
+    )
+    explicit_write = _skill_privilege_scope_has_any(
+        text,
+        (
+            r"\b(?:write|writes|writing|edit|modify|update|create|delete|move|rename|implement|fix|mutate)\b",
+            r"\bapply\s+patch\b",
+        ),
+    )
+    if explicit_write and not explicit_read_only:
+        allowed.add("write_path")
+        reasons["write_path"] = "task intent explicitly allows repository mutation"
+    if any(term in text for term in ("run", "execute", "pytest", "test", "lint", "build", "command", "shell")):
+        allowed.add("command")
+        reasons["command"] = "task intent names local command/check execution"
+    if any(term in text for term in ("network", "download", "fetch", "web", "http", "api", "github")):
+        allowed.add("network")
+        reasons["network"] = "task intent names network/API access"
+    if any(term in text for term in ("github", "issue", "pull request", "pr", "label", "comment")):
+        allowed.add("github_api")
+        reasons["github_api"] = "task intent names GitHub issue/PR/API activity"
+    if any(term in text for term in ("release", "publish", "deploy")) and not explicit_read_only:
+        allowed.add("release_publish")
+        reasons["release_publish"] = "task intent explicitly names release/publish/deploy"
+    if any(term in text for term in ("secret", "token", "credential", "api key", "private key", ".env")):
+        allowed.add("secret_adjacent")
+        reasons["secret_adjacent"] = "task intent names secret-adjacent review"
+
+    if isinstance(workflow_policy_plan, dict):
+        for step in workflow_policy_plan.get("steps", []) if isinstance(workflow_policy_plan.get("steps"), list) else []:
+            if not isinstance(step, dict):
+                continue
+            categories = {str(item).lower().replace("-", "_") for item in step.get("categories", []) if str(item).strip()}
+            if bool(step.get("mutates")) or "write" in categories:
+                allowed.add("write_path")
+                reasons.setdefault("write_path", "workflow_policy_plan declares mutation-capable steps")
+            if bool(step.get("network")) or "network" in categories:
+                allowed.add("network")
+                reasons.setdefault("network", "workflow_policy_plan declares network-capable steps")
+            if "shell/process" in categories or "shell_process" in categories:
+                allowed.add("command")
+                reasons.setdefault("command", "workflow_policy_plan declares shell/process steps")
+
+    for value in declared_privileges or []:
+        text_value = str(value or "").lower().replace("-", "_")
+        for category in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
+            if category in text_value:
+                allowed.add(category)
+                reasons.setdefault(category, "caller-declared task privilege")
+
+    if explicit_read_only:
+        allowed.discard("write_path")
+        allowed.discard("release_publish")
+        reasons.pop("write_path", None)
+        reasons.pop("release_publish", None)
+
+    return {
+        "task_digest": hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest()[:16],
+        "read_only_intent": explicit_read_only,
+        "allowed_categories": sorted(allowed),
+        "constraint_reasons": reasons,
+    }
+
+
+def _skill_privilege_scope_add_node(
+    nodes: list[dict[str, Any]],
+    seen: set[tuple[str, str, str, str]],
+    *,
+    item_id: str,
+    item_kind: str,
+    category: str,
+    field: str,
+    evidence: str,
+    paths: list[str] | None = None,
+) -> None:
+    evidence_text = re.sub(r"(?<![A-Za-z0-9_])/(?!repo(?:/|\b))[A-Za-z0-9_./-]+", "<outside-repo>", str(evidence))
+    redacted = _redact_untrusted_content_excerpt(evidence_text, max_chars=180)
+    path_list = sorted(set(paths or []))[:8]
+    key = (item_id, category, field, redacted)
+    if key in seen:
+        return
+    seen.add(key)
+    node_index = len(nodes) + 1
+    node: dict[str, Any] = {
+        "id": f"{item_id}:{category}:{node_index}",
+        "item_id": item_id,
+        "item_kind": item_kind,
+        "category": category,
+        "field": field,
+        "evidence_excerpt": redacted,
+        "repository_relative_paths": path_list,
+    }
+    nodes.append(node)
+
+
+def _skill_privilege_scope_extract_nodes(item: dict[str, Any], item_id: str, item_kind: str) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    declared = _skill_privilege_scope_declared_privileges(item)
+    for category in sorted(declared):
+        _skill_privilege_scope_add_node(
+            nodes,
+            seen,
+            item_id=item_id,
+            item_kind=item_kind,
+            category=category,
+            field="declared_privileges",
+            evidence=category,
+            paths=[],
+        )
+
+    for field, value in _skill_privilege_scope_iter_fields(item):
+        if field.rsplit(".", 1)[-1] in {"id", "name"}:
+            continue
+        text = _skill_privilege_scope_text(value)
+        if not text or text in {"None", "True", "False"}:
+            continue
+        lower = text.lower()
+        paths = _skill_privilege_scope_paths(text)
+        field_lower = field.lower()
+        for category, patterns, message in _SKILL_PRIVILEGE_SCOPE_PATTERN_SPECS:
+            if any(re.search(pattern, lower, flags=re.DOTALL) for pattern in patterns):
+                _skill_privilege_scope_add_node(
+                    nodes,
+                    seen,
+                    item_id=item_id,
+                    item_kind=item_kind,
+                    category=category,
+                    field=field,
+                    evidence=text if len(text) <= 240 else message,
+                    paths=paths,
+                )
+        if paths and any(term in field_lower for term in ("path", "target", "file")):
+            inferred = "write_path" if any(term in field_lower for term in ("write", "output", "target", "destination")) else "read_path"
+            _skill_privilege_scope_add_node(
+                nodes,
+                seen,
+                item_id=item_id,
+                item_kind=item_kind,
+                category=inferred,
+                field=field,
+                evidence=text,
+                paths=paths,
+            )
+    return nodes
+
+
+def _skill_privilege_scope_node_decision(
+    node: dict[str, Any],
+    *,
+    intent_profile: dict[str, Any],
+    declared_required: bool,
+) -> dict[str, Any]:
+    category = str(node.get("category") or "")
+    allowed = category in set(intent_profile.get("allowed_categories", []))
+    if not allowed:
+        severity = "block" if category in _SKILL_PRIVILEGE_SCOPE_MUTATING_CATEGORIES or category in {"network", "secret_adjacent"} else "warn"
+        return {
+            "status": "over_privileged",
+            "severity": severity,
+            "reason": f"{category} is not required by the declared task intent",
+            "suggested_constraint": f"Remove or gate `{category}` for this task unless the user explicitly expands scope.",
+        }
+    if declared_required or category == "read_path":
+        return {
+            "status": "required",
+            "severity": "info",
+            "reason": f"{category} is covered by task intent and declared as needed",
+            "suggested_constraint": f"Constrain `{category}` to the listed repository-relative paths and declared task.",
+        }
+    return {
+        "status": "allowed",
+        "severity": "info",
+        "reason": f"{category} is allowed by task intent but not explicitly declared as required",
+        "suggested_constraint": f"Document why `{category}` is necessary or remove it from the imported item.",
+    }
+
+
+@mcp.tool()
+def skill_privilege_scope(
+    prompt: str,
+    items: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    *,
+    workflow_policy_plan: dict[str, Any] | None = None,
+    declared_privileges: list[str] | None = None,
+    apply_repository_trust_defaults: bool | None = None,
+) -> dict[str, Any]:
+    """Read-only task-conditioned least-privilege analysis for imported cards/skills."""
+    items_to_analyze = WORKFLOW_CARDS if items is None else tuple(items)
+    if apply_repository_trust_defaults is None:
+        apply_repository_trust_defaults = items is None
+    intent_profile = _skill_privilege_scope_intent_profile(prompt, workflow_policy_plan, declared_privileges)
+    analyzed_items: list[dict[str, Any]] = []
+    action_nodes: list[dict[str, Any]] = []
+    advisory_blockers: list[dict[str, Any]] = []
+    required_privileges: list[dict[str, Any]] = []
+    allowed_set = set(intent_profile.get("allowed_categories", []))
+
+    for index, item in enumerate(items_to_analyze):
+        item_id = _skill_privilege_scope_item_id(item, index)
+        item_kind = _skill_pack_item_kind(item)
+        trust = _workflow_card_trust_metadata(item, apply_repository_default=apply_repository_trust_defaults)
+        declared_required_categories = _skill_privilege_scope_declared_privileges(item)
+        nodes = _skill_privilege_scope_extract_nodes(item, item_id, item_kind)
+        for node in nodes:
+            category = str(node.get("category") or "")
+            declared_required = category in declared_required_categories
+            decision = _skill_privilege_scope_node_decision(
+                node,
+                intent_profile=intent_profile,
+                declared_required=declared_required,
+            )
+            node.update(decision)
+            node["declared_required"] = declared_required
+            node["task_allowed"] = category in allowed_set
+            action_nodes.append(node)
+            if node["status"] == "over_privileged":
+                advisory_blockers.append(
+                    {
+                        "code": "task_conditioned_over_privilege",
+                        "severity": node["severity"],
+                        "item_id": item_id,
+                        "node_id": node["id"],
+                        "category": category,
+                        "message": node["reason"],
+                        "suggested_constraint": node["suggested_constraint"],
+                        "repository_relative_paths": node["repository_relative_paths"],
+                    }
+                )
+            elif node["status"] == "required":
+                required_privileges.append(
+                    {
+                        "item_id": item_id,
+                        "node_id": node["id"],
+                        "category": category,
+                        "repository_relative_paths": node["repository_relative_paths"],
+                    }
+                )
+        statuses: dict[str, int] = {}
+        for node in nodes:
+            statuses[str(node.get("status", "unknown"))] = statuses.get(str(node.get("status", "unknown")), 0) + 1
+        analyzed_items.append(
+            {
+                "item_id": item_id,
+                "item_kind": item_kind,
+                "trust_tier": trust.get("trust_tier", "missing") if trust else "missing",
+                "action_node_count": len(nodes),
+                "status_counts": statuses,
+            }
+        )
+
+    block_count = sum(1 for row in advisory_blockers if row.get("severity") == "block")
+    warn_count = sum(1 for row in advisory_blockers if row.get("severity") != "block")
+    decision = "block" if block_count else "warn" if warn_count else "allow"
+    summary = {
+        "decision": decision,
+        "items_analyzed": len(items_to_analyze),
+        "action_nodes": len(action_nodes),
+        "required_privileges": len(required_privileges),
+        "over_privileged_nodes": len(advisory_blockers),
+        "blockers": block_count,
+        "warnings": warn_count,
+    }
+    return {
+        "schema": SKILL_PRIVILEGE_SCOPE_SCHEMA_VERSION,
+        "read_only": True,
+        "executed_imported_code": False,
+        "external_services_called": False,
+        "redacted": True,
+        "repository_relative_output": True,
+        "intent_profile": intent_profile,
+        "summary": summary,
+        "items": analyzed_items,
+        "action_nodes": action_nodes,
+        "required_privileges": required_privileges,
+        "advisory_blockers": advisory_blockers,
+        "governance": {
+            "workflow_policy_plan_advisory_findings": advisory_blockers,
+            "policy_governance_decision_advisory_findings": advisory_blockers,
+            "skill_pack_import_review": {
+                "decision": "quarantine" if block_count else "allow_with_caveats" if warn_count else "allow",
+                "blocker_count": block_count,
+                "required_privilege_count": len(required_privileges),
+            },
+        },
+        "security": {
+            "contains_raw_prompts": False,
+            "contains_file_contents": False,
+            "contains_host_absolute_paths": False,
+            "redacted_evidence_only": True,
+            "imported_or_generated_code_executed": False,
+        },
+    }
+
+
 def _workflow_card_score(
     card: dict[str, Any],
     query: str,
@@ -30503,15 +30981,21 @@ class TaskRouterService:
             "coding_pip",
             "coding_sandbox",
             "workflow_select",
+            "skill_privilege_scope",
         }:
             raise ValueError(
-                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, workflow_select"
+                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, workflow_select, skill_privilege_scope"
             )
         if mode == "workflow_select":
             return workflow_select(
                 prompt=prompt or query,
                 top_k=3 if top_k is None else top_k,
                 execution_mode=execution_mode,
+            )
+        if mode == "skill_privilege_scope":
+            return skill_privilege_scope(
+                prompt=prompt or query,
+                items=candidates,
             )
         if mode == "status":
             return local_model_status()
@@ -30711,7 +31195,7 @@ def task_router(
     mode: Annotated[
         str,
         Field(
-            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use `workflow_select` first when you are unsure which existing MCP workflow/prompt/tool to use. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
+            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use `workflow_select` first when you are unsure which existing MCP workflow/prompt/tool to use. Use `skill_privilege_scope` to compare imported workflow cards/skills against task-conditioned least privilege. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
         ),
     ] = "task",
     prompt: Annotated[
@@ -30855,7 +31339,7 @@ def task_router(
         Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
     ] = True,
 ) -> dict[str, Any]:
-    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` plus `execution_mode` for read-only, mode-aware workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select."""
+    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` plus `execution_mode` for read-only, mode-aware workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select|skill_privilege_scope."""
     audit_args = {
         "mode": mode,
         "task": task,
