@@ -1,0 +1,69 @@
+{
+  "schema": "context_search_benchmark_fixture_set.v1",
+  "name": "grep-vector-context-search-smoke",
+  "target": "offline grep/vector/hybrid context search",
+  "description": "Deterministic local fixtures comparing grep, vector, and hybrid context retrieval under equal budgets and controlled distractor context.",
+  "budget": 3,
+  "fixtures": [
+    {
+      "id": "workflow-select-context-regression",
+      "question": "How do we verify workflow_select context retrieval metrics and top workflow card accuracy without network access?",
+      "evidence": [
+        {
+          "path": "docs/context-retrieval-regression.md",
+          "anchors": [
+            "task-router context retrieval smoke suite"
+          ]
+        },
+        {
+          "path": "source/server.py",
+          "anchors": [
+            "def _build_task_retrieval_context"
+          ]
+        },
+        {
+          "path": "tests/test_context_retrieval_eval.py",
+          "anchors": [
+            "test_evaluator_reports_context_retrieval_metrics"
+          ]
+        }
+      ],
+      "distractors": [
+        {
+          "id": "keyword-stuffed-routing-note",
+          "text": "workflow_select context retrieval metrics top workflow card accuracy network access workflow_select context retrieval metrics. This note is intentionally irrelevant and should not count as evidence."
+        }
+      ]
+    },
+    {
+      "id": "grep-output-presentation",
+      "question": "Which context should explain grep inline text versus resource link result handles for compact agent output?",
+      "evidence": [
+        {
+          "path": "docs/mcp-output-schemas.md",
+          "anchors": [
+            "Artifact resource links"
+          ]
+        },
+        {
+          "path": "docs/observation-compression.md",
+          "anchors": [
+            "grep(..., compressed_observation=true)"
+          ]
+        },
+        {
+          "path": "source/server.py",
+          "anchors": [
+            "def _result_store_put"
+          ]
+        }
+      ],
+      "distractors": [
+        {
+          "id": "presentation-keyword-noise",
+          "text": "grep inline text resource link result handles compact agent output grep inline text resource link. This distractor repeats search terms but is not repository evidence."
+        }
+      ]
+    }
+  ]
+}
