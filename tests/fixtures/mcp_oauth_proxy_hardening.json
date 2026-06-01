@@ -25,6 +25,16 @@
       "allowed_origins": ["https://*.example.test"]
     },
     {
+      "id": "disabled_resource_validation_proxy",
+      "auth_mode": "oauth-resource",
+      "authorization_servers": ["https://issuer.example.test"],
+      "expected_audience": "mcp://codebase-tooling-mcp",
+      "resource_validation": false,
+      "require_pkce": true,
+      "require_state": true,
+      "token_passthrough": false
+    },
+    {
       "id": "blocked_passthrough_proxy",
       "auth_mode": "oauth-resource",
       "issuer": "https://issuer.example.test",

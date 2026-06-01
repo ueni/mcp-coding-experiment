@@ -11574,6 +11574,32 @@ def _mcp_oauth_proxy_has_value(config: dict[str, Any], *needles: str) -> bool:
     return any(str(value).strip() for value in _mcp_oauth_proxy_values(config, *needles))
 
 
+def _mcp_oauth_proxy_false(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    text = str(value).strip().lower()
+    return text in {"0", "false", "no", "off", "disabled", "none"}
+
+
+def _mcp_oauth_proxy_validation_explicitly_disabled(config: dict[str, Any]) -> bool:
+    positive_validation_fields = {
+        "audience_validation",
+        "resource_validation",
+        "validate_audience",
+        "validate_resource",
+    }
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        segments = {segment for segment in re.split(r"[.\[\]]+", normalized) if segment}
+        if segments.intersection(positive_validation_fields) and _mcp_oauth_proxy_false(
+            value
+        ):
+            return True
+    return False
+
+
 def _mcp_oauth_proxy_field_refs(config: dict[str, Any], *needles: str) -> list[str]:
     wanted = tuple(needle.lower().replace("-", "_") for needle in needles)
     refs = []
@@ -11697,11 +11723,27 @@ def _mcp_oauth_proxy_analyze_config(
             "OAuth proxy forwards or reuses caller bearer tokens across a trust boundary.",
             ("token_passthrough", "passthrough_user_token", "forward_bearer_token", "reuse_client_token", "forward_authorization"),
         ))
-    if _mcp_oauth_proxy_bool(config, "accept_any_audience", "disable_audience_check", "skip_audience_validation", "disable_resource_validation"):
+    validation_disabled = _mcp_oauth_proxy_bool(
+        config,
+        "accept_any_audience",
+        "disable_audience_check",
+        "skip_audience_validation",
+        "disable_resource_validation",
+    ) or _mcp_oauth_proxy_validation_explicitly_disabled(config)
+    if validation_disabled:
         block_rules.append((
             "oauth-confused-deputy-validation-disabled",
-            "OAuth proxy disables audience/resource validation and is exposed to confused-deputy token replay.",
-            ("accept_any_audience", "disable_audience_check", "skip_audience_validation", "disable_resource_validation"),
+            "OAuth proxy disables or explicitly turns off audience/resource validation and is exposed to confused-deputy token replay.",
+            (
+                "accept_any_audience",
+                "disable_audience_check",
+                "skip_audience_validation",
+                "disable_resource_validation",
+                "audience_validation",
+                "resource_validation",
+                "validate_audience",
+                "validate_resource",
+            ),
         ))
     has_issuer = _mcp_oauth_proxy_has_value(config, "authorization_server", "authorization_servers", "issuer", "issuer_allowlist")
     has_audience = _mcp_oauth_proxy_bool(config, "audience_validation", "resource_validation", "resource_indicator", "resource_indicators", "validate_audience", "validate_resource", default=False) or _mcp_oauth_proxy_has_value(config, "expected_audience", "resource")

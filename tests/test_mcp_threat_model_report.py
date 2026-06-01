@@ -132,10 +132,11 @@ class McpThreatModelReportTests(ServerToolsTestBase):
         self.assertEqual(oauth["schema"], "mcp_oauth_proxy_hardening.v1")
         self.assertEqual(oauth["status"], "block")
         self.assertFalse(oauth["ok"])
-        self.assertEqual(oauth["summary"]["detected_config_count"], 3)
+        self.assertEqual(oauth["summary"]["detected_config_count"], 4)
         outcomes = {row["id"]: row["outcome"] for row in oauth["configs"]}
         self.assertEqual(outcomes["safe_oauth_proxy"], "pass")
         self.assertEqual(outcomes["warning_oauth_proxy"], "warn")
+        self.assertEqual(outcomes["disabled_resource_validation_proxy"], "block")
         self.assertEqual(outcomes["blocked_passthrough_proxy"], "block")
         self.assertEqual(outcomes["local_bearer_only"], "not_applicable")
 
@@ -155,6 +156,31 @@ class McpThreatModelReportTests(ServerToolsTestBase):
         self.assertNotIn("/home/user/private", serialized)
         self.assertFalse(oauth["security"]["tokens_or_secrets_included"])
         self.assertFalse(oauth["security"]["host_absolute_paths_included"])
+
+    def test_resource_validation_false_blocks_even_with_expected_audience(self):
+        report = self.server._mcp_oauth_proxy_hardening_report(
+            [
+                {
+                    "id": "disabled_resource_validation",
+                    "auth_mode": "oauth-resource",
+                    "authorization_servers": ["https://issuer.example.test"],
+                    "expected_audience": "mcp://codebase-tooling-mcp",
+                    "resource_validation": False,
+                    "require_pkce": True,
+                    "require_state": True,
+                    "token_passthrough": False,
+                }
+            ]
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "block")
+        self.assertEqual(report["configs"][0]["outcome"], "block")
+        self.assertEqual(report["summary"]["pass_count"], 0)
+        self.assertEqual(report["summary"]["block_count"], 1)
+        finding = report["findings"][0]
+        self.assertEqual(finding["rule_id"], "oauth-confused-deputy-validation-disabled")
+        self.assertIn("resource_validation", finding["evidence"]["field_refs"])
 
     def test_release_readiness_includes_oauth_proxy_compact_result(self):
         self.write_repo_text(
