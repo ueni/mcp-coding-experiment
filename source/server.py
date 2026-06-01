@@ -413,6 +413,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "policy_simulator": {"categories": ["read-only"]},
     "workflow_policy_plan": {"categories": ["read-only", "governance"]},
     "policy_governance_decision": {"categories": ["read-only", "governance"]},
+    "skill_privilege_scope": {"categories": ["read-only", "governance"]},
     "workflow_reminder": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
     "release_readiness": {"categories": ["read-only"]},
@@ -1104,6 +1105,7 @@ WORKFLOW_CARD_TRUST_SCHEMA_VERSION = "workflow_card_trust.v1"
 WORKFLOW_CARD_LINT_SCHEMA_VERSION = "workflow_card_lint.v1"
 WORKFLOW_CARD_SAFETY_SCHEMA_VERSION = "workflow_card_safety.v1"
 SKILL_PACK_SCORE_SCHEMA_VERSION = "skill_pack_score.v1"
+SKILL_PRIVILEGE_SCOPE_SCHEMA_VERSION = "skill_privilege_scope.v1"
 WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED = False
 WORKFLOW_CARD_FIELDS = (
     "id",
@@ -29446,6 +29448,322 @@ def _workflow_card_text(card: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+_SKILL_PRIVILEGE_INTENT_TERMS: dict[str, tuple[str, ...]] = {
+    "read_path": (
+        "read",
+        "inspect",
+        "review",
+        "audit",
+        "summarize",
+        "summary",
+        "search",
+        "grep",
+        "list",
+        "report",
+        "diagnose",
+    ),
+    "write_path": (
+        "write",
+        "edit",
+        "update",
+        "change",
+        "modify",
+        "patch",
+        "fix",
+        "create",
+        "delete",
+        "remove",
+        "refactor",
+        "mutate",
+        "commit",
+        "apply",
+    ),
+    "command": (
+        "run",
+        "execute",
+        "command",
+        "shell",
+        "test",
+        "pytest",
+        "verify",
+        "build",
+        "lint",
+        "install",
+    ),
+    "network": (
+        "network",
+        "online",
+        "download",
+        "upload",
+        "fetch",
+        "post",
+        "api",
+        "web",
+        "http",
+        "github",
+        "remote",
+    ),
+    "github_api": (
+        "github",
+        "issue",
+        "issues",
+        "pull request",
+        "pr",
+        "comment",
+        "label",
+        "review",
+        "release",
+    ),
+    "release_publish": ("release", "publish", "deploy", "ship", "tag", "registry", "npm", "pypi", "docker push"),
+    "secret_adjacent": (
+        "secret",
+        "secrets",
+        "credential",
+        "credentials",
+        "token",
+        "api key",
+        "private key",
+        ".env",
+        "env",
+        "config",
+        "security",
+        "leak",
+        "sensitive",
+        "private",
+    ),
+}
+
+_SKILL_PRIVILEGE_KIND_WEIGHTS = {
+    "read_path": 1,
+    "command": 3,
+    "write_path": 5,
+    "network": 5,
+    "github_api": 5,
+    "release_publish": 6,
+    "secret_adjacent": 6,
+}
+
+
+def _skill_privilege_iter_strings(value: Any, path: str = "$") -> Iterable[tuple[str, str]]:
+    """Yield untrusted fixture strings without importing, executing, or dereferencing them."""
+    if isinstance(value, str):
+        if value.strip():
+            yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            yield from _skill_privilege_iter_strings(key_text, f"{path}.{key_text}")
+            yield from _skill_privilege_iter_strings(item, f"{path}.{key_text}")
+    elif isinstance(value, (list, tuple, set)):
+        for index, item in enumerate(value):
+            yield from _skill_privilege_iter_strings(item, f"{path}[{index}]")
+    elif value is not None:
+        yield path, str(value)
+
+
+def _skill_privilege_node_id(kind: str, target: str, source: str) -> str:
+    stable = json.dumps([kind, target, source], sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return "priv-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
+
+
+def _skill_privilege_add_node(
+    nodes: list[dict[str, Any]],
+    seen: set[tuple[str, str, str]],
+    *,
+    kind: str,
+    operation: str,
+    target: str,
+    evidence: str,
+    source: str,
+) -> None:
+    normalized_target = _workflow_policy_redact_string(target or operation or kind, max_chars=120)
+    normalized_source = _workflow_policy_redact_string(source, max_chars=120)
+    key = (kind, normalized_target.lower(), normalized_source.lower())
+    if key in seen:
+        return
+    seen.add(key)
+    nodes.append(
+        {
+            "node_id": _skill_privilege_node_id(kind, normalized_target, normalized_source),
+            "kind": kind,
+            "operation": _workflow_policy_redact_string(operation or kind, max_chars=80),
+            "target": normalized_target,
+            "source": normalized_source,
+            "evidence": _redact_untrusted_content_excerpt(str(evidence), max_chars=180),
+        }
+    )
+
+
+def _skill_privilege_pathish_fragment(text: str) -> str:
+    match = re.search(r"(?:[\w.-]+/)+[\w.*{}@%+=:,.-]+|\.?/?[\w.-]+\.(?:py|md|json|ya?ml|toml|txt|env|sh|cfg|ini)", text)
+    if match:
+        return match.group(0)
+    return text.strip()[:80]
+
+
+def _skill_privilege_nodes_from_text(value: Any) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for source, raw_text in _skill_privilege_iter_strings(value):
+        text = raw_text.replace("\x00", " ").strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if re.search(r"\b(?:read|inspect|grep|scan|search|summarize|review|list)\b.{0,120}(?:[\w.-]+/|\.(?:py|md|json|ya?ml|toml|txt|env|sh)\b|\.env\b)", lower):
+            _skill_privilege_add_node(nodes, seen, kind="read_path", operation="read", target=_skill_privilege_pathish_fragment(text), evidence=text, source=source)
+        if re.search(r"\b(?:write|append|create|edit|modify|patch|apply|delete|remove|rm|move|mv|chmod|commit)\b", lower):
+            _skill_privilege_add_node(nodes, seen, kind="write_path", operation="write", target=_skill_privilege_pathish_fragment(text), evidence=text, source=source)
+        if re.search(r"\b(?:run|execute|shell|command|bash|sh -c|python -m|pytest|npm|make|docker)\b", lower):
+            _skill_privilege_add_node(nodes, seen, kind="command", operation="command", target=text[:100], evidence=text, source=source)
+        if re.search(r"https?://|\b(?:curl|wget|scp|sftp|rsync|upload|download|webhook|post)\b", lower):
+            _skill_privilege_add_node(nodes, seen, kind="network", operation="network", target=text[:100], evidence=text, source=source)
+        if re.search(r"\b(?:gh\s+(?:api|issue|pr|release)|github\s+api|pull request|\bpr\b|issue comment|add labels?|create issue)\b", lower):
+            _skill_privilege_add_node(nodes, seen, kind="github_api", operation="github_api", target=text[:100], evidence=text, source=source)
+        if re.search(r"\b(?:publish|deploy|ship|create\s+release|draft\s+release|npm\s+publish|twine\s+upload|docker\s+push|git\s+tag)\b", lower):
+            _skill_privilege_add_node(nodes, seen, kind="release_publish", operation="release_publish", target=text[:100], evidence=text, source=source)
+        if re.search(r"\b(?:secret|token|credential|api[-_ ]?key|private[-_ ]?key|authorization|\.env|password)\b", lower):
+            _skill_privilege_add_node(nodes, seen, kind="secret_adjacent", operation="secret_adjacent", target=_skill_privilege_pathish_fragment(text), evidence=text, source=source)
+    return nodes
+
+
+def _skill_privilege_nodes_from_steps(planned_steps: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for index, raw in enumerate(planned_steps or []):
+        if not isinstance(raw, dict):
+            raw = {"tool": str(raw)}
+        step = _workflow_policy_normalize_step(raw, index)
+        source = f"workflow_policy_plan.steps[{index}]"
+        tool = str(step.get("tool") or "")
+        mode = str(step.get("mode") or "")
+        target = ", ".join(str(item) for item in step.get("targets", []) if str(item).strip()) or tool or mode
+        evidence = f"{tool} {mode} {target}".strip()
+        if bool(step.get("read_only")) or tool in _WORKFLOW_POLICY_READ_TOOLS:
+            _skill_privilege_add_node(nodes, seen, kind="read_path", operation="read", target=target or tool, evidence=evidence, source=source)
+        if bool(step.get("mutates")):
+            _skill_privilege_add_node(nodes, seen, kind="write_path", operation="write", target=target or tool, evidence=evidence, source=source)
+        if bool(step.get("network")):
+            _skill_privilege_add_node(nodes, seen, kind="network", operation="network", target=target or tool, evidence=evidence, source=source)
+        if tool == "command_runner" or "shell/process" in step.get("categories", []):
+            _skill_privilege_add_node(nodes, seen, kind="command", operation="command", target=target or tool, evidence=evidence, source=source)
+        if "github" in tool.lower() or tool in {"github_issue", "github_pull_request"}:
+            _skill_privilege_add_node(nodes, seen, kind="github_api", operation="github_api", target=target or tool, evidence=evidence, source=source)
+        if re.search(r"\b(?:publish|deploy|ship|create[_ -]?release|tag)\b", f"{tool} {mode}".lower()):
+            _skill_privilege_add_node(nodes, seen, kind="release_publish", operation="release_publish", target=target or tool, evidence=evidence, source=source)
+        if _workflow_policy_looks_like_sensitive_read(step):
+            _skill_privilege_add_node(nodes, seen, kind="secret_adjacent", operation="secret_adjacent", target=target or tool, evidence=evidence, source=source)
+    return nodes
+
+
+def _skill_privilege_intent_allows(kind: str, intent: str) -> bool:
+    if kind == "read_path":
+        return True
+    lowered = intent.lower()
+    negation_patterns = {
+        "write_path": r"\b(?:no|without|avoid|do not|don't)\b.{0,40}\b(?:write|edit|change|modify|patch|delete|mutation|mutating|mutate|edits|changes)\b|\bread[- ]only\b|\bwithout changing\b",
+        "command": r"\b(?:no|without|avoid|do not|don't)\b.{0,40}\b(?:command|shell|execute|run)\b",
+        "network": r"\b(?:no|without|avoid|do not|don't)\b.{0,40}\b(?:network|external|online|upload|download|http|web)\b",
+        "github_api": r"\b(?:no|without|avoid|do not|don't)\b.{0,40}\b(?:github|pr|issue|comment|label|external writes?)\b",
+        "release_publish": r"\b(?:no|without|avoid|do not|don't)\b.{0,40}\b(?:release|publish|deploy|ship|tag)\b",
+        "secret_adjacent": r"\b(?:no|without|avoid|do not|don't)\b.{0,40}\b(?:secret|token|credential|private|sensitive)\b",
+    }
+    if kind in negation_patterns and re.search(negation_patterns[kind], lowered):
+        return False
+    return any(term in lowered for term in _SKILL_PRIVILEGE_INTENT_TERMS.get(kind, ()))
+
+
+def _skill_privilege_required_reason(kind: str, intent: str, workflow_policy_plan: dict[str, Any] | None) -> str:
+    if kind == "read_path":
+        return "read access is inherent to analysis and review tasks"
+    if _skill_privilege_intent_allows(kind, intent):
+        return f"declared intent contains task terms for `{kind}`"
+    if workflow_policy_plan and workflow_policy_plan.get("ok") is True:
+        return "declared workflow_policy_plan allows the corresponding privilege"
+    return ""
+
+
+def _skill_privilege_suggested_constraint(kind: str) -> str:
+    return {
+        "write_path": "Remove mutating steps, or require explicit write scope, snapshot/rollback, and user approval.",
+        "command": "Replace shell commands with read-only MCP tools, or constrain the exact command and timeout.",
+        "network": "Disable network egress, or require explicit destination allow-list and data-handling approval.",
+        "github_api": "Require explicit GitHub operation, target issue/PR/repo, and human approval before writes.",
+        "release_publish": "Split release/publish into a separate approved workflow with readiness gates.",
+        "secret_adjacent": "Redact evidence and require secret-scanning intent plus least-privilege path allow-list.",
+    }.get(kind, "Keep this action read-only and repository-relative unless explicitly approved.")
+
+
+def _skill_privilege_scope_payload(
+    *,
+    intent: str,
+    item: dict[str, Any] | None = None,
+    workflow_policy_plan: dict[str, Any] | None = None,
+    planned_steps: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+) -> dict[str, Any]:
+    """Build a read-only task-conditioned least-privilege action graph for imported cards/skills."""
+    normalized_intent = _workflow_policy_redact_string(intent or str((workflow_policy_plan or {}).get("intent") or ""), max_chars=240)
+    subject = item if isinstance(item, dict) else {}
+    subject_nodes = _skill_privilege_nodes_from_text(subject) if subject else []
+    step_nodes = _skill_privilege_nodes_from_steps(planned_steps)
+    if workflow_policy_plan and isinstance(workflow_policy_plan.get("steps"), list):
+        step_nodes.extend(_skill_privilege_nodes_from_steps(workflow_policy_plan.get("steps", [])))
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for node in subject_nodes + step_nodes:
+        node_id = str(node.get("node_id", ""))
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        required_reason = _skill_privilege_required_reason(str(node.get("kind", "")), normalized_intent, workflow_policy_plan)
+        required = bool(required_reason)
+        enriched = dict(node)
+        enriched["required"] = required
+        enriched["required_reason"] = required_reason or "not required by declared task intent"
+        if not required:
+            enriched["severity"] = "block" if str(node.get("kind")) in {"write_path", "network", "github_api", "release_publish", "secret_adjacent"} else "warning"
+            enriched["suggested_constraint"] = _skill_privilege_suggested_constraint(str(node.get("kind", "")))
+        merged.append(enriched)
+
+    blockers = [node for node in merged if not bool(node.get("required")) and str(node.get("severity")) == "block"]
+    warnings = [node for node in merged if not bool(node.get("required")) and str(node.get("severity")) == "warning"]
+    kind_counts: dict[str, int] = {}
+    for node in merged:
+        kind = str(node.get("kind") or "unknown")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    return {
+        "schema": SKILL_PRIVILEGE_SCOPE_SCHEMA_VERSION,
+        "read_only": True,
+        "executed_imported_code": False,
+        "external_services_called": False,
+        "intent": normalized_intent,
+        "item_id": _skill_pack_item_id(subject) if subject else "<planned_steps>",
+        "decision": "advisory_block" if blockers else "allow_with_warnings" if warnings else "allow",
+        "ok": not blockers,
+        "summary": {
+            "node_count": len(merged),
+            "required": sum(1 for node in merged if bool(node.get("required"))),
+            "overprivileged": len(blockers) + len(warnings),
+            "advisory_blockers": len(blockers),
+            "warnings": len(warnings),
+            "kind_counts": kind_counts,
+        },
+        "action_nodes": merged[:80],
+        "advisory_blockers": blockers[:40],
+        "required_privileges": [node for node in merged if bool(node.get("required"))][:40],
+        "suggested_constraints": list(dict.fromkeys(str(node.get("suggested_constraint")) for node in blockers + warnings if node.get("suggested_constraint")))[:10],
+        "security": {
+            "redacted": True,
+            "repository_relative": True,
+            "contains_file_contents": False,
+            "contains_host_absolute_paths": False,
+            "dynamic_code_loaded": False,
+            "imported_skill_executed": False,
+            "external_services_called": False,
+        },
+    }
+
+
 def _workflow_card_add_finding(
     findings: list[dict[str, Any]],
     *,
@@ -30156,6 +30474,17 @@ def _skill_pack_score_item(
     )
     fit_score = _skill_pack_fit_score(item, query, evidence)
     trust_metadata = trust if trust is not None else _workflow_card_trust_metadata(item, apply_repository_default=apply_repository_trust_default)
+    privilege_scope = _skill_privilege_scope_payload(intent=query, item=item)
+    if int(privilege_scope.get("summary", {}).get("advisory_blockers", 0)) > 0:
+        _skill_pack_score_add_evidence(
+            evidence,
+            category="least_privilege",
+            signal="task_conditioned_overprivilege",
+            weight=0,
+            severity="error",
+            message="Task-conditioned privilege scope found action nodes that are not required by the declared prompt.",
+            excerpt=", ".join(str(node.get("kind", "")) for node in privilege_scope.get("advisory_blockers", [])[:5]),
+        )
     decision = _skill_pack_decision(item, risk_score, fit_score, evidence, trust=trust_metadata)
     return {
         "schema": SKILL_PACK_SCORE_SCHEMA_VERSION,
@@ -30165,6 +30494,7 @@ def _skill_pack_score_item(
         "risk_score": risk_score,
         "fit_score": fit_score,
         "decision": decision,
+        "skill_privilege_scope": privilege_scope,
         "evidence": evidence[:24],
         "refinement_suggestions": _skill_pack_refinement_suggestions(item, fit_score, risk_score, query),
     }
@@ -30205,6 +30535,22 @@ def skill_pack_score(
         },
         "scores": scores,
     }
+
+
+@mcp.tool()
+def skill_privilege_scope(
+    intent: str,
+    item: dict[str, Any] | None = None,
+    workflow_policy_plan: dict[str, Any] | None = None,
+    planned_steps: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Read-only task-conditioned least-privilege graph for imported workflow cards or agent skills."""
+    return _skill_privilege_scope_payload(
+        intent=intent,
+        item=item or {},
+        workflow_policy_plan=workflow_policy_plan,
+        planned_steps=planned_steps or [],
+    )
 
 def _workflow_card_score(
     card: dict[str, Any],
@@ -37181,6 +37527,7 @@ _WORKFLOW_POLICY_READ_TOOLS = {
     "agents_context_health",
     "test_impact_map",
     "policy_governance_decision",
+    "skill_privilege_scope",
 }
 _WORKFLOW_POLICY_RELEASE_TOOLS = {
     "release_readiness",
@@ -37441,6 +37788,8 @@ def _workflow_policy_safe_next_actions(decision: str, findings: list[dict[str, A
         actions.append("Run or include the required test/change-impact/release-readiness gate before release-sensitive steps.")
     if "mutation_needs_approval" in codes or "network_needs_approval" in codes:
         actions.append("Ask for explicit approval for the mutation/network-capable portion of the sequence.")
+    if "task_conditioned_overprivilege" in codes:
+        actions.append("Remove imported/planned action nodes that are not required by the declared task, or restate the user-approved privilege scope and rerun least-privilege analysis.")
     if not actions and decision == "allow":
         actions.append("Proceed with the declared sequence; re-run preflight if intent, scope, tools, or order changes.")
     if not actions:
@@ -37460,6 +37809,7 @@ def _workflow_policy_plan_payload(
     allowed_targets: list[str],
     data_classification: str,
     planned_steps: list[dict[str, Any]],
+    imported_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_intent = _workflow_policy_redact_string(intent, max_chars=240)
     normalized_execution_mode = _workflow_policy_redact_string(execution_mode or "auto", max_chars=80)
@@ -37520,6 +37870,22 @@ def _workflow_policy_plan_payload(
                 findings.append(_workflow_policy_finding(code="missing_test_gate", severity="approval", step_index=step_index, policy="release_gate", message="release-sensitive step is missing an earlier test/change-impact/readiness gate", required_precondition="test_or_change_impact_gate"))
                 required_preconditions.append({"code": "test_or_change_impact_gate", "step_index": step_index, "reason": "release workflow requires validation evidence"})
 
+    least_privilege_scope = _skill_privilege_scope_payload(
+        intent=normalized_intent,
+        item=imported_item if isinstance(imported_item, dict) else None,
+        planned_steps=planned_steps,
+    )
+    for node in least_privilege_scope.get("advisory_blockers", [])[:20]:
+        findings.append(
+            _workflow_policy_finding(
+                code="task_conditioned_overprivilege",
+                severity="block",
+                policy="least_privilege",
+                message=f"planned/imported `{node.get('kind')}` action is not required by declared intent: {node.get('target')}",
+            )
+        )
+        blocking_policies.append("least_privilege")
+
     # Stable de-duplication while preserving first occurrence details.
     deduped_findings: list[dict[str, Any]] = []
     seen_finding_keys: set[tuple[str, int | None, str]] = set()
@@ -37558,6 +37924,7 @@ def _workflow_policy_plan_payload(
         "allowed_targets": normalized_allowed_targets,
         "data_classification": normalized_data_classification,
         "steps": normalized_steps,
+        "least_privilege_decision": least_privilege_scope.get("decision", ""),
     }
     result: dict[str, Any] = {
         "schema": WORKFLOW_POLICY_PLAN_SCHEMA,
@@ -37575,6 +37942,7 @@ def _workflow_policy_plan_payload(
         "blocking_policies": blocking_policies,
         "required_preconditions": required_preconditions,
         "findings": findings,
+        "least_privilege_scope": least_privilege_scope,
         "safe_next_actions": _workflow_policy_safe_next_actions(decision, findings),
         "security": {
             "redacted": True,
@@ -37626,6 +37994,7 @@ def workflow_policy_plan(
     execution_mode: str = "auto",
     allowed_targets: list[str] | None = None,
     data_classification: str = "unspecified",
+    imported_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Preflight a declared MCP tool sequence against workflow-level policy without executing it."""
     return _workflow_policy_plan_payload(
@@ -37634,6 +38003,7 @@ def workflow_policy_plan(
         allowed_targets=allowed_targets or [],
         data_classification=data_classification,
         planned_steps=planned_steps or [],
+        imported_item=imported_item,
     )
 
 
@@ -37902,6 +38272,7 @@ def _policy_governance_payload(
     allowed_targets: list[str],
     data_classification: str,
     policy_bundle_path: str,
+    imported_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_execution_mode = _workflow_policy_redact_string(execution_mode or "auto", max_chars=80)
     normalized_data_classification = _workflow_policy_redact_string(data_classification or "unspecified", max_chars=80).lower()
@@ -37911,6 +38282,7 @@ def _policy_governance_payload(
         allowed_targets=allowed_targets,
         data_classification=data_classification,
         planned_steps=planned_steps,
+        imported_item=imported_item,
     )
     normalized_steps = preflight.get("steps", []) if isinstance(preflight.get("steps"), list) else []
     bundle, bundle_meta = _policy_governance_load_bundle(policy_bundle_path)
@@ -37936,6 +38308,7 @@ def _policy_governance_payload(
             "safe_next_actions": ["Fix the repository-local reviewed policy bundle and rerun the policy decision before executing planned tools."],
             "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
             "workflow_policy_plan": {"decision": preflight.get("decision"), "plan_id": preflight.get("plan_id"), "ok": preflight.get("ok")},
+            "least_privilege_scope": preflight.get("least_privilege_scope", {}),
             "security": {
                 "redacted": True,
                 "read_only": True,
@@ -38019,6 +38392,7 @@ def _policy_governance_payload(
             "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
             "required_preconditions": _redact_audit_value(preflight.get("required_preconditions", [])),
         },
+        "least_privilege_scope": preflight.get("least_privilege_scope", {}),
         "security": {
             "redacted": True,
             "read_only": True,
@@ -38084,6 +38458,7 @@ def policy_governance_decision(
     allowed_targets: list[str] | None = None,
     data_classification: str = "unspecified",
     policy_bundle_path: str = POLICY_GOVERNANCE_DEFAULT_BUNDLE,
+    imported_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate declared MCP tool steps against a reviewed repo-local policy bundle without executing them."""
     return _policy_governance_payload(
@@ -38093,6 +38468,7 @@ def policy_governance_decision(
         allowed_targets=allowed_targets or [],
         data_classification=data_classification,
         policy_bundle_path=policy_bundle_path,
+        imported_item=imported_item,
     )
 
 

@@ -127,10 +127,11 @@ Public tools:
 - `tool_annotations`
 - `tool_output_contracts`
 - `tool_catalog_integrity`
+- `skill_privilege_scope`
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `agent_security_delta`, `agent_security_delta_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `observation_compression_report`, `agents_context_health`, `artifact_provenance`, `result_reference_resolve`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`, `policy_governance_decision`, `workflow_reminder`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `agent_security_delta`, `agent_security_delta_report`, `mcp_threat_model_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `observation_compression_report`, `agents_context_health`, `artifact_provenance`, `result_reference_resolve`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`, `policy_governance_decision`, `skill_privilege_scope`, `workflow_reminder`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -149,6 +150,8 @@ Public tools:
 `policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
 
 `agent_quality_delta` is a read-only base/head maintainability delta gate for autonomous PRs. It reports churn-normalized static-analysis finding deltas, touched Python function complexity deltas, duplication/large-function hints, and maintainer-override-aware warn/block/review-only policy decisions without storing raw prompts.
+
+`skill_privilege_scope` is a read-only/no-execution task-conditioned least-privilege analyzer for imported workflow cards and agent skills; it maps declared action nodes to required privileges or advisory blockers before import.
 
 `tool_catalog_integrity` is a read-only rug-pull drift guard for the public MCP surface. It hashes live `mcp.list_tools()`, `mcp.list_prompts()`, `mcp.get_prompt()` template text with synthetic arguments redacted, `mcp.list_resources()`, `mcp.list_resource_templates()`, allowlisted discovery/docs metadata, `tool_annotations`, checked-in output contracts, security categories/mode categories, and public documentation references against `source/tool_catalog_baseline.json`, then reports compact tool/prompt/resource/discovery added/removed/changed metadata diffs and advisory metadata-lint findings without embedding repository contents, resource payloads, host paths, tokens, raw dynamic prompt arguments, or runtime secrets.
 

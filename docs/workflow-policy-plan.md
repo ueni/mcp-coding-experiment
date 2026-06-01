@@ -54,3 +54,7 @@ For reviewed repository-local policy bundles on top of this normalized metadata,
 ## Privacy and redaction
 
 Preflight output is redacted by default. It records argument shape rather than raw argument values, redacts host absolute paths, secret-looking values, URLs, and emails, and does not persist raw prompts, repository file contents, or artifacts by default.
+
+## Imported card and skill least-privilege preflight
+
+`workflow_policy_plan` accepts an optional `imported_item` for proposed workflow cards or agent skills. The plan runs `skill_privilege_scope` in read-only mode and adds `least_privilege` blockers when imported metadata contains task-conditioned over-privilege, such as a write step in a read-only review. `policy_governance_decision` carries the same `least_privilege_scope` into governance reports.

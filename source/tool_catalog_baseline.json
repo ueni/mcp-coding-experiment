@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 43,
+  "tool_count": 44,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -7501,7 +7501,7 @@
       "name": "observation_compression_report"
     },
     {
-      "digest": "sha256:32d16aa355dff9571ee2d5a5770dff38f67020b80d5ea365f654b72c47d027c2",
+      "digest": "sha256:22e36e37dc7857c8744224c8637c1324eb3db6f13191a314f94762ecba3b721c",
       "metadata": {
         "documentation": [
           {
@@ -7543,6 +7543,19 @@
                 "default": "auto",
                 "title": "Execution Mode",
                 "type": "string"
+              },
+              "imported_item": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Imported Item"
               },
               "intent": {
                 "title": "Intent",
@@ -7619,6 +7632,9 @@
               },
               "intent": {
                 "type": "string"
+              },
+              "least_privilege_scope": {
+                "type": "object"
               },
               "matched_rule_ids": {
                 "items": {
@@ -7726,6 +7742,7 @@
             "bundle_version",
             "authoritative_hard_gates",
             "workflow_policy_plan",
+            "least_privilege_scope",
             "security"
           ],
           "outputSchema": {
@@ -7775,6 +7792,9 @@
               },
               "intent": {
                 "type": "string"
+              },
+              "least_privilege_scope": {
+                "type": "object"
               },
               "matched_rule_ids": {
                 "items": {
@@ -11063,6 +11083,322 @@
       "name": "self_optimization_report"
     },
     {
+      "digest": "sha256:5dc25c2f6a5784eb1871bcc66a6893c20dcdeb37e9f94f132c3bfbc40cba9245",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Read-only task-conditioned least-privilege graph for imported workflow cards or agent skills.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "intent": {
+                "title": "Intent",
+                "type": "string"
+              },
+              "item": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Item"
+              },
+              "planned_steps": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Planned Steps"
+              },
+              "workflow_policy_plan": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Workflow Policy Plan"
+              }
+            },
+            "required": [
+              "intent"
+            ],
+            "title": "skill_privilege_scopeArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "skill_privilege_scope",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "action_nodes": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "advisory_blockers": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "allow_with_warnings",
+                  "advisory_block"
+                ],
+                "type": "string"
+              },
+              "executed_imported_code": {
+                "const": false,
+                "type": "boolean"
+              },
+              "external_services_called": {
+                "const": false,
+                "type": "boolean"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "item_id": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "required_privileges": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "skill_privilege_scope.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "suggested_constraints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_imported_code",
+              "external_services_called",
+              "decision",
+              "ok",
+              "summary",
+              "action_nodes",
+              "advisory_blockers",
+              "required_privileges"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "intent",
+            "item_id",
+            "suggested_constraints",
+            "security"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "action_nodes": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "advisory_blockers": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "allow_with_warnings",
+                  "advisory_block"
+                ],
+                "type": "string"
+              },
+              "executed_imported_code": {
+                "const": false,
+                "type": "boolean"
+              },
+              "external_services_called": {
+                "const": false,
+                "type": "boolean"
+              },
+              "intent": {
+                "type": "string"
+              },
+              "item_id": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "required_privileges": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "skill_privilege_scope.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "suggested_constraints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_imported_code",
+              "external_services_called",
+              "decision",
+              "ok",
+              "summary",
+              "action_nodes",
+              "advisory_blockers",
+              "required_privileges"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "executed_imported_code",
+            "external_services_called",
+            "decision",
+            "ok",
+            "summary",
+            "action_nodes",
+            "advisory_blockers",
+            "required_privileges"
+          ],
+          "tool": "skill_privilege_scope"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "skill_privilege_scope"
+        }
+      },
+      "name": "skill_privilege_scope"
+    },
+    {
       "digest": "sha256:ca2e457a27cc93891c55d1a7786d1efc453ebde047bcccd8368e2bff0e70b1ff",
       "metadata": {
         "documentation": [
@@ -13796,7 +14132,7 @@
       "name": "workflow_lineage"
     },
     {
-      "digest": "sha256:5ce78e4e71ee2ee2ea9b43b2e7f872e6a6bd0c681ff0ea6df4a92dede0635651",
+      "digest": "sha256:2b623b58356ca03fe5bf92f642c671a61af7fcd93d163c5c4df6a2d77f8abf96",
       "metadata": {
         "documentation": [
           {
@@ -13838,6 +14174,19 @@
                 "default": "auto",
                 "title": "Execution Mode",
                 "type": "string"
+              },
+              "imported_item": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Imported Item"
               },
               "intent": {
                 "title": "Intent",
@@ -13904,6 +14253,9 @@
               },
               "intent": {
                 "type": "string"
+              },
+              "least_privilege_scope": {
+                "type": "object"
               },
               "ok": {
                 "type": "boolean"
@@ -14004,6 +14356,7 @@
             "data_classification",
             "step_count",
             "steps",
+            "least_privilege_scope",
             "security"
           ],
           "outputSchema": {
@@ -14048,6 +14401,9 @@
               },
               "intent": {
                 "type": "string"
+              },
+              "least_privilege_scope": {
+                "type": "object"
               },
               "ok": {
                 "type": "boolean"
@@ -16131,5 +16487,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:6f6d3f8315c8e786060df81bcee0c9db7e1be78a618bed71d2f19b1b34840659"
+  "whole_catalog_digest": "sha256:091438d111ac46e0b5abbd147bb8d6c0f71d4b60b85933facbf63a8ae2fb2179"
 }

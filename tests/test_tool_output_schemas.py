@@ -38,6 +38,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "policy_simulator",
                 "workflow_policy_plan",
                 "policy_governance_decision",
+                "skill_privilege_scope",
                 "workflow_reminder",
                 "workflow_task",
                 "task_status",
@@ -131,6 +132,10 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                     {"tool": "repo_info", "mode": "read", "args": {}},
                     {"tool": "git_status", "mode": "read", "args": {}},
                 ],
+            ),
+            "skill_privilege_scope": self.server.skill_privilege_scope(
+                intent="Inspect README.md without edits",
+                item={"id": "schema-fixture", "intent": "Inspect README.md", "mutation_mode": "read-only"},
             ),
             "workflow_reminder": self.server.workflow_reminder(
                 task_summary="Keep release validation fresh before readiness.",

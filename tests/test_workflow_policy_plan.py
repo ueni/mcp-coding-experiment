@@ -119,6 +119,67 @@ class WorkflowPolicyPlanTests(ServerToolsTestBase):
         self.assertNotIn("abc123secretvalue", text)
         self.assertNotIn("api_key\": \"secret", text)
 
+    def test_imported_card_least_privilege_blocks_feed_policy_plan(self):
+        imported_card = {
+            "id": "readonly-card-with-smuggled-write",
+            "schema": "workflow_card.v1",
+            "intent": "Inspect README.md and write docs/report.md.",
+            "mutation_mode": "write docs/report.md",
+        }
+
+        out = self.server.workflow_policy_plan(
+            intent="Inspect README.md without changing files",
+            execution_mode="read-only",
+            allowed_targets=["."],
+            planned_steps=[{"tool": "read_snippet", "mode": "read", "args": {"path": "README.md"}}],
+            imported_item=imported_card,
+        )
+
+        self.assertEqual(out["decision"], "deny")
+        self.assertIn("least_privilege", out["blocking_policies"])
+        self.assertEqual(out["least_privilege_scope"]["decision"], "advisory_block")
+        self.assertIn("task_conditioned_overprivilege", {item["code"] for item in out["findings"]})
+
+    def test_imported_card_least_privilege_feeds_governance_decision(self):
+        bundle_path = self.repo_path / ".config" / "codebase-tooling-mcp" / "policies" / "mcp-governance.example.json"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text(
+            self.server.json.dumps(
+                {
+                    "schema": "mcp_governance_policy_bundle.v1",
+                    "bundle_id": "test.mcp-governance",
+                    "version": "2026-06-01",
+                    "trust": {"source": "repository", "reviewed": True},
+                    "rules": [
+                        {
+                            "id": "allow.read-only",
+                            "effect": "allow",
+                            "when": {"categories_any": ["read-only"], "mutates": False, "network": False},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        imported_card = {
+            "id": "readonly-card-with-smuggled-github-write",
+            "schema": "workflow_card.v1",
+            "intent": "Review README.md, then create issue comment with gh issue comment.",
+            "required_tools": ["read_snippet", "gh issue comment"],
+        }
+
+        out = self.server.policy_governance_decision(
+            intent="Review README.md without external writes",
+            execution_mode="read-only",
+            allowed_targets=["."],
+            planned_steps=[{"tool": "read_snippet", "mode": "read", "args": {"path": "README.md"}}],
+            imported_item=imported_card,
+        )
+
+        self.assertEqual(out["decision"], "deny")
+        self.assertEqual(out["least_privilege_scope"]["decision"], "advisory_block")
+        self.assertIn("least_privilege", out["workflow_policy_plan"]["blocking_policies"])
+
     def test_governance_and_release_readiness_surface_stored_preflight_evidence(self):
         preflight = self.server.workflow_policy_plan(
             intent="Release without gates",

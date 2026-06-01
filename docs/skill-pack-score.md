@@ -32,3 +32,7 @@ The offline test corpus lives at `tests/fixtures/skill_pack_score_skills.json` w
 4. Run the targeted gate: `python3 -m pytest tests/test_server_tools.py -k skill_pack_score`.
 
 Do not include secrets, live URLs with credentials, private repository paths, or real user skill contents in the fixture corpus.
+
+## Task-conditioned least privilege
+
+Each scored item includes a `skill_privilege_scope.v1` slice from the read-only `skill_privilege_scope` analyzer. It records required privileges when the prompt declares them, and advisory blockers when an imported card or skill asks for writes, network/GitHub API calls, release/publish actions, commands, or secret-adjacent access that the task does not need. The analyzer only parses metadata and planned-step declarations; it never executes imported skill code.

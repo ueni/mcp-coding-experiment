@@ -29,6 +29,7 @@ SPDX-License-Identifier: MIT
 - [Mutation step guard](./mutation-step-guard.md) - read-only final checkpoint before workspace/git mutation steps.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) - read-only `skill_pack_score` risk/fit decisions for workflow cards and offline imported-skill fixtures.
+- [Skill privilege scope](./skill-privilege-scope.md) - read-only task-conditioned least-privilege analysis for imported workflow cards and agent skills.
 - [Context retrieval regression suite](./context-retrieval-regression.md) - offline ContextBench-style fixtures and metrics for task-router workflow-card retrieval.
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) - offline Terminal-Bench-style task fixtures, direct baseline runner, agent hooks, and trajectory/safety metrics for complete MCP workflows.
 - [Agent execution modes](./execution-modes.md) - online/cloud-assisted and offline/onboard-only routing contracts layered onto workflow selection.

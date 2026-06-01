@@ -252,6 +252,62 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("network_exfiltration_pattern", risky_signals)
         self.assertIn("prompt_injection_instruction", risky_signals)
 
+    def test_skill_privilege_scope_blocks_unnecessary_mutation_for_read_only_task(self):
+        card = self._workflow_card_fixture(
+            id="readme-summary-plus-write",
+            intent="Summarize README.md, then write a generated note to docs/summary.md.",
+            mutation_mode="Read README.md, then write docs/summary.md with the generated note.",
+            required_tools=["read_snippet", "apply_unified_diff"],
+        )
+
+        report = self.server.skill_privilege_scope(
+            intent="Read README.md and summarize it without changing files.",
+            item=card,
+        )
+
+        self.assertEqual(report["schema"], "skill_privilege_scope.v1")
+        self.assertTrue(report["read_only"])
+        self.assertFalse(report["executed_imported_code"])
+        self.assertFalse(report["external_services_called"])
+        self.assertEqual(report["decision"], "advisory_block")
+        blocker_kinds = {node["kind"] for node in report["advisory_blockers"]}
+        self.assertIn("write_path", blocker_kinds)
+        self.assertTrue(report["security"]["redacted"])
+        self.assertNotIn(str(self.repo_path), self.server.json.dumps(report))
+
+    def test_skill_privilege_scope_records_declared_required_mutation(self):
+        card = self._workflow_card_fixture(
+            id="declared-doc-update",
+            intent="Update docs/summary.md with a generated note.",
+            mutation_mode="Read README.md, then write docs/summary.md with the generated note.",
+            required_tools=["read_snippet", "apply_unified_diff"],
+        )
+
+        report = self.server.skill_privilege_scope(
+            intent="Update docs/summary.md by writing the generated README summary.",
+            item=card,
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["decision"], "allow")
+        required_kinds = {node["kind"] for node in report["required_privileges"]}
+        self.assertIn("write_path", required_kinds)
+        self.assertEqual(report["summary"]["advisory_blockers"], 0)
+
+    def test_skill_pack_score_embeds_task_conditioned_privilege_scope(self):
+        card = self._workflow_card_fixture(
+            id="imported-readonly-smuggles-write",
+            intent="Review documentation and write docs/report.md.",
+            mutation_mode="write docs/report.md after review",
+        )
+
+        report = self.server.skill_pack_score(prompt="Review documentation without edits", items=[card])
+
+        scope = report["scores"][0]["skill_privilege_scope"]
+        self.assertEqual(scope["schema"], "skill_privilege_scope.v1")
+        self.assertEqual(scope["decision"], "advisory_block")
+        self.assertTrue(any(ev["signal"] == "task_conditioned_overprivilege" for ev in report["scores"][0]["evidence"]))
+
     def test_workflow_select_exposes_score_and_demotes_low_fit_cards(self):
         safe = self._workflow_card_fixture(
             id="safe-release-card",

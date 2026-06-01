@@ -22,6 +22,7 @@ This repository publishes a schema-first contract layer for the initial agent-cr
 - `policy_simulator`
 - `workflow_policy_plan`
 - `policy_governance_decision`
+- `skill_privilege_scope`
 - `workflow_reminder`
 - `workflow_task`
 - `task_status`
@@ -210,7 +211,8 @@ Stable fields are the fields clients may rely on for routing, validation, and UI
 | `workspace_transaction` | `schema`, `mode`, `result` | mode-specific result internals, `resource_links`, `_meta` |
 | `policy_simulator` | `schema`, `ok`, `blocking_policies`, `docs`, `security`, `risk`, `license` | nested policy implementation details |
 | `workflow_policy_plan` | `schema`, `read_only`, `executed_plan`, `decision`, `ok`, `plan_id`, `blocking_policies`, `required_preconditions`, `findings`, `safe_next_actions` | redacted intent, execution mode, allowed targets, data classification, step count, normalized steps, security metadata |
-| `policy_governance_decision` | `schema`, `read_only`, `executed_plan`, `decision`, `ok`, `decision_id`, `policy_bundle`, `matched_rule_ids`, `decision_counts`, `rule_results`, `findings`, `safe_next_actions` | redacted intent, execution/data classification, step count, bundle id/version, authoritative hard gates, compact workflow-policy evidence, and security metadata |
+| `policy_governance_decision` | `schema`, `read_only`, `executed_plan`, `decision`, `ok`, `decision_id`, `policy_bundle`, `matched_rule_ids`, `decision_counts`, `rule_results`, `findings`, `safe_next_actions` | redacted intent, execution/data classification, step count, bundle id/version, authoritative hard gates, compact workflow-policy evidence, least-privilege scope, and security metadata |
+| `skill_privilege_scope` | `schema`, `read_only`, `executed_imported_code`, `external_services_called`, `decision`, `ok`, `summary`, `action_nodes`, `advisory_blockers`, `required_privileges` | redacted intent/item id, suggested constraints, and security flags for read-only/no-execution imported card or skill analysis |
 | `workflow_reminder` | `schema`, `read_only`, `advisory_only`, `emitted`, `trigger`, `remembered_constraints`, `required_next_gate`, `safe_next_actions`, `suppress_if_already_satisfied`, `evidence` | deterministic reminder id, redacted input summary, and security metadata |
 | `workflow_task` | `schema`, `task_id`, `workflow`, `status`, `state`, `retry_policy`, `retry_after_seconds`, `max_attempts`, `attempt`, `last_error_class`, `no_auto_retry`, `expires_at`, `retention_seconds`, `expired_result_action`, `audit_events` | timestamps, idempotency/replay metadata, redacted result summaries, result expiry availability, artifacts, cancellation, security, and `_meta` |
 | `task_status` | `schema`, `task_id`, `workflow`, `status`, `state`, `retry_policy`, `retry_after_seconds`, `max_attempts`, `attempt`, `last_error_class`, `no_auto_retry`, `expires_at`, `retention_seconds`, `expired_result_action`, `audit_events` | same workflow task lifecycle contract plus status resource links and expiry result envelope |
