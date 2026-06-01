@@ -30161,6 +30161,7 @@ def _skill_pack_score_item(
     fit_score = _skill_pack_fit_score(item, query, evidence)
     trust_metadata = trust if trust is not None else _workflow_card_trust_metadata(item, apply_repository_default=apply_repository_trust_default)
     decision = _skill_pack_decision(item, risk_score, fit_score, evidence, trust=trust_metadata)
+    privilege_scope = skill_privilege_scope(intent=query, items=[item], apply_repository_trust_defaults=apply_repository_trust_default)
     return {
         "schema": SKILL_PACK_SCORE_SCHEMA_VERSION,
         "item_id": _skill_pack_item_id(item),
@@ -30170,6 +30171,15 @@ def _skill_pack_score_item(
         "fit_score": fit_score,
         "decision": decision,
         "evidence": evidence[:24],
+        "privilege_scope": {
+            "schema": privilege_scope["schema"],
+            "decision": privilege_scope["decision"],
+            "ok": privilege_scope["ok"],
+            "node_count": privilege_scope["node_count"],
+            "required_privilege_count": privilege_scope["summary"]["required_privileges"],
+            "over_privileged_count": privilege_scope["summary"]["over_privileged_nodes"],
+            "advisory_blocker_codes": privilege_scope["governance"]["skill_pack_import_review"]["advisory_blocker_codes"],
+        },
         "refinement_suggestions": _skill_pack_refinement_suggestions(item, fit_score, risk_score, query),
     }
 
@@ -30266,6 +30276,73 @@ _SKILL_PRIVILEGE_SCOPE_PATH_RE = re.compile(
     r"(?P<path>(?:\.{1,2}/|[A-Za-z0-9_.-]+/)[A-Za-z0-9_./-]+|\.env(?:\.[A-Za-z0-9_.-]+)?|/[A-Za-z0-9_./-]+)"
 )
 
+_SKILL_PRIVILEGE_SCOPE_CATEGORY_ALIASES = {
+    "repository_read": "read_path",
+    "repo_read": "read_path",
+    "read_repository_context": "read_path",
+    "repository_write": "write_path",
+    "repo_write": "write_path",
+    "filesystem_write": "write_path",
+    "shell/process": "command",
+    "shell_process": "command",
+    "process": "command",
+    "github": "github_api",
+    "github-api": "github_api",
+    "github api": "github_api",
+    "release": "release_publish",
+    "publish": "release_publish",
+    "deploy": "release_publish",
+    "secrets": "secret_adjacent",
+    "secret": "secret_adjacent",
+}
+
+
+def _skill_privilege_scope_normalize_category(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text:
+        return ""
+    if text in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
+        return text
+    alias = _SKILL_PRIVILEGE_SCOPE_CATEGORY_ALIASES.get(text)
+    if alias:
+        return alias
+    for category in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
+        if category in text:
+            return category
+    return ""
+
+
+def _skill_privilege_scope_planned_step_item(step: dict[str, Any], index: int) -> dict[str, Any]:
+    """Convert a normalized planned step into static text for the no-execution analyzer."""
+    categories = {str(item).lower().replace("-", "_") for item in step.get("categories", []) if str(item).strip()}
+    tool = str(step.get("tool", "") or "")
+    mode = str(step.get("mode", "") or "")
+    blob = json.dumps(_redact_audit_value(step), sort_keys=True, ensure_ascii=True, default=str).lower()
+    actions: list[str] = []
+    if bool(step.get("read_only")) or "read_only" in categories:
+        actions.append("read repository path")
+    if bool(step.get("mutates")) or "write" in categories or "mutation" in categories:
+        actions.append("write repository path")
+    if bool(step.get("network")) or "network" in categories:
+        actions.append("http network access")
+    if "shell/process" in step.get("categories", []) or "shell_process" in categories:
+        actions.append("shell command execution")
+    if tool.startswith("gh_") or tool in {"gh", "github", "github_api"} or "github" in blob:
+        actions.append("github api access")
+    if any(term in blob for term in ("release", "publish", "deploy", "tag")):
+        actions.append("release publish deploy")
+    if any(term in blob for term in ("secret", "token", "credential", "api_key", "private_key", ".env")):
+        actions.append("secret token credential access")
+    return {
+        "id": f"planned-step-{index}",
+        "schema": "workflow_policy_plan_step.v1",
+        "type": "planned_step",
+        "title": f"Planned step {index}: {tool or '<unknown>'}",
+        "intent": f"{tool} {mode}".strip(),
+        "actions": actions,
+        "targets": step.get("targets", []),
+    }
+
 
 def _skill_privilege_scope_item_id(item: dict[str, Any], index: int) -> str:
     item_id = _skill_pack_item_id(item)
@@ -30333,6 +30410,9 @@ def _skill_privilege_scope_declared_privileges(item: dict[str, Any]) -> set[str]
         values = raw if isinstance(raw, list) else [raw]
         for value in values:
             text = str(value or "").strip().lower().replace("-", "_")
+            alias = _skill_privilege_scope_normalize_category(text)
+            if alias:
+                declared.add(alias)
             for category in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
                 if category in text:
                     declared.add(category)
@@ -30394,7 +30474,7 @@ def _skill_privilege_scope_intent_profile(
     explicit_write = _skill_privilege_scope_has_any(
         text,
         (
-            r"\b(?:write|writes|writing|edit|modify|update|create|delete|move|rename|implement|fix|mutate)\b",
+            r"\b(?:write|writes|writing|edit|modify|update|create|delete|move|rename|implement|fix|mutate|patch)\b",
             r"\bapply\s+patch\b",
         ),
     )
@@ -30433,11 +30513,10 @@ def _skill_privilege_scope_intent_profile(
                 reasons.setdefault("command", "workflow_policy_plan declares shell/process steps")
 
     for value in declared_privileges or []:
-        text_value = str(value or "").lower().replace("-", "_")
-        for category in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
-            if category in text_value:
-                allowed.add(category)
-                reasons.setdefault(category, "caller-declared task privilege")
+        category = _skill_privilege_scope_normalize_category(value)
+        if category:
+            allowed.add(category)
+            reasons.setdefault(category, "caller-declared task privilege")
 
     if explicit_read_only:
         allowed.discard("write_path")
@@ -30522,7 +30601,7 @@ def _skill_privilege_scope_extract_nodes(item: dict[str, Any], item_id: str, ite
                     paths=paths,
                 )
         if paths and any(term in field_lower for term in ("path", "target", "file")):
-            inferred = "write_path" if any(term in field_lower for term in ("write", "output", "target", "destination")) else "read_path"
+            inferred = "write_path" if any(term in field_lower for term in ("write", "output", "destination")) else "read_path"
             _skill_privilege_scope_add_node(
                 nodes,
                 seen,
@@ -30569,18 +30648,29 @@ def _skill_privilege_scope_node_decision(
 
 @mcp.tool()
 def skill_privilege_scope(
-    prompt: str,
+    intent: str = "",
     items: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    planned_steps: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    allowed_privileges: list[str] | tuple[str, ...] | None = None,
     *,
+    prompt: str | None = None,
     workflow_policy_plan: dict[str, Any] | None = None,
     declared_privileges: list[str] | None = None,
     apply_repository_trust_defaults: bool | None = None,
 ) -> dict[str, Any]:
     """Read-only task-conditioned least-privilege analysis for imported cards/skills."""
-    items_to_analyze = WORKFLOW_CARDS if items is None else tuple(items)
+    task_intent = str(intent or prompt or "")
+    planned_items = [
+        _skill_privilege_scope_planned_step_item(step, index)
+        for index, step in enumerate(planned_steps or [])
+        if isinstance(step, dict)
+    ]
+    source_items = list(WORKFLOW_CARDS if items is None and not planned_items else tuple(items or ()))
+    items_to_analyze = tuple(source_items + planned_items)
     if apply_repository_trust_defaults is None:
-        apply_repository_trust_defaults = items is None
-    intent_profile = _skill_privilege_scope_intent_profile(prompt, workflow_policy_plan, declared_privileges)
+        apply_repository_trust_defaults = items is None and not planned_items
+    declared_task_privileges = list(declared_privileges or []) + list(allowed_privileges or [])
+    intent_profile = _skill_privilege_scope_intent_profile(task_intent, workflow_policy_plan, declared_task_privileges)
     analyzed_items: list[dict[str, Any]] = []
     action_nodes: list[dict[str, Any]] = []
     advisory_blockers: list[dict[str, Any]] = []
@@ -30652,25 +30742,52 @@ def skill_privilege_scope(
         "blockers": block_count,
         "warnings": warn_count,
     }
+    suggested_constraints = []
+    for blocker in advisory_blockers:
+        suggestion = str(blocker.get("suggested_constraint", ""))
+        if suggestion and suggestion not in suggested_constraints:
+            suggested_constraints.append(suggestion)
+    blocker_codes = sorted({str(item.get("code", "")) for item in advisory_blockers if item.get("code")})
+    findings = [
+        {
+            "code": str(blocker.get("code", "task_conditioned_over_privilege")),
+            "severity": str(blocker.get("severity", "warning")),
+            "category": str(blocker.get("category", "")),
+            "node_id": str(blocker.get("node_id", "")),
+            "message": str(blocker.get("message", "")),
+            "suggested_constraint": str(blocker.get("suggested_constraint", "")),
+        }
+        for blocker in advisory_blockers[:50]
+    ]
     return {
         "schema": SKILL_PRIVILEGE_SCOPE_SCHEMA_VERSION,
         "read_only": True,
+        "executed_plan": False,
         "executed_imported_code": False,
         "external_services_called": False,
+        "decision": "needs_constraints" if advisory_blockers else "allow",
+        "ok": not advisory_blockers,
         "redacted": True,
         "repository_relative_output": True,
         "intent_profile": intent_profile,
+        "item_count": len(items_to_analyze),
+        "node_count": len(action_nodes),
         "summary": summary,
         "items": analyzed_items,
         "action_nodes": action_nodes,
         "required_privileges": required_privileges,
         "advisory_blockers": advisory_blockers,
+        "suggested_constraints": suggested_constraints[:10],
+        "findings": findings,
         "governance": {
+            "workflow_policy_plan": {"advisory_blocker_codes": blocker_codes},
+            "policy_governance_decision": {"advisory_blocker_codes": blocker_codes},
             "workflow_policy_plan_advisory_findings": advisory_blockers,
             "policy_governance_decision_advisory_findings": advisory_blockers,
             "skill_pack_import_review": {
                 "decision": "quarantine" if block_count else "allow_with_caveats" if warn_count else "allow",
                 "blocker_count": block_count,
+                "advisory_blocker_codes": blocker_codes,
                 "required_privilege_count": len(required_privileges),
             },
         },
@@ -38004,6 +38121,26 @@ def _workflow_policy_plan_payload(
                 findings.append(_workflow_policy_finding(code="missing_test_gate", severity="approval", step_index=step_index, policy="release_gate", message="release-sensitive step is missing an earlier test/change-impact/readiness gate", required_precondition="test_or_change_impact_gate"))
                 required_preconditions.append({"code": "test_or_change_impact_gate", "step_index": step_index, "reason": "release workflow requires validation evidence"})
 
+    privilege_scope = skill_privilege_scope(intent=normalized_intent, items=[], planned_steps=normalized_steps)
+    for blocker in privilege_scope.get("advisory_blockers", [])[:12]:
+        category = str(blocker.get("category", ""))
+        findings.append(
+            _workflow_policy_finding(
+                code="task_conditioned_over_privilege",
+                severity="approval",
+                policy=f"least_privilege.{category or 'scope'}",
+                message=f"planned action is over-privileged for the declared intent: {blocker.get('node_id', '')}",
+                required_precondition="drop_over_privileged_actions_or_expand_intent",
+            )
+        )
+        required_preconditions.append(
+            {
+                "code": "drop_over_privileged_actions_or_expand_intent",
+                "step_index": -1,
+                "reason": str(blocker.get("suggested_constraint", "remove privileges not needed for the declared task")),
+            }
+        )
+
     # Stable de-duplication while preserving first occurrence details.
     deduped_findings: list[dict[str, Any]] = []
     seen_finding_keys: set[tuple[str, int | None, str]] = set()
@@ -38060,6 +38197,14 @@ def _workflow_policy_plan_payload(
         "required_preconditions": required_preconditions,
         "findings": findings,
         "safe_next_actions": _workflow_policy_safe_next_actions(decision, findings),
+        "skill_privilege_scope": {
+            "schema": privilege_scope["schema"],
+            "decision": privilege_scope["decision"],
+            "ok": privilege_scope["ok"],
+            "node_count": privilege_scope["node_count"],
+            "over_privileged_count": privilege_scope["summary"]["over_privileged_nodes"],
+            "advisory_blocker_codes": privilege_scope["governance"]["workflow_policy_plan"]["advisory_blocker_codes"],
+        },
         "security": {
             "redacted": True,
             "persists_artifacts_by_default": False,
@@ -38420,6 +38565,7 @@ def _policy_governance_payload(
             "safe_next_actions": ["Fix the repository-local reviewed policy bundle and rerun the policy decision before executing planned tools."],
             "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
             "workflow_policy_plan": {"decision": preflight.get("decision"), "plan_id": preflight.get("plan_id"), "ok": preflight.get("ok")},
+            "skill_privilege_scope": preflight.get("skill_privilege_scope", {}),
             "security": {
                 "redacted": True,
                 "read_only": True,
@@ -38503,6 +38649,7 @@ def _policy_governance_payload(
             "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
             "required_preconditions": _redact_audit_value(preflight.get("required_preconditions", [])),
         },
+        "skill_privilege_scope": preflight.get("skill_privilege_scope", {}),
         "security": {
             "redacted": True,
             "read_only": True,

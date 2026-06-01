@@ -7501,7 +7501,7 @@
       "name": "observation_compression_report"
     },
     {
-      "digest": "sha256:32d16aa355dff9571ee2d5a5770dff38f67020b80d5ea365f654b72c47d027c2",
+      "digest": "sha256:cb301628931a6cdc366897619923ed59061a46b277e204891194318babe73c9e",
       "metadata": {
         "documentation": [
           {
@@ -7655,6 +7655,9 @@
               "security": {
                 "type": "object"
               },
+              "skill_privilege_scope": {
+                "type": "object"
+              },
               "step_count": {
                 "type": "integer"
               },
@@ -7726,6 +7729,7 @@
             "bundle_version",
             "authoritative_hard_gates",
             "workflow_policy_plan",
+            "skill_privilege_scope",
             "security"
           ],
           "outputSchema": {
@@ -7809,6 +7813,9 @@
                 "type": "string"
               },
               "security": {
+                "type": "object"
+              },
+              "skill_privilege_scope": {
                 "type": "object"
               },
               "step_count": {
@@ -11063,7 +11070,7 @@
       "name": "self_optimization_report"
     },
     {
-      "digest": "sha256:82be907acbf2f6b1f7bcc41d6778cae6001505ccd4fb4c1bd97b899339a2c120",
+      "digest": "sha256:29ef4f23f2c0ded1594b586c97a5d450df2d583ee86c372211b9a8bf03c39fc0",
       "metadata": {
         "documentation": [
           {
@@ -11081,6 +11088,21 @@
           "icons": null,
           "input_schema": {
             "properties": {
+              "allowed_privileges": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Allowed Privileges"
+              },
               "apply_repository_trust_defaults": {
                 "anyOf": [
                   {
@@ -11108,6 +11130,11 @@
                 "default": null,
                 "title": "Declared Privileges"
               },
+              "intent": {
+                "default": "",
+                "title": "Intent",
+                "type": "string"
+              },
               "items": {
                 "anyOf": [
                   {
@@ -11124,9 +11151,33 @@
                 "default": null,
                 "title": "Items"
               },
+              "planned_steps": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Planned Steps"
+              },
               "prompt": {
-                "title": "Prompt",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Prompt"
               },
               "workflow_policy_plan": {
                 "anyOf": [
@@ -11142,9 +11193,6 @@
                 "title": "Workflow Policy Plan"
               }
             },
-            "required": [
-              "prompt"
-            ],
             "title": "skill_privilege_scopeArguments",
             "type": "object"
           },
@@ -11166,7 +11214,18 @@
                 },
                 "type": "array"
               },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "needs_constraints"
+                ],
+                "type": "string"
+              },
               "executed_imported_code": {
+                "const": false,
+                "type": "boolean"
+              },
+              "executed_plan": {
                 "const": false,
                 "type": "boolean"
               },
@@ -11174,17 +11233,32 @@
                 "const": false,
                 "type": "boolean"
               },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "governance": {
                 "type": "object"
               },
               "intent_profile": {
                 "type": "object"
               },
+              "item_count": {
+                "type": "integer"
+              },
               "items": {
                 "items": {
                   "type": "object"
                 },
                 "type": "array"
+              },
+              "node_count": {
+                "type": "integer"
+              },
+              "ok": {
+                "type": "boolean"
               },
               "read_only": {
                 "const": true,
@@ -11209,6 +11283,12 @@
               "security": {
                 "type": "object"
               },
+              "suggested_constraints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "summary": {
                 "type": "object"
               }
@@ -11216,8 +11296,11 @@
             "required": [
               "schema",
               "read_only",
+              "executed_plan",
               "executed_imported_code",
               "external_services_called",
+              "decision",
+              "ok",
               "summary",
               "items",
               "action_nodes",
@@ -11270,6 +11353,9 @@
             "redacted",
             "repository_relative_output",
             "intent_profile",
+            "item_count",
+            "node_count",
+            "findings",
             "security"
           ],
           "outputSchema": {
@@ -11287,7 +11373,18 @@
                 },
                 "type": "array"
               },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "needs_constraints"
+                ],
+                "type": "string"
+              },
               "executed_imported_code": {
+                "const": false,
+                "type": "boolean"
+              },
+              "executed_plan": {
                 "const": false,
                 "type": "boolean"
               },
@@ -11295,17 +11392,32 @@
                 "const": false,
                 "type": "boolean"
               },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "governance": {
                 "type": "object"
               },
               "intent_profile": {
                 "type": "object"
               },
+              "item_count": {
+                "type": "integer"
+              },
               "items": {
                 "items": {
                   "type": "object"
                 },
                 "type": "array"
+              },
+              "node_count": {
+                "type": "integer"
+              },
+              "ok": {
+                "type": "boolean"
               },
               "read_only": {
                 "const": true,
@@ -11330,6 +11442,12 @@
               "security": {
                 "type": "object"
               },
+              "suggested_constraints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "summary": {
                 "type": "object"
               }
@@ -11337,8 +11455,11 @@
             "required": [
               "schema",
               "read_only",
+              "executed_plan",
               "executed_imported_code",
               "external_services_called",
+              "decision",
+              "ok",
               "summary",
               "items",
               "action_nodes",
@@ -11352,13 +11473,17 @@
           "stableFields": [
             "schema",
             "read_only",
+            "executed_plan",
             "executed_imported_code",
             "external_services_called",
+            "decision",
+            "ok",
             "summary",
             "items",
             "action_nodes",
             "required_privileges",
             "advisory_blockers",
+            "suggested_constraints",
             "governance"
           ],
           "tool": "skill_privilege_scope"
@@ -14132,7 +14257,7 @@
       "name": "workflow_lineage"
     },
     {
-      "digest": "sha256:5ce78e4e71ee2ee2ea9b43b2e7f872e6a6bd0c681ff0ea6df4a92dede0635651",
+      "digest": "sha256:522f770bbeddcea7dfc839fab5426166322ec7aee9b074163745500db049895a",
       "metadata": {
         "documentation": [
           {
@@ -14270,6 +14395,9 @@
               "security": {
                 "type": "object"
               },
+              "skill_privilege_scope": {
+                "type": "object"
+              },
               "step_count": {
                 "type": "integer"
               },
@@ -14340,6 +14468,7 @@
             "data_classification",
             "step_count",
             "steps",
+            "skill_privilege_scope",
             "security"
           ],
           "outputSchema": {
@@ -14412,6 +14541,9 @@
                 "type": "string"
               },
               "security": {
+                "type": "object"
+              },
+              "skill_privilege_scope": {
                 "type": "object"
               },
               "step_count": {
@@ -16467,5 +16599,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:ab4ce2f8b24d9d3638eb096655b519c597b1f726443577cae44e06bcb6f71c5f"
+  "whole_catalog_digest": "sha256:0bd7894b87235b7c1cd2e1188edabd1ea1d3a114d3e8ecec1babc558a6d1a649"
 }

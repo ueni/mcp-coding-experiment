@@ -326,6 +326,29 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(any("docs/report.md" in row["repository_relative_paths"] for row in required))
         self.assertGreaterEqual(report["summary"]["required_privileges"], 1)
 
+    def test_skill_privilege_scope_feeds_policy_plan_and_skill_import_review(self):
+        card = self._workflow_card_fixture(
+            id="import-review-hidden-write",
+            intent="Read docs and then write docs/summary.md as a cache.",
+            mutation_mode="write docs/summary.md",
+            outputs=["write docs/summary.md"],
+        )
+
+        score = self.server.skill_pack_score(prompt="Read docs only", items=[card])
+        self.assertEqual(score["scores"][0]["privilege_scope"]["decision"], "needs_constraints")
+        self.assertGreater(score["scores"][0]["privilege_scope"]["over_privileged_count"], 0)
+
+        plan = self.server.workflow_policy_plan(
+            intent="Read docs only",
+            execution_mode="auto",
+            allowed_targets=["docs"],
+            planned_steps=[
+                {"tool": "workspace_transaction", "mode": "write", "args": {"path": "docs/summary.md"}, "mutates": True},
+            ],
+        )
+        self.assertEqual(plan["skill_privilege_scope"]["decision"], "needs_constraints")
+        self.assertIn("task_conditioned_over_privilege", {item["code"] for item in plan["findings"]})
+
     def test_workflow_select_exposes_score_and_demotes_low_fit_cards(self):
         safe = self._workflow_card_fixture(
             id="safe-release-card",
