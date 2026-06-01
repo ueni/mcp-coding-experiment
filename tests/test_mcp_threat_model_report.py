@@ -119,6 +119,97 @@ class McpThreatModelReportTests(ServerToolsTestBase):
             {failure["type"] for failure in report["baseline"]["failures"]},
         )
 
+
+    def test_oauth_proxy_hardening_fixture_outcomes_are_redacted(self):
+        fixture_path = self._copy_fixture("mcp_oauth_proxy_hardening.json")
+
+        report = self.server.mcp_threat_model_report(
+            fixture_path=fixture_path,
+            export=False,
+        )
+
+        oauth = report["mcp_oauth_proxy_hardening"]
+        self.assertEqual(oauth["schema"], "mcp_oauth_proxy_hardening.v1")
+        self.assertEqual(oauth["status"], "block")
+        self.assertFalse(oauth["ok"])
+        self.assertEqual(oauth["summary"]["detected_config_count"], 3)
+        outcomes = {row["id"]: row["outcome"] for row in oauth["configs"]}
+        self.assertEqual(outcomes["safe_oauth_proxy"], "pass")
+        self.assertEqual(outcomes["warning_oauth_proxy"], "warn")
+        self.assertEqual(outcomes["blocked_passthrough_proxy"], "block")
+        self.assertEqual(outcomes["local_bearer_only"], "not_applicable")
+
+        rule_ids = {finding["rule_id"] for finding in oauth["findings"]}
+        self.assertIn("oauth-token-passthrough", rule_ids)
+        self.assertIn("oauth-confused-deputy-validation-disabled", rule_ids)
+        self.assertIn("oauth-inline-secret-material", rule_ids)
+        self.assertIn("oauth-pkce-not-required", rule_ids)
+        self.assertIn("oauth-state-not-required", rule_ids)
+        self.assertIn("oauth-broad-origin-or-redirect", rule_ids)
+        self.assertIn("oauth-token-passthrough", {finding["rule_id"] for finding in report["findings"]})
+
+        serialized = json.dumps(oauth, sort_keys=True)
+        self.assertNotIn("s3cr3t-client-secret-do-not-log", serialized)
+        self.assertNotIn("eyJunsafeDoNotLog", serialized)
+        self.assertNotIn("auth-code-do-not-log", serialized)
+        self.assertNotIn("/home/user/private", serialized)
+        self.assertFalse(oauth["security"]["tokens_or_secrets_included"])
+        self.assertFalse(oauth["security"]["host_absolute_paths_included"])
+
+    def test_release_readiness_includes_oauth_proxy_compact_result(self):
+        self.write_repo_text(
+            ".codebase-tooling-mcp/mcp-oauth-proxy.json",
+            json.dumps(
+                {
+                    "id": "repo_oauth_proxy",
+                    "auth_mode": "oauth-resource",
+                    "authorization_servers": ["https://issuer.example.test"],
+                    "expected_audience": "mcp://codebase-tooling-mcp",
+                    "resource_validation": True,
+                    "require_pkce": True,
+                    "require_state": True,
+                    "token_passthrough": False,
+                    "client_secret_ref": "env:MCP_OAUTH_CLIENT_SECRET",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+        readiness = self.server.release_readiness(
+            run_tests=False,
+            run_docs_check=False,
+            run_security_check=False,
+            run_dependency_security_check=False,
+            run_ci_workflow_security_check=False,
+            run_agent_security_delta_check=False,
+            run_secret_exposure_check=False,
+            run_agent_quality_delta_check=False,
+            run_license_check=False,
+            run_risk_check=False,
+            run_impact_check=False,
+            summary_mode="quick",
+        )
+
+        check = readiness["checks"]["mcp_oauth_proxy_hardening"]
+        self.assertTrue(check["ok"], check)
+        self.assertEqual(check["status"], "pass")
+        self.assertEqual(check["applicability"], "applicable")
+        self.assertEqual(check["detected_config_count"], 1)
+        self.assertEqual(check["finding_count"], 0)
+
+    def test_local_bearer_token_mode_oauth_hardening_not_applicable(self):
+        report = self.server._mcp_oauth_proxy_hardening_report(
+            [{"id": "local", "auth_mode": "bearer", "bearer_token_only": True}]
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["status"], "not_applicable")
+        self.assertEqual(report["applicability"], "not_applicable")
+        self.assertEqual(report["summary"]["detected_config_count"], 0)
+        self.assertEqual(report["configs"][0]["outcome"], "not_applicable")
+
     def test_export_writes_json_and_markdown_without_mutating_sources(self):
         fixture_path = self._copy_fixture("mcp_poisoned_tools.json")
 

@@ -36,6 +36,10 @@ mcp_threat_model_report(
 
 Fixtures model tool metadata and MCP catalog-event transitions only. They must not contain real credentials, private URLs, production prompts, or raw logs. The checked-in fixture set covers hidden instruction poisoning, cross-tool manipulation/exfiltration wording, ambiguous client parameter visibility, read-only annotation mismatch, and post-handshake tool-catalog mutation via `notifications/tools/list_changed` plus a repeated `tools/list`.
 
+Fixtures may also include `oauth_proxy_configs` for the narrow MCP OAuth/proxy hardening slice. The check returns `mcp_oauth_proxy_hardening` with compact `pass`, `warn`, `block`, or `not_applicable` outcomes. It flags token passthrough, disabled/missing audience or resource validation, missing issuer allowlists, inline secret-like material, missing PKCE/state binding, and wildcard origins/redirects. Evidence is field-name/count based only: raw bearer tokens, client secrets, auth codes, and absolute host paths are not included. Local bearer-token-only mode is reported as `not_applicable`.
+
+`release_readiness` and `governance_report` include the compact OAuth/proxy hardening result when repository-local config is present at `.codebase-tooling-mcp/mcp-oauth-proxy.{json,yaml,yml}` or `mcp-oauth-proxy.{json,yaml,yml}`.
+
 DREAD vectors are fixed, deterministic test fixtures for regression tracking; the report returns `dread_rubric` (`mcp_threat_model_dread_rubric.v1`) so changing a score, rule ID, or known high-uncovered finding ID requires updating the checked-in scoring rubric, frozen tests, and baseline fixture in the same change. Temporal tool-catalog mutations are flagged against `temporal_catalog_delta_audit` because single-frame catalog hashing does not prove clients audit the delta channel.
 
 The baseline uses `mcp_threat_model_baseline.v1` and records known high-severity uncovered findings by stable fixture finding ID:
