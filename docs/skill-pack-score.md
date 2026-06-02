@@ -12,13 +12,14 @@ SPDX-License-Identifier: MIT
 - `fit_score` from task-query overlap, routing phrases, required-tool matches, language/path affinity, and optional local benchmark/pass-rate metadata.
 - `decision`: `allow`, `allow_with_caveats`, `needs_human_review`, or `quarantine`.
 - `evidence`: bounded redacted signals explaining why the score was assigned.
+- `privilege_scope`: compact `skill_privilege_scope.v1` import-review evidence showing whether action nodes are required by the current task or over-privileged.
 - `refinement_suggestions`: optional local-only advice for making noisy summaries more query-specific without modifying source content.
 
 ## Difference from workflow-card trust linting
 
 Trust-tier linting answers “is this card structurally reviewable and within declared boundaries?” It checks required trust metadata, guardrails, broad permissions, dangerous shell/network/file-system wording, and high-risk sandbox guidance.
 
-Skill-pack scoring answers “is this item safe and useful for this specific task?” It consumes trust-lint findings as one risk input, then adds task-fit scoring and a routing decision. A card can pass trust lint but still be demoted for low fit; a risky or suspicious imported skill can be quarantined even if it has enough fields to be syntactically linted.
+Skill-pack scoring answers “is this item safe and useful for this specific task?” It consumes trust-lint findings as one risk input, adds task-fit scoring and routing decisions, and surfaces task-conditioned least-privilege evidence from [`skill_privilege_scope`](./skill-privilege-scope.md). A card can pass trust lint but still be demoted for low fit or show advisory over-privilege for the current task; a risky or suspicious imported skill can be quarantined even if it has enough fields to be syntactically linted.
 
 The workflow selector consumes `skill_pack_score` defensively: quarantined high-risk items are suppressed from normal matches, while low-fit items are demoted so irrelevant skill context does not crowd out better workflow cards.
 

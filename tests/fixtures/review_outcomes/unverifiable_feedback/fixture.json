@@ -1,0 +1,27 @@
+{
+  "schema": "review_outcome_fixture.v1",
+  "id": "unverifiable-feedback",
+  "description": "A redacted comment lacks file, line, rule, or digest evidence and cannot be linked to follow-up commits.",
+  "findings": [
+    {
+      "id": "redacted-comment-1",
+      "created_at": "2026-05-24T07:45:00Z"
+    }
+  ],
+  "follow_up_commits": [
+    {
+      "source": "follow_up_commit",
+      "sha": "fedcba0",
+      "timestamp": "2026-05-24T12:00:00Z",
+      "open_findings": [
+        "different-finding"
+      ],
+      "reason": "no matching path/rule/digest evidence"
+    }
+  ],
+  "gate_state": {
+    "tests": "unknown",
+    "security": "unknown",
+    "release": "unknown"
+  }
+}

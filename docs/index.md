@@ -30,6 +30,7 @@ SPDX-License-Identifier: MIT
 - [Trajectory trust guard](./trajectory-trust-guard.md) - read-only advisory report for over-trusting untrusted tool trajectories before sensitive final actions.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) - read-only `skill_pack_score` risk/fit decisions for workflow cards and offline imported-skill fixtures.
+- [Skill privilege scope](./skill-privilege-scope.md) - read-only task-conditioned least-privilege action-node analysis for imported cards and skills.
 - [Context retrieval regression suite](./context-retrieval-regression.md) - offline ContextBench-style fixtures and metrics for task-router workflow-card retrieval.
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) - offline Terminal-Bench-style task fixtures, direct baseline runner, agent hooks, and trajectory/safety metrics for complete MCP workflows.
 - [Agent execution modes](./execution-modes.md) - online/cloud-assisted and offline/onboard-only routing contracts layered onto workflow selection.
@@ -45,6 +46,7 @@ SPDX-License-Identifier: MIT
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) - deterministic advisory metadata for instruction-like text in tool outputs with aggregate governance/risk counts.
 - [MCP tool-response scanner](./tool-response-scanner.md) - opt-in LOG/SANITIZE/BLOCK enforcement for risky `role: "tool"` messages before Agent API Proxy model-context forwarding.
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) - offline CR-Bench-style fixture scoring for review true positives, misses, and spurious findings.
+- [Review outcome report](./review-outcome-report.md) - offline redacted fixture report for review-comment resolution, dismissal/noise, stale, open, and unverifiable outcomes.
 
 This index lists documentation ownership and status.
 
@@ -85,9 +87,11 @@ This index lists documentation ownership and status.
 - [MCP tool-response scanner](./tool-response-scanner.md) (`docs/tool-response-scanner.md`) - Status: `prototype`
 - [AGENTS.md context health report](./agents-context-health.md) (`docs/agents-context-health.md`) - Status: `prototype`
 - [Review signal/noise evaluator](./review-signal-noise-evaluator.md) (`docs/review-signal-noise-evaluator.md`) - Status: `prototype`
+- [Review outcome report](./review-outcome-report.md) (`docs/review-outcome-report.md`) - Status: `prototype`
 - [Reference-based result handles](./result-references.md) (`docs/result-references.md`) - Status: `prototype`
 - [Workflow selection cards](./workflow-selection.md) (`docs/workflow-selection.md`) - Status: `operational guidance`
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`
+- [Skill privilege scope](./skill-privilege-scope.md) (`docs/skill-privilege-scope.md`) - Status: `prototype`
 - [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`
 - [Trajectory trust guard](./trajectory-trust-guard.md) (`docs/trajectory-trust-guard.md`) - Status: `prototype`
 - [Context retrieval regression suite](./context-retrieval-regression.md) (`docs/context-retrieval-regression.md`) - Status: `prototype`
