@@ -1,6 +1,6 @@
 {
   "schema": "http_mcp_contract_expectations.v1",
-  "description": "Synthetic parity fixture with one matching endpoint and one drifted endpoint.",
+  "description": "Synthetic parity fixture covering matching contracts, stale docs/examples, and schema/default drift.",
   "endpoints": [
     {
       "id": "fixture-pass-repo-info",
@@ -30,7 +30,8 @@
         "type": "object",
         "properties": {
           "short": {
-            "type": "boolean"
+            "type": "boolean",
+            "default": true
           }
         }
       },
@@ -42,6 +43,42 @@
           }
         }
       }
+    }
+  ],
+  "repo_doc_surfaces": [
+    {
+      "id": "fixture-vscode-json-pass",
+      "kind": "vscode_mcp_example",
+      "path": "tests/fixtures/http_mcp_contract_parity/mcp-example-pass.json",
+      "expected_values": [
+        {
+          "pointer": "/servers/codebase-tooling-mcp/type",
+          "equals": "http"
+        },
+        {
+          "pointer": "/servers/codebase-tooling-mcp/url",
+          "equals": "http://localhost:8000/mcp"
+        }
+      ]
+    },
+    {
+      "id": "fixture-stale-onboarding-doc",
+      "kind": "onboarding_doc",
+      "path": "tests/fixtures/http_mcp_contract_parity/onboarding-stale.md",
+      "required_text": ["http://localhost:8000/mcp"]
+    },
+    {
+      "id": "fixture-default-drift-doc",
+      "kind": "onboarding_doc",
+      "path": "tests/fixtures/http_mcp_contract_parity/onboarding-default.md",
+      "required_text": ["git_status short default"],
+      "argument_defaults": [
+        {
+          "mcp_tool": "git_status",
+          "argument": "short",
+          "default": false
+        }
+      ]
     }
   ]
 }

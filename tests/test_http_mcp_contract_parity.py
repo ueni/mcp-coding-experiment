@@ -15,7 +15,13 @@ from source.http_mcp_contract_parity import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = REPO_ROOT / "tests" / "fixtures" / "http_mcp_contract_parity" / "contract-parity.json"
+FIXTURE = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "http_mcp_contract_parity"
+    / "contract-parity.json"
+)
 
 
 class HttpMcpContractParityReportTests(unittest.TestCase):
@@ -41,7 +47,9 @@ class HttpMcpContractParityReportTests(unittest.TestCase):
                         "list_tools": {
                             "input_schema": {
                                 "type": "object",
-                                "properties": {"short": {"type": "boolean"}},
+                                "properties": {
+                                    "short": {"type": "boolean", "default": True}
+                                },
                             },
                             "output_schema": {
                                 "type": "object",
@@ -53,7 +61,7 @@ class HttpMcpContractParityReportTests(unittest.TestCase):
             ]
         }
 
-    def test_fixture_reports_one_pass_and_one_drift_without_raw_schema_evidence(self):
+    def test_fixture_covers_matching_contract_stale_docs_and_default_drift(self):
         report = generate_http_mcp_contract_parity_report(
             FIXTURE,
             repo_root=REPO_ROOT,
@@ -67,25 +75,42 @@ class HttpMcpContractParityReportTests(unittest.TestCase):
         self.assertEqual(report["summary"]["endpoints"], 2)
         self.assertEqual(report["summary"]["matched"], 1)
         self.assertEqual(report["summary"]["drifted"], 1)
-        self.assertEqual(report["summary"]["findings"], 1)
-        statuses = {row["endpoint_id"]: row["status"] for row in report["comparisons"]}
-        self.assertEqual(statuses["fixture-pass-repo-info"], "pass")
-        self.assertEqual(statuses["fixture-drift-git-status"], "drift")
+        self.assertEqual(report["summary"]["doc_surfaces"], 3)
+        self.assertEqual(report["summary"]["doc_surfaces_checked"], 3)
+        self.assertEqual(report["summary"]["stale_doc_surfaces"], 1)
+        self.assertEqual(report["summary"]["default_drifts"], 1)
+        self.assertEqual(report["summary"]["findings"], 3)
 
-        finding = report["findings"][0]
-        self.assertEqual(finding["kind"], "response_schema_drift")
-        self.assertEqual(finding["mcp_tool"], "git_status")
+        endpoint_statuses = {
+            row["endpoint_id"]: row["status"] for row in report["comparisons"]
+        }
+        self.assertEqual(endpoint_statuses["fixture-pass-repo-info"], "pass")
+        self.assertEqual(endpoint_statuses["fixture-drift-git-status"], "drift")
+
+        surface_statuses = {
+            row["surface_id"]: row["status"] for row in report["doc_surfaces"]
+        }
+        self.assertEqual(surface_statuses["fixture-vscode-json-pass"], "pass")
+        self.assertEqual(surface_statuses["fixture-stale-onboarding-doc"], "stale-doc")
+        self.assertEqual(surface_statuses["fixture-default-drift-doc"], "default-drift")
+
+        finding_kinds = {finding["kind"] for finding in report["findings"]}
         self.assertEqual(
-            finding["evidence"]["contract_path"],
-            "tests/fixtures/http_mcp_contract_parity/contract-parity.json",
+            finding_kinds,
+            {
+                "response_schema_drift",
+                "repo_doc_surface_stale",
+                "repo_doc_argument_default_drift",
+            },
         )
-        serialized_finding = json.dumps(finding, sort_keys=True)
-        self.assertNotIn('"type": "integer"', serialized_finding)
-        self.assertNotIn('"type": "string"', serialized_finding)
+        serialized_findings = json.dumps(report["findings"], sort_keys=True)
+        self.assertNotIn('"type": "integer"', serialized_findings)
+        self.assertNotIn('"type": "string"', serialized_findings)
+        self.assertNotIn("http://localhost:8000/sse", serialized_findings)
         self.assertTrue(report["security"]["repo_relative_paths_only"])
         self.assertFalse(report["security"]["raw_schemas_embedded"])
 
-    def test_digest_only_expectations_can_pass(self):
+    def test_digest_only_expectations_can_pass_with_repo_doc_inventory(self):
         request_schema = {"type": "object", "properties": {}}
         response_schema = {
             "type": "object",
@@ -94,6 +119,25 @@ class HttpMcpContractParityReportTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            (root / "docs").mkdir()
+            (root / ".vscode").mkdir()
+            (root / "docs" / "onboarding.md").write_text(
+                "Use http://localhost:8000/mcp with MCP_HTTP_BEARER_TOKEN.\n",
+                encoding="utf-8",
+            )
+            (root / ".vscode" / "mcp.example.json").write_text(
+                json.dumps(
+                    {
+                        "servers": {
+                            "codebase-tooling-mcp": {
+                                "type": "http",
+                                "url": "http://localhost:8000/mcp",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             contract = root / "contracts" / "parity.json"
             contract.parent.mkdir(parents=True)
             contract.write_text(
@@ -106,8 +150,34 @@ class HttpMcpContractParityReportTests(unittest.TestCase):
                                 "path": "/mcp#tools/call:repo_info",
                                 "mcp_tool": "repo_info",
                                 "request_schema_digest": schema_digest(request_schema),
-                                "response_schema_digest": schema_digest(response_schema),
+                                "response_schema_digest": schema_digest(
+                                    response_schema
+                                ),
                             }
+                        ],
+                        "repo_doc_surfaces": [
+                            {
+                                "id": "tmp-vscode-example",
+                                "path": ".vscode/mcp.example.json",
+                                "expected_values": [
+                                    {
+                                        "pointer": "/servers/codebase-tooling-mcp/type",
+                                        "equals": "http",
+                                    },
+                                    {
+                                        "pointer": "/servers/codebase-tooling-mcp/url",
+                                        "equals": "http://localhost:8000/mcp",
+                                    },
+                                ],
+                            },
+                            {
+                                "id": "tmp-onboarding-doc",
+                                "path": "docs/onboarding.md",
+                                "required_text": [
+                                    "http://localhost:8000/mcp",
+                                    "MCP_HTTP_BEARER_TOKEN",
+                                ],
+                            },
                         ],
                     }
                 ),
@@ -124,7 +194,10 @@ class HttpMcpContractParityReportTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["summary"]["matched"], 1)
+        self.assertEqual(report["summary"]["doc_surfaces"], 2)
+        self.assertEqual(report["summary"]["doc_surfaces_checked"], 2)
         self.assertEqual(report["summary"]["findings"], 0)
+        self.assertEqual({row["status"] for row in report["doc_surfaces"]}, {"pass"})
 
     def test_missing_contract_docs_are_advisory_and_read_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -139,6 +212,7 @@ class HttpMcpContractParityReportTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertTrue(report["read_only"])
         self.assertFalse(report["network_used"])
+        self.assertEqual(report["doc_surfaces"], [])
         self.assertEqual(report["findings"], [])
 
 
