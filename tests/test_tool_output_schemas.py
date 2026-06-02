@@ -37,6 +37,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workspace_transaction",
                 "policy_simulator",
                 "workflow_policy_plan",
+                "skill_privilege_scope",
                 "policy_governance_decision",
                 "workflow_reminder",
                 "workflow_task",
@@ -124,6 +125,10 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "risk_scoring": self.server.risk_scoring(),
             "workspace_transaction": self.server.workspace_transaction(mode="begin", label="schema-contract"),
             "policy_simulator": self.server.policy_simulator(base_ref="HEAD", head_ref="HEAD"),
+            "skill_privilege_scope": self.server.skill_privilege_scope(
+                intent="Read repository guidance only",
+                planned_steps=[{"tool": "read_snippet", "mode": "read", "read_only": True, "args": {"path": "README.md"}}],
+            ),
             "workflow_policy_plan": self.server.workflow_policy_plan(
                 intent="Inspect repository status before summarizing",
                 execution_mode="offline-onboard-only",
