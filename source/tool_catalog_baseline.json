@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 44,
+  "tool_count": 45,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -7501,7 +7501,7 @@
       "name": "observation_compression_report"
     },
     {
-      "digest": "sha256:32d16aa355dff9571ee2d5a5770dff38f67020b80d5ea365f654b72c47d027c2",
+      "digest": "sha256:cb301628931a6cdc366897619923ed59061a46b277e204891194318babe73c9e",
       "metadata": {
         "documentation": [
           {
@@ -7655,6 +7655,9 @@
               "security": {
                 "type": "object"
               },
+              "skill_privilege_scope": {
+                "type": "object"
+              },
               "step_count": {
                 "type": "integer"
               },
@@ -7726,6 +7729,7 @@
             "bundle_version",
             "authoritative_hard_gates",
             "workflow_policy_plan",
+            "skill_privilege_scope",
             "security"
           ],
           "outputSchema": {
@@ -7809,6 +7813,9 @@
                 "type": "string"
               },
               "security": {
+                "type": "object"
+              },
+              "skill_privilege_scope": {
                 "type": "object"
               },
               "step_count": {
@@ -11063,6 +11070,444 @@
       "name": "self_optimization_report"
     },
     {
+      "digest": "sha256:29ef4f23f2c0ded1594b586c97a5d450df2d583ee86c372211b9a8bf03c39fc0",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Tooling white paper",
+            "path": "docs/tooling-whitepaper.md#51-public-mcp-v1-surface"
+          }
+        ],
+        "list_tools": {
+          "description": "Read-only task-conditioned least-privilege analysis for imported cards/skills.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "allowed_privileges": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Allowed Privileges"
+              },
+              "apply_repository_trust_defaults": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Apply Repository Trust Defaults"
+              },
+              "declared_privileges": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Declared Privileges"
+              },
+              "intent": {
+                "default": "",
+                "title": "Intent",
+                "type": "string"
+              },
+              "items": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Items"
+              },
+              "planned_steps": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Planned Steps"
+              },
+              "prompt": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Prompt"
+              },
+              "workflow_policy_plan": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Workflow Policy Plan"
+              }
+            },
+            "title": "skill_privilege_scopeArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "skill_privilege_scope",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "action_nodes": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "advisory_blockers": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "needs_constraints"
+                ],
+                "type": "string"
+              },
+              "executed_imported_code": {
+                "const": false,
+                "type": "boolean"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "external_services_called": {
+                "const": false,
+                "type": "boolean"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "governance": {
+                "type": "object"
+              },
+              "intent_profile": {
+                "type": "object"
+              },
+              "item_count": {
+                "type": "integer"
+              },
+              "items": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "node_count": {
+                "type": "integer"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "redacted": {
+                "type": "boolean"
+              },
+              "repository_relative_output": {
+                "type": "boolean"
+              },
+              "required_privileges": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "skill_privilege_scope.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "suggested_constraints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "executed_imported_code",
+              "external_services_called",
+              "decision",
+              "ok",
+              "summary",
+              "items",
+              "action_nodes",
+              "required_privileges",
+              "advisory_blockers",
+              "governance"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "redacted",
+            "repository_relative_output",
+            "intent_profile",
+            "item_count",
+            "node_count",
+            "findings",
+            "security"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "action_nodes": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "advisory_blockers": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "needs_constraints"
+                ],
+                "type": "string"
+              },
+              "executed_imported_code": {
+                "const": false,
+                "type": "boolean"
+              },
+              "executed_plan": {
+                "const": false,
+                "type": "boolean"
+              },
+              "external_services_called": {
+                "const": false,
+                "type": "boolean"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "governance": {
+                "type": "object"
+              },
+              "intent_profile": {
+                "type": "object"
+              },
+              "item_count": {
+                "type": "integer"
+              },
+              "items": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "node_count": {
+                "type": "integer"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "redacted": {
+                "type": "boolean"
+              },
+              "repository_relative_output": {
+                "type": "boolean"
+              },
+              "required_privileges": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "skill_privilege_scope.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "suggested_constraints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "executed_plan",
+              "executed_imported_code",
+              "external_services_called",
+              "decision",
+              "ok",
+              "summary",
+              "items",
+              "action_nodes",
+              "required_privileges",
+              "advisory_blockers",
+              "governance"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "executed_plan",
+            "executed_imported_code",
+            "external_services_called",
+            "decision",
+            "ok",
+            "summary",
+            "items",
+            "action_nodes",
+            "required_privileges",
+            "advisory_blockers",
+            "suggested_constraints",
+            "governance"
+          ],
+          "tool": "skill_privilege_scope"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "skill_privilege_scope"
+        }
+      },
+      "name": "skill_privilege_scope"
+    },
+    {
       "digest": "sha256:ca2e457a27cc93891c55d1a7786d1efc453ebde047bcccd8368e2bff0e70b1ff",
       "metadata": {
         "documentation": [
@@ -11533,7 +11978,7 @@
       "name": "summarize_diff"
     },
     {
-      "digest": "sha256:de2fa6d02340c809adc22b99362e80ed5fc0d5f9c9aa3f63fb8512fe33f947f7",
+      "digest": "sha256:75061cf166cc7adce3d3156d21cd5de63f9246f4cd5dc91186c4ba08a3f3be5f",
       "metadata": {
         "documentation": [
           {
@@ -11550,7 +11995,7 @@
           }
         ],
         "list_tools": {
-          "description": "Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` plus `execution_mode` for read-only, mode-aware workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select.",
+          "description": "Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` plus `execution_mode` for read-only, mode-aware workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select|skill_privilege_scope.",
           "execution": null,
           "icons": null,
           "input_schema": {
@@ -11653,7 +12098,7 @@
               },
               "mode": {
                 "default": "task",
-                "description": "Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use `workflow_select` first when you are unsure which existing MCP workflow/prompt/tool to use. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior.",
+                "description": "Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use `workflow_select` first when you are unsure which existing MCP workflow/prompt/tool to use. Use `skill_privilege_scope` to compare imported workflow cards/skills against task-conditioned least privilege. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior.",
                 "title": "Mode",
                 "type": "string"
               },
@@ -12009,6 +12454,22 @@
                 "read-only"
               ],
               "mode": "rerank",
+              "mutation_capable": false,
+              "required_scope": "mcp:read",
+              "tool": "task_router"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "categories": [
+                "read-only",
+                "governance"
+              ],
+              "mode": "skill_privilege_scope",
               "mutation_capable": false,
               "required_scope": "mcp:read",
               "tool": "task_router"
@@ -14076,7 +14537,7 @@
       "name": "workflow_lineage"
     },
     {
-      "digest": "sha256:5ce78e4e71ee2ee2ea9b43b2e7f872e6a6bd0c681ff0ea6df4a92dede0635651",
+      "digest": "sha256:522f770bbeddcea7dfc839fab5426166322ec7aee9b074163745500db049895a",
       "metadata": {
         "documentation": [
           {
@@ -14214,6 +14675,9 @@
               "security": {
                 "type": "object"
               },
+              "skill_privilege_scope": {
+                "type": "object"
+              },
               "step_count": {
                 "type": "integer"
               },
@@ -14284,6 +14748,7 @@
             "data_classification",
             "step_count",
             "steps",
+            "skill_privilege_scope",
             "security"
           ],
           "outputSchema": {
@@ -14356,6 +14821,9 @@
                 "type": "string"
               },
               "security": {
+                "type": "object"
+              },
+              "skill_privilege_scope": {
                 "type": "object"
               },
               "step_count": {
@@ -16411,5 +16879,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:60edf433cbbfbc38bcda9dcdb4d4bd019ce401b60443266989b47265e0fa752f"
+  "whole_catalog_digest": "sha256:da4f6058583c1d233ce685b380f0d61dda135024a2872553c9a73839d071a965"
 }
