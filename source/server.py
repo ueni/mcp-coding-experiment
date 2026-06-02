@@ -290,6 +290,8 @@ MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
 MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
 MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
 MCP_THREAT_MODEL_DREAD_RUBRIC_SCHEMA = "mcp_threat_model_dread_rubric.v1"
+AGENT_LIFESPAN_DRIFT_REPORT_PREFIX = "agent-lifespan-drift-report"
+AGENT_LIFESPAN_DRIFT_REPORT_SCHEMA = "agent_lifespan_drift_report.v1"
 DEPENDENCY_SECURITY_SBOM_SCHEMA = "dependency_security_sbom.cyclonedx-lite.v1"
 DEPENDENCY_SECURITY_BLOCKING = os.getenv(
     "MCP_DEPENDENCY_SECURITY_BLOCKING", "false"
@@ -423,6 +425,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "agent_security_delta": {"categories": ["read-only", "governance"]},
     "agent_security_delta_report": {"categories": ["read-only", "governance"]},
     "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
+    "agent_lifespan_drift_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
     "self_optimization_report": {"categories": ["read-only"]},
@@ -4916,6 +4919,7 @@ def _governance_audit_log_path() -> tuple[Path, str]:
 def _governance_report_paths(report_id: str) -> dict[str, str]:
     base = REPORTS_DIR / report_id
     return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
 
 
 def _load_audit_events(start_dt: datetime | None, end_dt: datetime | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -33715,9 +33719,380 @@ def _memory_governance_report_impl(
             "mutates_memory": False,
         },
     }
+
     if include_entries:
         report["entries"] = public_entries
     return report
+
+
+AGENT_LIFESPAN_DRIFT_FIXTURES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "pass_current_workflow_card",
+        "title": "Current workflow-card knowledge stays aligned after revision",
+        "expected_status": "pass",
+        "repo_events": [
+            {"revision": 1, "facts": {"gate": {"value": "run release_readiness before release", "path": "docs/release-readiness.md"}}},
+            {"revision": 2, "facts": {"gate": {"value": "run release_readiness and workflow_lineage before release", "path": "docs/workflow-lineage.md"}}},
+        ],
+        "knowledge": [
+            {"fact_id": "gate", "value": "run release_readiness and workflow_lineage before release", "revision": 2, "stage": "revision", "source_path": "docs/workflow-lineage.md", "tags": ["release", "governance"], "retrieval_score": 0.95, "supersedes_revision": 1},
+        ],
+        "probes": [
+            {"id": "release-gate", "fact_id": "gate", "tags": ["release", "governance"], "utilized_value": "run release_readiness and workflow_lineage before release"},
+        ],
+    },
+    {
+        "id": "warn_stale_revision",
+        "title": "Stale memory revision is not superseded cleanly",
+        "expected_status": "warn",
+        "repo_events": [
+            {"revision": 1, "facts": {"acceptance": {"value": "tests are optional for governance exports", "path": "docs/governance-report.md"}}},
+            {"revision": 2, "facts": {"acceptance": {"value": "run tests before governance exports", "path": "docs/governance-report.md"}}},
+        ],
+        "knowledge": [
+            {"fact_id": "acceptance", "value": "tests are optional for governance exports", "revision": 1, "stage": "revision", "source_path": "docs/governance-report.md", "tags": ["governance", "exports"], "retrieval_score": 0.91},
+        ],
+        "probes": [
+            {"id": "governance-export-acceptance", "fact_id": "acceptance", "tags": ["governance", "exports"], "utilized_value": "tests are optional for governance exports"},
+        ],
+    },
+    {
+        "id": "block_interference_retrieval",
+        "title": "Similar old workflow-card task overrides current repo fact",
+        "expected_status": "block",
+        "repo_events": [
+            {"revision": 1, "facts": {"rollback": {"value": "delete failed artifacts manually", "path": "docs/workflow-reminder.md"}}},
+            {"revision": 2, "facts": {"rollback": {"value": "take state_snapshot before mutation and use state_restore for rollback", "path": "docs/workflow-reminder.md"}}},
+        ],
+        "knowledge": [
+            {"fact_id": "legacy_cleanup", "value": "delete failed artifacts manually", "revision": 1, "stage": "retrieval", "source_path": "docs/workflow-reminder.md", "tags": ["rollback", "mutation"], "retrieval_score": 0.99},
+            {"fact_id": "rollback", "value": "take state_snapshot before mutation and use state_restore for rollback", "revision": 2, "stage": "revision", "source_path": "docs/workflow-reminder.md", "tags": ["rollback", "mutation"], "retrieval_score": 0.84, "supersedes_revision": 1},
+        ],
+        "probes": [
+            {"id": "rollback-before-mutation", "fact_id": "rollback", "tags": ["rollback", "mutation"], "utilized_value": "delete failed artifacts manually"},
+        ],
+    },
+    {
+        "id": "warn_write_compression",
+        "title": "Memory summary compression drops a required path-scoped constraint",
+        "expected_status": "warn",
+        "repo_events": [
+            {"revision": 1, "facts": {"path_constraint": {"value": "secret exposure findings must use repo-relative paths", "path": "docs/secret-exposure-report.md"}}},
+        ],
+        "knowledge": [
+            {"fact_id": "path_constraint", "value": "secret exposure findings are redacted", "revision": 1, "stage": "write", "source_path": "docs/secret-exposure-report.md", "tags": ["secret", "paths"], "retrieval_score": 0.9, "compressed": True},
+        ],
+        "probes": [
+            {"id": "secret-path-constraint", "fact_id": "path_constraint", "tags": ["secret", "paths"], "utilized_value": "secret exposure findings are redacted"},
+        ],
+    },
+    {
+        "id": "warn_utilization_misapply",
+        "title": "Correct retrieved memory is misapplied in agent-facing answer",
+        "expected_status": "warn",
+        "repo_events": [
+            {"revision": 1, "facts": {"docs_check": {"value": "docs changes require docs check only when docs changed", "path": "docs/release-notes-policy.md"}}},
+        ],
+        "knowledge": [
+            {"fact_id": "docs_check", "value": "docs changes require docs check only when docs changed", "revision": 1, "stage": "retrieval", "source_path": "docs/release-notes-policy.md", "tags": ["docs", "release"], "retrieval_score": 0.93},
+        ],
+        "probes": [
+            {"id": "docs-release-check", "fact_id": "docs_check", "tags": ["docs", "release"], "utilized_value": "always skip docs check for release"},
+        ],
+    },
+)
+
+
+def _agent_lifespan_drift_paths(report_id: str) -> dict[str, str]:
+    base = REPORTS_DIR / AGENT_LIFESPAN_DRIFT_REPORT_PREFIX / report_id
+    return {"json": str(base.with_suffix(".json")), "markdown": str(base.with_suffix(".md"))}
+
+
+def _agent_lifespan_drift_safe_path(value: Any) -> str:
+    raw = str(value or "").replace("\\", "/").strip()
+    if not raw:
+        return ""
+    if raw.startswith("/") or re.match(r"^[A-Za-z]:/", raw):
+        try:
+            candidate = Path(raw).resolve()
+            return str(candidate.relative_to(REPO_PATH.resolve())).replace("\\", "/")
+        except Exception:
+            return "<redacted:absolute-path>"
+    while raw.startswith("./"):
+        raw = raw[2:]
+    parts = [part for part in raw.split("/") if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return "<redacted:outside-repo>"
+    return "/".join(parts) or "."
+
+
+def _agent_lifespan_drift_hash(value: Any) -> str:
+    return _memory_governance_hash(value)
+
+
+def _agent_lifespan_latest_facts(fixture: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for event in fixture.get("repo_events", []) if isinstance(fixture.get("repo_events"), list) else []:
+        revision = int(event.get("revision", 0) or 0) if isinstance(event, dict) else 0
+        facts = event.get("facts", {}) if isinstance(event, dict) and isinstance(event.get("facts"), dict) else {}
+        for fact_id, fact in facts.items():
+            if not isinstance(fact, dict):
+                continue
+            current = latest.get(str(fact_id))
+            if current is None or revision >= int(current.get("revision", 0) or 0):
+                latest[str(fact_id)] = {
+                    "fact_id": str(fact_id),
+                    "value": str(fact.get("value", "")),
+                    "revision": revision,
+                    "path": _agent_lifespan_drift_safe_path(fact.get("path", "")),
+                }
+    return latest
+
+
+def _agent_lifespan_probe_candidates(probe: dict[str, Any], knowledge: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tags = {str(tag) for tag in probe.get("tags", []) if str(tag)} if isinstance(probe.get("tags"), list) else set()
+    candidates: list[dict[str, Any]] = []
+    for entry in knowledge:
+        if not isinstance(entry, dict):
+            continue
+        entry_tags = {str(tag) for tag in entry.get("tags", []) if str(tag)} if isinstance(entry.get("tags"), list) else set()
+        if str(entry.get("fact_id", "")) == str(probe.get("fact_id", "")) or (tags and tags.issubset(entry_tags)):
+            candidates.append(entry)
+    candidates.sort(key=lambda item: (float(item.get("retrieval_score", 0.0) or 0.0), int(item.get("revision", 0) or 0)), reverse=True)
+    return candidates
+
+
+def _agent_lifespan_drift_finding(
+    fixture: dict[str, Any],
+    probe: dict[str, Any],
+    *,
+    rule_id: str,
+    severity: str,
+    stage: str,
+    mechanism: str,
+    message: str,
+    current: dict[str, Any] | None,
+    observed: dict[str, Any] | None,
+) -> dict[str, Any]:
+    paths = sorted(
+        {
+            path
+            for path in (
+                current.get("path") if current else "",
+                _agent_lifespan_drift_safe_path(observed.get("source_path", "")) if observed else "",
+            )
+            if path
+        }
+    )
+    return {
+        "fixture_id": str(fixture.get("id", "")),
+        "probe_id": str(probe.get("id", "")),
+        "rule_id": rule_id,
+        "severity": severity,
+        "stage": stage,
+        "mechanism": mechanism,
+        "message": message,
+        "repo_paths": paths,
+        "recommendation": {
+            "write": "preserve_required_constraints_during_compaction",
+            "retrieval": "demote_interfering_legacy_memory_or_add_disambiguating_tags",
+            "revision": "supersede_stale_revision_before_reuse",
+            "utilization": "add_answer_check_against_retrieved_current_fact",
+        }.get(stage, "review_longitudinal_memory_flow"),
+        "evidence": {
+            "expected_revision": current.get("revision") if current else None,
+            "observed_revision": int(observed.get("revision", 0) or 0) if observed else None,
+            "expected_fact_hash": _agent_lifespan_drift_hash(current.get("value", "")) if current else "",
+            "observed_fact_hash": _agent_lifespan_drift_hash(observed.get("value", "")) if observed else "",
+            "utilized_value_hash": _agent_lifespan_drift_hash(probe.get("utilized_value", "")),
+            "raw_values_included": False,
+            "host_absolute_paths_included": False,
+        },
+    }
+
+
+def _agent_lifespan_evaluate_fixture(fixture: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    latest = _agent_lifespan_latest_facts(fixture)
+    knowledge = [item for item in fixture.get("knowledge", []) if isinstance(item, dict)] if isinstance(fixture.get("knowledge"), list) else []
+    probes = [item for item in fixture.get("probes", []) if isinstance(item, dict)] if isinstance(fixture.get("probes"), list) else []
+    findings: list[dict[str, Any]] = []
+    for probe in probes:
+        fact_id = str(probe.get("fact_id", ""))
+        current = latest.get(fact_id)
+        candidates = _agent_lifespan_probe_candidates(probe, knowledge)
+        observed = candidates[0] if candidates else None
+        if current is None:
+            findings.append(_agent_lifespan_drift_finding(fixture, probe, rule_id="missing_repo_fact", severity="medium", stage="write", mechanism="maintenance_aging", message="Probe references a fact that no longer has repo provenance.", current=current, observed=observed))
+            continue
+        exact_current_written = any(
+            str(entry.get("fact_id", "")) == fact_id
+            and str(entry.get("value", "")) == str(current.get("value", ""))
+            and int(entry.get("revision", 0) or 0) >= int(current.get("revision", 0) or 0)
+            for entry in knowledge
+        )
+        if not exact_current_written:
+            findings.append(_agent_lifespan_drift_finding(fixture, probe, rule_id="write_compression_lost_current_fact", severity="medium", stage="write", mechanism="compression_aging", message="No written memory/workflow entry preserves the current repo fact exactly.", current=current, observed=observed))
+        if observed is None:
+            findings.append(_agent_lifespan_drift_finding(fixture, probe, rule_id="retrieval_missed_fact", severity="medium", stage="retrieval", mechanism="maintenance_aging", message="Probe could not retrieve any candidate for a current repo fact.", current=current, observed=observed))
+            continue
+        observed_fact_id = str(observed.get("fact_id", ""))
+        observed_value = str(observed.get("value", ""))
+        current_value = str(current.get("value", ""))
+        observed_revision = int(observed.get("revision", 0) or 0)
+        current_revision = int(current.get("revision", 0) or 0)
+        if observed_fact_id != fact_id and observed_value != current_value:
+            findings.append(_agent_lifespan_drift_finding(fixture, probe, rule_id="interference_overrode_current_fact", severity="high", stage="retrieval", mechanism="interference_aging", message="A similar legacy task ranked ahead of the current repo fact.", current=current, observed=observed))
+        elif observed_revision < current_revision and observed_value != current_value:
+            findings.append(_agent_lifespan_drift_finding(fixture, probe, rule_id="stale_revision_not_superseded", severity="medium", stage="revision", mechanism="revision_aging", message="An older revision remained agent-facing after the repo fact changed.", current=current, observed=observed))
+        utilized = str(probe.get("utilized_value", ""))
+        if utilized and utilized != current_value and observed_value == current_value:
+            findings.append(_agent_lifespan_drift_finding(fixture, probe, rule_id="utilization_misapplied_current_fact", severity="medium", stage="utilization", mechanism="maintenance_aging", message="The retrieved current fact was misapplied in the agent-facing answer.", current=current, observed=observed))
+    status = "block" if any(item.get("severity") == "high" for item in findings) else ("warn" if findings else "pass")
+    summary = {
+        "id": str(fixture.get("id", "")),
+        "title": str(fixture.get("title", "")),
+        "expected_status": str(fixture.get("expected_status", "")),
+        "status": status,
+        "ok": status != "block",
+        "probe_count": len(probes),
+        "finding_count": len(findings),
+        "repo_paths": sorted({fact.get("path", "") for fact in latest.values() if fact.get("path")}),
+    }
+    return summary, findings
+
+
+def _agent_lifespan_drift_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    lines = [
+        f"# Agent lifespan drift report {report.get('report_id', '')}",
+        "",
+        f"- Schema: `{report.get('schema', '')}`",
+        f"- Generated at: `{report.get('generated_at', '')}`",
+        f"- Status: `{report.get('status', '')}`",
+        f"- Fixture count: {summary.get('fixture_count', 0)}",
+        f"- Finding count: {summary.get('finding_count', 0)}",
+        "",
+        "## Stage counts",
+    ]
+    for stage, count in sorted((summary.get("by_stage", {}) or {}).items()):
+        lines.append(f"- `{stage}`: {count}")
+    lines.extend(["", "## Findings"])
+    findings = report.get("findings", []) if isinstance(report.get("findings"), list) else []
+    if not findings:
+        lines.append("- None")
+    for finding in findings:
+        lines.append(f"- `{finding.get('severity')}` `{finding.get('stage')}` `{finding.get('rule_id')}` `{finding.get('fixture_id')}` - {finding.get('message')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_agent_lifespan_drift_report_exports(report: dict[str, Any]) -> dict[str, str]:
+    paths = _agent_lifespan_drift_paths(str(report["report_id"]))
+    json_path = _resolve_repo_path(paths["json"])
+    md_path = _resolve_repo_path(paths["markdown"])
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    exports = {"json": str(json_path.relative_to(REPO_PATH)), "markdown": str(md_path.relative_to(REPO_PATH))}
+    report["exports"] = exports
+    report["resource_links"] = [
+        _artifact_resource_link(
+            title="Agent lifespan drift report JSON",
+            rel_path=exports["json"],
+            mime_type="application/json",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="Report contains deterministic fixture identifiers, hashes, counts, and repo-relative paths only.",
+        ),
+        _artifact_resource_link(
+            title="Agent lifespan drift report Markdown",
+            rel_path=exports["markdown"],
+            mime_type="text/markdown",
+            created_at=str(report.get("generated_at", "")),
+            redacted=True,
+            safety_note="Markdown summarizes redacted longitudinal fixture findings without raw memory content.",
+        ),
+    ]
+    report["_meta"] = _artifact_meta(report["resource_links"])
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    md_path.write_text(_agent_lifespan_drift_markdown(report), encoding="utf-8")
+    return exports
+
+
+def _agent_lifespan_drift_compact(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    return {
+        "schema": "agent_lifespan_drift_summary.v1",
+        "status": report.get("status", ""),
+        "ok": report.get("ok", False),
+        "fixture_count": summary.get("fixture_count", 0),
+        "finding_count": summary.get("finding_count", 0),
+        "by_stage": summary.get("by_stage", {}),
+        "by_mechanism": summary.get("by_mechanism", {}),
+        "blocking_finding_count": summary.get("blocking_finding_count", 0),
+        "redacted": True,
+    }
+
+
+def _agent_lifespan_drift_report_impl(export: bool = False) -> dict[str, Any]:
+    _require_git_repo()
+    generated_at = _now_iso()
+    report_id = f"{AGENT_LIFESPAN_DRIFT_REPORT_PREFIX}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    fixture_summaries: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    for fixture in AGENT_LIFESPAN_DRIFT_FIXTURES:
+        summary, fixture_findings = _agent_lifespan_evaluate_fixture(dict(fixture))
+        fixture_summaries.append(summary)
+        findings.extend(fixture_findings)
+    severity_order = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    findings.sort(key=lambda item: (severity_order.get(str(item.get("severity")), 9), str(item.get("fixture_id", "")), str(item.get("rule_id", ""))))
+    by_stage: dict[str, int] = {stage: 0 for stage in ("write", "retrieval", "revision", "utilization")}
+    by_mechanism: dict[str, int] = {mechanism: 0 for mechanism in ("compression_aging", "interference_aging", "revision_aging", "maintenance_aging")}
+    by_severity: dict[str, int] = {}
+    for finding in findings:
+        stage = str(finding.get("stage", ""))
+        mechanism = str(finding.get("mechanism", ""))
+        severity = str(finding.get("severity", ""))
+        by_stage[stage] = by_stage.get(stage, 0) + 1
+        by_mechanism[mechanism] = by_mechanism.get(mechanism, 0) + 1
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+    status = "block" if by_severity.get("high", 0) else ("warn" if findings else "pass")
+    report: dict[str, Any] = {
+        "schema": AGENT_LIFESPAN_DRIFT_REPORT_SCHEMA,
+        "report_id": report_id,
+        "generated_at": generated_at,
+        "read_only": True,
+        "advisory_only": True,
+        "status": status,
+        "ok": status != "block",
+        "summary": {
+            "fixture_count": len(fixture_summaries),
+            "pass_fixture_count": sum(1 for item in fixture_summaries if item.get("status") == "pass"),
+            "warn_fixture_count": sum(1 for item in fixture_summaries if item.get("status") == "warn"),
+            "block_fixture_count": sum(1 for item in fixture_summaries if item.get("status") == "block"),
+            "finding_count": len(findings),
+            "blocking_finding_count": by_severity.get("high", 0),
+            "by_severity": dict(sorted(by_severity.items())),
+            "by_stage": dict(sorted(by_stage.items())),
+            "by_mechanism": dict(sorted(by_mechanism.items())),
+            "deterministic_fixture_suite": True,
+            "raw_memory_content_included": False,
+        },
+        "fixtures": fixture_summaries,
+        "findings": findings,
+        "security": {
+            "redaction": "findings include deterministic fixture ids, fact hashes, repo-relative paths, and aggregate counts only",
+            "raw_memory_content_included": False,
+            "host_absolute_paths_included": False,
+            "repo_boundary_enforced": True,
+            "mutates_memory": False,
+            "network_access": False,
+        },
+        "exports": {},
+        "resource_links": [],
+    }
+    if export:
+        _write_agent_lifespan_drift_report_exports(report)
+    return report
+
 
 def _governance_report_impl(
     start_time: str = "",
@@ -33783,6 +34158,7 @@ def _governance_report_impl(
             analyze_agents_context(REPO_PATH)
         ),
         "memory_governance": _memory_governance_report_impl(max_entries=1000, stale_days=90, include_entries=False)["summary"],
+        "agent_lifespan_drift": _agent_lifespan_drift_compact(_agent_lifespan_drift_report_impl(export=False)),
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
         "agent_security_delta": _agent_security_delta_compact(
@@ -34378,6 +34754,19 @@ def mcp_threat_model_report(
             baseline_path=baseline_path,
             export=export,
         )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
+def agent_lifespan_drift_report(export: bool = False) -> dict[str, Any]:
+    """Run deterministic longitudinal drift fixtures for memory and workflow-card knowledge."""
+    arguments = {"export": export}
+    with _otel_span(
+        "mcp.tool.agent_lifespan_drift_report",
+        _otel_tool_attributes("agent_lifespan_drift_report", arguments),
+    ) as span:
+        result = _agent_lifespan_drift_report_impl(export=export)
         _otel_set_result_attributes(span, result)
         return result
 

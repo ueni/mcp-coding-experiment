@@ -73,6 +73,10 @@ _DOC_REFS_BY_TOOL: dict[str, tuple[dict[str, str], ...]] = {
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "MCP threat-model regression report", "path": "docs/mcp-threat-model-report.md"},
     ),
+    "agent_lifespan_drift_report": (
+        {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
+        {"label": "Agent lifespan drift report", "path": "docs/agent-lifespan-drift-report.md"},
+    ),
     "governance_report": (
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "Governance report workflow", "path": "docs/governance-report.md"},

@@ -468,8 +468,390 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 43,
+  "tool_count": 44,
   "tools": [
+    {
+      "digest": "sha256:d34de71f67b800f3fbecbc98f8ff1683e243622afc86ebdfa51f1dd781657275",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Agent lifespan drift report",
+            "path": "docs/agent-lifespan-drift-report.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Run deterministic longitudinal drift fixtures for memory and workflow-card knowledge.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "export": {
+                "default": false,
+                "title": "Export",
+                "type": "boolean"
+              }
+            },
+            "title": "agent_lifespan_drift_reportArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "agent_lifespan_drift_report",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fixtures": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "agent_lifespan_drift_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "status",
+              "ok",
+              "summary",
+              "fixtures",
+              "findings",
+              "security",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "resource_links",
+            "_meta"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "_meta": {
+                "type": "object"
+              },
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "exports": {
+                "type": "object"
+              },
+              "findings": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "fixtures": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "generated_at": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "report_id": {
+                "type": "string"
+              },
+              "resource_links": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "safety": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "contains_secrets": {
+                          "type": "boolean"
+                        },
+                        "note": {
+                          "type": "string"
+                        },
+                        "redacted": {
+                          "type": "boolean"
+                        },
+                        "repo_boundary_enforced": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "redacted",
+                        "contains_secrets",
+                        "repo_boundary_enforced",
+                        "note"
+                      ],
+                      "type": "object"
+                    },
+                    "schema": {
+                      "const": "artifact_resource_link.v1",
+                      "type": "string"
+                    },
+                    "size_bytes": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "title",
+                    "uri",
+                    "mime_type",
+                    "created_at",
+                    "safety"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "agent_lifespan_drift_report.v1",
+                "type": "string"
+              },
+              "security": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "summary": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "report_id",
+              "generated_at",
+              "read_only",
+              "advisory_only",
+              "status",
+              "ok",
+              "summary",
+              "fixtures",
+              "findings",
+              "security",
+              "exports"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "report_id",
+            "generated_at",
+            "read_only",
+            "advisory_only",
+            "status",
+            "ok",
+            "summary",
+            "fixtures",
+            "findings",
+            "security",
+            "exports"
+          ],
+          "tool": "agent_lifespan_drift_report"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "agent_lifespan_drift_report"
+        }
+      },
+      "name": "agent_lifespan_drift_report"
+    },
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
       "metadata": {
@@ -3692,7 +4074,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:1f1668751779df5563d51b26c646259d65504bad4447ba8dd31192585ff89bf8",
+      "digest": "sha256:62d4bc266d615e65ebc12e1886861ffae73107f195fb2b371b1edb956cef91ae",
       "metadata": {
         "documentation": [
           {
@@ -3770,6 +4152,9 @@
               "_meta": {
                 "type": "object"
               },
+              "agent_lifespan_drift": {
+                "type": "object"
+              },
               "agent_security_delta": {
                 "type": "object"
               },
@@ -3795,6 +4180,9 @@
                 "type": "object"
               },
               "lineage": {
+                "type": "object"
+              },
+              "memory_governance": {
                 "type": "object"
               },
               "provenance": {
@@ -4042,6 +4430,7 @@
             "secret_exposure",
             "untrusted_content_signals",
             "memory_governance",
+            "agent_lifespan_drift",
             "result_references",
             "result_mode",
             "result_reference",
@@ -4054,6 +4443,9 @@
             "additionalProperties": true,
             "properties": {
               "_meta": {
+                "type": "object"
+              },
+              "agent_lifespan_drift": {
                 "type": "object"
               },
               "agent_security_delta": {
@@ -4081,6 +4473,9 @@
                 "type": "object"
               },
               "lineage": {
+                "type": "object"
+              },
+              "memory_governance": {
                 "type": "object"
               },
               "provenance": {
@@ -16131,5 +16526,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:6f6d3f8315c8e786060df81bcee0c9db7e1be78a618bed71d2f19b1b34840659"
+  "whole_catalog_digest": "sha256:a15f3c96950f599bfd9d758f236126611fe69a64c1b1fb356d0acfe49b91134c"
 }
