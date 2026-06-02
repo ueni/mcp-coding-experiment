@@ -253,6 +253,103 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertIn("network_exfiltration_pattern", risky_signals)
         self.assertIn("prompt_injection_instruction", risky_signals)
 
+    def test_skill_privilege_scope_blocks_unnecessary_mutation_for_read_only_task(self):
+        card = self._workflow_card_fixture(
+            id="read-only-card-with-write",
+            intent="Inspect docs and then write a scratch helper.",
+            mutation_mode="write /tmp/scope-helper.txt after reading docs/guide.md",
+            steps=[
+                {"action": "read", "path": "docs/guide.md"},
+                {"action": "write", "path": "/tmp/scope-helper.txt"},
+            ],
+        )
+
+        report = self.server.skill_privilege_scope(
+            prompt="Read-only audit of docs/guide.md; do not write or mutate anything.",
+            items=[card],
+        )
+
+        self.assertEqual(report["schema"], "skill_privilege_scope.v1")
+        self.assertTrue(report["read_only"])
+        self.assertFalse(report["executed_imported_code"])
+        self.assertEqual(report["summary"]["decision"], "block")
+        blockers = [row for row in report["advisory_blockers"] if row["category"] == "write_path"]
+        self.assertTrue(blockers)
+        self.assertEqual(blockers[0]["code"], "task_conditioned_over_privilege")
+        self.assertTrue(
+            any("<outside-repo>" in row["repository_relative_paths"] for row in blockers)
+        )
+        self.assertNotIn("/tmp", json.dumps(report))
+        self.assertEqual(
+            report["governance"]["skill_pack_import_review"]["decision"],
+            "quarantine",
+        )
+
+    def test_task_router_skill_privilege_scope_uses_candidates_as_imported_items(self):
+        card = self._workflow_card_fixture(
+            id="router-imported-release-card",
+            intent="Publish a GitHub release from a docs-only review.",
+            steps=[{"action": "publish", "target": "https://github.com/ueni/example/releases"}],
+        )
+
+        report = self.server.task_router(
+            mode="skill_privilege_scope",
+            prompt="Read-only review of release notes; do not publish or deploy.",
+            candidates=[card],
+        )
+
+        self.assertEqual(report["schema"], "skill_privilege_scope.v1")
+        self.assertEqual(report["summary"]["decision"], "block")
+        self.assertTrue(
+            any(row["category"] == "release_publish" for row in report["advisory_blockers"])
+        )
+        self.assertFalse(report["executed_imported_code"])
+
+    def test_skill_privilege_scope_records_declared_required_mutation(self):
+        card = self._workflow_card_fixture(
+            id="declared-doc-write",
+            intent="Update docs/report.md with the generated governance summary.",
+            mutation_mode="write_path required for docs/report.md",
+            required_privileges=["write_path"],
+            steps=[{"action": "write", "path": "docs/report.md"}],
+        )
+
+        report = self.server.skill_privilege_scope(
+            prompt="Implement the requested documentation update by writing docs/report.md.",
+            items=[card],
+        )
+
+        self.assertEqual(report["summary"]["decision"], "allow")
+        self.assertFalse(report["advisory_blockers"])
+        required = [row for row in report["action_nodes"] if row["category"] == "write_path"]
+        self.assertTrue(required)
+        self.assertTrue(all(row["status"] == "required" for row in required))
+        self.assertTrue(any("docs/report.md" in row["repository_relative_paths"] for row in required))
+        self.assertGreaterEqual(report["summary"]["required_privileges"], 1)
+
+    def test_skill_privilege_scope_feeds_policy_plan_and_skill_import_review(self):
+        card = self._workflow_card_fixture(
+            id="import-review-hidden-write",
+            intent="Read docs and then write docs/summary.md as a cache.",
+            mutation_mode="write docs/summary.md",
+            outputs=["write docs/summary.md"],
+        )
+
+        score = self.server.skill_pack_score(prompt="Read docs only", items=[card])
+        self.assertEqual(score["scores"][0]["privilege_scope"]["decision"], "needs_constraints")
+        self.assertGreater(score["scores"][0]["privilege_scope"]["over_privileged_count"], 0)
+
+        plan = self.server.workflow_policy_plan(
+            intent="Read docs only",
+            execution_mode="auto",
+            allowed_targets=["docs"],
+            planned_steps=[
+                {"tool": "workspace_transaction", "mode": "write", "args": {"path": "docs/summary.md"}, "mutates": True},
+            ],
+        )
+        self.assertEqual(plan["skill_privilege_scope"]["decision"], "needs_constraints")
+        self.assertIn("task_conditioned_over_privilege", {item["code"] for item in plan["findings"]})
+
     def test_workflow_select_exposes_score_and_demotes_low_fit_cards(self):
         safe = self._workflow_card_fixture(
             id="safe-release-card",

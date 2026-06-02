@@ -19,7 +19,8 @@ Stable fields:
 - `plan_id`: deterministic `workflow-plan-...` digest built from the redacted intent digest, execution mode, allowed targets, data classification, and normalized step metadata.
 - `blocking_policies`: sequence-level policies that require denial, such as `scope`, `dataflow`, or `shadow_tool`.
 - `required_preconditions`: missing gates such as `snapshot_or_rollback` or `test_or_change_impact_gate`.
-- `findings`: scope-creep, dataflow, mutation, network, shadow-tool, missing-gate, and clarification findings.
+- `findings`: scope-creep, dataflow, mutation, network, shadow-tool, missing-gate, task-conditioned over-privilege, and clarification findings.
+- `skill_privilege_scope`: compact read-only least-privilege summary for the declared steps.
 - `safe_next_actions`: bounded next steps for agents/humans.
 
 The response also includes normalized `steps` with tool name, mode/subcommand, argument shape, risk category, mutation/network flags, expected artifacts, dependency hints, and redacted target summaries.
@@ -41,9 +42,10 @@ The current slice checks:
 - release-sensitive sequences requiring earlier test/change-impact and snapshot gates;
 - repository/config read followed by network-capable steps, especially for sensitive classifications;
 - target scope creep outside `allowed_targets`;
-- unregistered/shadow tool names not present in the MCP tool security catalog.
+- unregistered/shadow tool names not present in the MCP tool security catalog;
+- task-conditioned least-privilege via [`skill_privilege_scope`](./skill-privilege-scope.md), so mutating, network, command, GitHub API, release, or secret-adjacent actions that are not required by the declared intent become approval findings before execution.
 
-Network and mutation findings are sequence-level governance findings. Per-tool authorization still remains with the existing MCP auth, mutation, and security gates.
+Network, mutation, and over-privilege findings are sequence-level governance findings. Per-tool authorization still remains with the existing MCP auth, mutation, and security gates.
 
 For reviewed repository-local policy bundles on top of this normalized metadata, use the read-only [`policy_governance_decision`](./policy-governance-decision.md) adapter. Its decisions cannot override this preflight or any existing hard gate.
 
