@@ -1,0 +1,30 @@
+{
+  "schema": "review_outcome_fixture.v1",
+  "id": "dismissed-feedback",
+  "description": "A noisy automated review comment is dismissed as not actionable.",
+  "findings": [
+    {
+      "id": "docs-cache-warning",
+      "rule_id": "cache-warning",
+      "path": "docs/cache.md",
+      "line": 12,
+      "comment_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "created_at": "2026-05-24T09:00:00Z"
+    }
+  ],
+  "human_reviews": [
+    {
+      "source": "human_review_label",
+      "timestamp": "2026-05-24T09:20:00Z",
+      "dismissed_findings": [
+        "docs-cache-warning"
+      ],
+      "reason": "false positive: documentation-only example is intentionally illustrative"
+    }
+  ],
+  "gate_state": {
+    "tests": "not_applicable",
+    "security": "not_applicable",
+    "release": "unchanged"
+  }
+}

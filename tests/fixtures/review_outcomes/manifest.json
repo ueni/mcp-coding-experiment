@@ -1,0 +1,10 @@
+{
+  "schema": "review_outcome_manifest.v1",
+  "fixtures": [
+    "resolved_feedback/fixture.json",
+    "dismissed_feedback/fixture.json",
+    "stale_feedback/fixture.json",
+    "open_feedback/fixture.json",
+    "unverifiable_feedback/fixture.json"
+  ]
+}
