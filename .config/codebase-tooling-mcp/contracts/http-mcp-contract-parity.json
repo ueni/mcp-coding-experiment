@@ -1,0 +1,16 @@
+{
+  "schema": "http_mcp_contract_expectations.v1",
+  "generated_from": "repo-local HTTP/HarnessAPI-style parity documentation",
+  "description": "Narrow checked-in parity contract mapping one Streamable HTTP endpoint expectation to its MCP tools/list schema digests.",
+  "endpoints": [
+    {
+      "id": "streamable-http-tools-call-repo-info",
+      "method": "POST",
+      "path": "/mcp#tools/call:repo_info",
+      "mcp_tool": "repo_info",
+      "request_schema_digest": "sha256:f960eacccbac0d9e38f484fd26a67984df2b2d5a2edd733790ceee52193f71ca",
+      "response_schema_digest": "sha256:3f2dfdc549d2b3f76279894c2c60a9982ae77644d7b70756d328bfd95fedfc8f",
+      "notes": "Digest-only expectation keeps governance output compact and avoids embedding raw schemas."
+    }
+  ]
+}

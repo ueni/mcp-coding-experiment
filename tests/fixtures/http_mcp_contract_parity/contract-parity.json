@@ -1,0 +1,47 @@
+{
+  "schema": "http_mcp_contract_expectations.v1",
+  "description": "Synthetic parity fixture with one matching endpoint and one drifted endpoint.",
+  "endpoints": [
+    {
+      "id": "fixture-pass-repo-info",
+      "method": "POST",
+      "path": "/mcp#tools/call:repo_info",
+      "mcp_tool": "repo_info",
+      "request_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string"
+          }
+        },
+        "required": ["schema"]
+      }
+    },
+    {
+      "id": "fixture-drift-git-status",
+      "method": "POST",
+      "path": "/mcp#tools/call:git_status",
+      "mcp_tool": "git_status",
+      "request_schema": {
+        "type": "object",
+        "properties": {
+          "short": {
+            "type": "boolean"
+          }
+        }
+      },
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  ]
+}

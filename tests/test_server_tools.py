@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+from source.http_mcp_contract_parity import schema_digest
 from tests.server_test_support import ServerToolsTestBase
 
 class ServerToolsTest(ServerToolsTestBase):
@@ -2435,6 +2436,43 @@ class ServerToolsTest(ServerToolsTestBase):
         self.assertTrue(all(link.get("size_bytes", 0) > 0 for link in sized_links))
         self.assertFalse(out["_meta"]["artifact_resources"]["safety"]["secrets_exposed"])
         self.assertEqual(out["audit"]["counts"]["digest"]["chain_head"], "")
+
+    def test_governance_report_includes_http_mcp_contract_parity_summary(self):
+        catalog = self.server._current_tool_catalog_baseline()
+        repo_info = next(tool for tool in catalog["tools"] if tool["name"] == "repo_info")
+        list_tools_contract = repo_info["metadata"]["list_tools"]
+        contract_path = self.repo_path / ".config" / "codebase-tooling-mcp" / "contracts" / "http-mcp-contract-parity.json"
+        contract_path.parent.mkdir(parents=True, exist_ok=True)
+        contract_path.write_text(
+            json.dumps(
+                {
+                    "schema": "http_mcp_contract_expectations.v1",
+                    "endpoints": [
+                        {
+                            "id": "test-repo-info",
+                            "method": "POST",
+                            "path": "/mcp#tools/call:repo_info",
+                            "mcp_tool": "repo_info",
+                            "request_schema_digest": schema_digest(list_tools_contract["input_schema"]),
+                            "response_schema_digest": schema_digest(list_tools_contract["output_schema"]),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False)
+
+        parity = out["http_mcp_contract_parity"]
+        self.assertEqual(parity["schema"], "http_mcp_contract_parity_report.v1")
+        self.assertTrue(parity["read_only"])
+        self.assertFalse(parity["network_used"])
+        self.assertEqual(parity["contract_path"], ".config/codebase-tooling-mcp/contracts/http-mcp-contract-parity.json")
+        self.assertEqual(parity["status"], "pass")
+        self.assertEqual(parity["summary"]["matched"], 1)
+        self.assertEqual(parity["summary"]["findings"], 0)
+        self.assertFalse(parity["security"]["raw_schemas_embedded"])
 
     def test_governance_report_absolute_audit_path_boundary(self):
         original_audit_log = self.server.MCP_AUDIT_LOG_FILE

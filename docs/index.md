@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 - [Agent security delta report](./agent-security-delta-report.md) - offline read-only security-regression pack and SARIF export for agent-generated feature changes.
 - [Dependency security report](./dependency-security.md) - read-only dependency inventory, SBOM/SARIF export, and vulnerability-gate evidence with offline/caller-provided advisory sources.
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) - checked-in public MCP tool-catalog digests, drift diffs, and advisory metadata lint for rug-pull detection.
+- [HTTP/MCP contract parity report](./http-mcp-contract-parity.md) - offline digest parity between repository-local HTTP/HarnessAPI-style endpoint expectations and MCP tools/list contracts.
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) - deterministic read-only ToolFuzz-style runtime checks for public tool contracts, error paths, and redaction invariants.
 - [Workflow lineage manifests](./workflow-lineage.md) - deterministic redacted plan identity, lineage graph, artifact digests, and read-only drift verification for replayable MCP executions.
 - [Workflow policy plan preflight](./workflow-policy-plan.md) - deterministic read-only preflight for intent-declared MCP tool sequences before execution.
@@ -64,6 +65,7 @@ This index lists documentation ownership and status.
 - [Secret exposure report](./secret-exposure-report.md) (`docs/secret-exposure-report.md`) - Status: `prototype`
 - [Agent security delta report](./agent-security-delta-report.md) (`docs/agent-security-delta-report.md`) - Status: `prototype`
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) (`docs/tool-catalog-integrity.md`) - Status: `prototype`
+- [HTTP/MCP contract parity report](./http-mcp-contract-parity.md) (`docs/http-mcp-contract-parity.md`) - Status: `prototype`
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) (`docs/tool-contract-fuzzing.md`) - Status: `prototype`
 - [Workflow lineage manifests](./workflow-lineage.md) (`docs/workflow-lineage.md`) - Status: `prototype`
 - [Workflow policy plan preflight](./workflow-policy-plan.md) (`docs/workflow-policy-plan.md`) - Status: `prototype`
