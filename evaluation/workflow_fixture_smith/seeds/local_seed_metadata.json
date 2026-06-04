@@ -1,0 +1,133 @@
+{
+  "schema": "workflow_fixture_smith_seed_pack.v1",
+  "seeds": [
+    {
+      "id": "policy-plan-tradeoff",
+      "title": "Policy plan tradeoff candidate",
+      "source_kind": "checked_in_seed_metadata",
+      "prompt": "Review a local workflow policy plan and propose one bounded repository change plus one report artifact. Stay within the named files and use only offline fixture metadata.",
+      "tags": [
+        "policy-plan",
+        "tradeoff",
+        "bounded-edit"
+      ],
+      "tool_chain_shape": [
+        "read_file",
+        "search",
+        "write_file",
+        "write_artifact",
+        "run_command"
+      ],
+      "expected_artifacts": [
+        "artifacts/policy_tradeoff_review.md"
+      ],
+      "verifier_requirements": {
+        "deterministic": true,
+        "required_reports": [
+          "artifacts/policy_tradeoff_review.md"
+        ],
+        "expected_file_touches": [
+          "src/workflow_policy.py"
+        ],
+        "deterministic_checks": [
+          "python -m pytest tests/test_workflow_policy.py"
+        ]
+      },
+      "safety_gates": {
+        "network": false,
+        "live_github_import": false,
+        "unbounded_scope_allowed": false,
+        "allowed_mutations": [
+          "repo",
+          "artifact"
+        ],
+        "max_files_changed": 2
+      },
+      "variants": [
+        {
+          "id": "impact-vs-full-gate",
+          "title": "Impact map versus full gate decision",
+          "prompt_delta": "Choose between a narrow test-impact gate and a full test run based on local metadata, and document the tradeoff in the expected artifact.",
+          "tags": [
+            "test-impact",
+            "gate-selection"
+          ],
+          "tool_chain_shape": [
+            "safety_gate"
+          ],
+          "expected_artifacts": [
+            "artifacts/test_gate_decision.json"
+          ],
+          "required_reports": [
+            "artifacts/test_gate_decision.json"
+          ],
+          "deterministic_checks": [
+            "python -m pytest tests/test_workflow_policy.py tests/test_test_impact_map.py"
+          ],
+          "diversity_reason": "combines policy planning, artifact reporting, and explicit gate-selection tradeoffs"
+        }
+      ]
+    },
+    {
+      "id": "context-cache-repair",
+      "title": "Context cache repair candidate",
+      "source_kind": "local_fixture_metadata",
+      "prompt": "Repair a small context-cache fixture using only local files, then produce a verifier report that explains why the change avoids overfitting to the original task wording.",
+      "tags": [
+        "context-retrieval",
+        "anti-overfit",
+        "cache-repair"
+      ],
+      "tool_chain_shape": [
+        "search",
+        "read_file",
+        "write_file",
+        "run_command",
+        "write_artifact"
+      ],
+      "expected_artifacts": [
+        "artifacts/context_cache_verifier.md"
+      ],
+      "verifier_requirements": {
+        "deterministic": true,
+        "required_reports": [
+          "artifacts/context_cache_verifier.md"
+        ],
+        "expected_file_touches": [
+          "src/context_cache.py"
+        ],
+        "deterministic_checks": [
+          "python -m pytest tests/test_context_cache.py"
+        ]
+      },
+      "safety_gates": {
+        "network": false,
+        "live_github_import": false,
+        "unbounded_scope_allowed": false,
+        "allowed_mutations": [
+          "repo",
+          "artifact"
+        ],
+        "max_files_changed": 2
+      },
+      "variants": [
+        {
+          "id": "noisy-retrieval",
+          "title": "Noisy retrieval with bounded repair",
+          "prompt_delta": "Include two irrelevant local hints and require the verifier to cite the decisive fixture metadata fields rather than matching exact phrasing.",
+          "tags": [
+            "noisy-context",
+            "verifier-citation"
+          ],
+          "expected_artifacts": [
+            "artifacts/retrieval_noise_audit.json"
+          ],
+          "required_reports": [
+            "artifacts/retrieval_noise_audit.json"
+          ],
+          "diversity_reason": "adds noisy local context and requires verifier citation instead of fixed prompt matching"
+        }
+      ]
+    }
+  ]
+}
