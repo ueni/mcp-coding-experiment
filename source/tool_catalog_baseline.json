@@ -4074,7 +4074,7 @@
       "name": "git_status"
     },
     {
-      "digest": "sha256:62d4bc266d615e65ebc12e1886861ffae73107f195fb2b371b1edb956cef91ae",
+      "digest": "sha256:b6ade0aff826b346b34be02bdafbeb44829fe116f23fc521bd4496e9534e3d5a",
       "metadata": {
         "documentation": [
           {
@@ -4177,6 +4177,9 @@
                 "type": "object"
               },
               "governance_hooks": {
+                "type": "object"
+              },
+              "http_mcp_contract_parity": {
                 "type": "object"
               },
               "lineage": {
@@ -4425,6 +4428,7 @@
             "security",
             "workflow_diagnostics",
             "tool_catalog_integrity",
+            "http_mcp_contract_parity",
             "ci_workflow_security",
             "agent_security_delta",
             "secret_exposure",
@@ -4470,6 +4474,9 @@
                 "type": "object"
               },
               "governance_hooks": {
+                "type": "object"
+              },
+              "http_mcp_contract_parity": {
                 "type": "object"
               },
               "lineage": {
@@ -17385,5 +17392,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:28a743a1e99e494722cc46dcaabe783a23cf48c50ad767598b59efb131754356"
+  "whole_catalog_digest": "sha256:1839f641780449da1ddad9b0612bd2a448caa37fce64a9d878d2b1fdf8977054"
 }

@@ -20,6 +20,7 @@ The first-slice report schema is `governance_report.v1`. It includes:
 - companion `mcp_threat_model_report` workflow for STRIDE/DREAD fixture regressions when a focused MCP threat-model view is needed;
 - compact `agent_lifespan_drift` longitudinal fixture summary for memory/workflow-card revision, interference, compression, and utilization drift;
 - compact `tool_catalog_integrity` public-MCP-surface status, baseline/current digests, tool/prompt/resource counts, drift counts, and advisory lint counts without embedding the full catalog;
+- compact `http_mcp_contract_parity` status comparing repository-local HTTP/HarnessAPI-style endpoint expectations with MCP tools/list input/output schema digests;
 - snapshot/rollback references from the state snapshot index when available;
 - a compact `workflow_diagnostics` summary for failed audit trajectories when blocked steps are present;
 - git base/head metadata for PR or release review;
@@ -74,6 +75,8 @@ The lineage manifest deliberately stores only safe identity inputs: repository-r
 
 `governance_report` also embeds a compact `memory_governance` summary from `memory_governance_report` so stale, sensitive, untrusted, or under-provenanced repository memory can be noticed without returning raw memory content. The separate `agent_lifespan_drift` compact summary is additive: it runs deterministic synthetic longitudinal probes and reports only counts/status/stage buckets suitable for governance inclusion.
 
+`http_mcp_contract_parity` is advisory and additive. It does not replace existing schema-backed output validation, `tool_catalog_integrity`, or ToolFuzz-style contract checks; it only reports whether repo-local HTTP contract documentation still matches declared MCP input/output schema digests.
+
 Security boundaries:
 
 - report generation does not require mutation mode;
@@ -81,6 +84,7 @@ Security boundaries:
 - absolute audit paths outside the repository are not read by the report workflow;
 - secret-exposure evidence contains only redacted metadata/fingerprints, and secrets/tokens are redacted before aggregation and export;
 - tool-catalog integrity summaries include only public MCP metadata digests/counts, never repository contents or host absolute paths;
+- HTTP/MCP contract parity findings include repository-relative contract paths and schema digests only, not raw schemas, endpoint payloads, or bearer tokens;
 - resource links and lineage manifests expose only repository-relative `repo://file/{path}` paths, never host absolute paths or raw secret-bearing inputs;
 - unsigned provenance sidecars and workflow-lineage manifests are local integrity/replay metadata only and are not cryptographic signatures;
 - the `local-dsse-fixture` backend is deterministic offline verifier plumbing for tests/local demos, not a production release trust root;
