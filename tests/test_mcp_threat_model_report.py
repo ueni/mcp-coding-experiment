@@ -257,16 +257,23 @@ class McpThreatModelReportTests(ServerToolsTestBase):
                     "token_passthrough": False,
                     "forward_authorization": True,
                 },
+                {
+                    "id": "bearer_token_forwarding",
+                    "auth_mode": "bearer",
+                    "bearer_token_only": True,
+                    "token_forwarding": True,
+                },
             ]
         )
 
         self.assertFalse(report["ok"])
         self.assertEqual(report["status"], "block")
-        self.assertEqual(report["summary"]["detected_config_count"], 2)
+        self.assertEqual(report["summary"]["detected_config_count"], 3)
         self.assertEqual(report["summary"]["not_applicable_count"], 0)
         outcomes = {row["id"]: row["outcome"] for row in report["configs"]}
         self.assertEqual(outcomes["mixed_oauth_bearer_passthrough"], "block")
         self.assertEqual(outcomes["bearer_forward_authorization"], "block")
+        self.assertEqual(outcomes["bearer_token_forwarding"], "block")
 
         passthrough_findings = [
             finding
@@ -275,7 +282,11 @@ class McpThreatModelReportTests(ServerToolsTestBase):
         ]
         self.assertEqual(
             {finding["fixture_id"] for finding in passthrough_findings},
-            {"mixed_oauth_bearer_passthrough", "bearer_forward_authorization"},
+            {
+                "mixed_oauth_bearer_passthrough",
+                "bearer_forward_authorization",
+                "bearer_token_forwarding",
+            },
         )
         self.assertTrue(
             any(
@@ -286,6 +297,12 @@ class McpThreatModelReportTests(ServerToolsTestBase):
         self.assertTrue(
             any(
                 "forward_authorization" in finding["evidence"]["field_refs"]
+                for finding in passthrough_findings
+            )
+        )
+        self.assertTrue(
+            any(
+                "token_forwarding" in finding["evidence"]["field_refs"]
                 for finding in passthrough_findings
             )
         )

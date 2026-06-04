@@ -11670,10 +11670,19 @@ def _mcp_oauth_proxy_load_repo_configs() -> list[dict[str, Any]]:
 
 _MCP_OAUTH_PROXY_FORWARDING_FIELDS = (
     "token_passthrough",
+    "token_forwarding",
     "passthrough_user_token",
+    "passthrough_token",
     "forward_bearer_token",
+    "forward_access_token",
+    "forward_user_token",
+    "forward_token",
     "reuse_client_token",
+    "reuse_bearer_token",
+    "reuse_access_token",
+    "reuse_user_token",
     "forward_authorization",
+    "authorization_passthrough",
 )
 
 
