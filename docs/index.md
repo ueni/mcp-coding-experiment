@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 - [GitHub Actions workflow security report](./ci-workflow-security.md) - offline read-only workflow posture checks for permissions, action refs, risky triggers, runners, Docker/secrets/artifacts, suppressions, and local no-upload SARIF export.
 - [Secret exposure report](./secret-exposure-report.md) - offline read-only redacted repository/diff secret exposure scanning with allowlist and gate evidence.
 - [Agent security delta report](./agent-security-delta-report.md) - offline read-only security-regression pack and SARIF export for agent-generated feature changes.
+- [Security root-cause evidence report](./security-root-cause-evidence.md) - offline read-only evidence pack ranking likely root-cause files/functions for security-sensitive agent fixes.
 - [Dependency security report](./dependency-security.md) - read-only dependency inventory, SBOM/SARIF export, and vulnerability-gate evidence with offline/caller-provided advisory sources.
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) - checked-in public MCP tool-catalog digests, drift diffs, and advisory metadata lint for rug-pull detection.
 - [HTTP/MCP contract parity report](./http-mcp-contract-parity.md) - offline digest parity between repository-local HTTP/HarnessAPI-style endpoint expectations and MCP tools/list contracts.
@@ -33,6 +34,7 @@ SPDX-License-Identifier: MIT
 - [Skill privilege scope](./skill-privilege-scope.md) - read-only task-conditioned least-privilege action-node analysis for imported cards and skills.
 - [Context retrieval regression suite](./context-retrieval-regression.md) - offline ContextBench-style fixtures and metrics for task-router workflow-card retrieval.
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) - offline Terminal-Bench-style task fixtures, direct baseline runner, agent hooks, and trajectory/safety metrics for complete MCP workflows.
+- [Workflow fixture smith](./workflow-fixture-smith.md) - opt-in offline review-queue generation for open-ended workflow fixture candidates from local seed metadata.
 - [Agent execution modes](./execution-modes.md) - online/cloud-assisted and offline/onboard-only routing contracts layered onto workflow selection.
 - [Explicit Agent API Proxy](./agent-api-proxy.md) - opt-in OpenAI-compatible `/v1/chat/completions` proxy with routing, durable privacy evidence packets, redaction/anonymization, streaming, and offline/no-network controls.
 - [Async workflow tasks](./workflow-tasks.md) - prototype MCP Tasks-style async handles for long-running repo workflows.
@@ -65,6 +67,7 @@ This index lists documentation ownership and status.
 - [GitHub Actions workflow security report](./ci-workflow-security.md) (`docs/ci-workflow-security.md`) - Status: `prototype`
 - [Secret exposure report](./secret-exposure-report.md) (`docs/secret-exposure-report.md`) - Status: `prototype`
 - [Agent security delta report](./agent-security-delta-report.md) (`docs/agent-security-delta-report.md`) - Status: `prototype`
+- [Security root-cause evidence report](./security-root-cause-evidence.md) (`docs/security-root-cause-evidence.md`) - Status: `prototype`
 - [Tool catalog integrity baseline](./tool-catalog-integrity.md) (`docs/tool-catalog-integrity.md`) - Status: `prototype`
 - [HTTP/MCP contract parity report](./http-mcp-contract-parity.md) (`docs/http-mcp-contract-parity.md`) - Status: `prototype`
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) (`docs/tool-contract-fuzzing.md`) - Status: `prototype`
