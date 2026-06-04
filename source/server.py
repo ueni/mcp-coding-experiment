@@ -11632,6 +11632,8 @@ def _mcp_oauth_proxy_secret_literal_refs(config: dict[str, Any]) -> list[str]:
         normalized = path.lower().replace("-", "_")
         if not _MCP_OAUTH_SECRET_KEY_RE.search(normalized):
             continue
+        if isinstance(value, (bool, int, float)):
+            continue
         text = str(value).strip()
         if not text or text.startswith(("${", "$", "env:", "secret:", "vault:", "file:")):
             continue

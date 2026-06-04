@@ -306,6 +306,10 @@ class McpThreatModelReportTests(ServerToolsTestBase):
                 for finding in passthrough_findings
             )
         )
+        self.assertNotIn(
+            "oauth-inline-secret-material",
+            {finding["rule_id"] for finding in report["findings"]},
+        )
         self.assertFalse(report["security"]["tokens_or_secrets_included"])
 
     def test_export_writes_json_and_markdown_without_mutating_sources(self):
