@@ -1,0 +1,84 @@
+{
+  "schema": "http_mcp_contract_expectations.v1",
+  "description": "Synthetic parity fixture covering matching contracts, stale docs/examples, and schema/default drift.",
+  "endpoints": [
+    {
+      "id": "fixture-pass-repo-info",
+      "method": "POST",
+      "path": "/mcp#tools/call:repo_info",
+      "mcp_tool": "repo_info",
+      "request_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string"
+          }
+        },
+        "required": ["schema"]
+      }
+    },
+    {
+      "id": "fixture-drift-git-status",
+      "method": "POST",
+      "path": "/mcp#tools/call:git_status",
+      "mcp_tool": "git_status",
+      "request_schema": {
+        "type": "object",
+        "properties": {
+          "short": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  ],
+  "repo_doc_surfaces": [
+    {
+      "id": "fixture-vscode-json-pass",
+      "kind": "vscode_mcp_example",
+      "path": "tests/fixtures/http_mcp_contract_parity/mcp-example-pass.json",
+      "expected_values": [
+        {
+          "pointer": "/servers/codebase-tooling-mcp/type",
+          "equals": "http"
+        },
+        {
+          "pointer": "/servers/codebase-tooling-mcp/url",
+          "equals": "http://localhost:8000/mcp"
+        }
+      ]
+    },
+    {
+      "id": "fixture-stale-onboarding-doc",
+      "kind": "onboarding_doc",
+      "path": "tests/fixtures/http_mcp_contract_parity/onboarding-stale.md",
+      "required_text": ["http://localhost:8000/mcp"]
+    },
+    {
+      "id": "fixture-default-drift-doc",
+      "kind": "onboarding_doc",
+      "path": "tests/fixtures/http_mcp_contract_parity/onboarding-default.md",
+      "required_text": ["git_status short default"],
+      "argument_defaults": [
+        {
+          "mcp_tool": "git_status",
+          "argument": "short",
+          "default": false
+        }
+      ]
+    }
+  ]
+}
