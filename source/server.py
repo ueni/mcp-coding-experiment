@@ -11590,6 +11590,15 @@ def _mcp_oauth_proxy_false(value: Any) -> bool:
     return text in {"0", "false", "no", "off", "disabled", "none"}
 
 
+def _mcp_oauth_proxy_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on", "enabled", "enforced", "required"}
+
+
 def _mcp_oauth_proxy_validation_explicitly_disabled(config: dict[str, Any]) -> bool:
     positive_validation_fields = {
         "audience_validation",
@@ -11659,9 +11668,26 @@ def _mcp_oauth_proxy_load_repo_configs() -> list[dict[str, Any]]:
     return configs
 
 
+_MCP_OAUTH_PROXY_FORWARDING_FIELDS = (
+    "token_passthrough",
+    "passthrough_user_token",
+    "forward_bearer_token",
+    "reuse_client_token",
+    "forward_authorization",
+)
+
+
+def _mcp_oauth_proxy_forwarding_enabled(config: dict[str, Any]) -> bool:
+    return any(
+        _mcp_oauth_proxy_true(value)
+        for value in _mcp_oauth_proxy_values(config, *_MCP_OAUTH_PROXY_FORWARDING_FIELDS)
+    )
+
+
 def _mcp_oauth_proxy_detected(config: dict[str, Any]) -> bool:
-    if _mcp_oauth_proxy_bool(config, "bearer_token_only", "local_bearer_only"):
-        return False
+    auth_mode = str(config.get("auth_mode", config.get("mcp_http_auth_mode", ""))).lower()
+    if auth_mode == "oauth-resource" or _mcp_oauth_proxy_forwarding_enabled(config):
+        return True
     signal_terms = (
         "oauth",
         "oidc",
@@ -11670,19 +11696,16 @@ def _mcp_oauth_proxy_detected(config: dict[str, Any]) -> bool:
         "redirect_uri",
         "client_id",
         "client_secret",
-        "token_passthrough",
         "token_exchange",
         "resource_indicator",
         "audience",
-        "forward_authorization",
         "proxy",
     )
     for path, value in _mcp_oauth_proxy_flatten(config):
         text = f"{path} {_mcp_oauth_proxy_scalar_text(value)}".lower()
         if any(term in text for term in signal_terms):
             return True
-    auth_mode = str(config.get("auth_mode", config.get("mcp_http_auth_mode", ""))).lower()
-    return auth_mode == "oauth-resource"
+    return False
 
 
 def _mcp_oauth_proxy_analyze_config(
@@ -11724,11 +11747,11 @@ def _mcp_oauth_proxy_analyze_config(
 
     block_rules: list[tuple[str, str, tuple[str, ...]]] = []
     warn_rules: list[tuple[str, str, tuple[str, ...]]] = []
-    if _mcp_oauth_proxy_bool(config, "token_passthrough", "passthrough_user_token", "forward_bearer_token", "reuse_client_token", "forward_authorization"):
+    if _mcp_oauth_proxy_forwarding_enabled(config):
         block_rules.append((
             "oauth-token-passthrough",
             "OAuth proxy forwards or reuses caller bearer tokens across a trust boundary.",
-            ("token_passthrough", "passthrough_user_token", "forward_bearer_token", "reuse_client_token", "forward_authorization"),
+            _MCP_OAUTH_PROXY_FORWARDING_FIELDS,
         ))
     validation_disabled = _mcp_oauth_proxy_bool(
         config,

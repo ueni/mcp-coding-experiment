@@ -236,6 +236,61 @@ class McpThreatModelReportTests(ServerToolsTestBase):
         self.assertEqual(report["summary"]["detected_config_count"], 0)
         self.assertEqual(report["configs"][0]["outcome"], "not_applicable")
 
+    def test_local_bearer_markers_do_not_hide_oauth_token_forwarding(self):
+        report = self.server._mcp_oauth_proxy_hardening_report(
+            [
+                {
+                    "id": "mixed_oauth_bearer_passthrough",
+                    "auth_mode": "oauth-resource",
+                    "bearer_token_only": True,
+                    "authorization_servers": ["https://issuer.example.test"],
+                    "expected_audience": "mcp://codebase-tooling-mcp",
+                    "resource_validation": True,
+                    "require_pkce": True,
+                    "require_state": True,
+                    "token_passthrough": True,
+                },
+                {
+                    "id": "bearer_forward_authorization",
+                    "auth_mode": "bearer",
+                    "local_bearer_only": True,
+                    "token_passthrough": False,
+                    "forward_authorization": True,
+                },
+            ]
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "block")
+        self.assertEqual(report["summary"]["detected_config_count"], 2)
+        self.assertEqual(report["summary"]["not_applicable_count"], 0)
+        outcomes = {row["id"]: row["outcome"] for row in report["configs"]}
+        self.assertEqual(outcomes["mixed_oauth_bearer_passthrough"], "block")
+        self.assertEqual(outcomes["bearer_forward_authorization"], "block")
+
+        passthrough_findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "oauth-token-passthrough"
+        ]
+        self.assertEqual(
+            {finding["fixture_id"] for finding in passthrough_findings},
+            {"mixed_oauth_bearer_passthrough", "bearer_forward_authorization"},
+        )
+        self.assertTrue(
+            any(
+                "token_passthrough" in finding["evidence"]["field_refs"]
+                for finding in passthrough_findings
+            )
+        )
+        self.assertTrue(
+            any(
+                "forward_authorization" in finding["evidence"]["field_refs"]
+                for finding in passthrough_findings
+            )
+        )
+        self.assertFalse(report["security"]["tokens_or_secrets_included"])
+
     def test_export_writes_json_and_markdown_without_mutating_sources(self):
         fixture_path = self._copy_fixture("mcp_poisoned_tools.json")
 
