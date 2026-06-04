@@ -156,3 +156,50 @@ class WorkflowEventLogReportTests(ServerToolsTestBase):
         artifact_ref = report["events"][0]["artifact_refs"][0]
         self.assertEqual(artifact_ref["uri"], "<redacted:absolute_path>")
         self.assertEqual(artifact_ref["summary"], "saved at <redacted:absolute_path>")
+
+    def test_privacy_redaction_removes_host_path_from_mixed_uri_summary(self):
+        event_log = self.repo_path / FIXTURE_DIR / "mixed_uri_privacy.jsonl"
+        event_log.parent.mkdir(parents=True, exist_ok=True)
+        event_log.write_text(
+            json.dumps(
+                {
+                    "sequence": 1,
+                    "event_id": "evt-mixed-uri",
+                    "event_type": "artifact.produced",
+                    "timestamp": "2026-06-04T17:00:00Z",
+                    "workflow_id": "wf-189",
+                    "label": "mixed external uri and local path",
+                    "status": "ok",
+                    "artifact_refs": [
+                        {
+                            "artifact_id": "dashboard",
+                            "kind": "report",
+                            "uri": "https://example.test/run",
+                            "summary": (
+                                "dashboard https://example.test/run saved at "
+                                "/home/user/private/out.log"
+                            ),
+                        }
+                    ],
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        report = self.server.workflow_event_log_report(
+            event_log_path=f"{FIXTURE_DIR}/mixed_uri_privacy.jsonl"
+        )
+        encoded = json.dumps(report, sort_keys=True)
+
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["privacy"]["absolute_host_paths_persisted"])
+        self.assertIn("absolute_path", report["privacy"]["redaction_categories"])
+        self.assertNotIn("/home/user/private", encoded)
+        artifact_ref = report["events"][0]["artifact_refs"][0]
+        self.assertEqual(artifact_ref["uri"], "https://example.test/run")
+        self.assertEqual(
+            artifact_ref["summary"],
+            "dashboard https://example.test/run saved at <redacted:absolute_path>",
+        )

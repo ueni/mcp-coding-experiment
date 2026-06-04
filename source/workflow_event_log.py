@@ -106,7 +106,7 @@ def _sanitize(value: Any, state: _RedactionState, path: str = "$") -> Any:
         if _LOCAL_FILE_URI_RE.search(sanitized_value):
             state.add(path=path, category="absolute_path", original=value)
             sanitized_value = _LOCAL_FILE_URI_RE.sub("<redacted:absolute_path>", sanitized_value)
-        if "://" not in sanitized_value and _ABSOLUTE_PATH_RE.search(sanitized_value):
+        if _ABSOLUTE_PATH_RE.search(sanitized_value):
             state.add(path=path, category="absolute_path", original=value)
             sanitized_value = _ABSOLUTE_PATH_RE.sub("<redacted:absolute_path>", sanitized_value)
         return sanitized_value
