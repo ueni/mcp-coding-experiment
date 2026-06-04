@@ -37,6 +37,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "workspace_transaction",
                 "policy_simulator",
                 "workflow_policy_plan",
+                "skill_privilege_scope",
                 "policy_governance_decision",
                 "workflow_reminder",
                 "workflow_task",
@@ -50,6 +51,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "secret_exposure_report",
                 "agent_security_delta",
                 "agent_security_delta_report",
+                "security_root_cause_evidence",
                 "mcp_threat_model_report",
                 "governance_report",
                 "memory_governance_report",
@@ -123,6 +125,10 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "risk_scoring": self.server.risk_scoring(),
             "workspace_transaction": self.server.workspace_transaction(mode="begin", label="schema-contract"),
             "policy_simulator": self.server.policy_simulator(base_ref="HEAD", head_ref="HEAD"),
+            "skill_privilege_scope": self.server.skill_privilege_scope(
+                intent="Read repository guidance only",
+                planned_steps=[{"tool": "read_snippet", "mode": "read", "read_only": True, "args": {"path": "README.md"}}],
+            ),
             "workflow_policy_plan": self.server.workflow_policy_plan(
                 intent="Inspect repository status before summarizing",
                 execution_mode="offline-onboard-only",
@@ -162,6 +168,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "secret_exposure_report": self.server.secret_exposure_report(paths=["src"], baseline_ref="HEAD"),
             "agent_security_delta": self.server.agent_security_delta(base_ref="HEAD", head_ref="HEAD", export=False),
             "agent_security_delta_report": self.server.agent_security_delta_report(base_ref="HEAD", head_ref="HEAD", export=False),
+            "security_root_cause_evidence": self.server.security_root_cause_evidence(base_ref="HEAD", head_ref="HEAD"),
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "observation_compression_report": self.server.observation_compression_report(
                 include_traces=False,

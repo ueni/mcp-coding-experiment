@@ -286,6 +286,8 @@ SECRET_EXPOSURE_REPORT_SCHEMA = "secret_exposure_report.v1"
 SECRET_EXPOSURE_DEFAULT_ALLOWLIST = Path(".codebase-tooling-mcp/secret-exposure-allowlist.json")
 AGENT_SECURITY_DELTA_REPORT_PREFIX = "agent-security-delta-report"
 AGENT_SECURITY_DELTA_REPORT_SCHEMA = "agent_security_delta_report.v1"
+SECURITY_ROOT_CAUSE_EVIDENCE_PREFIX = "security-root-cause-evidence"
+SECURITY_ROOT_CAUSE_EVIDENCE_SCHEMA = "security_root_cause_evidence.v1"
 MCP_THREAT_MODEL_REPORT_PREFIX = "mcp-threat-model-report"
 MCP_THREAT_MODEL_REPORT_SCHEMA = "mcp_threat_model_report.v1"
 MCP_THREAT_MODEL_BASELINE_SCHEMA = "mcp_threat_model_baseline.v1"
@@ -332,6 +334,7 @@ DEPENDENCY_LOCK_MANIFEST_FILE = "dependency-locks.json"
 # and the issue #4 schema-backed core tools are advertised with stable output schemas.
 PUBLIC_MCP_TOOL_NAMES = {
     "task_router",
+    "skill_privilege_scope",
     "test_impact_map",
     "tool_annotations",
     "tool_output_contracts",
@@ -368,6 +371,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
             "coding_pip": ["write", "shell/process", "network"],
             "coding_sandbox": ["write", "shell/process"],
             "workflow_select": ["read-only"],
+            "skill_privilege_scope": ["read-only", "governance"],
         },
     },
     "tool_annotations": {"categories": ["read-only"]},
@@ -412,6 +416,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     },
     "policy_simulator": {"categories": ["read-only"]},
     "workflow_policy_plan": {"categories": ["read-only", "governance"]},
+    "skill_privilege_scope": {"categories": ["read-only", "governance"]},
     "policy_governance_decision": {"categories": ["read-only", "governance"]},
     "workflow_reminder": {"categories": ["read-only", "governance"]},
     "clarification_gate": {"categories": ["read-only", "governance"]},
@@ -422,6 +427,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "secret_exposure_report": {"categories": ["read-only", "governance"]},
     "agent_security_delta": {"categories": ["read-only", "governance"]},
     "agent_security_delta_report": {"categories": ["read-only", "governance"]},
+    "security_root_cause_evidence": {"categories": ["read-only", "governance"]},
     "mcp_threat_model_report": {"categories": ["read-only", "governance"]},
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
@@ -1104,6 +1110,7 @@ WORKFLOW_CARD_TRUST_SCHEMA_VERSION = "workflow_card_trust.v1"
 WORKFLOW_CARD_LINT_SCHEMA_VERSION = "workflow_card_lint.v1"
 WORKFLOW_CARD_SAFETY_SCHEMA_VERSION = "workflow_card_safety.v1"
 SKILL_PACK_SCORE_SCHEMA_VERSION = "skill_pack_score.v1"
+SKILL_PRIVILEGE_SCOPE_SCHEMA_VERSION = "skill_privilege_scope.v1"
 WORKFLOW_CARD_EXTERNAL_LOADING_ENABLED = False
 WORKFLOW_CARD_FIELDS = (
     "id",
@@ -12588,6 +12595,7 @@ def _governance_workflow_lineage_plan_inputs(
             "ci_workflow_security_report": CI_WORKFLOW_SECURITY_REPORT_SCHEMA,
             "secret_exposure_report": SECRET_EXPOSURE_REPORT_SCHEMA,
             "agent_security_delta_report": AGENT_SECURITY_DELTA_REPORT_SCHEMA,
+            "security_root_cause_evidence": SECURITY_ROOT_CAUSE_EVIDENCE_SCHEMA,
             "execution_mode": AGENT_EXECUTION_MODE_SCHEMA_VERSION,
         },
     }
@@ -19203,6 +19211,950 @@ def _agent_security_delta_compact(report: dict[str, Any]) -> dict[str, Any]:
             "warning_finding_count": gate.get("warning_finding_count", 0),
         },
     }
+
+
+SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS = AGENT_SECURITY_DELTA_WORKTREE_REFS
+SECURITY_ROOT_CAUSE_REASON_WEIGHTS = {
+    "security_delta_finding": 38,
+    "removed_security_delta_finding": 34,
+    "security_sink": 24,
+    "local_trace_evidence": 22,
+    "local_reproducer_evidence": 20,
+    "input_source": 18,
+    "validator_or_boundary_check": 18,
+    "local_test_evidence": 16,
+    "security_sensitive_path": 14,
+    "changed_test": 12,
+    "vulnerability_hint_match": 10,
+    "call_import_neighbor": 8,
+}
+SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS = 20
+SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS = 240
+SECURITY_ROOT_CAUSE_SECURITY_PATH_RE = re.compile(
+    r"(^|[/_.-])(auth|authorize|permission|security|secret|token|credential|path|file|sandbox|container|"
+    r"docker|command|shell|exec|deserialize|yaml|pickle|sql|query|validation|validator|sanitize|policy|guard)([/_.-]|$)",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_SOURCE_RE = re.compile(
+    r"\b(request\.(args|form|json|files|headers|cookies)|input\s*\(|sys\.argv|os\.environ|getenv\s*\(|uploaded_file|user_input)\b",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_SINK_RE = re.compile(
+    r"\b(subprocess\.|os\.(system|popen)|eval\s*\(|exec\s*\(|pickle\.loads?\b|yaml\.load\b|open\s*\(|send_file\s*\(|\.execute\s*\(|docker\.sock|privileged\s*[:=]\s*true)\b",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_VALIDATOR_RE = re.compile(
+    r"\b(validate|validator|sanitize|canonical|resolve\s*\(|relative_to\s*\(|normpath\s*\(|abspath\s*\(|safe_join|allowed|auth|authorize|permission|SafeLoader|parameterized|escape)\b",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_SUPPRESSION_RE = re.compile(
+    r"(#\s*(noqa|nosec|pragma:\s*no cover|type:\s*ignore)|pylint:\s*disable|bandit:\s*skip|semgrep\s*:\s*ignore|security\s*[:=-]\s*ignore)",
+    re.IGNORECASE,
+)
+SECURITY_ROOT_CAUSE_WRAPPER_SYMPTOM_RE = re.compile(
+    r"\b(wrapper|adapter|proxy|service|handler|catch|except|try:|fallback|return\s+None|raise\s+(ValueError|RuntimeError|HTTPException)|error\s*handling)\b",
+    re.IGNORECASE,
+)
+
+
+def _security_root_cause_report_id(seed: dict[str, Any]) -> str:
+    payload = json.dumps(seed, sort_keys=True, ensure_ascii=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{SECURITY_ROOT_CAUSE_EVIDENCE_PREFIX}-{_now_stamp()}-{digest}"
+
+
+def _security_root_cause_text_for_path(rel_path: str, ref: str) -> str | None:
+    return _agent_security_delta_current_text(rel_path, ref)
+
+
+def _security_root_cause_line(text: str, line_no: int) -> str:
+    lines = text.splitlines()
+    if 1 <= line_no <= len(lines):
+        return _agent_security_delta_redact_evidence(lines[line_no - 1], max_chars=180)
+    return ""
+
+
+def _security_root_cause_symbol_ranges(text: str, rel_path: str) -> list[dict[str, Any]]:
+    if Path(rel_path).suffix.lower() != ".py":
+        return []
+    try:
+        tree = ast.parse(text or "\n", filename=rel_path)
+    except SyntaxError:
+        return []
+    symbols: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = getattr(node, "name", "")
+            if not name:
+                continue
+            symbols.append(
+                {
+                    "name": name,
+                    "kind": "class" if isinstance(node, ast.ClassDef) else "function",
+                    "line_start": int(getattr(node, "lineno", 1) or 1),
+                    "line_end": int(
+                        getattr(node, "end_lineno", getattr(node, "lineno", 1))
+                        or getattr(node, "lineno", 1)
+                        or 1
+                    ),
+                }
+            )
+    symbols.sort(key=lambda row: (int(row["line_start"]), str(row["name"])))
+    return symbols
+
+
+def _security_root_cause_symbol_for_line(symbols: list[dict[str, Any]], line_no: int) -> dict[str, Any] | None:
+    matches = [
+        symbol
+        for symbol in symbols
+        if int(symbol.get("line_start", 1)) <= line_no <= int(symbol.get("line_end", 1))
+    ]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda row: int(row.get("line_end", 1)) - int(row.get("line_start", 1)))[0]
+
+
+def _security_root_cause_reason(reason_type: str, description: str, *, line: int = 1, evidence: str = "") -> dict[str, Any]:
+    return {
+        "type": reason_type,
+        "description": description,
+        "weight": SECURITY_ROOT_CAUSE_REASON_WEIGHTS.get(reason_type, 1),
+        "line": max(1, int(line or 1)),
+        "evidence": evidence,
+        "raw_returned": False,
+    }
+
+
+def _security_root_cause_location_key(rel_path: str, symbol: dict[str, Any] | None) -> tuple[str, str, str]:
+    if symbol:
+        return (rel_path, str(symbol.get("kind", "function")), str(symbol.get("name", "")))
+    return (rel_path, "file", "")
+
+
+def _security_root_cause_add_reason(
+    candidates: dict[tuple[str, str, str], dict[str, Any]],
+    rel_path: str,
+    symbol: dict[str, Any] | None,
+    reason: dict[str, Any],
+) -> None:
+    key = _security_root_cause_location_key(rel_path, symbol)
+    if key not in candidates:
+        candidates[key] = {
+            "schema": "security_root_cause_location.v1",
+            "path": rel_path,
+            "kind": key[1],
+            "symbol": key[2],
+            "line_start": int(symbol.get("line_start", reason.get("line", 1))) if symbol else int(reason.get("line", 1)),
+            "line_end": int(symbol.get("line_end", reason.get("line", 1))) if symbol else int(reason.get("line", 1)),
+            "reasons": [],
+            "signals": {},
+            "security_delta_finding_ids": [],
+        }
+    row = candidates[key]
+    existing = {(item.get("type"), item.get("line"), item.get("description")) for item in row["reasons"]}
+    signature = (reason.get("type"), reason.get("line"), reason.get("description"))
+    if signature not in existing:
+        row["reasons"].append(reason)
+    signals = row.setdefault("signals", {})
+    signals[str(reason.get("type", "unknown"))] = signals.get(str(reason.get("type", "unknown")), 0) + 1
+
+
+def _security_root_cause_import_neighbors(text: str, rel_path: str, changed_paths: set[str]) -> list[dict[str, Any]]:
+    if Path(rel_path).suffix.lower() != ".py":
+        return []
+    try:
+        tree = ast.parse(text or "\n", filename=rel_path)
+    except SyntaxError:
+        return []
+    neighbors: list[dict[str, Any]] = []
+    changed_stems = {Path(path).stem for path in changed_paths}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [str(node.module or ""), *[alias.name for alias in node.names]]
+        else:
+            continue
+        matched = sorted({name for name in names if name.split(".")[-1] in changed_stems})
+        if matched:
+            neighbors.append({"path": rel_path, "line": int(getattr(node, "lineno", 1) or 1), "imports_changed_module": matched[:5]})
+    return neighbors[:25]
+
+
+def _security_root_cause_related_tests(changed_paths: list[str], text_by_path: dict[str, str], vulnerability_hint: str) -> list[dict[str, Any]]:
+    hint = vulnerability_hint.lower().strip()
+    tests: list[dict[str, Any]] = []
+    for rel in changed_paths:
+        path = Path(rel)
+        is_test = rel.startswith("tests/") or path.name.startswith("test_") or path.name.endswith("_test.py")
+        if not is_test:
+            continue
+        text = text_by_path.get(rel, "")
+        matched_terms: list[str] = []
+        lowered = text.lower()
+        for term in ("security", "auth", "path", "traversal", "command", "shell", "injection", "secret", "permission", "sanitize", "validate"):
+            if term in lowered or term in rel.lower():
+                matched_terms.append(term)
+        if hint:
+            for token in re.findall(r"[a-z0-9_]{4,}", hint):
+                if token in lowered or token in rel.lower():
+                    matched_terms.append(token)
+        tests.append(
+            {
+                "path": rel,
+                "security_relevant": bool(matched_terms),
+                "matched_terms": sorted(set(matched_terms))[:12],
+                "raw_contents_returned": False,
+            }
+        )
+    return tests[:100]
+
+
+def _security_root_cause_redact_local_evidence(value: Any, *, max_chars: int = SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").replace("\x00", " ")).strip()
+    if not text:
+        return ""
+    return _agent_security_delta_redact_evidence(text, max_chars=max_chars)
+
+
+def _security_root_cause_local_evidence_path(value: Any) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw or "://" in raw or "\x00" in raw:
+        return ""
+    try:
+        candidate = Path(raw)
+        resolved = candidate.resolve() if candidate.is_absolute() else _resolve_repo_path(raw)
+        return str(resolved.relative_to(REPO_PATH)).replace("\\", "/")
+    except (OSError, ValueError):
+        parts = [part for part in raw.split("/") if part and part != "."]
+        if raw.startswith("/") or any(part == ".." for part in parts):
+            return ""
+        return "/".join(parts)[:240]
+
+
+def _security_root_cause_iter_local_evidence_items(local_evidence: Any) -> tuple[list[dict[str, Any]], int]:
+    raw_items: list[dict[str, Any]] = []
+    rejected = 0
+    if not local_evidence:
+        return [], 0
+    if isinstance(local_evidence, list):
+        source_items = local_evidence
+    elif isinstance(local_evidence, dict):
+        source_items = []
+        if isinstance(local_evidence.get("items"), list):
+            source_items.extend(local_evidence.get("items", []))
+        for key, inferred_kind in (
+            ("tests", "test"),
+            ("failing_tests", "failing_test"),
+            ("passing_tests", "passing_test"),
+            ("traces", "error_trace"),
+            ("error_traces", "error_trace"),
+            ("sanitizer_traces", "sanitizer_trace"),
+            ("fixtures", "fixture_reproducer"),
+            ("reproducers", "fixture_reproducer"),
+        ):
+            value = local_evidence.get(key)
+            if isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, dict):
+                        source_items.append({"kind": inferred_kind, **entry})
+                    elif isinstance(entry, str):
+                        source_items.append({"kind": inferred_kind, "id": entry})
+            elif isinstance(value, dict):
+                source_items.append({"kind": inferred_kind, **value})
+            elif isinstance(value, str):
+                source_items.append({"kind": inferred_kind, "id": value})
+    else:
+        return [], 1
+
+    for raw_item in source_items[: SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS * 2]:
+        if not isinstance(raw_item, dict):
+            rejected += 1
+            continue
+        kind = _security_root_cause_redact_local_evidence(raw_item.get("kind") or raw_item.get("type") or "local_evidence", max_chars=60).lower()
+        status = _security_root_cause_redact_local_evidence(raw_item.get("status") or raw_item.get("result") or "", max_chars=80)
+        test_id = _security_root_cause_redact_local_evidence(raw_item.get("test_id") or raw_item.get("test") or raw_item.get("id") or "", max_chars=180)
+        fixture_id = _security_root_cause_redact_local_evidence(raw_item.get("fixture_id") or raw_item.get("fixture") or raw_item.get("reproducer_id") or "", max_chars=180)
+        summary = _security_root_cause_redact_local_evidence(raw_item.get("summary") or raw_item.get("reason") or raw_item.get("description") or "", max_chars=SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS)
+        trace_excerpt = _security_root_cause_redact_local_evidence(raw_item.get("trace") or raw_item.get("error") or raw_item.get("stderr") or raw_item.get("log") or "", max_chars=SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_TEXT_MAX_CHARS)
+        path = _security_root_cause_local_evidence_path(raw_item.get("path") or raw_item.get("file") or raw_item.get("source_path") or "")
+        line = 1
+        try:
+            line = max(1, int(raw_item.get("line") or raw_item.get("line_start") or 1))
+        except (TypeError, ValueError):
+            line = 1
+        if not any((test_id, fixture_id, summary, trace_excerpt, path)):
+            rejected += 1
+            continue
+        raw_items.append(
+            {
+                "schema": "security_root_cause_local_evidence.v1",
+                "kind": kind[:60] or "local_evidence",
+                "status": status,
+                "test_id": test_id,
+                "fixture_id": fixture_id,
+                "path": path,
+                "line": line,
+                "summary": summary,
+                "trace_excerpt": trace_excerpt,
+                "raw_returned": False,
+            }
+        )
+        if len(raw_items) >= SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS:
+            break
+    if len(source_items) > SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS:
+        rejected += len(source_items) - SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS
+    return raw_items, rejected
+
+
+def _security_root_cause_local_evidence_input(
+    local_evidence: Any,
+    *,
+    changed_paths: list[str],
+    vulnerability_hint: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    items, rejected = _security_root_cause_iter_local_evidence_items(local_evidence)
+    changed = list(dict.fromkeys(changed_paths))
+    hint_tokens = set(re.findall(r"[a-z0-9_]{4,}", vulnerability_hint.lower()))
+    for item in items:
+        blob = " ".join(
+            str(item.get(key, ""))
+            for key in ("kind", "status", "test_id", "fixture_id", "path", "summary", "trace_excerpt")
+        ).lower()
+        matched = ""
+        item_path = str(item.get("path") or "")
+        if item_path in changed:
+            matched = item_path
+        else:
+            for rel in changed:
+                stem = Path(rel).stem.lower()
+                if rel.lower() in blob or (stem and stem in blob):
+                    matched = rel
+                    break
+        matched_terms = sorted(token for token in hint_tokens if token in blob)[:12]
+        if matched:
+            item["matched_changed_file"] = matched
+        if matched_terms:
+            item["matched_hint_terms"] = matched_terms
+    test_count = sum(1 for item in items if "test" in str(item.get("kind", "")) or item.get("test_id"))
+    trace_count = sum(1 for item in items if "trace" in str(item.get("kind", "")) or item.get("trace_excerpt"))
+    fixture_count = sum(1 for item in items if "fixture" in str(item.get("kind", "")) or "reproducer" in str(item.get("kind", "")) or item.get("fixture_id"))
+    meta = {
+        "source": "caller_provided" if items else "not_provided",
+        "schema": "security_root_cause_local_evidence.v1",
+        "accepted_count": len(items),
+        "rejected_count": rejected,
+        "max_items": SECURITY_ROOT_CAUSE_LOCAL_EVIDENCE_MAX_ITEMS,
+        "test_evidence_count": test_count,
+        "trace_evidence_count": trace_count,
+        "fixture_evidence_count": fixture_count,
+        "matched_changed_file_count": len({item.get("matched_changed_file") for item in items if item.get("matched_changed_file")}),
+        "raw_returned": False,
+        "items": items,
+    }
+    return items, meta
+
+
+def _security_root_cause_local_evidence_reason_type(item: dict[str, Any]) -> str:
+    kind = str(item.get("kind", "")).lower()
+    if "trace" in kind or item.get("trace_excerpt"):
+        return "local_trace_evidence"
+    if "fixture" in kind or "reproducer" in kind or item.get("fixture_id"):
+        return "local_reproducer_evidence"
+    return "local_test_evidence"
+
+
+def _security_root_cause_confidence(score: int, reason_types: set[str]) -> tuple[str, float]:
+    independent = len(reason_types)
+    if score >= 80 and independent >= 3:
+        return "high", 0.85
+    if score >= 42 and independent >= 2:
+        return "medium", 0.62
+    if score >= 18:
+        return "low", 0.36
+    return "low", 0.2
+
+
+def _security_root_cause_changed_paths(
+    base_ref: str,
+    head_ref: str,
+    *,
+    include_globs: list[str] | None,
+    exclude_globs: list[str] | None,
+) -> tuple[list[str], dict[str, Any]]:
+    changed_paths, meta = _agent_security_delta_changed_paths(
+        base_ref,
+        head_ref,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+    )
+    candidates = set(changed_paths)
+    diff_args = ["diff", "--name-only", f"{base_ref}...{head_ref}"]
+    if str(head_ref or "").strip() in SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS:
+        diff_args = ["diff", "--name-only", base_ref]
+    result = _git(*diff_args, "--", ".", check=False)
+    if result.returncode != 0 and "..." in " ".join(diff_args):
+        result = _git("diff", "--name-only", base_ref, head_ref, "--", ".", check=False)
+    if result.returncode == 0:
+        candidates.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    if str(head_ref or "").strip() in SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS:
+        other = _git("ls-files", "--others", "--exclude-standard", check=False)
+        if other.returncode == 0:
+            candidates.update(line.strip() for line in other.stdout.splitlines() if line.strip())
+    exclude = [".git/**", ".codebase-tooling-mcp/**", "**/__pycache__/**", "**/.venv/**", "**/node_modules/**", *list(exclude_globs or [])]
+    related_test_paths = sorted(
+        rel for rel in candidates
+        if (rel.startswith("tests/") or Path(rel).name.startswith("test_") or Path(rel).name.endswith("_test.py"))
+        and _allowed_by_globs(rel, include_globs or ["*.py", "**/*.py", "*.md", "**/*.md"], exclude)
+    )[:200]
+    merged = sorted({*changed_paths, *related_test_paths})[:700]
+    meta["related_test_changed_count"] = len(related_test_paths)
+    return merged, meta
+
+
+def _security_root_cause_security_delta_input(
+    base_ref: str,
+    head_ref: str,
+    include_globs: list[str] | None,
+    exclude_globs: list[str] | None,
+    provided: dict[str, Any] | None,
+    enabled: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if isinstance(provided, dict) and provided.get("schema") == AGENT_SECURITY_DELTA_REPORT_SCHEMA:
+        return provided, {"source": "provided", "schema": provided.get("schema", ""), "report_id": provided.get("report_id", "")}
+    if not enabled:
+        return None, {"source": "disabled", "schema": "", "report_id": ""}
+    try:
+        report = _agent_security_delta_report_impl(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            export=False,
+        )
+        return report, {"source": "generated_offline", "schema": report.get("schema", ""), "report_id": report.get("report_id", "")}
+    except Exception as exc:
+        return None, {"source": "unavailable", "schema": "", "report_id": "", "error": _agent_security_delta_redact_evidence(str(exc))}
+
+
+def _security_root_cause_diff_added_lines(base_ref: str, head_ref: str) -> dict[str, list[str]]:
+    diff_args = ["diff", "--unified=0", f"{base_ref}...{head_ref}"]
+    if str(head_ref or "").strip() in SECURITY_ROOT_CAUSE_EVIDENCE_WORKTREE_REFS:
+        diff_args = ["diff", "--unified=0", base_ref]
+    result = _git(*diff_args, "--", ".", check=False)
+    if result.returncode != 0 and "..." in " ".join(diff_args):
+        result = _git("diff", "--unified=0", base_ref, head_ref, "--", ".", check=False)
+    added: dict[str, list[str]] = {}
+    current_path = ""
+    if result.returncode != 0:
+        return added
+    for line in result.stdout.splitlines():
+        if line.startswith("+++ "):
+            raw = line[4:].strip()
+            current_path = raw[2:] if raw.startswith("b/") else raw
+            if current_path == "/dev/null":
+                current_path = ""
+            continue
+        if not current_path or line.startswith("+++") or line.startswith("@@"):
+            continue
+        if line.startswith("+") and not line.startswith("++"):
+            added.setdefault(current_path, []).append(line[1:])
+    return added
+
+
+def _security_root_cause_is_test_path(rel_path: str) -> bool:
+    path = Path(rel_path)
+    return rel_path.startswith("tests/") or path.name.startswith("test_") or path.name.endswith("_test.py")
+
+
+def _security_root_cause_imported_modules(text: str, rel_path: str) -> set[str]:
+    if Path(rel_path).suffix.lower() != ".py":
+        return set()
+    try:
+        tree = ast.parse(text or "\n", filename=rel_path)
+    except SyntaxError:
+        return set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names if alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(str(node.module))
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names if alias.name and alias.name != "*")
+    return modules
+
+
+def _security_root_cause_module_candidates(module: str) -> list[str]:
+    rel = module.replace(".", "/").strip("/")
+    if not rel:
+        return []
+    return [f"{rel}.py", f"{rel}/__init__.py"]
+
+
+def _security_root_cause_shallow_fix_warnings(
+    *,
+    base_ref: str,
+    head_ref: str,
+    changed_paths: list[str],
+    text_by_path: dict[str, str],
+    related_tests: list[dict[str, Any]],
+    ranked: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    added_by_path = _security_root_cause_diff_added_lines(base_ref, head_ref)
+    changed_set = set(changed_paths)
+    non_test_changed = [path for path in changed_paths if not _security_root_cause_is_test_path(path)]
+
+    suppression_paths: list[str] = []
+    suppression_evidence: list[str] = []
+    for rel, lines in added_by_path.items():
+        if _security_root_cause_is_test_path(rel):
+            continue
+        matched = [line for line in lines if SECURITY_ROOT_CAUSE_SUPPRESSION_RE.search(line)]
+        if matched:
+            suppression_paths.append(rel)
+            suppression_evidence.extend(_agent_security_delta_redact_evidence(line, max_chars=160) for line in matched[:3])
+    if suppression_paths:
+        warnings.append(
+            {
+                "schema": "security_root_cause_shallow_fix_warning.v1",
+                "type": "warning_suppression_only",
+                "severity": "warning",
+                "status": "needs-review",
+                "summary": "Changed code adds static-analysis or security-warning suppression; verify the vulnerable path is fixed rather than silenced.",
+                "paths": sorted(set(suppression_paths))[:20],
+                "evidence": suppression_evidence[:5],
+                "raw_returned": False,
+            }
+        )
+
+    wrapper_paths: list[str] = []
+    wrapper_evidence: list[str] = []
+    for rel in non_test_changed:
+        text = text_by_path.get(rel, "")
+        added_lines = "\n".join(added_by_path.get(rel, []))
+        if not (SECURITY_ROOT_CAUSE_WRAPPER_SYMPTOM_RE.search(rel) or SECURITY_ROOT_CAUSE_WRAPPER_SYMPTOM_RE.search(added_lines)):
+            continue
+        for module in sorted(_security_root_cause_imported_modules(text, rel)):
+            for candidate in _security_root_cause_module_candidates(module):
+                if candidate in changed_set:
+                    continue
+                neighbor_text = _security_root_cause_text_for_path(candidate, head_ref)
+                if neighbor_text is None:
+                    neighbor_text = _agent_security_delta_git_blob(base_ref, candidate)
+                if neighbor_text and SECURITY_ROOT_CAUSE_SINK_RE.search(neighbor_text):
+                    wrapper_paths.append(rel)
+                    wrapper_evidence.append(
+                        _agent_security_delta_redact_evidence(
+                            f"{rel} changes wrapper/error-handling while imported sink remains in {candidate}",
+                            max_chars=180,
+                        )
+                    )
+                    break
+            if rel in wrapper_paths:
+                break
+    if wrapper_paths:
+        warnings.append(
+            {
+                "schema": "security_root_cause_shallow_fix_warning.v1",
+                "type": "wrapper_symptom_only",
+                "severity": "warning",
+                "status": "needs-review",
+                "summary": "Patch appears to change a wrapper, adapter, service, or error path while an imported sink remains reachable.",
+                "paths": sorted(set(wrapper_paths))[:20],
+                "evidence": wrapper_evidence[:5],
+                "raw_returned": False,
+            }
+        )
+
+    ranked_reason_types = {
+        str(reason.get("type", ""))
+        for location in ranked
+        for reason in location.get("reasons", [])
+        if isinstance(reason, dict)
+    }
+    if changed_paths and not related_tests and "removed_security_delta_finding" not in ranked_reason_types:
+        warnings.append(
+            {
+                "schema": "security_root_cause_shallow_fix_warning.v1",
+                "type": "missing_regression_evidence",
+                "severity": "note",
+                "status": "warn",
+                "summary": "No changed security-relevant regression test or removed security-delta finding was observed for this suspected fix.",
+                "paths": non_test_changed[:20],
+                "evidence": [],
+                "raw_returned": False,
+            }
+        )
+    return warnings[:20]
+
+
+def _security_root_cause_compact_status(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    warnings = report.get("shallow_fix_warnings", []) if isinstance(report.get("shallow_fix_warnings"), list) else []
+    warning_count = len(warnings)
+    if report.get("status") == "insufficient_evidence":
+        status = "needs-review"
+    elif warning_count:
+        status = "warn"
+    else:
+        status = "pass"
+    return {
+        "ok": True,
+        "status": status,
+        "report_id": report.get("report_id", ""),
+        "ranked_location_count": summary.get("ranked_location_count", 0),
+        "related_test_count": summary.get("related_test_count", 0),
+        "local_evidence_count": summary.get("local_evidence_count", 0),
+        "local_evidence_matched_changed_file_count": summary.get("local_evidence_matched_changed_file_count", 0),
+        "shallow_fix_warning_count": warning_count,
+        "warning": status in {"warn", "needs-review"},
+        "warning_reason": "; ".join(str(item.get("summary", "")) for item in warnings[:2] if isinstance(item, dict))
+        or ("insufficient root-cause evidence for security-sensitive change" if status == "needs-review" else ""),
+    }
+
+
+def _security_root_cause_evidence_impl(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    vulnerability_hint: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    max_locations: int = 20,
+    include_security_delta: bool = True,
+    security_delta_report: dict[str, Any] | None = None,
+    local_evidence: dict[str, Any] | list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    _require_git_repo()
+    max_locations = max(1, min(int(max_locations or 20), 100))
+    changed_paths, diff_meta = _security_root_cause_changed_paths(
+        base_ref,
+        head_ref,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+    )
+    text_by_path: dict[str, str] = {}
+    skipped: list[dict[str, Any]] = []
+    for rel in changed_paths:
+        text = _security_root_cause_text_for_path(rel, head_ref)
+        if text is None:
+            baseline = _agent_security_delta_git_blob(base_ref, rel)
+            if baseline is not None:
+                text = baseline
+            else:
+                skipped.append({"path": rel, "reason": "unreadable_or_binary"})
+                continue
+        text_by_path[rel] = text
+
+    delta_report, delta_meta = _security_root_cause_security_delta_input(
+        base_ref,
+        head_ref,
+        include_globs,
+        exclude_globs,
+        security_delta_report,
+        include_security_delta,
+    )
+    local_evidence_items, local_evidence_meta = _security_root_cause_local_evidence_input(
+        local_evidence,
+        changed_paths=changed_paths,
+        vulnerability_hint=vulnerability_hint,
+    )
+    candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
+    changed_set = set(changed_paths)
+    call_import_neighbors: list[dict[str, Any]] = []
+    hint_lower = vulnerability_hint.lower().strip()
+    hint_tokens = set(re.findall(r"[a-z0-9_]{4,}", hint_lower))
+
+    for rel, text in text_by_path.items():
+        symbols = _security_root_cause_symbol_ranges(text, rel)
+        suffix = Path(rel).suffix.lower()
+        if SECURITY_ROOT_CAUSE_SECURITY_PATH_RE.search(rel):
+            _security_root_cause_add_reason(
+                candidates,
+                rel,
+                None,
+                _security_root_cause_reason(
+                    "security_sensitive_path",
+                    "Changed path name is security-sensitive or boundary-adjacent.",
+                    evidence=_agent_security_delta_redact_evidence(rel),
+                ),
+            )
+        if hint_tokens and any(token in rel.lower() for token in hint_tokens):
+            _security_root_cause_add_reason(
+                candidates,
+                rel,
+                None,
+                _security_root_cause_reason(
+                    "vulnerability_hint_match",
+                    "Changed path matches the caller-supplied vulnerability hint.",
+                    evidence=_agent_security_delta_redact_evidence(rel),
+                ),
+            )
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            symbol = _security_root_cause_symbol_for_line(symbols, line_no)
+            redacted = _security_root_cause_line(text, line_no)
+            if SECURITY_ROOT_CAUSE_SOURCE_RE.search(line):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "input_source",
+                        "Code references a user/tool-controlled input source.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+            if SECURITY_ROOT_CAUSE_SINK_RE.search(line):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "security_sink",
+                        "Code touches a security-sensitive sink or boundary.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+            if SECURITY_ROOT_CAUSE_VALIDATOR_RE.search(line):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "validator_or_boundary_check",
+                        "Patch touches validation, authorization, sanitization, or boundary-check logic.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+            if hint_tokens and any(token in line.lower() for token in hint_tokens):
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        "vulnerability_hint_match",
+                        "Line matches the caller-supplied vulnerability hint.",
+                        line=line_no,
+                        evidence=redacted,
+                    ),
+                )
+        if suffix == ".py":
+            call_import_neighbors.extend(_security_root_cause_import_neighbors(text, rel, changed_set))
+
+    related_tests = _security_root_cause_related_tests(changed_paths, text_by_path, vulnerability_hint)
+    seen_related_tests = {str(test.get("path", "")) + "\0" + str(test.get("test_id", "")) for test in related_tests if isinstance(test, dict)}
+    for item in local_evidence_items:
+        kind = str(item.get("kind", ""))
+        if "test" not in kind and not item.get("test_id"):
+            continue
+        rel_path = str(item.get("path") or item.get("matched_changed_file") or "")
+        signature = rel_path + "\0" + str(item.get("test_id", ""))
+        if signature in seen_related_tests:
+            continue
+        seen_related_tests.add(signature)
+        related_tests.append(
+            {
+                "path": rel_path,
+                "test_id": item.get("test_id", ""),
+                "status": item.get("status", ""),
+                "security_relevant": True,
+                "matched_terms": item.get("matched_hint_terms", []),
+                "source": "caller_local_evidence",
+                "matched_changed_file": item.get("matched_changed_file", ""),
+                "reason": item.get("summary", "") or item.get("trace_excerpt", ""),
+                "raw_contents_returned": False,
+            }
+        )
+    related_tests = related_tests[:100]
+    for test in related_tests:
+        reason_type = "local_test_evidence" if test.get("source") == "caller_local_evidence" else "changed_test"
+        target_path = str(test.get("matched_changed_file") or test.get("path") or "")
+        if not target_path:
+            continue
+        _security_root_cause_add_reason(
+            candidates,
+            target_path,
+            None,
+            _security_root_cause_reason(
+                reason_type,
+                "Caller-provided local test/reproducer metadata references this location." if reason_type == "local_test_evidence" else "Changed test file may carry regression evidence for the security-sensitive fix path.",
+                evidence=str(test.get("reason") or ", ".join(test.get("matched_terms", [])) or test.get("test_id") or test.get("path") or ""),
+            ),
+        )
+
+    for item in local_evidence_items:
+        matched = str(item.get("matched_changed_file") or "")
+        if not matched:
+            continue
+        reason_type = _security_root_cause_local_evidence_reason_type(item)
+        evidence = item.get("summary") or item.get("trace_excerpt") or item.get("test_id") or item.get("fixture_id") or item.get("path") or ""
+        _security_root_cause_add_reason(
+            candidates,
+            matched,
+            None,
+            _security_root_cause_reason(
+                reason_type,
+                "Caller-provided bounded local reproducer/test metadata references this changed location.",
+                line=int(item.get("line", 1) or 1),
+                evidence=str(evidence),
+            ),
+        )
+
+    if delta_report:
+        for section, reason_type, description in (
+            ("findings", "security_delta_finding", "Existing agent-security-delta signal overlaps this location."),
+            ("removed_findings", "removed_security_delta_finding", "Security-delta finding was removed by the patch, suggesting a candidate fixed root-cause area."),
+        ):
+            findings = delta_report.get(section, []) if isinstance(delta_report.get(section), list) else []
+            for finding in findings[:200]:
+                if not isinstance(finding, dict):
+                    continue
+                rel = str(finding.get("path", ""))
+                if not rel:
+                    continue
+                text = text_by_path.get(rel) or _security_root_cause_text_for_path(rel, head_ref) or ""
+                symbols = _security_root_cause_symbol_ranges(text, rel) if text else []
+                line_no = int(finding.get("line_start", 1) or 1)
+                symbol = _security_root_cause_symbol_for_line(symbols, line_no)
+                evidence = finding.get("evidence", {}) if isinstance(finding.get("evidence"), dict) else {}
+                _security_root_cause_add_reason(
+                    candidates,
+                    rel,
+                    symbol,
+                    _security_root_cause_reason(
+                        reason_type,
+                        description,
+                        line=line_no,
+                        evidence=str(evidence.get("redacted_excerpt") or finding.get("rule_id") or ""),
+                    ),
+                )
+                key = _security_root_cause_location_key(rel, symbol)
+                if key in candidates:
+                    fid = str(finding.get("id") or finding.get("fingerprint") or finding.get("rule_id") or "")
+                    if fid and fid not in candidates[key]["security_delta_finding_ids"]:
+                        candidates[key]["security_delta_finding_ids"].append(fid)
+
+    for neighbor in call_import_neighbors[:100]:
+        rel = str(neighbor.get("path", ""))
+        if not rel:
+            continue
+        _security_root_cause_add_reason(
+            candidates,
+            rel,
+            None,
+            _security_root_cause_reason(
+                "call_import_neighbor",
+                "Import graph touches another changed module; inspect call path before claiming a root-cause fix.",
+                line=int(neighbor.get("line", 1) or 1),
+                evidence=", ".join(neighbor.get("imports_changed_module", [])),
+            ),
+        )
+
+    ranked: list[dict[str, Any]] = []
+    for row in candidates.values():
+        reason_types = {str(reason.get("type", "")) for reason in row.get("reasons", []) if isinstance(reason, dict)}
+        score = sum(int(reason.get("weight", 0) or 0) for reason in row.get("reasons", []) if isinstance(reason, dict))
+        confidence, confidence_score = _security_root_cause_confidence(score, reason_types)
+        row["score"] = score
+        row["confidence"] = confidence
+        row["confidence_score"] = confidence_score
+        row["reasons"] = sorted(
+            row.get("reasons", []),
+            key=lambda item: (
+                -int(item.get("weight", 0) or 0),
+                int(item.get("line", 1) or 1),
+                str(item.get("type", "")),
+            ),
+        )[:12]
+        row["security_delta_finding_ids"] = row.get("security_delta_finding_ids", [])[:12]
+        ranked.append(row)
+    ranked.sort(key=lambda row: (-int(row.get("score", 0)), str(row.get("path", "")), int(row.get("line_start", 1))))
+    for index, row in enumerate(ranked[:max_locations], start=1):
+        row["rank"] = index
+    ranked = ranked[:max_locations]
+
+    shallow_fix_warnings = _security_root_cause_shallow_fix_warnings(
+        base_ref=base_ref,
+        head_ref=head_ref,
+        changed_paths=changed_paths,
+        text_by_path=text_by_path,
+        related_tests=related_tests,
+        ranked=ranked,
+    )
+    high_conf = sum(1 for row in ranked if row.get("confidence") == "high")
+    medium_conf = sum(1 for row in ranked if row.get("confidence") == "medium")
+    status = "no_changed_files" if not changed_paths else "evidence_found" if ranked else "insufficient_evidence"
+    shallow_fix_status = "needs-review" if status == "insufficient_evidence" else "warn" if shallow_fix_warnings else "pass"
+    generated_at = _now_iso()
+    summary = {
+        "changed_file_count": len(changed_paths),
+        "ranked_location_count": len(ranked),
+        "high_confidence_location_count": high_conf,
+        "medium_confidence_location_count": medium_conf,
+        "related_test_count": len(related_tests),
+        "local_evidence_count": local_evidence_meta.get("accepted_count", 0),
+        "local_evidence_matched_changed_file_count": local_evidence_meta.get("matched_changed_file_count", 0),
+        "security_delta_findings_used": sum(len(row.get("security_delta_finding_ids", [])) for row in ranked),
+        "shallow_fix_warning_count": len(shallow_fix_warnings),
+        "shallow_fix_status": shallow_fix_status,
+        "status_reason": "ranked_static_evidence" if ranked else "no_changed_files" if not changed_paths else "changed_files_lacked_root_cause_signals",
+    }
+    report: dict[str, Any] = {
+        "schema": SECURITY_ROOT_CAUSE_EVIDENCE_SCHEMA,
+        "report_id": _security_root_cause_report_id(
+            {
+                "generated_at": generated_at,
+                "base_ref": base_ref,
+                "head_ref": head_ref,
+                "summary": summary,
+                "changed_paths": changed_paths,
+            }
+        ),
+        "generated_at": generated_at,
+        "read_only": True,
+        "advisory_only": True,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "status": status,
+        "ok": status != "insufficient_evidence",
+        "summary": summary,
+        "changed_files": changed_paths,
+        "ranked_locations": ranked,
+        "related_tests": related_tests,
+        "call_import_neighbors": call_import_neighbors[:100],
+        "shallow_fix_warnings": shallow_fix_warnings,
+        "evidence_inputs": {
+            "diff": diff_meta,
+            "security_delta": delta_meta,
+            "local_evidence": local_evidence_meta,
+            "vulnerability_hint_provided": bool(vulnerability_hint.strip()),
+            "include_globs": include_globs or AGENT_SECURITY_DELTA_DEFAULT_INCLUDE_GLOBS,
+            "exclude_globs": AGENT_SECURITY_DELTA_DEFAULT_EXCLUDE_GLOBS + list(exclude_globs or []),
+        },
+        "skipped": skipped[:200],
+        "limitations": [
+            "Deterministic static evidence ranks likely root-cause locations; it does not prove exploitability or prove a vulnerability is fixed.",
+            "Confidence requires multiple shallow signals and should be reviewed with tests, code review, and threat context.",
+            "No network access, model calls, auto-fixing, or raw file-content disclosure are performed by this report.",
+        ],
+        "security": {
+            "read_only": True,
+            "advisory_only": True,
+            "network_access": False,
+            "auto_fix": False,
+            "repo_boundary_enforced": True,
+            "raw_file_contents_returned": False,
+            "redacted_evidence": True,
+            "host_absolute_paths_exposed": False,
+            "exploit_proof_claimed": False,
+        },
+        "_meta": _artifact_meta([]),
+    }
+    return report
+
 
 def _truncate_with_flag(text: str, max_chars: int) -> tuple[str, bool]:
     if max_chars < 1:
@@ -30597,6 +31549,7 @@ def _skill_pack_score_item(
     fit_score = _skill_pack_fit_score(item, query, evidence)
     trust_metadata = trust if trust is not None else _workflow_card_trust_metadata(item, apply_repository_default=apply_repository_trust_default)
     decision = _skill_pack_decision(item, risk_score, fit_score, evidence, trust=trust_metadata)
+    privilege_scope = skill_privilege_scope(intent=query, items=[item], apply_repository_trust_defaults=apply_repository_trust_default)
     return {
         "schema": SKILL_PACK_SCORE_SCHEMA_VERSION,
         "item_id": _skill_pack_item_id(item),
@@ -30606,6 +31559,15 @@ def _skill_pack_score_item(
         "fit_score": fit_score,
         "decision": decision,
         "evidence": evidence[:24],
+        "privilege_scope": {
+            "schema": privilege_scope["schema"],
+            "decision": privilege_scope["decision"],
+            "ok": privilege_scope["ok"],
+            "node_count": privilege_scope["node_count"],
+            "required_privilege_count": privilege_scope["summary"]["required_privileges"],
+            "over_privileged_count": privilege_scope["summary"]["over_privileged_nodes"],
+            "advisory_blocker_codes": privilege_scope["governance"]["skill_pack_import_review"]["advisory_blocker_codes"],
+        },
         "refinement_suggestions": _skill_pack_refinement_suggestions(item, fit_score, risk_score, query),
     }
 
@@ -30645,6 +31607,587 @@ def skill_pack_score(
         },
         "scores": scores,
     }
+
+
+
+_SKILL_PRIVILEGE_SCOPE_CATEGORIES = (
+    "read_path",
+    "write_path",
+    "command",
+    "network",
+    "github_api",
+    "release_publish",
+    "secret_adjacent",
+)
+_SKILL_PRIVILEGE_SCOPE_MUTATING_CATEGORIES = {"write_path", "release_publish"}
+_SKILL_PRIVILEGE_SCOPE_PATTERN_SPECS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    (
+        "write_path",
+        (
+            r"\b(?:write|edit|modify|update|create|append|delete|remove|move|rename|chmod|apply\s+patch|commit)\b",
+            r"\b(?:rm|mv|cp|tee|chmod|mkdir|touch)\b",
+        ),
+        "Filesystem mutation or repository write requested by the imported item.",
+    ),
+    (
+        "read_path",
+        (r"\b(?:read|inspect|view|list|cat|grep|search|summarize|open)\b",),
+        "Repository read requested by the imported item.",
+    ),
+    (
+        "command",
+        (r"\b(?:run|execute|shell|command|bash|sh|python|pytest|npm|make|docker|git)\b",),
+        "Process or shell command requested by the imported item.",
+    ),
+    (
+        "network",
+        (r"https?://[^\s`\"')]+", r"\b(?:curl|wget|scp|sftp|rsync|webhook|download|upload|http)\b"),
+        "Network access requested by the imported item.",
+    ),
+    (
+        "github_api",
+        (r"\b(?:github|gh\s+(?:api|issue|pr|release)|pull request|issue comment|label)\b",),
+        "GitHub API or repository-host operation requested by the imported item.",
+    ),
+    (
+        "release_publish",
+        (r"\b(?:release|publish|deploy|upload artifact|docker\s+push|npm\s+publish|twine\s+upload)\b",),
+        "Release, deploy, or package publish operation requested by the imported item.",
+    ),
+    (
+        "secret_adjacent",
+        (r"\b(?:secret|token|credential|api[-_ ]?key|private[-_ ]?key|authorization|\.env)\b",),
+        "Secret-adjacent access or wording requested by the imported item.",
+    ),
+)
+_SKILL_PRIVILEGE_SCOPE_PATH_RE = re.compile(
+    r"(?P<path>(?:\.{1,2}/|[A-Za-z0-9_.-]+/)[A-Za-z0-9_./-]+|\.env(?:\.[A-Za-z0-9_.-]+)?|/[A-Za-z0-9_./-]+)"
+)
+
+_SKILL_PRIVILEGE_SCOPE_CATEGORY_ALIASES = {
+    "repository_read": "read_path",
+    "repo_read": "read_path",
+    "read_repository_context": "read_path",
+    "repository_write": "write_path",
+    "repo_write": "write_path",
+    "filesystem_write": "write_path",
+    "shell/process": "command",
+    "shell_process": "command",
+    "process": "command",
+    "github": "github_api",
+    "github-api": "github_api",
+    "github api": "github_api",
+    "release": "release_publish",
+    "publish": "release_publish",
+    "deploy": "release_publish",
+    "secrets": "secret_adjacent",
+    "secret": "secret_adjacent",
+}
+
+
+def _skill_privilege_scope_normalize_category(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text:
+        return ""
+    if text in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
+        return text
+    alias = _SKILL_PRIVILEGE_SCOPE_CATEGORY_ALIASES.get(text)
+    if alias:
+        return alias
+    for category in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
+        if category in text:
+            return category
+    return ""
+
+
+def _skill_privilege_scope_planned_step_item(step: dict[str, Any], index: int) -> dict[str, Any]:
+    """Convert a normalized planned step into static text for the no-execution analyzer."""
+    categories = {str(item).lower().replace("-", "_") for item in step.get("categories", []) if str(item).strip()}
+    tool = str(step.get("tool", "") or "")
+    mode = str(step.get("mode", "") or "")
+    blob = json.dumps(_redact_audit_value(step), sort_keys=True, ensure_ascii=True, default=str).lower()
+    actions: list[str] = []
+    if bool(step.get("read_only")) or "read_only" in categories:
+        actions.append("read repository path")
+    if bool(step.get("mutates")) or "write" in categories or "mutation" in categories:
+        actions.append("write repository path")
+    if bool(step.get("network")) or "network" in categories:
+        actions.append("http network access")
+    if "shell/process" in step.get("categories", []) or "shell_process" in categories:
+        actions.append("shell command execution")
+    if tool.startswith("gh_") or tool in {"gh", "github", "github_api"} or "github" in blob:
+        actions.append("github api access")
+    if any(term in blob for term in ("release", "publish", "deploy", "tag")):
+        actions.append("release publish deploy")
+    if any(term in blob for term in ("secret", "token", "credential", "api_key", "private_key", ".env")):
+        actions.append("secret token credential access")
+    return {
+        "id": f"planned-step-{index}",
+        "schema": "workflow_policy_plan_step.v1",
+        "type": "planned_step",
+        "title": f"Planned step {index}: {tool or '<unknown>'}",
+        "intent": f"{tool} {mode}".strip(),
+        "actions": actions,
+        "targets": step.get("targets", []),
+    }
+
+
+def _skill_privilege_scope_item_id(item: dict[str, Any], index: int) -> str:
+    item_id = _skill_pack_item_id(item)
+    return item_id if item_id != "<unknown>" else f"item-{index}"
+
+
+def _skill_privilege_scope_iter_fields(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    fields: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        for key in sorted(value):
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            fields.append((child_prefix, value[key]))
+            fields.extend(_skill_privilege_scope_iter_fields(value[key], child_prefix))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            fields.append((child_prefix, item))
+            fields.extend(_skill_privilege_scope_iter_fields(item, child_prefix))
+    return fields
+
+
+def _skill_privilege_scope_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)) or value is None:
+        return str(value)
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _skill_privilege_scope_repo_path(raw: str) -> str:
+    candidate = str(raw or "").strip().strip("`'\".,;:()[]{}")
+    if not candidate:
+        return ""
+    if candidate.startswith("/repo/"):
+        return candidate.removeprefix("/repo/").strip("/") or "."
+    if candidate == "/repo":
+        return "."
+    if candidate.startswith("/") or candidate.startswith("../") or "/../" in candidate:
+        return "<outside-repo>"
+    return candidate.removeprefix("./") or "."
+
+
+def _skill_privilege_scope_paths(text: str) -> list[str]:
+    paths: list[str] = []
+    for match in _SKILL_PRIVILEGE_SCOPE_PATH_RE.finditer(text):
+        path = _skill_privilege_scope_repo_path(match.group("path"))
+        if path and path not in paths:
+            paths.append(path)
+    return paths[:8]
+
+
+def _skill_privilege_scope_declared_privileges(item: dict[str, Any]) -> set[str]:
+    declared: set[str] = set()
+    raw_values: list[Any] = []
+    for key in ("required_privileges", "declared_privileges", "permissions", "scopes"):
+        if key in item:
+            raw_values.append(item.get(key))
+    trust = item.get("trust") if isinstance(item.get("trust"), dict) else {}
+    if trust:
+        raw_values.append(trust.get("permissions"))
+    for raw in raw_values:
+        values = raw if isinstance(raw, list) else [raw]
+        for value in values:
+            text = str(value or "").strip().lower().replace("-", "_")
+            alias = _skill_privilege_scope_normalize_category(text)
+            if alias:
+                declared.add(alias)
+            for category in _SKILL_PRIVILEGE_SCOPE_CATEGORIES:
+                if category in text:
+                    declared.add(category)
+            if text in {"write", "mutation", "mutate", "filesystem_write"}:
+                declared.add("write_path")
+            if text in {"read", "read_repository_context", "repository_read"}:
+                declared.add("read_path")
+            if text in {"shell", "process", "shell_process"}:
+                declared.add("command")
+            if "network" in text or "egress" in text:
+                declared.add("network")
+            if "secret" in text or "credential" in text or "token" in text:
+                declared.add("secret_adjacent")
+    return declared
+
+
+def _skill_privilege_scope_has_any(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _skill_privilege_scope_policy_text(workflow_policy_plan: dict[str, Any] | None) -> str:
+    if not isinstance(workflow_policy_plan, dict):
+        return ""
+    safe_keys = (
+        "intent",
+        "execution_mode",
+        "allowed_targets",
+        "data_classification",
+        "required_preconditions",
+        "blocking_policies",
+        "findings",
+        "steps",
+        "allowed_privileges",
+        "required_privileges",
+    )
+    filtered = {key: workflow_policy_plan.get(key) for key in safe_keys if key in workflow_policy_plan}
+    return json.dumps(filtered, sort_keys=True, ensure_ascii=True)
+
+
+def _skill_privilege_scope_intent_profile(
+    prompt: str,
+    workflow_policy_plan: dict[str, Any] | None,
+    declared_privileges: list[str] | None,
+) -> dict[str, Any]:
+    raw_prompt = str(prompt or "")
+    plan_text = _skill_privilege_scope_policy_text(workflow_policy_plan)
+    text = f"{raw_prompt}\n{plan_text}".lower()
+    allowed = {"read_path"}
+    reasons = {"read_path": "repository/context reads are the default minimum privilege"}
+    explicit_read_only = _skill_privilege_scope_has_any(
+        text,
+        (
+            r"\bread[- ]only\b",
+            r"\bno\s+(?:mutation|write|writes|changes?)\b",
+            r"\bwithout\s+mutat(?:ing|ion)\b",
+            r"\b(?:inspect|audit|review)\b",
+        ),
+    )
+    explicit_write = _skill_privilege_scope_has_any(
+        text,
+        (
+            r"\b(?:write|writes|writing|edit|modify|update|create|delete|move|rename|implement|fix|mutate|patch)\b",
+            r"\bapply\s+patch\b",
+        ),
+    )
+    if explicit_write and not explicit_read_only:
+        allowed.add("write_path")
+        reasons["write_path"] = "task intent explicitly allows repository mutation"
+    if any(term in text for term in ("run", "execute", "pytest", "test", "lint", "build", "command", "shell")):
+        allowed.add("command")
+        reasons["command"] = "task intent names local command/check execution"
+    if any(term in text for term in ("network", "download", "fetch", "web", "http", "api", "github")):
+        allowed.add("network")
+        reasons["network"] = "task intent names network/API access"
+    if any(term in text for term in ("github", "issue", "pull request", "pr", "label", "comment")):
+        allowed.add("github_api")
+        reasons["github_api"] = "task intent names GitHub issue/PR/API activity"
+    if any(term in text for term in ("release", "publish", "deploy")) and not explicit_read_only:
+        allowed.add("release_publish")
+        reasons["release_publish"] = "task intent explicitly names release/publish/deploy"
+    if any(term in text for term in ("secret", "token", "credential", "api key", "private key", ".env")):
+        allowed.add("secret_adjacent")
+        reasons["secret_adjacent"] = "task intent names secret-adjacent review"
+
+    if isinstance(workflow_policy_plan, dict):
+        for step in workflow_policy_plan.get("steps", []) if isinstance(workflow_policy_plan.get("steps"), list) else []:
+            if not isinstance(step, dict):
+                continue
+            categories = {str(item).lower().replace("-", "_") for item in step.get("categories", []) if str(item).strip()}
+            if bool(step.get("mutates")) or "write" in categories:
+                allowed.add("write_path")
+                reasons.setdefault("write_path", "workflow_policy_plan declares mutation-capable steps")
+            if bool(step.get("network")) or "network" in categories:
+                allowed.add("network")
+                reasons.setdefault("network", "workflow_policy_plan declares network-capable steps")
+            if "shell/process" in categories or "shell_process" in categories:
+                allowed.add("command")
+                reasons.setdefault("command", "workflow_policy_plan declares shell/process steps")
+
+    for value in declared_privileges or []:
+        category = _skill_privilege_scope_normalize_category(value)
+        if category:
+            allowed.add(category)
+            reasons.setdefault(category, "caller-declared task privilege")
+
+    if explicit_read_only:
+        allowed.discard("write_path")
+        allowed.discard("release_publish")
+        reasons.pop("write_path", None)
+        reasons.pop("release_publish", None)
+
+    return {
+        "task_digest": hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest()[:16],
+        "read_only_intent": explicit_read_only,
+        "allowed_categories": sorted(allowed),
+        "constraint_reasons": reasons,
+    }
+
+
+def _skill_privilege_scope_add_node(
+    nodes: list[dict[str, Any]],
+    seen: set[tuple[str, str, str, str]],
+    *,
+    item_id: str,
+    item_kind: str,
+    category: str,
+    field: str,
+    evidence: str,
+    paths: list[str] | None = None,
+) -> None:
+    evidence_text = re.sub(r"(?<![A-Za-z0-9_])/(?!repo(?:/|\b))[A-Za-z0-9_./-]+", "<outside-repo>", str(evidence))
+    redacted = _redact_untrusted_content_excerpt(evidence_text, max_chars=180)
+    path_list = sorted(set(paths or []))[:8]
+    key = (item_id, category, field, redacted)
+    if key in seen:
+        return
+    seen.add(key)
+    node_index = len(nodes) + 1
+    node: dict[str, Any] = {
+        "id": f"{item_id}:{category}:{node_index}",
+        "item_id": item_id,
+        "item_kind": item_kind,
+        "category": category,
+        "field": field,
+        "evidence_excerpt": redacted,
+        "repository_relative_paths": path_list,
+    }
+    nodes.append(node)
+
+
+def _skill_privilege_scope_extract_nodes(item: dict[str, Any], item_id: str, item_kind: str) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    declared = _skill_privilege_scope_declared_privileges(item)
+    for category in sorted(declared):
+        _skill_privilege_scope_add_node(
+            nodes,
+            seen,
+            item_id=item_id,
+            item_kind=item_kind,
+            category=category,
+            field="declared_privileges",
+            evidence=category,
+            paths=[],
+        )
+
+    for field, value in _skill_privilege_scope_iter_fields(item):
+        if field.rsplit(".", 1)[-1] in {"id", "name"}:
+            continue
+        text = _skill_privilege_scope_text(value)
+        if not text or text in {"None", "True", "False"}:
+            continue
+        lower = text.lower()
+        paths = _skill_privilege_scope_paths(text)
+        field_lower = field.lower()
+        for category, patterns, message in _SKILL_PRIVILEGE_SCOPE_PATTERN_SPECS:
+            if any(re.search(pattern, lower, flags=re.DOTALL) for pattern in patterns):
+                _skill_privilege_scope_add_node(
+                    nodes,
+                    seen,
+                    item_id=item_id,
+                    item_kind=item_kind,
+                    category=category,
+                    field=field,
+                    evidence=text if len(text) <= 240 else message,
+                    paths=paths,
+                )
+        if paths and any(term in field_lower for term in ("path", "target", "file")):
+            inferred = "write_path" if any(term in field_lower for term in ("write", "output", "destination")) else "read_path"
+            _skill_privilege_scope_add_node(
+                nodes,
+                seen,
+                item_id=item_id,
+                item_kind=item_kind,
+                category=inferred,
+                field=field,
+                evidence=text,
+                paths=paths,
+            )
+    return nodes
+
+
+def _skill_privilege_scope_node_decision(
+    node: dict[str, Any],
+    *,
+    intent_profile: dict[str, Any],
+    declared_required: bool,
+) -> dict[str, Any]:
+    category = str(node.get("category") or "")
+    allowed = category in set(intent_profile.get("allowed_categories", []))
+    if not allowed:
+        severity = "block" if category in _SKILL_PRIVILEGE_SCOPE_MUTATING_CATEGORIES or category in {"network", "secret_adjacent"} else "warn"
+        return {
+            "status": "over_privileged",
+            "severity": severity,
+            "reason": f"{category} is not required by the declared task intent",
+            "suggested_constraint": f"Remove or gate `{category}` for this task unless the user explicitly expands scope.",
+        }
+    if declared_required or category == "read_path":
+        return {
+            "status": "required",
+            "severity": "info",
+            "reason": f"{category} is covered by task intent and declared as needed",
+            "suggested_constraint": f"Constrain `{category}` to the listed repository-relative paths and declared task.",
+        }
+    return {
+        "status": "allowed",
+        "severity": "info",
+        "reason": f"{category} is allowed by task intent but not explicitly declared as required",
+        "suggested_constraint": f"Document why `{category}` is necessary or remove it from the imported item.",
+    }
+
+
+@mcp.tool()
+def skill_privilege_scope(
+    intent: str = "",
+    items: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    planned_steps: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    allowed_privileges: list[str] | tuple[str, ...] | None = None,
+    *,
+    prompt: str | None = None,
+    workflow_policy_plan: dict[str, Any] | None = None,
+    declared_privileges: list[str] | None = None,
+    apply_repository_trust_defaults: bool | None = None,
+) -> dict[str, Any]:
+    """Read-only task-conditioned least-privilege analysis for imported cards/skills."""
+    task_intent = str(intent or prompt or "")
+    planned_items = [
+        _skill_privilege_scope_planned_step_item(step, index)
+        for index, step in enumerate(planned_steps or [])
+        if isinstance(step, dict)
+    ]
+    source_items = list(WORKFLOW_CARDS if items is None and not planned_items else tuple(items or ()))
+    items_to_analyze = tuple(source_items + planned_items)
+    if apply_repository_trust_defaults is None:
+        apply_repository_trust_defaults = items is None and not planned_items
+    declared_task_privileges = list(declared_privileges or []) + list(allowed_privileges or [])
+    intent_profile = _skill_privilege_scope_intent_profile(task_intent, workflow_policy_plan, declared_task_privileges)
+    analyzed_items: list[dict[str, Any]] = []
+    action_nodes: list[dict[str, Any]] = []
+    advisory_blockers: list[dict[str, Any]] = []
+    required_privileges: list[dict[str, Any]] = []
+    allowed_set = set(intent_profile.get("allowed_categories", []))
+
+    for index, item in enumerate(items_to_analyze):
+        item_id = _skill_privilege_scope_item_id(item, index)
+        item_kind = _skill_pack_item_kind(item)
+        trust = _workflow_card_trust_metadata(item, apply_repository_default=apply_repository_trust_defaults)
+        declared_required_categories = _skill_privilege_scope_declared_privileges(item)
+        nodes = _skill_privilege_scope_extract_nodes(item, item_id, item_kind)
+        for node in nodes:
+            category = str(node.get("category") or "")
+            declared_required = category in declared_required_categories
+            decision = _skill_privilege_scope_node_decision(
+                node,
+                intent_profile=intent_profile,
+                declared_required=declared_required,
+            )
+            node.update(decision)
+            node["declared_required"] = declared_required
+            node["task_allowed"] = category in allowed_set
+            action_nodes.append(node)
+            if node["status"] == "over_privileged":
+                advisory_blockers.append(
+                    {
+                        "code": "task_conditioned_over_privilege",
+                        "severity": node["severity"],
+                        "item_id": item_id,
+                        "node_id": node["id"],
+                        "category": category,
+                        "message": node["reason"],
+                        "suggested_constraint": node["suggested_constraint"],
+                        "repository_relative_paths": node["repository_relative_paths"],
+                    }
+                )
+            elif node["status"] == "required":
+                required_privileges.append(
+                    {
+                        "item_id": item_id,
+                        "node_id": node["id"],
+                        "category": category,
+                        "repository_relative_paths": node["repository_relative_paths"],
+                    }
+                )
+        statuses: dict[str, int] = {}
+        for node in nodes:
+            statuses[str(node.get("status", "unknown"))] = statuses.get(str(node.get("status", "unknown")), 0) + 1
+        analyzed_items.append(
+            {
+                "item_id": item_id,
+                "item_kind": item_kind,
+                "trust_tier": trust.get("trust_tier", "missing") if trust else "missing",
+                "action_node_count": len(nodes),
+                "status_counts": statuses,
+            }
+        )
+
+    block_count = sum(1 for row in advisory_blockers if row.get("severity") == "block")
+    warn_count = sum(1 for row in advisory_blockers if row.get("severity") != "block")
+    decision = "block" if block_count else "warn" if warn_count else "allow"
+    summary = {
+        "decision": decision,
+        "items_analyzed": len(items_to_analyze),
+        "action_nodes": len(action_nodes),
+        "required_privileges": len(required_privileges),
+        "over_privileged_nodes": len(advisory_blockers),
+        "blockers": block_count,
+        "warnings": warn_count,
+    }
+    suggested_constraints = []
+    for blocker in advisory_blockers:
+        suggestion = str(blocker.get("suggested_constraint", ""))
+        if suggestion and suggestion not in suggested_constraints:
+            suggested_constraints.append(suggestion)
+    blocker_codes = sorted({str(item.get("code", "")) for item in advisory_blockers if item.get("code")})
+    findings = [
+        {
+            "code": str(blocker.get("code", "task_conditioned_over_privilege")),
+            "severity": str(blocker.get("severity", "warning")),
+            "category": str(blocker.get("category", "")),
+            "node_id": str(blocker.get("node_id", "")),
+            "message": str(blocker.get("message", "")),
+            "suggested_constraint": str(blocker.get("suggested_constraint", "")),
+        }
+        for blocker in advisory_blockers[:50]
+    ]
+    return {
+        "schema": SKILL_PRIVILEGE_SCOPE_SCHEMA_VERSION,
+        "read_only": True,
+        "executed_plan": False,
+        "executed_imported_code": False,
+        "external_services_called": False,
+        "decision": "needs_constraints" if advisory_blockers else "allow",
+        "ok": not advisory_blockers,
+        "redacted": True,
+        "repository_relative_output": True,
+        "intent_profile": intent_profile,
+        "item_count": len(items_to_analyze),
+        "node_count": len(action_nodes),
+        "summary": summary,
+        "items": analyzed_items,
+        "action_nodes": action_nodes,
+        "required_privileges": required_privileges,
+        "advisory_blockers": advisory_blockers,
+        "suggested_constraints": suggested_constraints[:10],
+        "findings": findings,
+        "governance": {
+            "workflow_policy_plan": {"advisory_blocker_codes": blocker_codes},
+            "policy_governance_decision": {"advisory_blocker_codes": blocker_codes},
+            "workflow_policy_plan_advisory_findings": advisory_blockers,
+            "policy_governance_decision_advisory_findings": advisory_blockers,
+            "skill_pack_import_review": {
+                "decision": "quarantine" if block_count else "allow_with_caveats" if warn_count else "allow",
+                "blocker_count": block_count,
+                "advisory_blocker_codes": blocker_codes,
+                "required_privilege_count": len(required_privileges),
+            },
+        },
+        "security": {
+            "contains_raw_prompts": False,
+            "contains_file_contents": False,
+            "contains_host_absolute_paths": False,
+            "redacted_evidence_only": True,
+            "imported_or_generated_code_executed": False,
+        },
+    }
+
 
 def _workflow_card_score(
     card: dict[str, Any],
@@ -30943,15 +32486,21 @@ class TaskRouterService:
             "coding_pip",
             "coding_sandbox",
             "workflow_select",
+            "skill_privilege_scope",
         }:
             raise ValueError(
-                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, workflow_select"
+                "mode must be one of: task, status, embed, infer, parallel_infer, autocomplete, rerank, coding_infer, coding_check, coding_pip, coding_sandbox, workflow_select, skill_privilege_scope"
             )
         if mode == "workflow_select":
             return workflow_select(
                 prompt=prompt or query,
                 top_k=3 if top_k is None else top_k,
                 execution_mode=execution_mode,
+            )
+        if mode == "skill_privilege_scope":
+            return skill_privilege_scope(
+                prompt=prompt or query,
+                items=candidates,
             )
         if mode == "status":
             return local_model_status()
@@ -31151,7 +32700,7 @@ def task_router(
     mode: Annotated[
         str,
         Field(
-            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use `workflow_select` first when you are unsure which existing MCP workflow/prompt/tool to use. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
+            description="Execution mode. Start with `task` for almost every natural-language request; it classifies the request, injects compact task/session memory, and dispatches to the right specialist flow. Use `workflow_select` first when you are unsure which existing MCP workflow/prompt/tool to use. Use `skill_privilege_scope` to compare imported workflow cards/skills against task-conditioned least privilege. Use the other modes only when you intentionally need raw status, infer, embed, rerank, autocomplete, or coding sandbox/check/package behavior."
         ),
     ] = "task",
     prompt: Annotated[
@@ -31295,7 +32844,7 @@ def task_router(
         Field(description="Whether `mode='infer'` should automatically upgrade independent prompt batches to `parallel_infer`."),
     ] = True,
 ) -> dict[str, Any]:
-    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` plus `execution_mode` for read-only, mode-aware workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select."""
+    """Single public task router for LLM agents. Default `mode='task'` is the normal entrypoint. Use `mode='workflow_select'` plus `execution_mode` for read-only, mode-aware workflow-card retrieval before choosing a workflow. Explicit modes expose status|embed|infer|parallel_infer|autocomplete|rerank|coding_infer|coding_check|coding_pip|coding_sandbox|workflow_select|skill_privilege_scope."""
     audit_args = {
         "mode": mode,
         "task": task,
@@ -34803,6 +36352,49 @@ def agent_security_delta(
 
 
 @mcp.tool()
+def security_root_cause_evidence(
+    base_ref: str = "HEAD~1",
+    head_ref: str = "HEAD",
+    vulnerability_hint: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    max_locations: int = 20,
+    include_security_delta: bool = True,
+    security_delta_report: dict[str, Any] | None = None,
+    local_evidence: dict[str, Any] | list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a local, read-only evidence pack ranking likely root-cause locations for security-sensitive agent fixes."""
+    arguments = {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "vulnerability_hint_provided": bool(vulnerability_hint.strip()),
+        "include_globs": include_globs or [],
+        "exclude_globs": exclude_globs or [],
+        "max_locations": max_locations,
+        "include_security_delta": include_security_delta,
+        "security_delta_report_provided": isinstance(security_delta_report, dict),
+        "local_evidence_provided": bool(local_evidence),
+    }
+    with _otel_span(
+        "mcp.tool.security_root_cause_evidence",
+        _otel_tool_attributes("security_root_cause_evidence", arguments),
+    ) as span:
+        result = _security_root_cause_evidence_impl(
+            base_ref=base_ref,
+            head_ref=head_ref,
+            vulnerability_hint=vulnerability_hint,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
+            max_locations=max_locations,
+            include_security_delta=include_security_delta,
+            security_delta_report=security_delta_report,
+            local_evidence=local_evidence,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
+
+@mcp.tool()
 def mcp_threat_model_report(
     fixture_path: str = "",
     baseline_path: str = "",
@@ -36817,6 +38409,23 @@ def release_readiness(
             result["checks"]["agent_security_delta"] = {"ok": False, "status": "scanner-unavailable", "error": str(exc)}
             result["ok"] = False
 
+    if run_security_check or run_agent_security_delta_check:
+        try:
+            root_cause_report = _security_root_cause_evidence_impl(
+                base_ref=base_ref,
+                head_ref=head_ref,
+                include_security_delta=run_agent_security_delta_check,
+            )
+            result["checks"]["security_root_cause_evidence"] = _security_root_cause_compact_status(root_cause_report)
+        except Exception as exc:
+            result["checks"]["security_root_cause_evidence"] = {
+                "ok": True,
+                "status": "needs-review",
+                "warning": True,
+                "warning_reason": str(exc),
+                "shallow_fix_warning_count": 0,
+            }
+
     if run_secret_exposure_check:
         try:
             secret_report = secret_exposure_report(
@@ -36977,6 +38586,9 @@ def release_readiness(
                         "pass_count",
                         "not_applicable_count",
                         "would_block",
+                        "shallow_fix_warning_count",
+                        "ranked_location_count",
+                        "related_test_count",
                         "positive_static_finding_delta",
                         "max_cognitive_delta",
                         "max_cyclomatic_delta",
@@ -37987,6 +39599,26 @@ def _workflow_policy_plan_payload(
                 findings.append(_workflow_policy_finding(code="missing_test_gate", severity="approval", step_index=step_index, policy="release_gate", message="release-sensitive step is missing an earlier test/change-impact/readiness gate", required_precondition="test_or_change_impact_gate"))
                 required_preconditions.append({"code": "test_or_change_impact_gate", "step_index": step_index, "reason": "release workflow requires validation evidence"})
 
+    privilege_scope = skill_privilege_scope(intent=normalized_intent, items=[], planned_steps=normalized_steps)
+    for blocker in privilege_scope.get("advisory_blockers", [])[:12]:
+        category = str(blocker.get("category", ""))
+        findings.append(
+            _workflow_policy_finding(
+                code="task_conditioned_over_privilege",
+                severity="approval",
+                policy=f"least_privilege.{category or 'scope'}",
+                message=f"planned action is over-privileged for the declared intent: {blocker.get('node_id', '')}",
+                required_precondition="drop_over_privileged_actions_or_expand_intent",
+            )
+        )
+        required_preconditions.append(
+            {
+                "code": "drop_over_privileged_actions_or_expand_intent",
+                "step_index": -1,
+                "reason": str(blocker.get("suggested_constraint", "remove privileges not needed for the declared task")),
+            }
+        )
+
     # Stable de-duplication while preserving first occurrence details.
     deduped_findings: list[dict[str, Any]] = []
     seen_finding_keys: set[tuple[str, int | None, str]] = set()
@@ -38043,6 +39675,14 @@ def _workflow_policy_plan_payload(
         "required_preconditions": required_preconditions,
         "findings": findings,
         "safe_next_actions": _workflow_policy_safe_next_actions(decision, findings),
+        "skill_privilege_scope": {
+            "schema": privilege_scope["schema"],
+            "decision": privilege_scope["decision"],
+            "ok": privilege_scope["ok"],
+            "node_count": privilege_scope["node_count"],
+            "over_privileged_count": privilege_scope["summary"]["over_privileged_nodes"],
+            "advisory_blocker_codes": privilege_scope["governance"]["workflow_policy_plan"]["advisory_blocker_codes"],
+        },
         "security": {
             "redacted": True,
             "persists_artifacts_by_default": False,
@@ -38403,6 +40043,7 @@ def _policy_governance_payload(
             "safe_next_actions": ["Fix the repository-local reviewed policy bundle and rerun the policy decision before executing planned tools."],
             "authoritative_hard_gates": ["ALLOW_MUTATIONS", "HTTP bearer scopes/auth", "repository path scope", "workflow_policy_plan", "mutation_step_guard", "per-tool security checks"],
             "workflow_policy_plan": {"decision": preflight.get("decision"), "plan_id": preflight.get("plan_id"), "ok": preflight.get("ok")},
+            "skill_privilege_scope": preflight.get("skill_privilege_scope", {}),
             "security": {
                 "redacted": True,
                 "read_only": True,
@@ -38486,6 +40127,7 @@ def _policy_governance_payload(
             "blocking_policies": _redact_audit_value(preflight.get("blocking_policies", [])),
             "required_preconditions": _redact_audit_value(preflight.get("required_preconditions", [])),
         },
+        "skill_privilege_scope": preflight.get("skill_privilege_scope", {}),
         "security": {
             "redacted": True,
             "read_only": True,
