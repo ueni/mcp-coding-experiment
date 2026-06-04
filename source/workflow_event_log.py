@@ -58,6 +58,7 @@ _ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9._~+%/-])(?:/[A-Za-z0-9._~+@%=-][^\s,;:'\"{}\]<>]*)"
     r"|(?:[A-Za-z]:\\[^\s,;:'\"{}\]<>]+)"
 )
+_LOCAL_FILE_URI_RE = re.compile(r"\bfile://[^\s,;:'\"{}\]<>]+", re.IGNORECASE)
 
 
 class _RedactionState:
@@ -98,12 +99,17 @@ def _sanitize(value: Any, state: _RedactionState, path: str = "$") -> Any:
     if isinstance(value, list):
         return [_sanitize(item, state, f"{path}[{idx}]") for idx, item in enumerate(value)]
     if isinstance(value, str):
-        if _SENSITIVE_VALUE_RE.search(value):
+        sanitized_value = value
+        if _SENSITIVE_VALUE_RE.search(sanitized_value):
             state.add(path=path, category="secret_value", original=value)
-            return _SENSITIVE_VALUE_RE.sub("<redacted:secret_value>", value)
-        if "://" not in value and _ABSOLUTE_PATH_RE.search(value):
+            sanitized_value = _SENSITIVE_VALUE_RE.sub("<redacted:secret_value>", sanitized_value)
+        if _LOCAL_FILE_URI_RE.search(sanitized_value):
             state.add(path=path, category="absolute_path", original=value)
-            return _ABSOLUTE_PATH_RE.sub("<redacted:absolute_path>", value)
+            sanitized_value = _LOCAL_FILE_URI_RE.sub("<redacted:absolute_path>", sanitized_value)
+        if "://" not in sanitized_value and _ABSOLUTE_PATH_RE.search(sanitized_value):
+            state.add(path=path, category="absolute_path", original=value)
+            sanitized_value = _ABSOLUTE_PATH_RE.sub("<redacted:absolute_path>", sanitized_value)
+        return sanitized_value
     return value
 
 

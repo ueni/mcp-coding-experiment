@@ -106,3 +106,53 @@ class WorkflowEventLogReportTests(ServerToolsTestBase):
         self.assertNotIn("super-secret-token", encoded)
         self.assertNotIn("ghp_1234567890abcdef", encoded)
         self.assertNotIn("/home/user/private", encoded)
+
+    def test_privacy_redaction_removes_local_file_uri_host_paths_from_refs(self):
+        event_log = self.repo_path / FIXTURE_DIR / "file_uri_privacy.jsonl"
+        event_log.parent.mkdir(parents=True, exist_ok=True)
+        event_log.write_text(
+            json.dumps(
+                {
+                    "sequence": 1,
+                    "event_id": "evt-file-uri",
+                    "event_type": "artifact.produced",
+                    "timestamp": "2026-06-04T10:00:00Z",
+                    "workflow_id": "wf-189",
+                    "label": "local file uri artifact",
+                    "status": "ok",
+                    "artifact_refs": [
+                        {
+                            "artifact_id": "local-report",
+                            "kind": "report",
+                            "uri": "file:///home/user/private/out.log",
+                            "summary": "saved at file:///home/user/private/out.log",
+                        }
+                    ],
+                    "evidence_refs": [
+                        {
+                            "ref_id": "local-evidence",
+                            "kind": "evidence",
+                            "uri": "file://localhost/home/user/private/evidence.json",
+                        }
+                    ],
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        report = self.server.workflow_event_log_report(
+            event_log_path=f"{FIXTURE_DIR}/file_uri_privacy.jsonl"
+        )
+        encoded = json.dumps(report, sort_keys=True)
+
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["privacy"]["absolute_host_paths_persisted"])
+        self.assertIn("absolute_path", report["privacy"]["redaction_categories"])
+        self.assertNotIn("file:///home/user/private/out.log", encoded)
+        self.assertNotIn("file://localhost/home/user/private/evidence.json", encoded)
+        self.assertNotIn("/home/user/private", encoded)
+        artifact_ref = report["events"][0]["artifact_refs"][0]
+        self.assertEqual(artifact_ref["uri"], "<redacted:absolute_path>")
+        self.assertEqual(artifact_ref["summary"], "saved at <redacted:absolute_path>")
