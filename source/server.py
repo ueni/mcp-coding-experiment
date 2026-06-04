@@ -118,6 +118,11 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import EventMessage, EventStore
 from pydantic import Field, RootModel, ValidationError
 from source.agents_context_health import analyze_agents_context, summarize_agents_context_health
+from source.http_mcp_contract_parity import (
+    DEFAULT_CONTRACT_PATH as HTTP_MCP_CONTRACT_PARITY_DEFAULT_PATH,
+    compact_http_mcp_contract_parity,
+    generate_http_mcp_contract_parity_report,
+)
 from source.tool_output_schemas import (
     SCHEMA_BACKED_TOOL_NAMES,
     TOOL_OUTPUT_SCHEMAS,
@@ -35662,6 +35667,49 @@ def _memory_governance_report_impl(
         report["entries"] = public_entries
     return report
 
+def _http_mcp_contract_parity_summary() -> dict[str, Any]:
+    try:
+        report = generate_http_mcp_contract_parity_report(
+            HTTP_MCP_CONTRACT_PARITY_DEFAULT_PATH,
+            repo_root=REPO_PATH,
+            tool_catalog=_current_tool_catalog_baseline(),
+        )
+        return compact_http_mcp_contract_parity(report)
+    except Exception as exc:  # pragma: no cover - defensive report hardening
+        return {
+            "schema": "http_mcp_contract_parity_report.v1",
+            "ok": False,
+            "status": "unavailable",
+            "read_only": True,
+            "network_used": False,
+            "contract_path": str(HTTP_MCP_CONTRACT_PARITY_DEFAULT_PATH),
+            "summary": {
+                "endpoints": 0,
+                "matched": 0,
+                "drifted": 0,
+                "missing_tools": 0,
+                "unchecked": 0,
+                "findings": 1,
+            },
+            "findings": [
+                {
+                    "kind": "parity_report_unavailable",
+                    "severity": "warn",
+                    "message": f"HTTP/MCP contract parity report unavailable: {type(exc).__name__}",
+                    "evidence": {"contract_path": str(HTTP_MCP_CONTRACT_PARITY_DEFAULT_PATH)},
+                }
+            ],
+            "security": {
+                "repo_relative_paths_only": True,
+                "raw_schemas_embedded": False,
+                "schema_evidence": "sha256 digests only",
+                "network_used": False,
+                "contains_secrets": False,
+            },
+        }
+
+
+
 def _governance_report_impl(
     start_time: str = "",
     end_time: str = "",
@@ -35735,6 +35783,7 @@ def _governance_report_impl(
             _secret_exposure_report_impl(paths=["."], baseline_ref=base_ref, export=False, block_on_high_confidence_new=True)
         ),
         "tool_catalog_integrity": _tool_catalog_integrity_summary(),
+        "http_mcp_contract_parity": _http_mcp_contract_parity_summary(),
         "snapshots": _governance_snapshot_references(),
         "security": {
             "redaction": "audit events, untrusted-content signal counts, agent-security-delta/secret-exposure evidence, and report summaries are redacted/aggregate-only",
