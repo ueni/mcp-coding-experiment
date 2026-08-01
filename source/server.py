@@ -445,6 +445,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
     "mutation_step_guard": {"categories": ["read-only", "governance"]},
+    "trajectory_trust_guard": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "continue_model_fallback_configure": {"categories": ["write"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
@@ -33757,6 +33758,399 @@ def clarification_gate(
         rollback_plan=rollback_plan,
         user_response_action=user_response_action,
     )
+
+
+TRAJECTORY_TRUST_GUARD_SENSITIVE_TERMS = {
+    "apply",
+    "commit",
+    "delete",
+    "deploy",
+    "merge",
+    "mutate",
+    "push",
+    "release",
+    "restore",
+    "rollback",
+    "shell",
+    "write",
+}
+TRAJECTORY_TRUST_GUARD_CRITICAL_TERMS = {"delete", "deploy", "merge", "push", "release", "rollback"}
+TRAJECTORY_TRUST_GUARD_WARN_DECISIONS = {"log", "sanitize", "warn"}
+TRAJECTORY_TRUST_GUARD_BLOCK_DECISIONS = {"block", "deny", "blocked"}
+
+
+def _trajectory_guard_safe_text(value: Any, max_chars: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value).replace("\x00", " ")).strip()
+    text = re.sub(
+        r"\bauthorization\b\s*[:= ]\s*bearer\s+\S+",
+        "<redacted:secret>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bbearer\s+\S+", "<redacted:secret>", text, flags=re.IGNORECASE)
+    text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
+    text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", text)
+    text = re.sub(r"https?://[^\s<>\"']+", "<redacted:url>", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        "<redacted:email>",
+        text,
+    )
+    return _trim_text(text, max_chars=max_chars)
+
+
+def _trajectory_guard_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "ok", "clean", "consistent", "present"}:
+            return True
+        if normalized in {"false", "no", "missing", "absent", "inconsistent", "conflict"}:
+            return False
+    return None
+
+
+def _trajectory_guard_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _trajectory_guard_redacted_ref(value: Any, *, default_kind: str = "evidence") -> dict[str, Any]:
+    if isinstance(value, str):
+        return {"kind": default_kind, "ref": _trajectory_guard_safe_text(value, max_chars=160)}
+    if not isinstance(value, dict):
+        return {"kind": default_kind, "ref": _trajectory_guard_safe_text(value, max_chars=160)}
+    allowed = (
+        "id",
+        "kind",
+        "tool",
+        "schema",
+        "report_id",
+        "decision",
+        "status",
+        "digest",
+        "artifact_ref",
+        "ref",
+        "uri",
+        "path",
+        "line_start",
+        "fingerprint",
+    )
+    redacted: dict[str, Any] = {"kind": _trajectory_guard_safe_text(value.get("kind") or default_kind, max_chars=60)}
+    for key in allowed:
+        if key not in value:
+            continue
+        item = value.get(key)
+        if isinstance(item, (int, float, bool)):
+            redacted[key] = item
+        else:
+            redacted[key] = _trajectory_guard_safe_text(item, max_chars=180)
+    return redacted
+
+
+def _trajectory_guard_ref_list(*values: Any) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for value in values:
+        items = value if isinstance(value, list) else ([] if value in (None, "") else [value])
+        for item in items[:25]:
+            refs.append(_trajectory_guard_redacted_ref(item))
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        key = json.dumps(ref, sort_keys=True, ensure_ascii=True)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(ref)
+    return deduped[:50]
+
+
+def _trajectory_guard_normalize_step(step: Any, index: int) -> dict[str, Any]:
+    data = step if isinstance(step, dict) else {"summary_ref": step}
+    tool = _trajectory_guard_safe_text(
+        data.get("tool")
+        or data.get("tool_name")
+        or data.get("source")
+        or data.get("name")
+        or "unknown",
+        max_chars=80,
+    )
+    trust = str(data.get("trust") or data.get("trust_level") or data.get("source_trust") or "untrusted").strip().lower()
+    if trust not in {"trusted", "untrusted", "mixed", "unknown"}:
+        trust = "untrusted" if "untrusted" in trust or "external" in trust else "unknown"
+    scanner = data.get("scanner") if isinstance(data.get("scanner"), dict) else data.get("response_scanner")
+    scanner = scanner if isinstance(scanner, dict) else {}
+    scanner_decision = str(
+        data.get("scanner_decision")
+        or scanner.get("decision")
+        or scanner.get("status")
+        or scanner.get("action")
+        or "none"
+    ).strip().lower()
+    warnings = data.get("warnings") or data.get("scanner_warnings") or scanner.get("warnings") or scanner.get("findings") or []
+    warning_count = len(warnings) if isinstance(warnings, list) else (1 if warnings else 0)
+    consistency = str(data.get("consistency") or data.get("evidence_consistency") or data.get("status") or "unknown").strip().lower()
+    contradiction_count = len(data.get("contradictions") or data.get("conflicts") or []) if isinstance(data.get("contradictions") or data.get("conflicts") or [], list) else 0
+    confidence = _trajectory_guard_float(data.get("confidence") or data.get("trust_score") or data.get("score"))
+    dependency_weight = _trajectory_guard_float(data.get("dependency_weight") or data.get("final_action_weight") or data.get("weight"))
+    supports_final_action = _trajectory_guard_bool(data.get("supports_final_action") or data.get("supports_final"))
+    provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
+    evidence_refs = _trajectory_guard_ref_list(
+        data.get("evidence_ref"),
+        data.get("evidence_refs"),
+        data.get("artifact_ref"),
+        data.get("artifact_refs"),
+        data.get("report_id"),
+        provenance.get("evidence_ref"),
+        provenance.get("artifact_ref"),
+    )
+    provenance_present = bool(evidence_refs or data.get("digest") or provenance.get("digest") or provenance.get("report_id"))
+    return {
+        "index": index,
+        "tool": tool,
+        "trust": trust,
+        "scanner_decision": scanner_decision,
+        "scanner_warning_count": warning_count,
+        "consistency": consistency,
+        "contradiction_count": contradiction_count,
+        "confidence": confidence,
+        "dependency_weight": dependency_weight,
+        "supports_final_action": supports_final_action,
+        "provenance_present": provenance_present,
+        "evidence_refs": evidence_refs,
+    }
+
+
+def _trajectory_guard_final_action(final_action: dict[str, Any] | str | None) -> dict[str, Any]:
+    if isinstance(final_action, dict):
+        data = _redact_audit_value(final_action)
+        safe = data if isinstance(data, dict) else {}
+    elif final_action in (None, ""):
+        safe = {}
+    else:
+        safe = {"summary": _trajectory_guard_safe_text(final_action, max_chars=200)}
+    allowed: dict[str, Any] = {}
+    for key in ("action", "action_type", "operation", "planned_tool", "mode", "decision", "summary", "sensitivity", "requires_human_approval"):
+        if key in safe:
+            value = safe[key]
+            allowed[key] = value if isinstance(value, bool) else _trajectory_guard_safe_text(value, max_chars=120)
+    source_tools = safe.get("source_tools") or safe.get("depends_on_tools") or []
+    if isinstance(source_tools, list):
+        allowed["source_tools"] = [_trajectory_guard_safe_text(item, max_chars=80) for item in source_tools[:20]]
+    evidence_refs = _trajectory_guard_ref_list(safe.get("evidence_ref"), safe.get("evidence_refs"), safe.get("artifact_ref"), safe.get("artifact_refs"))
+    if evidence_refs:
+        allowed["evidence_refs"] = evidence_refs
+    return allowed
+
+
+def _trajectory_guard_sensitivity(final_action: dict[str, Any], requested: str = "auto") -> str:
+    requested = str(requested or "auto").strip().lower()
+    if requested in {"low", "medium", "high", "critical"}:
+        return requested
+    explicit = str(final_action.get("sensitivity") or "").strip().lower()
+    if explicit in {"low", "medium", "high", "critical"}:
+        return explicit
+    action_fields = {
+        key: final_action.get(key)
+        for key in ("action", "action_type", "operation", "planned_tool", "mode", "decision", "summary")
+        if key in final_action
+    }
+    blob = json.dumps(action_fields, sort_keys=True, ensure_ascii=True).lower()
+    if any(term in blob for term in TRAJECTORY_TRUST_GUARD_CRITICAL_TERMS):
+        return "critical"
+    if any(term in blob for term in TRAJECTORY_TRUST_GUARD_SENSITIVE_TERMS):
+        return "high"
+    if any(term in blob for term in ("model_forward", "model-context", "network", "publish", "readiness")):
+        return "medium"
+    return "low"
+
+
+def _trajectory_guard_features(steps: list[dict[str, Any]], final_action: dict[str, Any], sensitivity: str) -> dict[str, Any]:
+    tools = [step["tool"] for step in steps if step.get("tool")]
+    unique_tools = sorted(set(tools))
+    untrusted_steps = [step for step in steps if step.get("trust") != "trusted"]
+    scanner_warning_count = sum(int(step.get("scanner_warning_count") or 0) for step in steps)
+    scanner_block_count = sum(1 for step in steps if step.get("scanner_decision") in TRAJECTORY_TRUST_GUARD_BLOCK_DECISIONS)
+    scanner_warn_count = sum(1 for step in steps if step.get("scanner_decision") in TRAJECTORY_TRUST_GUARD_WARN_DECISIONS)
+    inconsistent_steps = [
+        step
+        for step in steps
+        if step.get("consistency") in {"inconsistent", "conflict", "contradiction", "unstable"}
+        or int(step.get("contradiction_count") or 0) > 0
+    ]
+    confidence_by_tool: dict[str, list[float]] = {}
+    for step in steps:
+        if isinstance(step.get("confidence"), float):
+            confidence_by_tool.setdefault(str(step.get("tool")), []).append(float(step["confidence"]))
+    confidence_swings = {
+        tool: round(max(values) - min(values), 3)
+        for tool, values in confidence_by_tool.items()
+        if len(values) > 1 and max(values) - min(values) >= 0.45
+    }
+    max_dependency = max((float(step.get("dependency_weight") or 0.0) for step in steps), default=0.0)
+    final_source_tools = final_action.get("source_tools") if isinstance(final_action.get("source_tools"), list) else []
+    single_tool_dependency = bool(
+        steps
+        and (
+            len(unique_tools) <= 1
+            or max_dependency >= 0.7
+            or (sensitivity in {"high", "critical"} and len(final_source_tools) == 1)
+        )
+    )
+    high_confidence_untrusted_dependency = any(
+        step.get("trust") != "trusted"
+        and ((step.get("confidence") or 0.0) >= 0.8 or (step.get("dependency_weight") or 0.0) >= 0.5 or step.get("supports_final_action") is True)
+        for step in steps
+    )
+    missing_provenance_count = sum(1 for step in steps if not step.get("provenance_present"))
+    trust_escalation = bool(high_confidence_untrusted_dependency and sensitivity in {"high", "critical"})
+    return {
+        "step_count": len(steps),
+        "source_diversity": {"tool_count": len(unique_tools), "tools": unique_tools[:20]},
+        "untrusted_tool_count": len({step["tool"] for step in untrusted_steps}),
+        "single_tool_dependency": single_tool_dependency,
+        "max_dependency_weight": round(max_dependency, 3),
+        "scanner_warning_accumulation": scanner_warning_count >= 2 or scanner_warn_count >= 2 or scanner_block_count > 0,
+        "scanner_warning_count": scanner_warning_count,
+        "scanner_warn_decision_count": scanner_warn_count,
+        "scanner_block_decision_count": scanner_block_count,
+        "evidence_consistency": "inconsistent" if inconsistent_steps or confidence_swings else "consistent",
+        "inconsistent_step_count": len(inconsistent_steps),
+        "confidence_swings": confidence_swings,
+        "high_confidence_untrusted_dependency": high_confidence_untrusted_dependency,
+        "trust_escalation": trust_escalation,
+        "missing_provenance_count": missing_provenance_count,
+        "final_action_high_risk": sensitivity in {"high", "critical"},
+    }
+
+
+def _trajectory_guard_decision(features: dict[str, Any], sensitivity: str) -> tuple[str, int, list[str]]:
+    score = {"low": 5, "medium": 15, "high": 30, "critical": 40}.get(sensitivity, 15)
+    reasons: list[str] = []
+
+    def add(reason: str, weight: int) -> None:
+        nonlocal score
+        reasons.append(reason)
+        score += weight
+
+    if features.get("single_tool_dependency"):
+        add("single_tool_dependency", 20)
+    if features.get("scanner_warning_accumulation"):
+        add("scanner_warning_accumulation", 20)
+    if int(features.get("scanner_block_decision_count") or 0) > 0:
+        add("scanner_block_decision", 30)
+    if features.get("evidence_consistency") != "consistent":
+        add("inconsistent_tool_feedback", 25)
+    if features.get("high_confidence_untrusted_dependency"):
+        add("high_confidence_untrusted_dependency", 15)
+    if features.get("trust_escalation"):
+        add("trust_escalation_before_sensitive_action", 15)
+    if int(features.get("missing_provenance_count") or 0) > 0:
+        add("missing_provenance", 10)
+    if features.get("final_action_high_risk") and reasons:
+        add("high_risk_final_action", 15)
+    score = min(100, score)
+    if score >= 75 or int(features.get("scanner_block_decision_count") or 0) > 0:
+        decision = "block"
+    elif score >= 35:
+        decision = "warn"
+    else:
+        decision = "pass"
+    return decision, score, list(dict.fromkeys(reasons))
+
+
+@mcp.tool()
+def trajectory_trust_guard(
+    trajectory_summaries: list[dict[str, Any]] | None = None,
+    proposed_final_action: dict[str, Any] | str | None = None,
+    scanner_outcomes: list[dict[str, Any]] | None = None,
+    policy_decisions: list[dict[str, Any]] | None = None,
+    evidence_refs: list[dict[str, Any] | str] | None = None,
+    final_action_sensitivity: str = "auto",
+    log_audit: bool = False,
+) -> dict[str, Any]:
+    """Read-only advisory guard for over-trust in untrusted tool trajectories before sensitive final actions."""
+    steps = [
+        _trajectory_guard_normalize_step(step, index)
+        for index, step in enumerate(trajectory_summaries or [])
+    ]
+    if scanner_outcomes:
+        for offset, outcome in enumerate(scanner_outcomes[:25], start=len(steps)):
+            if isinstance(outcome, dict):
+                scanner_step = {"tool": outcome.get("tool") or outcome.get("tool_name") or "scanner_evidence", "trust": "trusted", "scanner": outcome, "provenance": outcome}
+            else:
+                scanner_step = {"tool": "scanner_evidence", "trust": "trusted", "scanner": {"status": outcome}}
+            steps.append(_trajectory_guard_normalize_step(scanner_step, offset))
+    final_action = _trajectory_guard_final_action(proposed_final_action)
+    sensitivity = _trajectory_guard_sensitivity(final_action, final_action_sensitivity)
+    features = _trajectory_guard_features(steps, final_action, sensitivity)
+    decision, risk_score, reasons = _trajectory_guard_decision(features, sensitivity)
+    risk_level = "high" if risk_score >= 75 else "medium" if risk_score >= 35 else "low"
+    redacted_refs = _trajectory_guard_ref_list(evidence_refs, final_action.get("evidence_refs"))
+    for step in steps:
+        redacted_refs.extend(step.get("evidence_refs", []))
+    if policy_decisions:
+        redacted_refs.extend(_trajectory_guard_ref_list(policy_decisions))
+    redacted_refs = _trajectory_guard_ref_list(redacted_refs)
+    safe_next_actions = {
+        "pass": ["Proceed only if the final action still matches the declared workflow and existing hard gates pass."],
+        "warn": ["Re-check provenance and source diversity before the high-risk or final action; consider rerunning response scanner and mutation_step_guard."],
+        "block": ["Do not execute the final action from this trajectory; require independent evidence, fresh scanner results, or human review before retrying."],
+    }[decision]
+    payload: dict[str, Any] = {
+        "schema": "trajectory_trust_guard.v1",
+        "read_only": True,
+        "advisory_only": True,
+        "ok": decision == "pass",
+        "decision": decision,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "final_action_sensitivity": sensitivity,
+        "trajectory_features": features,
+        "redacted_reasons": reasons,
+        "redacted_evidence_refs": redacted_refs[:50],
+        "safe_next_actions": safe_next_actions,
+        "privacy_metadata": {
+            "raw_prompts_persisted": False,
+            "raw_tool_outputs_persisted": False,
+            "stores_only_caller_supplied_redacted_summaries": True,
+            "secrets_redacted": True,
+            "host_absolute_paths_redacted": True,
+            "repository_boundary_enforced": True,
+            "network_access": False,
+        },
+        "input_summary": {
+            "trajectory_step_count": len(trajectory_summaries or []),
+            "scanner_outcome_count": len(scanner_outcomes or []),
+            "policy_decision_count": len(policy_decisions or []),
+            "final_action_present": bool(final_action),
+        },
+        "linked_gates": {
+            "mutation_step_guard": "Run before write/delete/git/workspace mutation when the planned final action is mutating.",
+            "release_readiness": "Use as release evidence; trajectory_trust_guard is advisory and does not replace readiness checks.",
+            "governance_report": "Include the compact decision and redacted evidence refs in governance summaries for high-risk workflows.",
+        },
+    }
+    if log_audit:
+        _append_audit_event(
+            "trajectory_trust_guard",
+            ["read-only", "governance"],
+            payload["ok"],
+            {
+                "decision": decision,
+                "risk_score": risk_score,
+                "risk_level": risk_level,
+                "final_action_sensitivity": sensitivity,
+                "reasons": reasons,
+                "input_summary": payload["input_summary"],
+            },
+            decision,
+        )
+    return payload
 
 
 MUTATION_STEP_GUARD_MUTATING_MODES = {

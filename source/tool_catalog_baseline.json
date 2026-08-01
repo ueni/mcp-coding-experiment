@@ -468,7 +468,7 @@
     "public_metadata_only": true,
     "resource_payloads_hashed": false
   },
-  "tool_count": 45,
+  "tool_count": 46,
   "tools": [
     {
       "digest": "sha256:60199c52665c1f037931f57156a45e2eb8275468163db9c794a2a23a784e5a7c",
@@ -14064,6 +14064,395 @@
       "name": "tool_output_contracts"
     },
     {
+      "digest": "sha256:8ec5a5d84d8d294bee93ecb500972fc0d63971a646ad482acf80252343e46867",
+      "metadata": {
+        "documentation": [
+          {
+            "label": "README public MCP surface",
+            "path": "README.md#tool-catalog-by-category"
+          },
+          {
+            "label": "Trajectory trust guard",
+            "path": "docs/trajectory-trust-guard.md"
+          }
+        ],
+        "list_tools": {
+          "description": "Read-only advisory guard for over-trust in untrusted tool trajectories before sensitive final actions.",
+          "execution": null,
+          "icons": null,
+          "input_schema": {
+            "properties": {
+              "evidence_refs": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Evidence Refs"
+              },
+              "final_action_sensitivity": {
+                "default": "auto",
+                "title": "Final Action Sensitivity",
+                "type": "string"
+              },
+              "log_audit": {
+                "default": false,
+                "title": "Log Audit",
+                "type": "boolean"
+              },
+              "policy_decisions": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Policy Decisions"
+              },
+              "proposed_final_action": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Proposed Final Action"
+              },
+              "scanner_outcomes": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Scanner Outcomes"
+              },
+              "trajectory_summaries": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trajectory Summaries"
+              }
+            },
+            "title": "trajectory_trust_guardArguments",
+            "type": "object"
+          },
+          "mcp_annotations": null,
+          "meta": null,
+          "name": "trajectory_trust_guard",
+          "output_schema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "decision": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "final_action_sensitivity": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              "input_summary": {
+                "type": "object"
+              },
+              "linked_gates": {
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "privacy_metadata": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "redacted_evidence_refs": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "redacted_reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "risk_level": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ],
+                "type": "string"
+              },
+              "risk_score": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "trajectory_trust_guard.v1",
+                "type": "string"
+              },
+              "trajectory_features": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "advisory_only",
+              "ok",
+              "decision",
+              "risk_score",
+              "final_action_sensitivity",
+              "trajectory_features",
+              "redacted_evidence_refs",
+              "privacy_metadata"
+            ],
+            "type": "object"
+          },
+          "title": null
+        },
+        "output_contract": {
+          "errorOutputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "error": {
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "retryable": {
+                    "type": "boolean"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "ok": {
+                "const": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "experimentalFields": [
+            "risk_level",
+            "redacted_reasons",
+            "safe_next_actions",
+            "input_summary",
+            "linked_gates"
+          ],
+          "outputSchema": {
+            "additionalProperties": true,
+            "properties": {
+              "advisory_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "decision": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "block"
+                ],
+                "type": "string"
+              },
+              "final_action_sensitivity": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              "input_summary": {
+                "type": "object"
+              },
+              "linked_gates": {
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "privacy_metadata": {
+                "type": "object"
+              },
+              "read_only": {
+                "const": true,
+                "type": "boolean"
+              },
+              "redacted_evidence_refs": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "redacted_reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "risk_level": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ],
+                "type": "string"
+              },
+              "risk_score": {
+                "maximum": 100,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "safe_next_actions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "schema": {
+                "const": "trajectory_trust_guard.v1",
+                "type": "string"
+              },
+              "trajectory_features": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema",
+              "read_only",
+              "advisory_only",
+              "ok",
+              "decision",
+              "risk_score",
+              "final_action_sensitivity",
+              "trajectory_features",
+              "redacted_evidence_refs",
+              "privacy_metadata"
+            ],
+            "type": "object"
+          },
+          "schema": "tool_output_contracts.v1",
+          "stableFields": [
+            "schema",
+            "read_only",
+            "advisory_only",
+            "ok",
+            "decision",
+            "risk_score",
+            "final_action_sensitivity",
+            "trajectory_features",
+            "redacted_evidence_refs",
+            "privacy_metadata"
+          ],
+          "tool": "trajectory_trust_guard"
+        },
+        "security": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "categories": [
+            "read-only",
+            "governance"
+          ],
+          "mode": "",
+          "mutation_capable": false,
+          "required_scope": "mcp:read",
+          "tool": "trajectory_trust_guard"
+        }
+      },
+      "name": "trajectory_trust_guard"
+    },
+    {
       "digest": "sha256:0ca67e7edeb84f29e6fde1ce39ab28f779f370cce333c32e04a7dee1be2d2097",
       "metadata": {
         "documentation": [
@@ -16997,5 +17386,5 @@
       "name": "workspace_transaction"
     }
   ],
-  "whole_catalog_digest": "sha256:df162d934036ed61c1f76c56d2d36fc3d15e0ec5765c964776eb8d2ab1a6dba8"
+  "whole_catalog_digest": "sha256:ea13eeb429a7fd076deccc24196f41f7886f2ca573cd1d22ef852457d9da9cca"
 }
