@@ -24,6 +24,7 @@ SPDX-License-Identifier: MIT
 - [Agent quality delta](./agent-quality-delta.md) - deterministic read-only base/head maintainability delta gate for autonomous PRs.
 - [Workflow reminder packets](./workflow-reminder.md) - deterministic read-only instruction-fade reminder packets before high-risk planned actions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
+- [Workflow event-log checkpoint report](./workflow-event-log-report.md) - read-only typed workflow event/checkpoint projection, artifact lineage, and local fork diff audit view.
 - [Reference-based result handles](./result-references.md) - opt-in `mcp_result_reference.v1` handles and resolver for large read-only outputs.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
@@ -73,6 +74,7 @@ This index lists documentation ownership and status.
 - [HTTP/MCP contract parity report](./http-mcp-contract-parity.md) (`docs/http-mcp-contract-parity.md`) - Status: `prototype`
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) (`docs/tool-contract-fuzzing.md`) - Status: `prototype`
 - [Workflow lineage manifests](./workflow-lineage.md) (`docs/workflow-lineage.md`) - Status: `prototype`
+- [Workflow event-log checkpoint report](./workflow-event-log-report.md) (`docs/workflow-event-log-report.md`) - Status: `prototype`
 - [Workflow policy plan preflight](./workflow-policy-plan.md) (`docs/workflow-policy-plan.md`) - Status: `prototype`
 - [Policy-as-code governance decision adapter](./policy-governance-decision.md) (`docs/policy-governance-decision.md`) - Status: `prototype`
 - [Agent quality delta](./agent-quality-delta.md) (`docs/agent-quality-delta.md`) - Status: `prototype`

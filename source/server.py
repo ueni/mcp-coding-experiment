@@ -136,6 +136,10 @@ from source.tool_catalog_integrity import (
     integrity_report,
     load_baseline as load_tool_catalog_baseline,
 )
+from source.workflow_event_log import (
+    DEFAULT_EVENT_LOG as WORKFLOW_EVENT_LOG_DEFAULT_PATH,
+    build_workflow_checkpoint_report,
+)
 from source.version_metadata import (
     mcp_coding_experiment_version,
     runtime_image_version,
@@ -442,6 +446,7 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "artifact_provenance": {"categories": ["read-only"]},
     "result_reference_resolve": {"categories": ["read-only", "governance"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
+    "workflow_event_log_report": {"categories": ["read-only", "governance"]},
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
     "mutation_step_guard": {"categories": ["read-only", "governance"]},
@@ -36515,6 +36520,39 @@ def memory_governance_report(
         )
         _otel_set_result_attributes(span, result)
         return result
+
+@mcp.tool()
+def workflow_event_log_report(
+    event_log_path: str = WORKFLOW_EVENT_LOG_DEFAULT_PATH,
+    fork_id: str = "",
+    parent_fork_id: str = "",
+    include_events: bool = True,
+) -> dict[str, Any]:
+    """Project a redacted workflow event log into checkpoints, timeline, lineage, and fork diff."""
+    _require_git_repo()
+    requested_path = event_log_path.strip() or WORKFLOW_EVENT_LOG_DEFAULT_PATH
+    path = _resolve_repo_path(requested_path)
+    display_path = str(path.relative_to(REPO_PATH))
+    arguments = {
+        "event_log_path": display_path,
+        "fork_id": fork_id,
+        "parent_fork_id": parent_fork_id,
+        "include_events": include_events,
+    }
+    with _otel_span(
+        "mcp.tool.workflow_event_log_report",
+        _otel_tool_attributes("workflow_event_log_report", arguments),
+    ) as span:
+        result = build_workflow_checkpoint_report(
+            path,
+            display_path=display_path,
+            fork_id=fork_id,
+            parent_fork_id=parent_fork_id,
+            include_events=include_events,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
 
 @mcp.tool()
 def workflow_lineage(mode: str = "verify", manifest_path: str = "") -> dict[str, Any]:

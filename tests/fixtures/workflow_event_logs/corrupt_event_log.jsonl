@@ -1,0 +1,3 @@
+{"sequence":1,"event_id":"evt-ok","event_type":"workflow.started","timestamp":"2026-05-31T08:02:00Z","workflow_id":"wf-corrupt","status":"running"}
+this is not json
+{"sequence":2,"event_id":"evt-after-corrupt","event_type":"workflow.ended","timestamp":"2026-05-31T08:02:01Z","workflow_id":"wf-corrupt","status":"completed"}
