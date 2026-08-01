@@ -53,6 +53,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "agent_security_delta_report",
                 "security_root_cause_evidence",
                 "mcp_threat_model_report",
+                "agent_lifespan_drift_report",
                 "governance_report",
                 "memory_governance_report",
                 "self_optimization_report",
@@ -172,6 +173,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
             "agent_security_delta": self.server.agent_security_delta(base_ref="HEAD", head_ref="HEAD", export=False),
             "agent_security_delta_report": self.server.agent_security_delta_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "security_root_cause_evidence": self.server.security_root_cause_evidence(base_ref="HEAD", head_ref="HEAD"),
+            "agent_lifespan_drift_report": self.server.agent_lifespan_drift_report(export=False),
             "governance_report": self.server.governance_report(base_ref="HEAD", head_ref="HEAD", export=False),
             "observation_compression_report": self.server.observation_compression_report(
                 include_traces=False,

@@ -18,6 +18,7 @@ The first-slice report schema is `governance_report.v1`. It includes:
 - inline `ci_workflow_security_report` summary with checked workflow count, status, and active high/medium finding counts;
 - compact redacted `secret_exposure_report` summary with new high-confidence secret blockers for governance/release review;
 - companion `mcp_threat_model_report` workflow for STRIDE/DREAD fixture regressions when a focused MCP threat-model view is needed;
+- compact `agent_lifespan_drift` longitudinal fixture summary for memory/workflow-card revision, interference, compression, and utilization drift;
 - compact `tool_catalog_integrity` public-MCP-surface status, baseline/current digests, tool/prompt/resource counts, drift counts, and advisory lint counts without embedding the full catalog;
 - compact `http_mcp_contract_parity` status comparing repository-local HTTP/HarnessAPI-style endpoint expectations with MCP tools/list input/output schema digests;
 - snapshot/rollback references from the state snapshot index when available;
@@ -72,7 +73,7 @@ The lineage manifest deliberately stores only safe identity inputs: repository-r
 
 `release_readiness(summary_mode="quick")` surfaces `ci_workflow_security`, non-blocking `governance_report`, `workflow_policy_plan`, and `dependency_security` checks showing whether recent governance/workflow-policy/dependency evidence exists and whether dependency advisory data was clean, vulnerable, stale, skipped, network-disabled, or scanner-unavailable. Missing reports or disabled advisory lookup are informational by default and do not fail release readiness unless dependency-security blocking is explicitly enabled.
 
-`governance_report` also embeds a compact `memory_governance` summary from `memory_governance_report` so stale, sensitive, untrusted, or under-provenanced repository memory can be noticed without returning raw memory content.
+`governance_report` also embeds a compact `memory_governance` summary from `memory_governance_report` so stale, sensitive, untrusted, or under-provenanced repository memory can be noticed without returning raw memory content. The separate `agent_lifespan_drift` compact summary is additive: it runs deterministic synthetic longitudinal probes and reports only counts/status/stage buckets suitable for governance inclusion.
 
 `http_mcp_contract_parity` is advisory and additive. It does not replace existing schema-backed output validation, `tool_catalog_integrity`, or ToolFuzz-style contract checks; it only reports whether repo-local HTTP contract documentation still matches declared MCP input/output schema digests.
 
