@@ -25,11 +25,14 @@ SPDX-License-Identifier: MIT
 - [Agent quality delta](./agent-quality-delta.md) - deterministic read-only base/head maintainability delta gate for autonomous PRs.
 - [Workflow reminder packets](./workflow-reminder.md) - deterministic read-only instruction-fade reminder packets before high-risk planned actions.
 - [Workflow diagnostics](./workflow-diagnostics.md) - read-only critical-step diagnostics for failed MCP workflows.
+- [Workflow event-log checkpoint report](./workflow-event-log-report.md) - read-only typed workflow event/checkpoint projection, artifact lineage, and local fork diff audit view.
 - [Reference-based result handles](./result-references.md) - opt-in `mcp_result_reference.v1` handles and resolver for large read-only outputs.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
+- [Workflow phase telemetry](./workflow-phase-telemetry.md) - read-only phase-level workload telemetry for redacted MCP workflow/tool-call summaries.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [AGENTS.md context health report](./agents-context-health.md) - read-only minimal-context budget, duplication, stale guidance, risky global instruction, and move-candidate lint.
 - [Mutation step guard](./mutation-step-guard.md) - read-only final checkpoint before workspace/git mutation steps.
+- [Trajectory trust guard](./trajectory-trust-guard.md) - read-only advisory report for over-trusting untrusted tool trajectories before sensitive final actions.
 - [Workflow selection cards](./workflow-selection.md) - read-only workflow-card retrieval for choosing existing MCP workflows/prompts/tools.
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) - read-only `skill_pack_score` risk/fit decisions for workflow cards and offline imported-skill fixtures.
 - [Skill privilege scope](./skill-privilege-scope.md) - read-only task-conditioned least-privilege action-node analysis for imported cards and skills.
@@ -74,6 +77,7 @@ This index lists documentation ownership and status.
 - [HTTP/MCP contract parity report](./http-mcp-contract-parity.md) (`docs/http-mcp-contract-parity.md`) - Status: `prototype`
 - [MCP tool contract behavioral fuzzing](./tool-contract-fuzzing.md) (`docs/tool-contract-fuzzing.md`) - Status: `prototype`
 - [Workflow lineage manifests](./workflow-lineage.md) (`docs/workflow-lineage.md`) - Status: `prototype`
+- [Workflow event-log checkpoint report](./workflow-event-log-report.md) (`docs/workflow-event-log-report.md`) - Status: `prototype`
 - [Workflow policy plan preflight](./workflow-policy-plan.md) (`docs/workflow-policy-plan.md`) - Status: `prototype`
 - [Policy-as-code governance decision adapter](./policy-governance-decision.md) (`docs/policy-governance-decision.md`) - Status: `prototype`
 - [Agent quality delta](./agent-quality-delta.md) (`docs/agent-quality-delta.md`) - Status: `prototype`
@@ -88,6 +92,7 @@ This index lists documentation ownership and status.
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) (`docs/opentelemetry-tracing.md`) - Status: `prototype`
 - [Hash-pinned dependency locks](./dependency-locks.md) (`docs/dependency-locks.md`) - Status: `operational guidance`
 - [Self-optimization efficiency report](./self-optimization-report.md) (`docs/self-optimization-report.md`) - Status: `prototype`
+- [Workflow phase telemetry](./workflow-phase-telemetry.md) (`docs/workflow-phase-telemetry.md`) - Status: `prototype`
 - [Build download cache verification](./build-download-cache.md) (`docs/build-download-cache.md`) - Status: `operational verification`
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
 - [MCP tool-response scanner](./tool-response-scanner.md) (`docs/tool-response-scanner.md`) - Status: `prototype`
@@ -99,6 +104,7 @@ This index lists documentation ownership and status.
 - [Skill-pack risk and fit scoring](./skill-pack-score.md) (`docs/skill-pack-score.md`) - Status: `prototype`
 - [Skill privilege scope](./skill-privilege-scope.md) (`docs/skill-privilege-scope.md`) - Status: `prototype`
 - [Mutation step guard](./mutation-step-guard.md) (`docs/mutation-step-guard.md`) - Status: `prototype`
+- [Trajectory trust guard](./trajectory-trust-guard.md) (`docs/trajectory-trust-guard.md`) - Status: `prototype`
 - [Context retrieval regression suite](./context-retrieval-regression.md) (`docs/context-retrieval-regression.md`) - Status: `prototype`
 - [E2E MCP workflow benchmarks](./e2e-mcp-workflow-benchmarks.md) (`docs/e2e-mcp-workflow-benchmarks.md`) - Status: `prototype`
 - [Agent execution modes](./execution-modes.md) (`docs/execution-modes.md`) - Status: `operational guidance`

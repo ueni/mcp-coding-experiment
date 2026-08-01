@@ -130,7 +130,7 @@ Public tools:
 - `policy_insights`
 - `workflow_task`
 - `task_status`
-- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `agent_security_delta`, `agent_security_delta_report`, `security_root_cause_evidence`, `mcp_threat_model_report`, `agent_lifespan_drift_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `observation_compression_report`, `agents_context_health`, `artifact_provenance`, `result_reference_resolve`, `workflow_diagnostics`, `workflow_lineage`, `interaction_invariant_audit`, `workflow_policy_plan`, `skill_privilege_scope`, `policy_governance_decision`, `workflow_reminder`
+- Schema-backed core tools: `repo_info`, `roots_diagnostics`, `model_assisted_summary`, `runtime_state`, `git_status`, `grep`, `find_paths`, `read_snippet`, `summarize_diff`, `risk_scoring`, `workspace_transaction`, `policy_simulator`, `clarification_gate`, `release_readiness`, `agent_quality_delta`, `tool_catalog_integrity`, `dependency_security_report`, `ci_workflow_security_report`, `secret_exposure_report`, `agent_security_delta`, `agent_security_delta_report`, `security_root_cause_evidence`, `mcp_threat_model_report`, `agent_lifespan_drift_report`, `governance_report`, `memory_governance_report`, `self_optimization_report`, `workflow_phase_telemetry`, `observation_compression_report`, `agents_context_health`, `artifact_provenance`, `result_reference_resolve`, `workflow_diagnostics`, `workflow_event_log_report`, `workflow_lineage`, `interaction_invariant_audit`, `trajectory_trust_guard`, `workflow_policy_plan`, `skill_privilege_scope`, `policy_governance_decision`, `workflow_reminder`
 - Public workflow tool: `test_impact_map` for static Python test-impact map query/refresh
 - Public async handle tools: `workflow_task` starts supported long-running workflows and `task_status` polls redacted persisted status under `.codebase-tooling-mcp/tasks/`.
 
@@ -144,6 +144,8 @@ Public tools:
 
 `mutation_step_guard` is a read-only final checkpoint before planned workspace/git mutations. It takes declared intent, target files, expected diff shape, rollback/snapshot evidence, tests or impact-gate status, invariant-audit status, and freshness metadata, then returns `allow`, a concrete missing-precondition decision, `needs_human_approval`, or `deny` without executing the mutation.
 
+`trajectory_trust_guard` is a read-only advisory guard for sensitive final actions that depend on tool-call trajectories. It scores source diversity, single-tool dependency, scanner-warning accumulation, inconsistent feedback, untrusted high-confidence dependency, provenance gaps, and final-action sensitivity, then returns `pass`, `warn`, or `block` with redacted evidence references and optional handoff links to existing gates without persisting raw prompts or tool outputs.
+
 `workflow_reminder` is a read-only advisory risk-reminder packet for instruction fade-out risk before high-risk planned actions. It emits `workflow_reminder.v1` with remembered constraints, an existing required next gate, safe next actions, suppress-if-satisfied evidence, and redacted emission/suppression evidence without granting permission or replacing hard gates.
 
 `policy_insights` is a read-only reporting path for the source-controlled `mcp_policy_insights.v1` regression bank. It exposes only stable IDs, summaries, expected decisions, rationale, source, and remediation so clients can inspect policy coverage without seeing raw triggers or secret-like fixture values.
@@ -155,6 +157,8 @@ Public tools:
 `mcp_threat_model_report` is the offline public governance tool for MCP trust-boundary review. It maps host/client, LLM, server, repository, and external-service boundaries to STRIDE/DREAD-style threats, returns the checked-in deterministic DREAD rubric, links existing controls to risks, analyzes secret-free poisoned-tool fixtures including post-handshake `notifications/tools/list_changed` plus repeated `tools/list` mutations, and can compare a local baseline for high-severity uncovered regressions without exposing secrets or raw external state.
 
 `self_optimization_report` is the direct public tool for the software team's self-optimization loop on this repository. It stays offline/repo-local while aggregating redacted audit events, local spans, task handles, cache metadata, and local Git refs into usage, savings, throughput, bottleneck, duplicate-suppressed recommendation, and advisory optimization-integrity summaries. The nested `optimization_integrity_report` checks suspicious proxy wins before efficiency metrics are reused for optimization issues or release-gate policy.
+
+`workflow_phase_telemetry` is the read-only phase telemetry slice for redacted MCP workflow/tool-call summaries. It classifies workload into discover/read, analyze/plan, mutate/write, verify/test, review/release, cleanup, and other phases, then reports cache/repeated-read signals, guard/test/release markers, ordering anomalies, hashed trace references, and optimization hints without returning raw prompts, raw tool outputs, file contents, secrets, or absolute host paths.
 
 `observation_compression_report` is the standalone read-only observation-compression audit path. It classifies stored workflow/task/tool observations into conservative preserve/summarize/deduplicate/drop/redact buckets, reports retained critical signals and estimated savings, and never deletes raw evidence.
 
@@ -268,7 +272,9 @@ Restore:
 - Risk score thresholds.
 - Failed-workflow attribution from `workflow_diagnostics` when audit events or caller-supplied trajectories show blocked steps.
 - First-slice replay lineage for `governance_report` via redacted `workflow_lineage.v1` manifests and read-only `workflow_lineage(mode="verify")` drift reports.
+- Read-only event-log checkpoint projection through `workflow_event_log_report`, which reconstructs timeline/artifact lineage and fork-vs-parent diffs from local redacted JSONL events without rerunning tools or replaying transport frames.
 - Multi-turn invariant checks from `interaction_invariant_audit` before mutation or readiness summaries, without storing conversation snippets by default.
+- Trajectory trust checks from `trajectory_trust_guard` before sensitive final actions that may over-trust untrusted, inconsistent, or warning-heavy tool feedback.
 - Event-triggered reminders from `workflow_reminder` before missing rollback, stale-test readiness, secret-sensitive, scope-expansion, or repeated-failed-mutation risk boundaries.
 - Required artifact/report presence, including `.codebase-tooling-mcp/reports/TEST_IMPACT_MAP.json` when the impact-map workflow is used.
 - Unmapped changed files and coverage gaps that require manual review or new tests.
@@ -282,7 +288,7 @@ Restore:
 ### 9.1 Result Handles and Persistent Reports
 
 - `result_handle` enables referential linking of prior tool outputs.
-- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison. `dependency_security_report` writes dependency-security JSON/SBOM artifacts with adjacent local provenance sidecars, `governance_report` writes adjacent local provenance sidecars plus a `workflow_lineage.v1` manifest and opt-in result-reference artifacts, `artifact_provenance` verifies report/snapshot sidecars read-only, `result_reference_resolve` fetches repository-local result handles only after boundary/expiry/hash checks, and `workflow_lineage` verifies governance-report lineage drift read-only. `TEST_IMPACT_MAP.json` is the refreshable static Python test-impact report consumed by `test_impact_map` and preferred by `impact_tests` when fresh.
+- `.codebase-tooling-mcp/reports` stores generated artifacts for later review/comparison. `dependency_security_report` writes dependency-security JSON/SBOM artifacts with adjacent local provenance sidecars, `governance_report` writes adjacent local provenance sidecars plus a `workflow_lineage.v1` manifest and opt-in result-reference artifacts, `artifact_provenance` verifies report/snapshot sidecars read-only, `result_reference_resolve` fetches repository-local result handles only after boundary/expiry/hash checks, `workflow_event_log_report` projects local workflow-event checkpoints read-only, and `workflow_lineage` verifies governance-report lineage drift read-only. `TEST_IMPACT_MAP.json` is the refreshable static Python test-impact report consumed by `test_impact_map` and preferred by `impact_tests` when fresh.
 
 ### 9.2 Replay and Memory
 

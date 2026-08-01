@@ -136,6 +136,10 @@ from source.tool_catalog_integrity import (
     integrity_report,
     load_baseline as load_tool_catalog_baseline,
 )
+from source.workflow_event_log import (
+    DEFAULT_EVENT_LOG as WORKFLOW_EVENT_LOG_DEFAULT_PATH,
+    build_workflow_checkpoint_report,
+)
 from source.version_metadata import (
     mcp_coding_experiment_version,
     runtime_image_version,
@@ -440,14 +444,17 @@ TOOL_SECURITY_METADATA: dict[str, dict[str, Any]] = {
     "governance_report": {"categories": ["read-only"]},
     "memory_governance_report": {"categories": ["read-only", "governance"]},
     "self_optimization_report": {"categories": ["read-only"]},
+    "workflow_phase_telemetry": {"categories": ["read-only"]},
     "observation_compression_report": {"categories": ["read-only"]},
     "agents_context_health": {"categories": ["read-only", "governance"]},
     "artifact_provenance": {"categories": ["read-only"]},
     "result_reference_resolve": {"categories": ["read-only", "governance"]},
     "workflow_diagnostics": {"categories": ["read-only"]},
+    "workflow_event_log_report": {"categories": ["read-only", "governance"]},
     "workflow_lineage": {"categories": ["read-only"]},
     "interaction_invariant_audit": {"categories": ["read-only", "governance"]},
     "mutation_step_guard": {"categories": ["read-only", "governance"]},
+    "trajectory_trust_guard": {"categories": ["read-only", "governance"]},
     "test_impact_map": {"categories": ["read-only"], "mode_categories": {"refresh": ["write"]}},
     "continue_model_fallback_configure": {"categories": ["write"]},
     "apply_unified_diff": {"categories": ["write", "git mutation"]},
@@ -5117,6 +5124,7 @@ def _aggregate_audit_events(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 SELF_OPTIMIZATION_REPORT_SCHEMA = "self_optimization_report.v1"
+WORKFLOW_PHASE_TELEMETRY_SCHEMA = "workflow_phase_telemetry.v1"
 OBSERVATION_COMPRESSION_REPORT_SCHEMA = "observation_compression_report.v1"
 OPTIMIZATION_INTEGRITY_REPORT_SCHEMA = "optimization_integrity_report.v1"
 SELF_OPTIMIZATION_NO_ATTRIBUTION = "unattributed"
@@ -8581,6 +8589,653 @@ def _observation_compression_report_impl(
         report["_meta"] = _artifact_meta([])
     return report
 
+WORKFLOW_PHASE_ORDER = (
+    "discover_read",
+    "analyze_plan",
+    "mutate_write",
+    "verify_test",
+    "review_release",
+    "cleanup",
+    "other",
+)
+WORKFLOW_PHASE_LABELS = {
+    "discover_read": "discover/read",
+    "analyze_plan": "analyze/plan",
+    "mutate_write": "mutate/write",
+    "verify_test": "verify/test",
+    "review_release": "review/release",
+    "cleanup": "cleanup",
+    "other": "other",
+}
+WORKFLOW_PHASE_READ_TOOLS = {
+    "find_paths",
+    "grep",
+    "read_snippet",
+    "repo_info",
+    "roots_diagnostics",
+    "runtime_state",
+    "tool_annotations",
+    "tool_output_contracts",
+}
+WORKFLOW_PHASE_ANALYZE_TOOLS = {
+    "model_assisted_summary",
+    "risk_scoring",
+    "summarize_diff",
+    "policy_simulator",
+    "workflow_policy_plan",
+    "policy_governance_decision",
+    "interaction_invariant_audit",
+    "workflow_diagnostics",
+    "task_router",
+}
+WORKFLOW_PHASE_MUTATION_TOOLS = {
+    "apply_unified_diff",
+    "command_runner",
+    "workspace_transaction",
+    "docker_router",
+    "vscode_router",
+    "continue_model_fallback_configure",
+}
+WORKFLOW_PHASE_VERIFY_TOOLS = {
+    "test_impact_map",
+    "quality_router",
+    "workflow_lineage",
+    "artifact_provenance",
+}
+WORKFLOW_PHASE_RELEASE_TOOLS = {
+    "release_readiness",
+    "governance_report",
+    "agent_quality_delta",
+    "agent_security_delta",
+    "agent_security_delta_report",
+    "ci_workflow_security_report",
+    "dependency_security_report",
+    "mcp_threat_model_report",
+    "secret_exposure_report",
+    "tool_catalog_integrity",
+    "memory_governance_report",
+    "self_optimization_report",
+    "observation_compression_report",
+    "agents_context_health",
+}
+WORKFLOW_PHASE_CLEANUP_TERMS = {"cleanup", "clean", "rollback", "restore", "cancel", "prune", "delete"}
+WORKFLOW_PHASE_VERIFY_TERMS = {
+    "build",
+    "check",
+    "compile",
+    "gate",
+    "lint",
+    "py_compile",
+    "pytest",
+    "self_test",
+    "test",
+    "typecheck",
+    "verify",
+}
+WORKFLOW_PHASE_GUARD_TERMS = {
+    "guard",
+    "policy",
+    "security",
+    "scanner",
+    "scan",
+    "trust",
+    "gate",
+    "invariant",
+    "threat",
+}
+WORKFLOW_PHASE_RAW_FIELD_TERMS = {
+    "content",
+    "file_content",
+    "file_contents",
+    "full_text",
+    "output",
+    "prompt",
+    "raw",
+    "response",
+    "secret",
+    "stderr",
+    "stdout",
+    "text",
+    "token",
+    "tool_output",
+    "transcript",
+}
+
+
+def _workflow_phase_safe_text(value: Any, redact_terms: list[str]) -> str:
+    return _self_opt_redact_string(str(value or ""), redact_terms).strip()[:160]
+
+
+def _workflow_phase_lower_text(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=True, default=str).lower()
+    except Exception:
+        return str(value or "").lower()
+
+
+def _workflow_phase_input_rows(workflow_summary: Any | None, workflow_summary_json: str) -> list[dict[str, Any]]:
+    payload: Any = workflow_summary
+    if payload is None and workflow_summary_json.strip():
+        try:
+            payload = json.loads(workflow_summary_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("workflow_summary_json must be valid JSON") from exc
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("tool_calls", "calls", "events", "records", "steps", "workflow_events"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+        return [payload]
+    raise ValueError("workflow summary must be a JSON object or array")
+
+
+def _workflow_phase_tool_name(row: dict[str, Any], redact_terms: list[str]) -> str:
+    for key in ("tool", "tool_name", "mcp.tool.name"):
+        raw = row.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return _workflow_phase_safe_text(raw, redact_terms) or "unknown"
+    attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+    for key in ("mcp.tool.name", "gen_ai.tool.name"):
+        raw = attrs.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return _workflow_phase_safe_text(raw, redact_terms) or "unknown"
+    span_name = row.get("name")
+    if isinstance(span_name, str) and span_name.startswith("mcp.tool."):
+        return _workflow_phase_safe_text(span_name.removeprefix("mcp.tool."), redact_terms) or "unknown"
+    if isinstance(span_name, str) and span_name.strip():
+        return _workflow_phase_safe_text(span_name, redact_terms) or "unknown"
+    return "unknown"
+
+
+def _workflow_phase_categories(row: dict[str, Any]) -> list[str]:
+    categories = row.get("categories")
+    if not isinstance(categories, list):
+        security = row.get("security") if isinstance(row.get("security"), dict) else {}
+        categories = security.get("categories")
+    if not isinstance(categories, list):
+        return []
+    return [str(item).lower() for item in categories if isinstance(item, (str, int, float))]
+
+
+def _workflow_phase_nested_string(row: dict[str, Any], keys: tuple[str, ...]) -> str:
+    sources: list[Any] = [row]
+    for nested_key in ("arguments", "attributes", "metadata"):
+        nested = row.get(nested_key)
+        if isinstance(nested, dict):
+            sources.append(nested)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _workflow_phase_normalize_phase(raw_phase: Any) -> str:
+    text = str(raw_phase or "").strip().lower().replace("-", "_").replace("/", "_").replace(" ", "_")
+    aliases = {
+        "discover": "discover_read",
+        "discovery": "discover_read",
+        "read": "discover_read",
+        "explore": "discover_read",
+        "exploration": "discover_read",
+        "analyze": "analyze_plan",
+        "analysis": "analyze_plan",
+        "plan": "analyze_plan",
+        "planning": "analyze_plan",
+        "mutate": "mutate_write",
+        "mutation": "mutate_write",
+        "write": "mutate_write",
+        "execute": "mutate_write",
+        "verification": "verify_test",
+        "verify": "verify_test",
+        "test": "verify_test",
+        "review": "review_release",
+        "release": "review_release",
+        "gate": "review_release",
+        "cleanup": "cleanup",
+    }
+    if text in WORKFLOW_PHASE_ORDER:
+        return text
+    return aliases.get(text, "")
+
+
+def _workflow_phase_classify(row: dict[str, Any], tool: str, categories: list[str]) -> str:
+    explicit = _workflow_phase_normalize_phase(row.get("phase"))
+    if explicit:
+        return explicit
+    tool_norm = tool.lower().replace("-", "_").strip()
+    mode = _workflow_phase_nested_string(row, ("mode", "action", "operation", "task", "workflow"))
+    text = f"{tool_norm} {mode.lower()} {_workflow_phase_lower_text({'mode': mode, 'categories': categories})}"
+    if any(term in text for term in WORKFLOW_PHASE_CLEANUP_TERMS):
+        return "cleanup"
+    if tool_norm in WORKFLOW_PHASE_RELEASE_TOOLS or "release" in text or "review" in text or "governance" in text:
+        return "review_release"
+    if tool_norm in WORKFLOW_PHASE_VERIFY_TOOLS or any(term in text for term in WORKFLOW_PHASE_VERIFY_TERMS):
+        return "verify_test"
+    if tool_norm in WORKFLOW_PHASE_MUTATION_TOOLS or any(cat in {"write", "git mutation", "destructive"} for cat in categories):
+        return "mutate_write"
+    if tool_norm in WORKFLOW_PHASE_ANALYZE_TOOLS or any(term in text for term in ("plan", "analy", "summar", "risk", "policy", "diagnostic")):
+        return "analyze_plan"
+    if tool_norm in WORKFLOW_PHASE_READ_TOOLS or "read-only" in categories:
+        return "discover_read"
+    return "other"
+
+
+def _workflow_phase_duration_ms(row: dict[str, Any]) -> float | None:
+    for key in ("duration_ms", "elapsed_ms", "latency_ms"):
+        raw = row.get(key)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            return max(0.0, float(raw))
+    start = _self_opt_first_timestamp({"timestamp": row.get("start_time") or row.get("started_at")})
+    end = _self_opt_first_timestamp({"timestamp": row.get("end_time") or row.get("finished_at") or row.get("completed_at")})
+    if start and end and end >= start:
+        return (end - start).total_seconds() * 1000.0
+    return None
+
+
+def _workflow_phase_bool(row: dict[str, Any], keys: tuple[str, ...]) -> bool | None:
+    sources: list[Any] = [row]
+    for nested_key in ("arguments", "attributes", "metadata"):
+        nested = row.get(nested_key)
+        if isinstance(nested, dict):
+            sources.append(nested)
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"true", "yes", "1", "hit", "cache_hit"}:
+                    return True
+                if normalized in {"false", "no", "0", "miss", "cache_miss"}:
+                    return False
+    return None
+
+
+def _workflow_phase_fingerprint(row: dict[str, Any], tool: str, redact_terms: list[str]) -> str:
+    for key in ("input_fingerprint", "request_fingerprint", "cache_key", "cache_digest", "fingerprint"):
+        raw = row.get(key)
+        if isinstance(raw, (str, int, float)) and str(raw).strip():
+            safe = _workflow_phase_safe_text(raw, redact_terms)
+            return hashlib.sha256(safe.encode("utf-8")).hexdigest()[:16]
+    args = row.get("arguments") if isinstance(row.get("arguments"), dict) else {}
+    if not args:
+        return ""
+    safe_subset: dict[str, Any] = {}
+    for key, value in args.items():
+        key_lower = str(key).lower()
+        if any(term in key_lower for term in WORKFLOW_PHASE_RAW_FIELD_TERMS):
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe_subset[str(key)] = _self_opt_redact_value(value, redact_terms)
+    if not safe_subset:
+        return ""
+    seed = json.dumps({"tool": tool, "args": safe_subset}, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _workflow_phase_trace_hashes(row: dict[str, Any], redact_terms: list[str]) -> list[str]:
+    out: list[str] = []
+    attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+    for source in (row, attrs):
+        for key in ("trace_id", "traceparent", "mcp.trace_id"):
+            raw = source.get(key) if isinstance(source, dict) else None
+            if isinstance(raw, str) and raw.strip():
+                safe = _workflow_phase_safe_text(raw, redact_terms)
+                out.append(hashlib.sha256(safe.encode("utf-8")).hexdigest()[:16])
+    return out
+
+
+def _workflow_phase_blank(phase: str) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "label": WORKFLOW_PHASE_LABELS[phase],
+        "count": 0,
+        "duration_ms": 0.0,
+        "duration_available_count": 0,
+        "tools": {},
+        "cacheable_count": 0,
+        "cache_hit_count": 0,
+        "repeated_read_count": 0,
+        "guard_invocation_count": 0,
+        "test_marker_count": 0,
+        "release_gate_count": 0,
+        "write_marker_count": 0,
+    }
+
+
+def _workflow_phase_anomaly(rule_id: str, severity: str, phase: str, message: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rule_id": rule_id,
+        "severity": severity,
+        "phase": phase,
+        "message": message,
+        "evidence": evidence,
+    }
+
+
+def _workflow_phase_telemetry_from_records(
+    records: list[dict[str, Any]],
+    *,
+    redact_terms: list[str] | None = None,
+    start_dt: datetime | None = None,
+    end_dt: datetime | None = None,
+    sources: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    redaction_terms = _self_opt_default_redact_terms(redact_terms)
+    phases = {phase: _workflow_phase_blank(phase) for phase in WORKFLOW_PHASE_ORDER}
+    ordered_phase_sequence: list[str] = []
+    read_evidence_before_first_write = 0
+    first_write_index: int | None = None
+    last_write_index: int | None = None
+    first_verify_after_write_index: int | None = None
+    first_release_index: int | None = None
+    last_verify_index: int | None = None
+    repeated_read_count = 0
+    repeated_uncached_heavy_read_count = 0
+    read_fingerprints: dict[str, dict[str, Any]] = {}
+    trace_hashes: set[str] = set()
+    checkpoint_count = 0
+    guard_count = 0
+    test_count = 0
+    release_count = 0
+    write_count = 0
+    cacheable_count = 0
+    cache_hit_count = 0
+    duration_count = 0
+    total_duration_ms = 0.0
+
+    for index, row in enumerate(records):
+        tool = _workflow_phase_tool_name(row, redaction_terms)
+        categories = _workflow_phase_categories(row)
+        phase = _workflow_phase_classify(row, tool, categories)
+        phase_row = phases[phase]
+        ordered_phase_sequence.append(phase)
+        phase_row["count"] += 1
+        phase_row["tools"][tool] = int(phase_row["tools"].get(tool, 0)) + 1
+        duration = _workflow_phase_duration_ms(row)
+        if duration is not None:
+            phase_row["duration_ms"] += duration
+            phase_row["duration_available_count"] += 1
+            total_duration_ms += duration
+            duration_count += 1
+        cacheable = _workflow_phase_bool(row, ("cacheable", "mcp.cache.cacheable", "cacheability"))
+        if cacheable is None:
+            cacheable = phase == "discover_read" and tool.lower() in WORKFLOW_PHASE_READ_TOOLS
+        cache_hit = _workflow_phase_bool(row, ("cache_hit", "cache_hit_count", "mcp.cache.hit"))
+        if cache_hit is None:
+            cache_hit = False
+        if cacheable:
+            phase_row["cacheable_count"] += 1
+            cacheable_count += 1
+        if cache_hit:
+            phase_row["cache_hit_count"] += 1
+            cache_hit_count += 1
+        trace_hashes.update(_workflow_phase_trace_hashes(row, redaction_terms))
+        if row.get("checkpoint") or row.get("workflow_checkpoint") or _workflow_phase_nested_string(row, ("checkpoint", "event")):
+            checkpoint_count += 1
+        tool_mode_text = f"{tool} {_workflow_phase_nested_string(row, ('mode', 'action', 'operation', 'workflow'))}".lower()
+        is_guard = any(term in tool_mode_text for term in WORKFLOW_PHASE_GUARD_TERMS)
+        is_test = phase == "verify_test" or any(term in tool_mode_text for term in WORKFLOW_PHASE_VERIFY_TERMS)
+        is_release = phase == "review_release" or "release" in tool_mode_text
+        is_write = phase == "mutate_write"
+        is_read_evidence = phase in {"discover_read", "analyze_plan"}
+        if is_guard:
+            phase_row["guard_invocation_count"] += 1
+            guard_count += 1
+        if is_test:
+            phase_row["test_marker_count"] += 1
+            test_count += 1
+            last_verify_index = index
+            if first_write_index is not None and first_verify_after_write_index is None:
+                first_verify_after_write_index = index
+        if is_release:
+            phase_row["release_gate_count"] += 1
+            release_count += 1
+            if first_release_index is None:
+                first_release_index = index
+        if is_write:
+            phase_row["write_marker_count"] += 1
+            write_count += 1
+            last_write_index = index
+            if first_write_index is None:
+                first_write_index = index
+        elif first_write_index is None and is_read_evidence:
+            read_evidence_before_first_write += 1
+        if phase == "discover_read":
+            fingerprint = _workflow_phase_fingerprint(row, tool, redaction_terms)
+            if fingerprint:
+                info = read_fingerprints.setdefault(
+                    fingerprint,
+                    {"count": 0, "cache_hits": 0, "cacheable": False, "tools": set()},
+                )
+                info["count"] += 1
+                info["cache_hits"] += 1 if cache_hit else 0
+                info["cacheable"] = bool(info["cacheable"] or cacheable)
+                info["tools"].add(tool)
+
+    for info in read_fingerprints.values():
+        count = int(info.get("count", 0))
+        if count > 1:
+            repeated = count - 1
+            repeated_read_count += repeated
+            if bool(info.get("cacheable", False)) and int(info.get("cache_hits", 0)) == 0:
+                repeated_uncached_heavy_read_count += repeated
+    phases["discover_read"]["repeated_read_count"] = repeated_read_count
+    phase_rows: list[dict[str, Any]] = []
+    for phase in WORKFLOW_PHASE_ORDER:
+        row = phases[phase]
+        row["duration_ms"] = round(float(row["duration_ms"]), 3)
+        row["tools"] = [
+            {"name": name, "count": count}
+            for name, count in sorted(row["tools"].items(), key=lambda item: (-item[1], item[0]))
+        ]
+        phase_rows.append(row)
+
+    anomalies: list[dict[str, Any]] = []
+    if first_write_index is not None and read_evidence_before_first_write < 2:
+        anomalies.append(
+            _workflow_phase_anomaly(
+                "early_mutation_before_read_evidence",
+                "warn",
+                "mutate_write",
+                "Mutation/write activity appeared before enough discover/analyze evidence accumulated.",
+                {"first_write_index": first_write_index, "read_evidence_before_first_write": read_evidence_before_first_write, "minimum_expected": 2},
+            )
+        )
+    latest_write_verified = not write_count or (last_verify_index is not None and last_write_index is not None and last_verify_index > last_write_index)
+    if not latest_write_verified:
+        anomalies.append(
+            _workflow_phase_anomaly(
+                "missing_verification_after_write",
+                "warn",
+                "verify_test",
+                "Write activity was observed without a later verify/test marker after the most recent write.",
+                {"write_count": write_count, "last_write_index": last_write_index, "last_verify_index": last_verify_index},
+            )
+        )
+    if repeated_uncached_heavy_read_count:
+        anomalies.append(
+            _workflow_phase_anomaly(
+                "repeated_uncached_heavy_reads",
+                "info",
+                "discover_read",
+                "Repeated cacheable read inputs were observed without cache-hit evidence.",
+                {"repeated_uncached_read_count": repeated_uncached_heavy_read_count},
+            )
+        )
+    if release_count and (last_verify_index is None or (last_write_index is not None and last_verify_index < last_write_index)):
+        anomalies.append(
+            _workflow_phase_anomaly(
+                "release_gate_without_recent_test_evidence",
+                "warn",
+                "review_release",
+                "Release/review gate activity lacked verify/test evidence after the most recent write.",
+                {"release_gate_count": release_count, "last_verify_index": last_verify_index, "last_write_index": last_write_index},
+            )
+        )
+
+    hints: list[dict[str, Any]] = []
+    if repeated_uncached_heavy_read_count:
+        hints.append({"hint_id": "cache_repeated_reads", "phase": "discover_read", "message": "Add cache keys or reuse result references for repeated read/explore calls."})
+    if any(item["rule_id"] == "early_mutation_before_read_evidence" for item in anomalies):
+        hints.append({"hint_id": "delay_mutation_guards", "phase": "mutate_write", "message": "Require read/plan evidence or a mutation_step_guard before write-capable tools."})
+    if any(item["rule_id"] == "missing_verification_after_write" for item in anomalies):
+        hints.append({"hint_id": "route_post_write_verification", "phase": "verify_test", "message": "Run test-impact, focused tests, or release readiness after write phases."})
+    if release_count and test_count:
+        hints.append({"hint_id": "healthy_release_gate_ordering", "phase": "review_release", "message": "Release/review gates have verify/test evidence; keep this gate placement."})
+    if not hints:
+        hints.append({"hint_id": "phase_shape_observed", "phase": "analyze_plan", "message": "Use phase counts and duration concentrations to tune tool ordering and guard placement."})
+
+    phase_counts = {phase: int(phases[phase]["count"]) for phase in WORKFLOW_PHASE_ORDER}
+    summary = {
+        "record_count": len(records),
+        "phase_counts": phase_counts,
+        "duration_available_count": duration_count,
+        "duration_ms": round(total_duration_ms, 3),
+        "cacheable_count": cacheable_count,
+        "cache_hit_count": cache_hit_count,
+        "repeated_read_count": repeated_read_count,
+        "guard_invocation_count": guard_count,
+        "test_marker_count": test_count,
+        "release_gate_count": release_count,
+        "write_marker_count": write_count,
+        "anomaly_count": len(anomalies),
+    }
+    if cacheable_count:
+        summary["cache_hit_ratio"] = round(cache_hit_count / cacheable_count, 3)
+    report_seed = json.dumps(
+        {"summary": summary, "phases": phase_rows, "anomalies": anomalies},
+        sort_keys=True,
+        ensure_ascii=True,
+        default=str,
+    )
+    return {
+        "schema": WORKFLOW_PHASE_TELEMETRY_SCHEMA,
+        "report_id": f"workflow-phase-telemetry-{hashlib.sha256(report_seed.encode('utf-8')).hexdigest()[:12]}",
+        "generated_at": _now_iso(),
+        "read_only": True,
+        "advisory_only": True,
+        "window": {
+            "start_time": start_dt.isoformat() if start_dt else "",
+            "end_time": end_dt.isoformat() if end_dt else "",
+        },
+        "summary": summary,
+        "phase_order": list(WORKFLOW_PHASE_ORDER),
+        "phases": phase_rows,
+        "signals": {
+            "cacheability": {
+                "cacheable_count": cacheable_count,
+                "cache_hit_count": cache_hit_count,
+                "repeated_read_count": repeated_read_count,
+                "repeated_uncached_heavy_read_count": repeated_uncached_heavy_read_count,
+            },
+            "ordering": {
+                "first_write_index": first_write_index,
+                "read_evidence_before_first_write": read_evidence_before_first_write,
+                "first_verify_after_write_index": first_verify_after_write_index,
+                "first_release_index": first_release_index,
+                "last_write_index": last_write_index,
+                "last_verify_index": last_verify_index,
+                "write_after_read_ok": first_write_index is None or read_evidence_before_first_write >= 2,
+                "post_write_verification_present": latest_write_verified,
+                "release_after_verify_ok": not release_count or (last_verify_index is not None and (last_write_index is None or last_verify_index >= last_write_index)),
+            },
+            "markers": {
+                "guard_invocations": guard_count,
+                "test_markers": test_count,
+                "release_gates": release_count,
+                "write_markers": write_count,
+            },
+            "phase_sequence_sample": ordered_phase_sequence[:20],
+        },
+        "anomalies": anomalies,
+        "optimization_hints": hints,
+        "trace_context": {
+            "trace_id_count": len(trace_hashes),
+            "trace_id_hashes": sorted(trace_hashes)[:10],
+            "workflow_checkpoint_count": checkpoint_count,
+        },
+        "sources": sources or {"input": {"kind": "redacted_workflow_summary", "record_count": len(records)}},
+        "privacy": {
+            "local_only": True,
+            "redacted_input_required": True,
+            "raw_prompts_excluded": True,
+            "raw_tool_outputs_excluded": True,
+            "file_contents_excluded": True,
+            "secrets_excluded": True,
+            "absolute_host_paths_excluded": True,
+            "trace_ids_hashed": True,
+            "redactions_applied": ["secret-like values", "absolute host paths", "sensitive local names", "raw prompt/output/content fields"],
+        },
+        "security": {
+            "offline_capable": True,
+            "network_used": False,
+            "repo_boundary_enforced_for_local_sources": True,
+            "records_raw_content": False,
+            "records_secrets": False,
+        },
+    }
+
+
+def _workflow_phase_telemetry_impl(
+    workflow_summary: Any | None = None,
+    workflow_summary_json: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    include_tasks: bool = True,
+    redact_terms: list[str] | None = None,
+) -> dict[str, Any]:
+    _ensure_repo_path_exists()
+    redaction_terms = _self_opt_default_redact_terms(redact_terms)
+    records = _workflow_phase_input_rows(workflow_summary, workflow_summary_json)
+    sources: dict[str, Any] = {"network": {"used": False}, "input": {"kind": "redacted_workflow_summary", "record_count": len(records)}}
+    start_dt: datetime | None = None
+    end_dt: datetime | None = None
+    if not records:
+        start_dt, end_dt = _self_opt_parse_window(start_time, end_time, window_hours)
+        if include_audit:
+            audit_events, audit_meta = _load_audit_events(start_dt, end_dt)
+            records.extend(audit_events)
+            sources["audit"] = _self_opt_public_source_meta(audit_meta)
+        else:
+            sources["audit"] = {"enabled": False}
+        if include_traces:
+            span_rows, span_meta = _self_opt_load_jsonl_records(MCP_OTEL_SPANS_FILE, start_dt, end_dt)
+            records.extend(span_rows)
+            sources["traces"] = _self_opt_public_source_meta(span_meta)
+        else:
+            sources["traces"] = {"enabled": False}
+        if include_tasks:
+            task_records, task_meta = _self_opt_load_task_records(start_dt, end_dt, redaction_terms)
+            records.extend(task_records)
+            sources["tasks"] = _self_opt_public_source_meta(task_meta)
+        else:
+            sources["tasks"] = {"enabled": False}
+        sources["input"] = {"kind": "local_runtime_sources", "record_count": len(records)}
+    report = _workflow_phase_telemetry_from_records(
+        records,
+        redact_terms=redaction_terms,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        sources=sources,
+    )
+    return _self_opt_redact_value(report, redaction_terms)
+
+
 def _self_optimization_report_impl(
     start_time: str = "",
     end_time: str = "",
@@ -11475,9 +12130,9 @@ def _mcp_threat_model_controls() -> dict[str, dict[str, Any]]:
 
 def _mcp_threat_model_load_fixture(
     path: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     if not path.strip():
-        return [], [], {"path": "", "loaded": False, "tool_count": 0, "transition_count": 0, "digest": ""}
+        return [], [], [], {"path": "", "loaded": False, "tool_count": 0, "transition_count": 0, "oauth_proxy_config_count": 0, "digest": ""}
     fixture_path = _resolve_repo_path(path)
     try:
         payload = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -11493,9 +12148,463 @@ def _mcp_threat_model_load_fixture(
     if not isinstance(raw_transitions, list):
         raise ValueError("fixture_path tool_catalog_transitions must be a list")
     transitions = [item for item in raw_transitions if isinstance(item, dict)]
-    digest_payload = {"tools": tools, "tool_catalog_transitions": transitions}
+    raw_oauth_configs = payload.get("oauth_proxy_configs", payload.get("mcp_oauth_proxy_configs", []))
+    if not isinstance(raw_oauth_configs, list):
+        raise ValueError("fixture_path oauth_proxy_configs must be a list")
+    oauth_configs = [item for item in raw_oauth_configs if isinstance(item, dict)]
+    digest_payload = {
+        "tools": tools,
+        "tool_catalog_transitions": transitions,
+        "oauth_proxy_configs": oauth_configs,
+    }
     digest = "sha256:" + hashlib.sha256(json.dumps(digest_payload, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
-    return tools, transitions, {"path": str(fixture_path.relative_to(REPO_PATH)), "loaded": True, "tool_count": len(tools), "transition_count": len(transitions), "digest": digest, "schema": str(payload.get("schema", ""))}
+    return tools, transitions, oauth_configs, {
+        "path": str(fixture_path.relative_to(REPO_PATH)),
+        "loaded": True,
+        "tool_count": len(tools),
+        "transition_count": len(transitions),
+        "oauth_proxy_config_count": len(oauth_configs),
+        "digest": digest,
+        "schema": str(payload.get("schema", "")),
+    }
+
+
+_MCP_OAUTH_PROXY_HARDENING_SCHEMA = "mcp_oauth_proxy_hardening.v1"
+_MCP_OAUTH_PROXY_CONFIG_PATHS = (
+    ".codebase-tooling-mcp/mcp-oauth-proxy.json",
+    ".codebase-tooling-mcp/mcp-oauth-proxy.yaml",
+    ".codebase-tooling-mcp/mcp-oauth-proxy.yml",
+    "mcp-oauth-proxy.json",
+    "mcp-oauth-proxy.yaml",
+    "mcp-oauth-proxy.yml",
+)
+_MCP_OAUTH_SECRET_KEY_RE = re.compile(
+    r"(?i)(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|auth[_-]?code|authorization[_-]?header|bearer|secret|password|api[_-]?key|credential)"
+)
+_MCP_OAUTH_SECRET_VALUE_RE = re.compile(
+    r"(?i)(authorization:\s*bearer\s+\S+|bearer\s+[A-Za-z0-9._~+/=-]{6,}|code=[^&\s]+|token=[^&\s]+|client_secret=[^&\s]+)"
+)
+_MCP_OAUTH_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:/[A-Za-z0-9._ -]+){2,}")
+
+
+def _mcp_oauth_proxy_redact_text(value: str) -> str:
+    redacted = _MCP_OAUTH_SECRET_VALUE_RE.sub("<redacted:secret>", value)
+    redacted = _MCP_OAUTH_ABSOLUTE_PATH_RE.sub("<redacted:path>", redacted)
+    return redacted[:160]
+
+
+def _mcp_oauth_proxy_scalar_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return str(value)
+
+
+def _mcp_oauth_proxy_flatten(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    rows: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(_mcp_oauth_proxy_flatten(item, path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            rows.extend(_mcp_oauth_proxy_flatten(item, f"{prefix}[{index}]"))
+    else:
+        rows.append((prefix, value))
+    return rows
+
+
+def _mcp_oauth_proxy_values(config: dict[str, Any], *needles: str) -> list[Any]:
+    wanted = tuple(needle.lower().replace("-", "_") for needle in needles)
+    values: list[Any] = []
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        if any(needle in normalized for needle in wanted):
+            values.append(value)
+    return values
+
+
+def _mcp_oauth_proxy_bool(config: dict[str, Any], *needles: str, default: bool = False) -> bool:
+    for value in _mcp_oauth_proxy_values(config, *needles):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "enabled", "enforced", "required"}:
+            return True
+        if text in {"0", "false", "no", "off", "disabled", "none"}:
+            return False
+    return default
+
+
+def _mcp_oauth_proxy_has_value(config: dict[str, Any], *needles: str) -> bool:
+    return any(str(value).strip() for value in _mcp_oauth_proxy_values(config, *needles))
+
+
+def _mcp_oauth_proxy_false(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    text = str(value).strip().lower()
+    return text in {"0", "false", "no", "off", "disabled", "none"}
+
+
+def _mcp_oauth_proxy_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on", "enabled", "enforced", "required"}
+
+
+def _mcp_oauth_proxy_validation_explicitly_disabled(config: dict[str, Any]) -> bool:
+    positive_validation_fields = {
+        "audience_validation",
+        "resource_validation",
+        "validate_audience",
+        "validate_resource",
+    }
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        segments = {segment for segment in re.split(r"[.\[\]]+", normalized) if segment}
+        if segments.intersection(positive_validation_fields) and _mcp_oauth_proxy_false(
+            value
+        ):
+            return True
+    return False
+
+
+def _mcp_oauth_proxy_field_refs(config: dict[str, Any], *needles: str) -> list[str]:
+    wanted = tuple(needle.lower().replace("-", "_") for needle in needles)
+    refs = []
+    for path, _value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        if any(needle in normalized for needle in wanted):
+            refs.append(path)
+    return sorted(set(refs))[:12]
+
+
+def _mcp_oauth_proxy_secret_literal_refs(config: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        if not _MCP_OAUTH_SECRET_KEY_RE.search(normalized):
+            continue
+        if isinstance(value, (bool, int, float)):
+            continue
+        text = str(value).strip()
+        if not text or text.startswith(("${", "$", "env:", "secret:", "vault:", "file:")):
+            continue
+        if "ref" in normalized or normalized.endswith("env") or normalized.endswith("env_var"):
+            continue
+        refs.append(path)
+    return sorted(set(refs))[:12]
+
+
+def _mcp_oauth_proxy_load_repo_configs() -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    for rel_path in _MCP_OAUTH_PROXY_CONFIG_PATHS:
+        path = _resolve_repo_path(rel_path)
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+            if path.suffix.lower() == ".json":
+                payload = json.loads(raw)
+            elif yaml is not None:
+                payload = yaml.safe_load(raw)
+            else:
+                continue
+        except Exception:
+            continue
+        rows = payload if isinstance(payload, list) else [payload]
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            item = dict(row)
+            item.setdefault("id", f"repo_config_{index}")
+            item["_source_path"] = rel_path
+            configs.append(item)
+    return configs
+
+
+_MCP_OAUTH_PROXY_FORWARDING_FIELDS = (
+    "token_passthrough",
+    "token_forwarding",
+    "passthrough_user_token",
+    "passthrough_token",
+    "forward_bearer_token",
+    "forward_access_token",
+    "forward_user_token",
+    "forward_token",
+    "reuse_client_token",
+    "reuse_bearer_token",
+    "reuse_access_token",
+    "reuse_user_token",
+    "forward_authorization",
+    "authorization_passthrough",
+)
+
+
+def _mcp_oauth_proxy_forwarding_enabled(config: dict[str, Any]) -> bool:
+    return any(
+        _mcp_oauth_proxy_true(value)
+        for value in _mcp_oauth_proxy_values(config, *_MCP_OAUTH_PROXY_FORWARDING_FIELDS)
+    )
+
+
+def _mcp_oauth_proxy_detected(config: dict[str, Any]) -> bool:
+    auth_mode = str(config.get("auth_mode", config.get("mcp_http_auth_mode", ""))).lower()
+    if auth_mode == "oauth-resource" or _mcp_oauth_proxy_forwarding_enabled(config):
+        return True
+    signal_terms = (
+        "oauth",
+        "oidc",
+        "authorization_server",
+        "issuer",
+        "redirect_uri",
+        "client_id",
+        "client_secret",
+        "token_exchange",
+        "resource_indicator",
+        "audience",
+        "proxy",
+    )
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        text = f"{path} {_mcp_oauth_proxy_scalar_text(value)}".lower()
+        if any(term in text for term in signal_terms):
+            return True
+    return False
+
+
+def _mcp_oauth_proxy_analyze_config(
+    config: dict[str, Any],
+    *,
+    index: int,
+    default_source_path: str = "",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    config_id = _mcp_oauth_proxy_redact_text(str(config.get("id") or config.get("name") or f"oauth_proxy_config_{index}"))[:120]
+    source_path = _mcp_oauth_proxy_redact_text(str(config.get("_source_path") or default_source_path or ""))
+    auth_mode = str(config.get("auth_mode", config.get("mcp_http_auth_mode", ""))).strip().lower()
+    local_bearer_only = auth_mode in {"token", "bearer", "local-bearer"} or _mcp_oauth_proxy_bool(config, "bearer_token_only", "local_bearer_only")
+    detected = _mcp_oauth_proxy_detected(config)
+    if local_bearer_only and not detected:
+        return (
+            {
+                "id": config_id,
+                "source_path": source_path,
+                "detected": False,
+                "outcome": "not_applicable",
+                "reason": "local bearer-token-only mode has no OAuth proxy/token-passthrough surface",
+                "raw_values_included": False,
+            },
+            [],
+        )
+
+    if not detected:
+        return (
+            {
+                "id": config_id,
+                "source_path": source_path,
+                "detected": False,
+                "outcome": "not_applicable",
+                "reason": "no OAuth/proxy settings detected",
+                "raw_values_included": False,
+            },
+            [],
+        )
+
+    block_rules: list[tuple[str, str, tuple[str, ...]]] = []
+    warn_rules: list[tuple[str, str, tuple[str, ...]]] = []
+    if _mcp_oauth_proxy_forwarding_enabled(config):
+        block_rules.append((
+            "oauth-token-passthrough",
+            "OAuth proxy forwards or reuses caller bearer tokens across a trust boundary.",
+            _MCP_OAUTH_PROXY_FORWARDING_FIELDS,
+        ))
+    validation_disabled = _mcp_oauth_proxy_bool(
+        config,
+        "accept_any_audience",
+        "disable_audience_check",
+        "skip_audience_validation",
+        "disable_resource_validation",
+    ) or _mcp_oauth_proxy_validation_explicitly_disabled(config)
+    if validation_disabled:
+        block_rules.append((
+            "oauth-confused-deputy-validation-disabled",
+            "OAuth proxy disables or explicitly turns off audience/resource validation and is exposed to confused-deputy token replay.",
+            (
+                "accept_any_audience",
+                "disable_audience_check",
+                "skip_audience_validation",
+                "disable_resource_validation",
+                "audience_validation",
+                "resource_validation",
+                "validate_audience",
+                "validate_resource",
+            ),
+        ))
+    has_issuer = _mcp_oauth_proxy_has_value(config, "authorization_server", "authorization_servers", "issuer", "issuer_allowlist")
+    has_audience = _mcp_oauth_proxy_bool(config, "audience_validation", "resource_validation", "resource_indicator", "resource_indicators", "validate_audience", "validate_resource", default=False) or _mcp_oauth_proxy_has_value(config, "expected_audience", "resource")
+    if not has_issuer:
+        block_rules.append((
+            "oauth-missing-issuer-allowlist",
+            "OAuth/proxy settings are present without a configured authorization-server/issuer allowlist.",
+            ("authorization_server", "authorization_servers", "issuer", "issuer_allowlist"),
+        ))
+    if not has_audience:
+        block_rules.append((
+            "oauth-missing-audience-resource-validation",
+            "OAuth/proxy settings are present without explicit audience/resource validation.",
+            ("audience", "resource", "resource_indicator", "validate_audience", "validate_resource"),
+        ))
+    secret_refs = _mcp_oauth_proxy_secret_literal_refs(config)
+    if secret_refs:
+        block_rules.append((
+            "oauth-inline-secret-material",
+            "OAuth/proxy config contains inline secret-like material; use secret references instead.",
+            tuple(secret_refs),
+        ))
+    if not _mcp_oauth_proxy_bool(config, "pkce", "require_pkce", default=False):
+        warn_rules.append((
+            "oauth-pkce-not-required",
+            "OAuth proxy config does not require PKCE for authorization-code flows.",
+            ("pkce", "require_pkce"),
+        ))
+    if not _mcp_oauth_proxy_bool(config, "state", "require_state", default=False):
+        warn_rules.append((
+            "oauth-state-not-required",
+            "OAuth proxy config does not require state/nonce binding for authorization redirects.",
+            ("state", "require_state", "nonce"),
+        ))
+    origin_values = [str(value).strip() for value in _mcp_oauth_proxy_values(config, "allowed_origin", "redirect_uri") if str(value).strip()]
+    if any(value == "*" or "*" in value for value in origin_values):
+        warn_rules.append((
+            "oauth-broad-origin-or-redirect",
+            "OAuth proxy config uses wildcard origins or redirect URIs.",
+            ("allowed_origin", "redirect_uri"),
+        ))
+
+    findings: list[dict[str, Any]] = []
+    for outcome, severity, rules in (("block", "high", block_rules), ("warn", "medium", warn_rules)):
+        for rule_id, message, refs in rules:
+            ref_list = list(refs) if rule_id == "oauth-inline-secret-material" else _mcp_oauth_proxy_field_refs(config, *refs)
+            findings.append(
+                {
+                    "id": f"oauth-proxy:{config_id}:{rule_id}",
+                    "rule_id": rule_id,
+                    "threat_id": "oauth_confused_deputy_token_passthrough",
+                    "fixture_id": config_id,
+                    "tool_name": "mcp_oauth_proxy_hardening",
+                    "severity": severity,
+                    "outcome": outcome,
+                    "dread": {"score": 36 if severity == "high" else 28, "damage": 8 if severity == "high" else 6, "reproducibility": 7, "exploitability": 7 if severity == "high" else 5, "affected_users": 7 if severity == "high" else 5, "discoverability": 7 if severity == "high" else 5},
+                    "stride": ["Spoofing", "Information disclosure", "Elevation of privilege"],
+                    "message": message,
+                    "uncovered_controls": ["oauth_proxy_hardening"],
+                    "covered_by": ["http_scope_security_gates"],
+                    "evidence": {
+                        "config_id": config_id,
+                        "source_path": source_path,
+                        "field_refs": sorted(set(ref_list))[:12],
+                        "raw_values_included": False,
+                        "tokens_or_secrets_included": False,
+                        "host_absolute_paths_included": False,
+                    },
+                }
+            )
+    outcome = "block" if block_rules else "warn" if warn_rules else "pass"
+    return (
+        {
+            "id": config_id,
+            "source_path": source_path,
+            "detected": True,
+            "outcome": outcome,
+            "finding_count": len(findings),
+            "block_count": len(block_rules),
+            "warn_count": len(warn_rules),
+            "raw_values_included": False,
+        },
+        findings,
+    )
+
+
+def _mcp_oauth_proxy_hardening_report(configs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    if configs is None:
+        configs = _mcp_oauth_proxy_load_repo_configs()
+    if not configs:
+        configs = [{"id": "runtime_http_auth", "auth_mode": MCP_HTTP_AUTH_MODE, "bearer_token_only": MCP_HTTP_AUTH_MODE in {"token", "bearer"}}]
+    config_rows: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    for index, config in enumerate(configs):
+        row, row_findings = _mcp_oauth_proxy_analyze_config(config, index=index)
+        config_rows.append(row)
+        findings.extend(row_findings)
+    detected_rows = [row for row in config_rows if row.get("detected")]
+    block_count = sum(1 for finding in findings if finding.get("outcome") == "block")
+    warn_count = sum(1 for finding in findings if finding.get("outcome") == "warn")
+    if block_count:
+        status = "block"
+    elif warn_count:
+        status = "warn"
+    elif detected_rows:
+        status = "pass"
+    else:
+        status = "not_applicable"
+    return {
+        "schema": _MCP_OAUTH_PROXY_HARDENING_SCHEMA,
+        "status": status,
+        "ok": status != "block",
+        "read_only": True,
+        "applicability": "applicable" if detected_rows else "not_applicable",
+        "summary": {
+            "config_count": len(config_rows),
+            "detected_config_count": len(detected_rows),
+            "finding_count": len(findings),
+            "block_count": block_count,
+            "warn_count": warn_count,
+            "pass_count": sum(1 for row in config_rows if row.get("outcome") == "pass"),
+            "not_applicable_count": sum(1 for row in config_rows if row.get("outcome") == "not_applicable"),
+        },
+        "gate": {"status": status, "would_block": status == "block", "blocking_enabled": True},
+        "configs": config_rows,
+        "findings": findings,
+        "security": {
+            "read_only": True,
+            "offline": True,
+            "network_access": False,
+            "raw_config_values_included": False,
+            "tokens_or_secrets_included": False,
+            "auth_codes_included": False,
+            "host_absolute_paths_included": False,
+        },
+    }
+
+
+def _mcp_oauth_proxy_hardening_compact(report: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = report if isinstance(report, dict) else _mcp_oauth_proxy_hardening_report()
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    gate = payload.get("gate", {}) if isinstance(payload.get("gate"), dict) else {}
+    return {
+        "schema": payload.get("schema", _MCP_OAUTH_PROXY_HARDENING_SCHEMA),
+        "status": payload.get("status", "unknown"),
+        "ok": bool(payload.get("ok", False)),
+        "applicability": payload.get("applicability", "unknown"),
+        "detected_config_count": summary.get("detected_config_count", 0),
+        "finding_count": summary.get("finding_count", 0),
+        "block_count": summary.get("block_count", 0),
+        "warn_count": summary.get("warn_count", 0),
+        "pass_count": summary.get("pass_count", 0),
+        "not_applicable_count": summary.get("not_applicable_count", 0),
+        "blocking_enabled": gate.get("blocking_enabled", True),
+        "would_block": gate.get("would_block", False),
+    }
 
 
 def _mcp_threat_model_load_baseline(path: str) -> dict[str, Any]:
@@ -11770,7 +12879,7 @@ def _mcp_threat_model_report_impl(
     export: bool = False,
 ) -> dict[str, Any]:
     _require_git_repo()
-    fixtures, transitions, fixture_meta = _mcp_threat_model_load_fixture(fixture_path)
+    fixtures, transitions, oauth_configs, fixture_meta = _mcp_threat_model_load_fixture(fixture_path)
     baseline = _mcp_threat_model_load_baseline(baseline_path)
     controls = _mcp_threat_model_controls()
     generated_at = _now_iso()
@@ -11801,7 +12910,12 @@ def _mcp_threat_model_report_impl(
                 "evidence": {control: controls.get(control, {}).get("evidence", {}) for control in required},
             }
         )
+    oauth_proxy_hardening = _mcp_oauth_proxy_hardening_report(oauth_configs) if oauth_configs else _mcp_oauth_proxy_hardening_report([])
     findings = _mcp_threat_model_fixture_findings(fixtures, transitions)
+    if oauth_configs:
+        findings.extend(oauth_proxy_hardening.get("findings", []))
+        order = {"high": 0, "medium": 1, "low": 2, "info": 3, "none": 4}
+        findings.sort(key=lambda row: (order.get(str(row.get("severity")), 9), str(row.get("fixture_id", "")), str(row.get("rule_id", ""))))
     high_uncovered = [finding for finding in findings if finding.get("severity") == "high" and finding.get("uncovered_controls")]
     high_uncovered_ids = sorted(str(finding.get("id", "")) for finding in high_uncovered if str(finding.get("id", "")))
     allowed_high_uncovered = int(baseline.get("allowed_high_uncovered_finding_count", 0) or 0) if baseline.get("loaded") else 0
@@ -11857,6 +12971,7 @@ def _mcp_threat_model_report_impl(
         "components": list(MCP_THREAT_MODEL_COMPONENTS),
         "trust_boundaries": list(MCP_THREAT_MODEL_BOUNDARIES),
         "controls": controls,
+        "mcp_oauth_proxy_hardening": oauth_proxy_hardening,
         "dread_rubric": _mcp_threat_model_dread_rubric(),
         "threats": threats,
         "findings": findings,
@@ -11975,6 +13090,20 @@ def _governance_markdown(report: dict[str, Any]) -> str:
                 f"- Workflows checked: {ci_summary.get('checked_workflow_count', 0)}",
                 f"- Active findings: {ci_summary.get('finding_count', 0)}",
                 f"- High findings: {by_severity.get('high', 0)}",
+            ]
+        )
+    oauth_hardening = report.get("mcp_oauth_proxy_hardening", {}) if isinstance(report.get("mcp_oauth_proxy_hardening"), dict) else {}
+    if oauth_hardening:
+        lines.extend(
+            [
+                "",
+                "## MCP OAuth/proxy hardening",
+                f"- Status: `{oauth_hardening.get('status', 'unknown')}`",
+                f"- Applicable: `{oauth_hardening.get('applicability', 'unknown')}`",
+                f"- Detected configs: {oauth_hardening.get('detected_config_count', 0)}",
+                f"- Findings: {oauth_hardening.get('finding_count', 0)}",
+                f"- Blocks: {oauth_hardening.get('block_count', 0)}",
+                f"- Warnings: {oauth_hardening.get('warn_count', 0)}",
             ]
         )
     agent_delta = report.get("agent_security_delta", {}) if isinstance(report.get("agent_security_delta"), dict) else {}
@@ -33763,6 +34892,399 @@ def clarification_gate(
     )
 
 
+TRAJECTORY_TRUST_GUARD_SENSITIVE_TERMS = {
+    "apply",
+    "commit",
+    "delete",
+    "deploy",
+    "merge",
+    "mutate",
+    "push",
+    "release",
+    "restore",
+    "rollback",
+    "shell",
+    "write",
+}
+TRAJECTORY_TRUST_GUARD_CRITICAL_TERMS = {"delete", "deploy", "merge", "push", "release", "rollback"}
+TRAJECTORY_TRUST_GUARD_WARN_DECISIONS = {"log", "sanitize", "warn"}
+TRAJECTORY_TRUST_GUARD_BLOCK_DECISIONS = {"block", "deny", "blocked"}
+
+
+def _trajectory_guard_safe_text(value: Any, max_chars: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value).replace("\x00", " ")).strip()
+    text = re.sub(
+        r"\bauthorization\b\s*[:= ]\s*bearer\s+\S+",
+        "<redacted:secret>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bbearer\s+\S+", "<redacted:secret>", text, flags=re.IGNORECASE)
+    text = SENSITIVE_AUDIT_VALUE_RE.sub("<redacted:secret>", text)
+    text = ABSOLUTE_PATH_VALUE_RE.sub("<redacted:path>", text)
+    text = re.sub(r"https?://[^\s<>\"']+", "<redacted:url>", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        "<redacted:email>",
+        text,
+    )
+    return _trim_text(text, max_chars=max_chars)
+
+
+def _trajectory_guard_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "ok", "clean", "consistent", "present"}:
+            return True
+        if normalized in {"false", "no", "missing", "absent", "inconsistent", "conflict"}:
+            return False
+    return None
+
+
+def _trajectory_guard_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _trajectory_guard_redacted_ref(value: Any, *, default_kind: str = "evidence") -> dict[str, Any]:
+    if isinstance(value, str):
+        return {"kind": default_kind, "ref": _trajectory_guard_safe_text(value, max_chars=160)}
+    if not isinstance(value, dict):
+        return {"kind": default_kind, "ref": _trajectory_guard_safe_text(value, max_chars=160)}
+    allowed = (
+        "id",
+        "kind",
+        "tool",
+        "schema",
+        "report_id",
+        "decision",
+        "status",
+        "digest",
+        "artifact_ref",
+        "ref",
+        "uri",
+        "path",
+        "line_start",
+        "fingerprint",
+    )
+    redacted: dict[str, Any] = {"kind": _trajectory_guard_safe_text(value.get("kind") or default_kind, max_chars=60)}
+    for key in allowed:
+        if key not in value:
+            continue
+        item = value.get(key)
+        if isinstance(item, (int, float, bool)):
+            redacted[key] = item
+        else:
+            redacted[key] = _trajectory_guard_safe_text(item, max_chars=180)
+    return redacted
+
+
+def _trajectory_guard_ref_list(*values: Any) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for value in values:
+        items = value if isinstance(value, list) else ([] if value in (None, "") else [value])
+        for item in items[:25]:
+            refs.append(_trajectory_guard_redacted_ref(item))
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        key = json.dumps(ref, sort_keys=True, ensure_ascii=True)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(ref)
+    return deduped[:50]
+
+
+def _trajectory_guard_normalize_step(step: Any, index: int) -> dict[str, Any]:
+    data = step if isinstance(step, dict) else {"summary_ref": step}
+    tool = _trajectory_guard_safe_text(
+        data.get("tool")
+        or data.get("tool_name")
+        or data.get("source")
+        or data.get("name")
+        or "unknown",
+        max_chars=80,
+    )
+    trust = str(data.get("trust") or data.get("trust_level") or data.get("source_trust") or "untrusted").strip().lower()
+    if trust not in {"trusted", "untrusted", "mixed", "unknown"}:
+        trust = "untrusted" if "untrusted" in trust or "external" in trust else "unknown"
+    scanner = data.get("scanner") if isinstance(data.get("scanner"), dict) else data.get("response_scanner")
+    scanner = scanner if isinstance(scanner, dict) else {}
+    scanner_decision = str(
+        data.get("scanner_decision")
+        or scanner.get("decision")
+        or scanner.get("status")
+        or scanner.get("action")
+        or "none"
+    ).strip().lower()
+    warnings = data.get("warnings") or data.get("scanner_warnings") or scanner.get("warnings") or scanner.get("findings") or []
+    warning_count = len(warnings) if isinstance(warnings, list) else (1 if warnings else 0)
+    consistency = str(data.get("consistency") or data.get("evidence_consistency") or data.get("status") or "unknown").strip().lower()
+    contradiction_count = len(data.get("contradictions") or data.get("conflicts") or []) if isinstance(data.get("contradictions") or data.get("conflicts") or [], list) else 0
+    confidence = _trajectory_guard_float(data.get("confidence") or data.get("trust_score") or data.get("score"))
+    dependency_weight = _trajectory_guard_float(data.get("dependency_weight") or data.get("final_action_weight") or data.get("weight"))
+    supports_final_action = _trajectory_guard_bool(data.get("supports_final_action") or data.get("supports_final"))
+    provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
+    evidence_refs = _trajectory_guard_ref_list(
+        data.get("evidence_ref"),
+        data.get("evidence_refs"),
+        data.get("artifact_ref"),
+        data.get("artifact_refs"),
+        data.get("report_id"),
+        provenance.get("evidence_ref"),
+        provenance.get("artifact_ref"),
+    )
+    provenance_present = bool(evidence_refs or data.get("digest") or provenance.get("digest") or provenance.get("report_id"))
+    return {
+        "index": index,
+        "tool": tool,
+        "trust": trust,
+        "scanner_decision": scanner_decision,
+        "scanner_warning_count": warning_count,
+        "consistency": consistency,
+        "contradiction_count": contradiction_count,
+        "confidence": confidence,
+        "dependency_weight": dependency_weight,
+        "supports_final_action": supports_final_action,
+        "provenance_present": provenance_present,
+        "evidence_refs": evidence_refs,
+    }
+
+
+def _trajectory_guard_final_action(final_action: dict[str, Any] | str | None) -> dict[str, Any]:
+    if isinstance(final_action, dict):
+        data = _redact_audit_value(final_action)
+        safe = data if isinstance(data, dict) else {}
+    elif final_action in (None, ""):
+        safe = {}
+    else:
+        safe = {"summary": _trajectory_guard_safe_text(final_action, max_chars=200)}
+    allowed: dict[str, Any] = {}
+    for key in ("action", "action_type", "operation", "planned_tool", "mode", "decision", "summary", "sensitivity", "requires_human_approval"):
+        if key in safe:
+            value = safe[key]
+            allowed[key] = value if isinstance(value, bool) else _trajectory_guard_safe_text(value, max_chars=120)
+    source_tools = safe.get("source_tools") or safe.get("depends_on_tools") or []
+    if isinstance(source_tools, list):
+        allowed["source_tools"] = [_trajectory_guard_safe_text(item, max_chars=80) for item in source_tools[:20]]
+    evidence_refs = _trajectory_guard_ref_list(safe.get("evidence_ref"), safe.get("evidence_refs"), safe.get("artifact_ref"), safe.get("artifact_refs"))
+    if evidence_refs:
+        allowed["evidence_refs"] = evidence_refs
+    return allowed
+
+
+def _trajectory_guard_sensitivity(final_action: dict[str, Any], requested: str = "auto") -> str:
+    requested = str(requested or "auto").strip().lower()
+    if requested in {"low", "medium", "high", "critical"}:
+        return requested
+    explicit = str(final_action.get("sensitivity") or "").strip().lower()
+    if explicit in {"low", "medium", "high", "critical"}:
+        return explicit
+    action_fields = {
+        key: final_action.get(key)
+        for key in ("action", "action_type", "operation", "planned_tool", "mode", "decision", "summary")
+        if key in final_action
+    }
+    blob = json.dumps(action_fields, sort_keys=True, ensure_ascii=True).lower()
+    if any(term in blob for term in TRAJECTORY_TRUST_GUARD_CRITICAL_TERMS):
+        return "critical"
+    if any(term in blob for term in TRAJECTORY_TRUST_GUARD_SENSITIVE_TERMS):
+        return "high"
+    if any(term in blob for term in ("model_forward", "model-context", "network", "publish", "readiness")):
+        return "medium"
+    return "low"
+
+
+def _trajectory_guard_features(steps: list[dict[str, Any]], final_action: dict[str, Any], sensitivity: str) -> dict[str, Any]:
+    tools = [step["tool"] for step in steps if step.get("tool")]
+    unique_tools = sorted(set(tools))
+    untrusted_steps = [step for step in steps if step.get("trust") != "trusted"]
+    scanner_warning_count = sum(int(step.get("scanner_warning_count") or 0) for step in steps)
+    scanner_block_count = sum(1 for step in steps if step.get("scanner_decision") in TRAJECTORY_TRUST_GUARD_BLOCK_DECISIONS)
+    scanner_warn_count = sum(1 for step in steps if step.get("scanner_decision") in TRAJECTORY_TRUST_GUARD_WARN_DECISIONS)
+    inconsistent_steps = [
+        step
+        for step in steps
+        if step.get("consistency") in {"inconsistent", "conflict", "contradiction", "unstable"}
+        or int(step.get("contradiction_count") or 0) > 0
+    ]
+    confidence_by_tool: dict[str, list[float]] = {}
+    for step in steps:
+        if isinstance(step.get("confidence"), float):
+            confidence_by_tool.setdefault(str(step.get("tool")), []).append(float(step["confidence"]))
+    confidence_swings = {
+        tool: round(max(values) - min(values), 3)
+        for tool, values in confidence_by_tool.items()
+        if len(values) > 1 and max(values) - min(values) >= 0.45
+    }
+    max_dependency = max((float(step.get("dependency_weight") or 0.0) for step in steps), default=0.0)
+    final_source_tools = final_action.get("source_tools") if isinstance(final_action.get("source_tools"), list) else []
+    single_tool_dependency = bool(
+        steps
+        and (
+            len(unique_tools) <= 1
+            or max_dependency >= 0.7
+            or (sensitivity in {"high", "critical"} and len(final_source_tools) == 1)
+        )
+    )
+    high_confidence_untrusted_dependency = any(
+        step.get("trust") != "trusted"
+        and ((step.get("confidence") or 0.0) >= 0.8 or (step.get("dependency_weight") or 0.0) >= 0.5 or step.get("supports_final_action") is True)
+        for step in steps
+    )
+    missing_provenance_count = sum(1 for step in steps if not step.get("provenance_present"))
+    trust_escalation = bool(high_confidence_untrusted_dependency and sensitivity in {"high", "critical"})
+    return {
+        "step_count": len(steps),
+        "source_diversity": {"tool_count": len(unique_tools), "tools": unique_tools[:20]},
+        "untrusted_tool_count": len({step["tool"] for step in untrusted_steps}),
+        "single_tool_dependency": single_tool_dependency,
+        "max_dependency_weight": round(max_dependency, 3),
+        "scanner_warning_accumulation": scanner_warning_count >= 2 or scanner_warn_count >= 2 or scanner_block_count > 0,
+        "scanner_warning_count": scanner_warning_count,
+        "scanner_warn_decision_count": scanner_warn_count,
+        "scanner_block_decision_count": scanner_block_count,
+        "evidence_consistency": "inconsistent" if inconsistent_steps or confidence_swings else "consistent",
+        "inconsistent_step_count": len(inconsistent_steps),
+        "confidence_swings": confidence_swings,
+        "high_confidence_untrusted_dependency": high_confidence_untrusted_dependency,
+        "trust_escalation": trust_escalation,
+        "missing_provenance_count": missing_provenance_count,
+        "final_action_high_risk": sensitivity in {"high", "critical"},
+    }
+
+
+def _trajectory_guard_decision(features: dict[str, Any], sensitivity: str) -> tuple[str, int, list[str]]:
+    score = {"low": 5, "medium": 15, "high": 30, "critical": 40}.get(sensitivity, 15)
+    reasons: list[str] = []
+
+    def add(reason: str, weight: int) -> None:
+        nonlocal score
+        reasons.append(reason)
+        score += weight
+
+    if features.get("single_tool_dependency"):
+        add("single_tool_dependency", 20)
+    if features.get("scanner_warning_accumulation"):
+        add("scanner_warning_accumulation", 20)
+    if int(features.get("scanner_block_decision_count") or 0) > 0:
+        add("scanner_block_decision", 30)
+    if features.get("evidence_consistency") != "consistent":
+        add("inconsistent_tool_feedback", 25)
+    if features.get("high_confidence_untrusted_dependency"):
+        add("high_confidence_untrusted_dependency", 15)
+    if features.get("trust_escalation"):
+        add("trust_escalation_before_sensitive_action", 15)
+    if int(features.get("missing_provenance_count") or 0) > 0:
+        add("missing_provenance", 10)
+    if features.get("final_action_high_risk") and reasons:
+        add("high_risk_final_action", 15)
+    score = min(100, score)
+    if score >= 75 or int(features.get("scanner_block_decision_count") or 0) > 0:
+        decision = "block"
+    elif score >= 35:
+        decision = "warn"
+    else:
+        decision = "pass"
+    return decision, score, list(dict.fromkeys(reasons))
+
+
+@mcp.tool()
+def trajectory_trust_guard(
+    trajectory_summaries: list[dict[str, Any]] | None = None,
+    proposed_final_action: dict[str, Any] | str | None = None,
+    scanner_outcomes: list[dict[str, Any]] | None = None,
+    policy_decisions: list[dict[str, Any]] | None = None,
+    evidence_refs: list[dict[str, Any] | str] | None = None,
+    final_action_sensitivity: str = "auto",
+    log_audit: bool = False,
+) -> dict[str, Any]:
+    """Read-only advisory guard for over-trust in untrusted tool trajectories before sensitive final actions."""
+    steps = [
+        _trajectory_guard_normalize_step(step, index)
+        for index, step in enumerate(trajectory_summaries or [])
+    ]
+    if scanner_outcomes:
+        for offset, outcome in enumerate(scanner_outcomes[:25], start=len(steps)):
+            if isinstance(outcome, dict):
+                scanner_step = {"tool": outcome.get("tool") or outcome.get("tool_name") or "scanner_evidence", "trust": "trusted", "scanner": outcome, "provenance": outcome}
+            else:
+                scanner_step = {"tool": "scanner_evidence", "trust": "trusted", "scanner": {"status": outcome}}
+            steps.append(_trajectory_guard_normalize_step(scanner_step, offset))
+    final_action = _trajectory_guard_final_action(proposed_final_action)
+    sensitivity = _trajectory_guard_sensitivity(final_action, final_action_sensitivity)
+    features = _trajectory_guard_features(steps, final_action, sensitivity)
+    decision, risk_score, reasons = _trajectory_guard_decision(features, sensitivity)
+    risk_level = "high" if risk_score >= 75 else "medium" if risk_score >= 35 else "low"
+    redacted_refs = _trajectory_guard_ref_list(evidence_refs, final_action.get("evidence_refs"))
+    for step in steps:
+        redacted_refs.extend(step.get("evidence_refs", []))
+    if policy_decisions:
+        redacted_refs.extend(_trajectory_guard_ref_list(policy_decisions))
+    redacted_refs = _trajectory_guard_ref_list(redacted_refs)
+    safe_next_actions = {
+        "pass": ["Proceed only if the final action still matches the declared workflow and existing hard gates pass."],
+        "warn": ["Re-check provenance and source diversity before the high-risk or final action; consider rerunning response scanner and mutation_step_guard."],
+        "block": ["Do not execute the final action from this trajectory; require independent evidence, fresh scanner results, or human review before retrying."],
+    }[decision]
+    payload: dict[str, Any] = {
+        "schema": "trajectory_trust_guard.v1",
+        "read_only": True,
+        "advisory_only": True,
+        "ok": decision == "pass",
+        "decision": decision,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "final_action_sensitivity": sensitivity,
+        "trajectory_features": features,
+        "redacted_reasons": reasons,
+        "redacted_evidence_refs": redacted_refs[:50],
+        "safe_next_actions": safe_next_actions,
+        "privacy_metadata": {
+            "raw_prompts_persisted": False,
+            "raw_tool_outputs_persisted": False,
+            "stores_only_caller_supplied_redacted_summaries": True,
+            "secrets_redacted": True,
+            "host_absolute_paths_redacted": True,
+            "repository_boundary_enforced": True,
+            "network_access": False,
+        },
+        "input_summary": {
+            "trajectory_step_count": len(trajectory_summaries or []),
+            "scanner_outcome_count": len(scanner_outcomes or []),
+            "policy_decision_count": len(policy_decisions or []),
+            "final_action_present": bool(final_action),
+        },
+        "linked_gates": {
+            "mutation_step_guard": "Run before write/delete/git/workspace mutation when the planned final action is mutating.",
+            "release_readiness": "Use as release evidence; trajectory_trust_guard is advisory and does not replace readiness checks.",
+            "governance_report": "Include the compact decision and redacted evidence refs in governance summaries for high-risk workflows.",
+        },
+    }
+    if log_audit:
+        _append_audit_event(
+            "trajectory_trust_guard",
+            ["read-only", "governance"],
+            payload["ok"],
+            {
+                "decision": decision,
+                "risk_score": risk_score,
+                "risk_level": risk_level,
+                "final_action_sensitivity": sensitivity,
+                "reasons": reasons,
+                "input_summary": payload["input_summary"],
+            },
+            decision,
+        )
+    return payload
+
+
 MUTATION_STEP_GUARD_MUTATING_MODES = {
     "apply",
     "apply_diff",
@@ -35757,6 +37279,7 @@ def _governance_report_impl(
         "agent_lifespan_drift": _agent_lifespan_drift_compact(_agent_lifespan_drift_report_impl(export=False)),
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
+        "mcp_oauth_proxy_hardening": _mcp_oauth_proxy_hardening_compact(),
         "agent_security_delta": _agent_security_delta_compact(
             _agent_security_delta_report_impl(base_ref=base_ref, head_ref=head_ref, export=False)
         ),
@@ -36114,6 +37637,44 @@ def dependency_security_report(
         )
         _otel_set_result_attributes(span, result)
         return result
+
+
+@mcp.tool()
+def workflow_phase_telemetry(
+    workflow_summary_json: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    window_hours: int = 168,
+    include_audit: bool = True,
+    include_traces: bool = True,
+    include_tasks: bool = True,
+) -> dict[str, Any]:
+    """Build a read-only local phase telemetry report from redacted MCP workflow/tool-call summaries."""
+    arguments = {
+        "workflow_summary_json": "<provided>" if workflow_summary_json else "",
+        "start_time": start_time,
+        "end_time": end_time,
+        "window_hours": window_hours,
+        "include_audit": include_audit,
+        "include_traces": include_traces,
+        "include_tasks": include_tasks,
+    }
+    with _otel_span(
+        "mcp.tool.workflow_phase_telemetry",
+        _otel_tool_attributes("workflow_phase_telemetry", arguments),
+    ) as span:
+        result = _workflow_phase_telemetry_impl(
+            workflow_summary_json=workflow_summary_json,
+            start_time=start_time,
+            end_time=end_time,
+            window_hours=window_hours,
+            include_audit=include_audit,
+            include_traces=include_traces,
+            include_tasks=include_tasks,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
 
 @mcp.tool()
 def self_optimization_report(
@@ -36509,6 +38070,39 @@ def memory_governance_report(
         )
         _otel_set_result_attributes(span, result)
         return result
+
+@mcp.tool()
+def workflow_event_log_report(
+    event_log_path: str = WORKFLOW_EVENT_LOG_DEFAULT_PATH,
+    fork_id: str = "",
+    parent_fork_id: str = "",
+    include_events: bool = True,
+) -> dict[str, Any]:
+    """Project a redacted workflow event log into checkpoints, timeline, lineage, and fork diff."""
+    _require_git_repo()
+    requested_path = event_log_path.strip() or WORKFLOW_EVENT_LOG_DEFAULT_PATH
+    path = _resolve_repo_path(requested_path)
+    display_path = str(path.relative_to(REPO_PATH))
+    arguments = {
+        "event_log_path": display_path,
+        "fork_id": fork_id,
+        "parent_fork_id": parent_fork_id,
+        "include_events": include_events,
+    }
+    with _otel_span(
+        "mcp.tool.workflow_event_log_report",
+        _otel_tool_attributes("workflow_event_log_report", arguments),
+    ) as span:
+        result = build_workflow_checkpoint_report(
+            path,
+            display_path=display_path,
+            fork_id=fork_id,
+            parent_fork_id=parent_fork_id,
+            include_events=include_events,
+        )
+        _otel_set_result_attributes(span, result)
+        return result
+
 
 @mcp.tool()
 def workflow_lineage(mode: str = "verify", manifest_path: str = "") -> dict[str, Any]:
@@ -38448,6 +40042,25 @@ def release_readiness(
         except Exception as exc:
             result["checks"]["secret_exposure"] = {"ok": True, "status": "skipped", "warning": True, "warning_reason": str(exc)}
 
+    oauth_hardening = _mcp_oauth_proxy_hardening_compact()
+    result["checks"]["mcp_oauth_proxy_hardening"] = {
+        "ok": bool(oauth_hardening.get("ok", False)),
+        "status": oauth_hardening.get("status", "unknown"),
+        "applicability": oauth_hardening.get("applicability", "unknown"),
+        "detected_config_count": oauth_hardening.get("detected_config_count", 0),
+        "finding_count": oauth_hardening.get("finding_count", 0),
+        "block_count": oauth_hardening.get("block_count", 0),
+        "warn_count": oauth_hardening.get("warn_count", 0),
+        "pass_count": oauth_hardening.get("pass_count", 0),
+        "not_applicable_count": oauth_hardening.get("not_applicable_count", 0),
+        "blocking_enabled": oauth_hardening.get("blocking_enabled", True),
+        "would_block": oauth_hardening.get("would_block", False),
+        "warning": oauth_hardening.get("status") == "warn",
+        "warning_reason": "OAuth/proxy hardening warnings need review" if oauth_hardening.get("status") == "warn" else "",
+    }
+    if oauth_hardening.get("would_block", False):
+        result["ok"] = False
+
     if run_agent_quality_delta_check:
         quality_check = _release_readiness_agent_quality_delta_check(
             base_ref,
@@ -38556,6 +40169,13 @@ def release_readiness(
                         "new_finding_count",
                         "new_high_confidence_count",
                         "suppressed_count",
+                        "applicability",
+                        "detected_config_count",
+                        "block_count",
+                        "warn_count",
+                        "pass_count",
+                        "not_applicable_count",
+                        "would_block",
                         "shallow_fix_warning_count",
                         "ranked_location_count",
                         "related_test_count",
