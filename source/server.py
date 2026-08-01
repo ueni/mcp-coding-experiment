@@ -12126,9 +12126,9 @@ def _mcp_threat_model_controls() -> dict[str, dict[str, Any]]:
 
 def _mcp_threat_model_load_fixture(
     path: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     if not path.strip():
-        return [], [], {"path": "", "loaded": False, "tool_count": 0, "transition_count": 0, "digest": ""}
+        return [], [], [], {"path": "", "loaded": False, "tool_count": 0, "transition_count": 0, "oauth_proxy_config_count": 0, "digest": ""}
     fixture_path = _resolve_repo_path(path)
     try:
         payload = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -12144,9 +12144,463 @@ def _mcp_threat_model_load_fixture(
     if not isinstance(raw_transitions, list):
         raise ValueError("fixture_path tool_catalog_transitions must be a list")
     transitions = [item for item in raw_transitions if isinstance(item, dict)]
-    digest_payload = {"tools": tools, "tool_catalog_transitions": transitions}
+    raw_oauth_configs = payload.get("oauth_proxy_configs", payload.get("mcp_oauth_proxy_configs", []))
+    if not isinstance(raw_oauth_configs, list):
+        raise ValueError("fixture_path oauth_proxy_configs must be a list")
+    oauth_configs = [item for item in raw_oauth_configs if isinstance(item, dict)]
+    digest_payload = {
+        "tools": tools,
+        "tool_catalog_transitions": transitions,
+        "oauth_proxy_configs": oauth_configs,
+    }
     digest = "sha256:" + hashlib.sha256(json.dumps(digest_payload, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
-    return tools, transitions, {"path": str(fixture_path.relative_to(REPO_PATH)), "loaded": True, "tool_count": len(tools), "transition_count": len(transitions), "digest": digest, "schema": str(payload.get("schema", ""))}
+    return tools, transitions, oauth_configs, {
+        "path": str(fixture_path.relative_to(REPO_PATH)),
+        "loaded": True,
+        "tool_count": len(tools),
+        "transition_count": len(transitions),
+        "oauth_proxy_config_count": len(oauth_configs),
+        "digest": digest,
+        "schema": str(payload.get("schema", "")),
+    }
+
+
+_MCP_OAUTH_PROXY_HARDENING_SCHEMA = "mcp_oauth_proxy_hardening.v1"
+_MCP_OAUTH_PROXY_CONFIG_PATHS = (
+    ".codebase-tooling-mcp/mcp-oauth-proxy.json",
+    ".codebase-tooling-mcp/mcp-oauth-proxy.yaml",
+    ".codebase-tooling-mcp/mcp-oauth-proxy.yml",
+    "mcp-oauth-proxy.json",
+    "mcp-oauth-proxy.yaml",
+    "mcp-oauth-proxy.yml",
+)
+_MCP_OAUTH_SECRET_KEY_RE = re.compile(
+    r"(?i)(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|auth[_-]?code|authorization[_-]?header|bearer|secret|password|api[_-]?key|credential)"
+)
+_MCP_OAUTH_SECRET_VALUE_RE = re.compile(
+    r"(?i)(authorization:\s*bearer\s+\S+|bearer\s+[A-Za-z0-9._~+/=-]{6,}|code=[^&\s]+|token=[^&\s]+|client_secret=[^&\s]+)"
+)
+_MCP_OAUTH_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:/[A-Za-z0-9._ -]+){2,}")
+
+
+def _mcp_oauth_proxy_redact_text(value: str) -> str:
+    redacted = _MCP_OAUTH_SECRET_VALUE_RE.sub("<redacted:secret>", value)
+    redacted = _MCP_OAUTH_ABSOLUTE_PATH_RE.sub("<redacted:path>", redacted)
+    return redacted[:160]
+
+
+def _mcp_oauth_proxy_scalar_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return str(value)
+
+
+def _mcp_oauth_proxy_flatten(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    rows: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(_mcp_oauth_proxy_flatten(item, path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            rows.extend(_mcp_oauth_proxy_flatten(item, f"{prefix}[{index}]"))
+    else:
+        rows.append((prefix, value))
+    return rows
+
+
+def _mcp_oauth_proxy_values(config: dict[str, Any], *needles: str) -> list[Any]:
+    wanted = tuple(needle.lower().replace("-", "_") for needle in needles)
+    values: list[Any] = []
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        if any(needle in normalized for needle in wanted):
+            values.append(value)
+    return values
+
+
+def _mcp_oauth_proxy_bool(config: dict[str, Any], *needles: str, default: bool = False) -> bool:
+    for value in _mcp_oauth_proxy_values(config, *needles):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "enabled", "enforced", "required"}:
+            return True
+        if text in {"0", "false", "no", "off", "disabled", "none"}:
+            return False
+    return default
+
+
+def _mcp_oauth_proxy_has_value(config: dict[str, Any], *needles: str) -> bool:
+    return any(str(value).strip() for value in _mcp_oauth_proxy_values(config, *needles))
+
+
+def _mcp_oauth_proxy_false(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    text = str(value).strip().lower()
+    return text in {"0", "false", "no", "off", "disabled", "none"}
+
+
+def _mcp_oauth_proxy_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on", "enabled", "enforced", "required"}
+
+
+def _mcp_oauth_proxy_validation_explicitly_disabled(config: dict[str, Any]) -> bool:
+    positive_validation_fields = {
+        "audience_validation",
+        "resource_validation",
+        "validate_audience",
+        "validate_resource",
+    }
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        segments = {segment for segment in re.split(r"[.\[\]]+", normalized) if segment}
+        if segments.intersection(positive_validation_fields) and _mcp_oauth_proxy_false(
+            value
+        ):
+            return True
+    return False
+
+
+def _mcp_oauth_proxy_field_refs(config: dict[str, Any], *needles: str) -> list[str]:
+    wanted = tuple(needle.lower().replace("-", "_") for needle in needles)
+    refs = []
+    for path, _value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        if any(needle in normalized for needle in wanted):
+            refs.append(path)
+    return sorted(set(refs))[:12]
+
+
+def _mcp_oauth_proxy_secret_literal_refs(config: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        normalized = path.lower().replace("-", "_")
+        if not _MCP_OAUTH_SECRET_KEY_RE.search(normalized):
+            continue
+        if isinstance(value, (bool, int, float)):
+            continue
+        text = str(value).strip()
+        if not text or text.startswith(("${", "$", "env:", "secret:", "vault:", "file:")):
+            continue
+        if "ref" in normalized or normalized.endswith("env") or normalized.endswith("env_var"):
+            continue
+        refs.append(path)
+    return sorted(set(refs))[:12]
+
+
+def _mcp_oauth_proxy_load_repo_configs() -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    for rel_path in _MCP_OAUTH_PROXY_CONFIG_PATHS:
+        path = _resolve_repo_path(rel_path)
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+            if path.suffix.lower() == ".json":
+                payload = json.loads(raw)
+            elif yaml is not None:
+                payload = yaml.safe_load(raw)
+            else:
+                continue
+        except Exception:
+            continue
+        rows = payload if isinstance(payload, list) else [payload]
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            item = dict(row)
+            item.setdefault("id", f"repo_config_{index}")
+            item["_source_path"] = rel_path
+            configs.append(item)
+    return configs
+
+
+_MCP_OAUTH_PROXY_FORWARDING_FIELDS = (
+    "token_passthrough",
+    "token_forwarding",
+    "passthrough_user_token",
+    "passthrough_token",
+    "forward_bearer_token",
+    "forward_access_token",
+    "forward_user_token",
+    "forward_token",
+    "reuse_client_token",
+    "reuse_bearer_token",
+    "reuse_access_token",
+    "reuse_user_token",
+    "forward_authorization",
+    "authorization_passthrough",
+)
+
+
+def _mcp_oauth_proxy_forwarding_enabled(config: dict[str, Any]) -> bool:
+    return any(
+        _mcp_oauth_proxy_true(value)
+        for value in _mcp_oauth_proxy_values(config, *_MCP_OAUTH_PROXY_FORWARDING_FIELDS)
+    )
+
+
+def _mcp_oauth_proxy_detected(config: dict[str, Any]) -> bool:
+    auth_mode = str(config.get("auth_mode", config.get("mcp_http_auth_mode", ""))).lower()
+    if auth_mode == "oauth-resource" or _mcp_oauth_proxy_forwarding_enabled(config):
+        return True
+    signal_terms = (
+        "oauth",
+        "oidc",
+        "authorization_server",
+        "issuer",
+        "redirect_uri",
+        "client_id",
+        "client_secret",
+        "token_exchange",
+        "resource_indicator",
+        "audience",
+        "proxy",
+    )
+    for path, value in _mcp_oauth_proxy_flatten(config):
+        text = f"{path} {_mcp_oauth_proxy_scalar_text(value)}".lower()
+        if any(term in text for term in signal_terms):
+            return True
+    return False
+
+
+def _mcp_oauth_proxy_analyze_config(
+    config: dict[str, Any],
+    *,
+    index: int,
+    default_source_path: str = "",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    config_id = _mcp_oauth_proxy_redact_text(str(config.get("id") or config.get("name") or f"oauth_proxy_config_{index}"))[:120]
+    source_path = _mcp_oauth_proxy_redact_text(str(config.get("_source_path") or default_source_path or ""))
+    auth_mode = str(config.get("auth_mode", config.get("mcp_http_auth_mode", ""))).strip().lower()
+    local_bearer_only = auth_mode in {"token", "bearer", "local-bearer"} or _mcp_oauth_proxy_bool(config, "bearer_token_only", "local_bearer_only")
+    detected = _mcp_oauth_proxy_detected(config)
+    if local_bearer_only and not detected:
+        return (
+            {
+                "id": config_id,
+                "source_path": source_path,
+                "detected": False,
+                "outcome": "not_applicable",
+                "reason": "local bearer-token-only mode has no OAuth proxy/token-passthrough surface",
+                "raw_values_included": False,
+            },
+            [],
+        )
+
+    if not detected:
+        return (
+            {
+                "id": config_id,
+                "source_path": source_path,
+                "detected": False,
+                "outcome": "not_applicable",
+                "reason": "no OAuth/proxy settings detected",
+                "raw_values_included": False,
+            },
+            [],
+        )
+
+    block_rules: list[tuple[str, str, tuple[str, ...]]] = []
+    warn_rules: list[tuple[str, str, tuple[str, ...]]] = []
+    if _mcp_oauth_proxy_forwarding_enabled(config):
+        block_rules.append((
+            "oauth-token-passthrough",
+            "OAuth proxy forwards or reuses caller bearer tokens across a trust boundary.",
+            _MCP_OAUTH_PROXY_FORWARDING_FIELDS,
+        ))
+    validation_disabled = _mcp_oauth_proxy_bool(
+        config,
+        "accept_any_audience",
+        "disable_audience_check",
+        "skip_audience_validation",
+        "disable_resource_validation",
+    ) or _mcp_oauth_proxy_validation_explicitly_disabled(config)
+    if validation_disabled:
+        block_rules.append((
+            "oauth-confused-deputy-validation-disabled",
+            "OAuth proxy disables or explicitly turns off audience/resource validation and is exposed to confused-deputy token replay.",
+            (
+                "accept_any_audience",
+                "disable_audience_check",
+                "skip_audience_validation",
+                "disable_resource_validation",
+                "audience_validation",
+                "resource_validation",
+                "validate_audience",
+                "validate_resource",
+            ),
+        ))
+    has_issuer = _mcp_oauth_proxy_has_value(config, "authorization_server", "authorization_servers", "issuer", "issuer_allowlist")
+    has_audience = _mcp_oauth_proxy_bool(config, "audience_validation", "resource_validation", "resource_indicator", "resource_indicators", "validate_audience", "validate_resource", default=False) or _mcp_oauth_proxy_has_value(config, "expected_audience", "resource")
+    if not has_issuer:
+        block_rules.append((
+            "oauth-missing-issuer-allowlist",
+            "OAuth/proxy settings are present without a configured authorization-server/issuer allowlist.",
+            ("authorization_server", "authorization_servers", "issuer", "issuer_allowlist"),
+        ))
+    if not has_audience:
+        block_rules.append((
+            "oauth-missing-audience-resource-validation",
+            "OAuth/proxy settings are present without explicit audience/resource validation.",
+            ("audience", "resource", "resource_indicator", "validate_audience", "validate_resource"),
+        ))
+    secret_refs = _mcp_oauth_proxy_secret_literal_refs(config)
+    if secret_refs:
+        block_rules.append((
+            "oauth-inline-secret-material",
+            "OAuth/proxy config contains inline secret-like material; use secret references instead.",
+            tuple(secret_refs),
+        ))
+    if not _mcp_oauth_proxy_bool(config, "pkce", "require_pkce", default=False):
+        warn_rules.append((
+            "oauth-pkce-not-required",
+            "OAuth proxy config does not require PKCE for authorization-code flows.",
+            ("pkce", "require_pkce"),
+        ))
+    if not _mcp_oauth_proxy_bool(config, "state", "require_state", default=False):
+        warn_rules.append((
+            "oauth-state-not-required",
+            "OAuth proxy config does not require state/nonce binding for authorization redirects.",
+            ("state", "require_state", "nonce"),
+        ))
+    origin_values = [str(value).strip() for value in _mcp_oauth_proxy_values(config, "allowed_origin", "redirect_uri") if str(value).strip()]
+    if any(value == "*" or "*" in value for value in origin_values):
+        warn_rules.append((
+            "oauth-broad-origin-or-redirect",
+            "OAuth proxy config uses wildcard origins or redirect URIs.",
+            ("allowed_origin", "redirect_uri"),
+        ))
+
+    findings: list[dict[str, Any]] = []
+    for outcome, severity, rules in (("block", "high", block_rules), ("warn", "medium", warn_rules)):
+        for rule_id, message, refs in rules:
+            ref_list = list(refs) if rule_id == "oauth-inline-secret-material" else _mcp_oauth_proxy_field_refs(config, *refs)
+            findings.append(
+                {
+                    "id": f"oauth-proxy:{config_id}:{rule_id}",
+                    "rule_id": rule_id,
+                    "threat_id": "oauth_confused_deputy_token_passthrough",
+                    "fixture_id": config_id,
+                    "tool_name": "mcp_oauth_proxy_hardening",
+                    "severity": severity,
+                    "outcome": outcome,
+                    "dread": {"score": 36 if severity == "high" else 28, "damage": 8 if severity == "high" else 6, "reproducibility": 7, "exploitability": 7 if severity == "high" else 5, "affected_users": 7 if severity == "high" else 5, "discoverability": 7 if severity == "high" else 5},
+                    "stride": ["Spoofing", "Information disclosure", "Elevation of privilege"],
+                    "message": message,
+                    "uncovered_controls": ["oauth_proxy_hardening"],
+                    "covered_by": ["http_scope_security_gates"],
+                    "evidence": {
+                        "config_id": config_id,
+                        "source_path": source_path,
+                        "field_refs": sorted(set(ref_list))[:12],
+                        "raw_values_included": False,
+                        "tokens_or_secrets_included": False,
+                        "host_absolute_paths_included": False,
+                    },
+                }
+            )
+    outcome = "block" if block_rules else "warn" if warn_rules else "pass"
+    return (
+        {
+            "id": config_id,
+            "source_path": source_path,
+            "detected": True,
+            "outcome": outcome,
+            "finding_count": len(findings),
+            "block_count": len(block_rules),
+            "warn_count": len(warn_rules),
+            "raw_values_included": False,
+        },
+        findings,
+    )
+
+
+def _mcp_oauth_proxy_hardening_report(configs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    if configs is None:
+        configs = _mcp_oauth_proxy_load_repo_configs()
+    if not configs:
+        configs = [{"id": "runtime_http_auth", "auth_mode": MCP_HTTP_AUTH_MODE, "bearer_token_only": MCP_HTTP_AUTH_MODE in {"token", "bearer"}}]
+    config_rows: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    for index, config in enumerate(configs):
+        row, row_findings = _mcp_oauth_proxy_analyze_config(config, index=index)
+        config_rows.append(row)
+        findings.extend(row_findings)
+    detected_rows = [row for row in config_rows if row.get("detected")]
+    block_count = sum(1 for finding in findings if finding.get("outcome") == "block")
+    warn_count = sum(1 for finding in findings if finding.get("outcome") == "warn")
+    if block_count:
+        status = "block"
+    elif warn_count:
+        status = "warn"
+    elif detected_rows:
+        status = "pass"
+    else:
+        status = "not_applicable"
+    return {
+        "schema": _MCP_OAUTH_PROXY_HARDENING_SCHEMA,
+        "status": status,
+        "ok": status != "block",
+        "read_only": True,
+        "applicability": "applicable" if detected_rows else "not_applicable",
+        "summary": {
+            "config_count": len(config_rows),
+            "detected_config_count": len(detected_rows),
+            "finding_count": len(findings),
+            "block_count": block_count,
+            "warn_count": warn_count,
+            "pass_count": sum(1 for row in config_rows if row.get("outcome") == "pass"),
+            "not_applicable_count": sum(1 for row in config_rows if row.get("outcome") == "not_applicable"),
+        },
+        "gate": {"status": status, "would_block": status == "block", "blocking_enabled": True},
+        "configs": config_rows,
+        "findings": findings,
+        "security": {
+            "read_only": True,
+            "offline": True,
+            "network_access": False,
+            "raw_config_values_included": False,
+            "tokens_or_secrets_included": False,
+            "auth_codes_included": False,
+            "host_absolute_paths_included": False,
+        },
+    }
+
+
+def _mcp_oauth_proxy_hardening_compact(report: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = report if isinstance(report, dict) else _mcp_oauth_proxy_hardening_report()
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    gate = payload.get("gate", {}) if isinstance(payload.get("gate"), dict) else {}
+    return {
+        "schema": payload.get("schema", _MCP_OAUTH_PROXY_HARDENING_SCHEMA),
+        "status": payload.get("status", "unknown"),
+        "ok": bool(payload.get("ok", False)),
+        "applicability": payload.get("applicability", "unknown"),
+        "detected_config_count": summary.get("detected_config_count", 0),
+        "finding_count": summary.get("finding_count", 0),
+        "block_count": summary.get("block_count", 0),
+        "warn_count": summary.get("warn_count", 0),
+        "pass_count": summary.get("pass_count", 0),
+        "not_applicable_count": summary.get("not_applicable_count", 0),
+        "blocking_enabled": gate.get("blocking_enabled", True),
+        "would_block": gate.get("would_block", False),
+    }
 
 
 def _mcp_threat_model_load_baseline(path: str) -> dict[str, Any]:
@@ -12421,7 +12875,7 @@ def _mcp_threat_model_report_impl(
     export: bool = False,
 ) -> dict[str, Any]:
     _require_git_repo()
-    fixtures, transitions, fixture_meta = _mcp_threat_model_load_fixture(fixture_path)
+    fixtures, transitions, oauth_configs, fixture_meta = _mcp_threat_model_load_fixture(fixture_path)
     baseline = _mcp_threat_model_load_baseline(baseline_path)
     controls = _mcp_threat_model_controls()
     generated_at = _now_iso()
@@ -12452,7 +12906,12 @@ def _mcp_threat_model_report_impl(
                 "evidence": {control: controls.get(control, {}).get("evidence", {}) for control in required},
             }
         )
+    oauth_proxy_hardening = _mcp_oauth_proxy_hardening_report(oauth_configs) if oauth_configs else _mcp_oauth_proxy_hardening_report([])
     findings = _mcp_threat_model_fixture_findings(fixtures, transitions)
+    if oauth_configs:
+        findings.extend(oauth_proxy_hardening.get("findings", []))
+        order = {"high": 0, "medium": 1, "low": 2, "info": 3, "none": 4}
+        findings.sort(key=lambda row: (order.get(str(row.get("severity")), 9), str(row.get("fixture_id", "")), str(row.get("rule_id", ""))))
     high_uncovered = [finding for finding in findings if finding.get("severity") == "high" and finding.get("uncovered_controls")]
     high_uncovered_ids = sorted(str(finding.get("id", "")) for finding in high_uncovered if str(finding.get("id", "")))
     allowed_high_uncovered = int(baseline.get("allowed_high_uncovered_finding_count", 0) or 0) if baseline.get("loaded") else 0
@@ -12508,6 +12967,7 @@ def _mcp_threat_model_report_impl(
         "components": list(MCP_THREAT_MODEL_COMPONENTS),
         "trust_boundaries": list(MCP_THREAT_MODEL_BOUNDARIES),
         "controls": controls,
+        "mcp_oauth_proxy_hardening": oauth_proxy_hardening,
         "dread_rubric": _mcp_threat_model_dread_rubric(),
         "threats": threats,
         "findings": findings,
@@ -12626,6 +13086,20 @@ def _governance_markdown(report: dict[str, Any]) -> str:
                 f"- Workflows checked: {ci_summary.get('checked_workflow_count', 0)}",
                 f"- Active findings: {ci_summary.get('finding_count', 0)}",
                 f"- High findings: {by_severity.get('high', 0)}",
+            ]
+        )
+    oauth_hardening = report.get("mcp_oauth_proxy_hardening", {}) if isinstance(report.get("mcp_oauth_proxy_hardening"), dict) else {}
+    if oauth_hardening:
+        lines.extend(
+            [
+                "",
+                "## MCP OAuth/proxy hardening",
+                f"- Status: `{oauth_hardening.get('status', 'unknown')}`",
+                f"- Applicable: `{oauth_hardening.get('applicability', 'unknown')}`",
+                f"- Detected configs: {oauth_hardening.get('detected_config_count', 0)}",
+                f"- Findings: {oauth_hardening.get('finding_count', 0)}",
+                f"- Blocks: {oauth_hardening.get('block_count', 0)}",
+                f"- Warnings: {oauth_hardening.get('warn_count', 0)}",
             ]
         )
     agent_delta = report.get("agent_security_delta", {}) if isinstance(report.get("agent_security_delta"), dict) else {}
@@ -36430,6 +36904,7 @@ def _governance_report_impl(
         "memory_governance": _memory_governance_report_impl(max_entries=1000, stale_days=90, include_entries=False)["summary"],
         "dependency_security": _latest_dependency_security_report(max_age_hours=24),
         "ci_workflow_security": _ci_workflow_security_report_impl(export=False),
+        "mcp_oauth_proxy_hardening": _mcp_oauth_proxy_hardening_compact(),
         "agent_security_delta": _agent_security_delta_compact(
             _agent_security_delta_report_impl(base_ref=base_ref, head_ref=head_ref, export=False)
         ),
@@ -39179,6 +39654,25 @@ def release_readiness(
         except Exception as exc:
             result["checks"]["secret_exposure"] = {"ok": True, "status": "skipped", "warning": True, "warning_reason": str(exc)}
 
+    oauth_hardening = _mcp_oauth_proxy_hardening_compact()
+    result["checks"]["mcp_oauth_proxy_hardening"] = {
+        "ok": bool(oauth_hardening.get("ok", False)),
+        "status": oauth_hardening.get("status", "unknown"),
+        "applicability": oauth_hardening.get("applicability", "unknown"),
+        "detected_config_count": oauth_hardening.get("detected_config_count", 0),
+        "finding_count": oauth_hardening.get("finding_count", 0),
+        "block_count": oauth_hardening.get("block_count", 0),
+        "warn_count": oauth_hardening.get("warn_count", 0),
+        "pass_count": oauth_hardening.get("pass_count", 0),
+        "not_applicable_count": oauth_hardening.get("not_applicable_count", 0),
+        "blocking_enabled": oauth_hardening.get("blocking_enabled", True),
+        "would_block": oauth_hardening.get("would_block", False),
+        "warning": oauth_hardening.get("status") == "warn",
+        "warning_reason": "OAuth/proxy hardening warnings need review" if oauth_hardening.get("status") == "warn" else "",
+    }
+    if oauth_hardening.get("would_block", False):
+        result["ok"] = False
+
     if run_agent_quality_delta_check:
         quality_check = _release_readiness_agent_quality_delta_check(
             base_ref,
@@ -39287,6 +39781,13 @@ def release_readiness(
                         "new_finding_count",
                         "new_high_confidence_count",
                         "suppressed_count",
+                        "applicability",
+                        "detected_config_count",
+                        "block_count",
+                        "warn_count",
+                        "pass_count",
+                        "not_applicable_count",
+                        "would_block",
                         "shallow_fix_warning_count",
                         "ranked_location_count",
                         "related_test_count",
