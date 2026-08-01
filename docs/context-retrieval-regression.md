@@ -34,6 +34,18 @@ python scripts/context_retrieval_eval.py --fail-on-threshold
 
 The command imports the local `source.server` module, calls only the read-only `workflow_select` router path, and emits a `context_retrieval_regression_report.v1` JSON report. It does not call network services or mutate repository files.
 
+## Grep/vector search benchmark mode
+
+For retrieval-harness experiments, run the offline benchmark mode:
+
+```bash
+python scripts/context_retrieval_eval.py --search-benchmark
+```
+
+The benchmark uses fixed question-to-evidence fixtures from repository docs, source, and tests in [`tests/fixtures/context_retrieval_search_benchmark.json`](../tests/fixtures/context_retrieval_search_benchmark.json). It compares `grep`, deterministic local `vector`, and `hybrid` scoring under the same top-k budget, renders each run as either `inline_text` or `resource_link`, and repeats the run with controlled irrelevant distractor context. The report schema is `context_search_benchmark_report.v1` and includes precision/recall-style hit metrics, output-character and estimated-token counts, distractor deltas, and an advisory recommendation.
+
+The recommendation is intentionally advisory (`default_router_change=false`); this benchmark does not change production router defaults.
+
 ## Metrics
 
 For each fixture the report includes:
