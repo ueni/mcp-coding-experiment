@@ -106,6 +106,12 @@ _DOC_REFS_BY_TOOL: dict[str, tuple[dict[str, str], ...]] = {
         {"label": "Observation compression report", "path": "docs/observation-compression-report.md"},
         {"label": "Adaptive observation compression", "path": "docs/observation-compression.md"},
     ),
+    "workflow_phase_telemetry": (
+        {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
+        {"label": "Workflow phase telemetry", "path": "docs/workflow-phase-telemetry.md"},
+        {"label": "Self-optimization efficiency report", "path": "docs/self-optimization-report.md"},
+        {"label": "OpenTelemetry tracing", "path": "docs/opentelemetry-tracing.md"},
+    ),
     "agents_context_health": (
         {"label": "README public MCP surface", "path": "README.md#tool-catalog-by-category"},
         {"label": "AGENTS.md context health report", "path": "docs/agents-context-health.md"},

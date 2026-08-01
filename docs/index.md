@@ -27,6 +27,7 @@ SPDX-License-Identifier: MIT
 - [Workflow event-log checkpoint report](./workflow-event-log-report.md) - read-only typed workflow event/checkpoint projection, artifact lineage, and local fork diff audit view.
 - [Reference-based result handles](./result-references.md) - opt-in `mcp_result_reference.v1` handles and resolver for large read-only outputs.
 - [Self-optimization efficiency report](./self-optimization-report.md) - offline repo-local MCP usage, token/time savings, throughput, bottleneck, and duplicate recommendation reporting.
+- [Workflow phase telemetry](./workflow-phase-telemetry.md) - read-only phase-level workload telemetry for redacted MCP workflow/tool-call summaries.
 - [Interaction invariant audit](./interaction-invariant-audit.md) - read-only invariant-smell guardrail for multi-turn agent workflows.
 - [AGENTS.md context health report](./agents-context-health.md) - read-only minimal-context budget, duplication, stale guidance, risky global instruction, and move-candidate lint.
 - [Mutation step guard](./mutation-step-guard.md) - read-only final checkpoint before workspace/git mutation steps.
@@ -89,6 +90,7 @@ This index lists documentation ownership and status.
 - [Opt-in OpenTelemetry tracing](./opentelemetry-tracing.md) (`docs/opentelemetry-tracing.md`) - Status: `prototype`
 - [Hash-pinned dependency locks](./dependency-locks.md) (`docs/dependency-locks.md`) - Status: `operational guidance`
 - [Self-optimization efficiency report](./self-optimization-report.md) (`docs/self-optimization-report.md`) - Status: `prototype`
+- [Workflow phase telemetry](./workflow-phase-telemetry.md) (`docs/workflow-phase-telemetry.md`) - Status: `prototype`
 - [Build download cache verification](./build-download-cache.md) (`docs/build-download-cache.md`) - Status: `operational verification`
 - [Untrusted content prompt-injection signals](./untrusted-content-signals.md) (`docs/untrusted-content-signals.md`) - Status: `prototype`
 - [MCP tool-response scanner](./tool-response-scanner.md) (`docs/tool-response-scanner.md`) - Status: `prototype`
