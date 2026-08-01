@@ -62,9 +62,11 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 "artifact_provenance",
                 "result_reference_resolve",
                 "workflow_diagnostics",
+                "workflow_event_log_report",
                 "workflow_lineage",
                 "interaction_invariant_audit",
                 "mutation_step_guard",
+                "trajectory_trust_guard",
             ),
         )
         contracts = all_tool_output_contracts()
@@ -182,6 +184,7 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 reference=referenced_report["result_reference"], include_content=False
             ),
             "workflow_diagnostics": self.server.workflow_diagnostics(),
+            "workflow_event_log_report": self.server.workflow_event_log_report(),
             "workflow_lineage": self.server.workflow_lineage(
                 manifest_path=lineage_report["exports"]["lineage"]
             ),
@@ -199,6 +202,25 @@ class ToolOutputSchemaContractTests(ServerToolsTestBase):
                 selected_tests=["tests/test_tool_output_schemas.py"],
                 invariant_audit_summary={"ok_to_continue": True, "suspected_smells": []},
                 context_metadata={"fresh": True, "tests_fresh": True},
+            ),
+            "trajectory_trust_guard": self.server.trajectory_trust_guard(
+                trajectory_summaries=[
+                    {
+                        "tool": "grep",
+                        "trust": "trusted",
+                        "confidence": 0.7,
+                        "dependency_weight": 0.3,
+                        "evidence_ref": {"kind": "tool", "tool": "grep", "digest": "sha256:a"},
+                    },
+                    {
+                        "tool": "release_readiness",
+                        "trust": "trusted",
+                        "confidence": 0.8,
+                        "dependency_weight": 0.3,
+                        "evidence_ref": {"kind": "report", "report_id": "ready", "digest": "sha256:b"},
+                    },
+                ],
+                proposed_final_action={"operation": "summarize", "source_tools": ["grep", "release_readiness"]},
             ),
         }
 

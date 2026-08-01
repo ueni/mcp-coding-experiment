@@ -56,9 +56,11 @@ SCHEMA_BACKED_TOOL_NAMES: tuple[str, ...] = (
     "artifact_provenance",
     "result_reference_resolve",
     "workflow_diagnostics",
+    "workflow_event_log_report",
     "workflow_lineage",
     "interaction_invariant_audit",
     "mutation_step_guard",
+    "trajectory_trust_guard",
 )
 
 STABLE_FIELDS: dict[str, tuple[str, ...]] = {
@@ -100,9 +102,11 @@ STABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "artifact_provenance": ("schema", "provenance_schema", "attestation_schema", "artifact_count", "ok", "checks"),
     "result_reference_resolve": ("schema", "ok", "status", "read_only", "reference_id", "artifact", "security"),
     "workflow_diagnostics": ("schema", "ok", "critical_failure_step", "failure_category", "constraint_violations", "evidence", "confidence", "recommended_followup", "redactions_applied"),
+    "workflow_event_log_report": ("schema", "report_id", "read_only", "ok", "status", "event_log", "summary", "privacy", "checkpoints", "projection", "fork_diff", "errors"),
     "workflow_lineage": ("schema", "read_only", "manifest_path", "plan_id", "status", "ok", "checks", "conditions"),
     "interaction_invariant_audit": ("schema", "read_only", "advisory_only", "ok_to_continue", "confidence", "extracted_invariants", "suspected_smells", "safe_next_actions", "linked_gates"),
     "mutation_step_guard": ("schema", "read_only", "ok_to_mutate", "decision", "decision_flags", "decisive_deviation_risk", "missing_preconditions", "targeted_reflection_checklist", "safe_next_actions"),
+    "trajectory_trust_guard": ("schema", "read_only", "advisory_only", "ok", "decision", "risk_score", "final_action_sensitivity", "trajectory_features", "redacted_evidence_refs", "privacy_metadata"),
 }
 
 EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -144,9 +148,11 @@ EXPERIMENTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "artifact_provenance": ("checks[].attestation",),
     "result_reference_resolve": ("producer_tool", "summary", "message", "content", "content_encoding"),
     "workflow_diagnostics": ("audit_source", "read_only", "security", "trajectory", "failure_categories", "critical_step_candidate", "safe_next_actions", "failure_taxonomy", "llm_judging"),
+    "workflow_event_log_report": ("events", "privacy.redaction_categories", "projection.timeline", "projection.artifact_lineage", "fork_diff.changed_artifacts"),
     "workflow_lineage": ("mode", "security"),
     "interaction_invariant_audit": ("security", "redactions_applied", "input_summary"),
     "mutation_step_guard": ("input_summary", "security"),
+    "trajectory_trust_guard": ("risk_level", "redacted_reasons", "safe_next_actions", "input_summary", "linked_gates"),
 }
 
 
@@ -1048,6 +1054,24 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "llm_judging": {"type": "object"},
         },
     ),
+    "workflow_event_log_report": _object_schema(
+        ["schema", "report_id", "read_only", "ok", "status", "event_log", "summary", "privacy", "checkpoints", "projection", "fork_diff", "errors"],
+        {
+            "schema": {"type": "string", "const": "workflow_checkpoint_report.v1"},
+            "report_id": {"type": "string"},
+            "read_only": {"type": "boolean", "const": True},
+            "ok": {"type": "boolean"},
+            "status": {"type": "string", "enum": ["ok", "missing", "invalid", "corrupt"]},
+            "event_log": {"type": "object"},
+            "summary": {"type": "object"},
+            "privacy": {"type": "object"},
+            "events": {"type": "array", "items": {"type": "object"}},
+            "checkpoints": {"type": "array", "items": {"type": "object"}},
+            "projection": {"type": "object"},
+            "fork_diff": {"type": "object"},
+            "errors": {"type": "array", "items": {"type": "object"}},
+        },
+    ),
     "workflow_lineage": _object_schema(
         ["schema", "read_only", "manifest_path", "plan_id", "status", "ok", "checks", "conditions"],
         {
@@ -1102,6 +1126,26 @@ TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "safe_next_actions": {"type": "array", "items": {"type": "string"}},
             "input_summary": {"type": "object"},
             "security": {"type": "object"},
+        },
+    ),
+    "trajectory_trust_guard": _object_schema(
+        ["schema", "read_only", "advisory_only", "ok", "decision", "risk_score", "final_action_sensitivity", "trajectory_features", "redacted_evidence_refs", "privacy_metadata"],
+        {
+            "schema": {"type": "string", "const": "trajectory_trust_guard.v1"},
+            "read_only": {"type": "boolean", "const": True},
+            "advisory_only": {"type": "boolean", "const": True},
+            "ok": {"type": "boolean"},
+            "decision": {"type": "string", "enum": ["pass", "warn", "block"]},
+            "risk_score": {"type": "integer", "minimum": 0, "maximum": 100},
+            "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+            "final_action_sensitivity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+            "trajectory_features": {"type": "object"},
+            "redacted_reasons": {"type": "array", "items": {"type": "string"}},
+            "redacted_evidence_refs": {"type": "array", "items": {"type": "object"}},
+            "safe_next_actions": {"type": "array", "items": {"type": "string"}},
+            "privacy_metadata": {"type": "object"},
+            "input_summary": {"type": "object"},
+            "linked_gates": {"type": "object"},
         },
     ),
 }
